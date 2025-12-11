@@ -1,0 +1,3 @@
+[submodule "3rdlibs/siren"]
+	path = 3rdlibs/siren
+	url = ssh://git@frp-mom.com:32122/CcooLcyy/siren.git

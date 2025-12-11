@@ -1,0 +1,10 @@
+{
+  "dependencies": [
+    "boost-asio",
+    "boost-json",
+    "boost-log",
+    "gtest",
+    "paho-mqttpp3",
+    "protobuf"
+  ]
+}
