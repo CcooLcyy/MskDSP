@@ -1,0 +1,12 @@
+CompileFlags:
+  # 添加必要标志
+  Add: 
+    - -std=c++20
+    - -xc++
+  # 移除 GCC 特定的模块标志
+  Remove: 
+    - -fmodules-ts
+    - -fmodule-mapper=*
+    - -fdeps-format=*
+  # 指定使用 GCC 头文件路径
+  Compiler: g++
