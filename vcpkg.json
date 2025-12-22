@@ -6,6 +6,7 @@
     "gtest",
     "paho-mqttpp3",
     "protobuf",
-    "grpc"
+    "grpc",
+    "boost-dll"
   ]
 }
