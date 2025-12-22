@@ -3,3 +3,8 @@ build
 
 # clangd
 .cache
+
+# bin
+package/lib/*
+package/MskDSP
+package/test*

@@ -7,6 +7,7 @@
     "paho-mqttpp3",
     "protobuf",
     "grpc",
-    "boost-dll"
+    "boost-dll",
+    "tomlplusplus"
   ]
 }
