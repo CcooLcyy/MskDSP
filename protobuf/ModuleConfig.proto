@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package ModuleConfigProto;
+
+message ConfigBody {
+  string name = 1;
+  string path = 2;
+}
+
+message Config {
+  repeated ConfigBody body = 1;
+}
