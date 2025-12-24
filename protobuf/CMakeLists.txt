@@ -1,6 +1,7 @@
 file(GLOB PROTO_FILE_SRCS *.proto)
 
-add_library(dspProto SHARED ${PROTO_FILE_SRCS})
+add_library(dspProto STATIC ${PROTO_FILE_SRCS})
+set_target_properties(dspProto PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(dspProto PUBLIC 
   gRPC::grpc++
   protobuf::libprotobuf
