@@ -16,7 +16,7 @@ struct MetaData {
   std::string name;
   Version version;
   std::string libName;
-  std::filesystem::path grpcServer;
+  std::string grpcServer;
 };
 
 class ModuleInterface {

@@ -26,7 +26,17 @@ ModuleManager::ModuleManager(std::stop_token stopToken) :
       moduleManagerLibInfo::VERSION};
   metaData_.version = versionInfo;
   std::string socktPath{std::format("./socket/{}.sock", metaData_.name)};
-  metaData_.grpcServer = std::format("unix://{}", std::filesystem::absolute(socktPath).c_str()).c_str();
+  std::filesystem::path path(socktPath);
+  if (!std::filesystem::exists(path.parent_path())) {
+    std::filesystem::create_directory(path.parent_path());
+  }
+  auto absPath = std::filesystem::canonical(path.parent_path());
+  auto absFilePath = std::format("{}/{}.sock", absPath.c_str(), metaData_.name);
+  auto sockPath = std::format("unix:/{}", absFilePath);
+  if (std::filesystem::exists(absFilePath)) {
+    std::filesystem::remove(absFilePath);
+  }
+  metaData_.grpcServer = sockPath;
 }
 ModuleManager::~ModuleManager() {}
 ::ModuleInterface::MetaData ModuleManager::metaData() {
