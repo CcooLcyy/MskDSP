@@ -3,20 +3,25 @@
 #include <stop_token>
 #include <string>
 
+struct LibVersion {
+  std::string major;
+  std::string minor;
+  std::string patch;
+};
+
 struct MetaData {
   std::string name;
-  std::string version;
+  LibVersion version;
   std::string libName;
-  std::string description;
   std::string grpcServer;
 };
 
 class ModuleInterface {
 public:
-  ModuleInterface(std::stop_token stopToken);
+  explicit ModuleInterface(std::stop_token stopToken);
+  virtual ~ModuleInterface() = default;
   virtual MetaData metaData() = 0;
   virtual void start() = 0;
-  virtual ~ModuleInterface() = default;
 
 protected:
   MetaData metaData_;
