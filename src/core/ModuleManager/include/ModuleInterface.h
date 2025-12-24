@@ -3,15 +3,17 @@
 #include <stop_token>
 #include <string>
 
-struct LibVersion {
+namespace ModuleInterface {
+struct Version {
   std::string major;
   std::string minor;
   std::string patch;
+  std::string version;
 };
 
 struct MetaData {
   std::string name;
-  LibVersion version;
+  Version version;
   std::string libName;
   std::string grpcServer;
 };
@@ -27,3 +29,4 @@ protected:
   MetaData metaData_;
   std::stop_token stopToken_;
 };
+}  // namespace ModuleInterface

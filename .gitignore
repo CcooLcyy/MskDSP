@@ -10,4 +10,4 @@ package/MskDSP
 package/test*
 
 # 屏蔽所有版本文件
-**/version.h
+**/*LibInfo.h

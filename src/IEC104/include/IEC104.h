@@ -4,10 +4,12 @@
 
 #include "ModuleInterface.h"
 
-class IEC104 : public ModuleInterface {
+namespace IEC104 {
+class IEC104 : public ModuleInterface::ModuleInterface {
 public:
   explicit IEC104(std::stop_token stopToken);
   ~IEC104();
-  virtual MetaData metaData() override;
+  virtual ::ModuleInterface::MetaData metaData() override;
   virtual void start() override;
 };
+}  // namespace IEC104

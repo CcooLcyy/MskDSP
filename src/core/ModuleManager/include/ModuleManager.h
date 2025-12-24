@@ -6,17 +6,22 @@
 
 #include "ModuleInterface.h"
 
+namespace ModuleManager {
 struct LibInfo {
-  MetaData metaData;
+  ModuleInterface::MetaData metaData;
   boost::dll::shared_library lib;
-  std::shared_ptr<ModuleInterface> instance;
+  std::shared_ptr<ModuleInterface::ModuleInterface> instance;
   std::jthread thread;
 };
 
-class ModuleManager {
+class ModuleManager : public ModuleInterface::ModuleInterface {
 public:
-  ModuleManager(std::string configFile);
+  explicit ModuleManager(std::stop_token stopToken);
   ~ModuleManager();
+
+  virtual ::ModuleInterface::MetaData metaData() override;
+  virtual void start() override;
 
   void loadModule();
 };
+}  // namespace ModuleManager
