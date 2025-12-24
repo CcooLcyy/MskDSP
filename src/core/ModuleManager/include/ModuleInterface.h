@@ -1,8 +1,8 @@
 #pragma once
 
-#include <filesystem>
 #include <stop_token>
 #include <string>
+#include "moduleManagerLibInfo.h"
 
 namespace ModuleInterface {
 struct Version {
@@ -23,6 +23,7 @@ class ModuleInterface {
 public:
   explicit ModuleInterface(std::stop_token stopToken);
   virtual ~ModuleInterface() = default;
+  void initLibInfo(LibInfo libInfo);
   virtual MetaData metaData() = 0;
   virtual void start() = 0;
   virtual void runServer() = 0;

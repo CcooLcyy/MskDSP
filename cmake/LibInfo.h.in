@@ -2,10 +2,10 @@
 
 #include <string>
 
-namespace @LIB_NAME@LibInfo {
+inline struct LibInfo {
   const std::string VERSION_MAJOR{"@VERSION_MAJOR@"};
   const std::string VERSION_MINOR{"@VERSION_MINOR@"};
   const std::string VERSION_PATCH{"@VERSION_PATCH@"};
   const std::string VERSION{"@VERSION@"};
   const std::string LIB_NAME{"@LIB_NAME@"};
-}  // namespace @LIB_NAME@ LibInfo
+} @LIB_NAME@LibInfo;  // namespace @LIB_NAME@ LibInfo
