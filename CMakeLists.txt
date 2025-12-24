@@ -14,6 +14,9 @@ set(libPath ${packPath}/lib)
 set(configPath ${packPath}/conf)
 file(MAKE_DIRECTORY ${packPath} ${libPath} ${configPath})
 
+set(CMAKE_C_COMPILER_LAUNCHER ccache)
+set(CMAKE_CXX_COMPILER_LAUNCHER ccache)
+
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${packPath})
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${libPath})
 
