@@ -1,5 +1,6 @@
 #pragma once
 
+#include <filesystem>
 #include <stop_token>
 #include <string>
 
@@ -15,7 +16,7 @@ struct MetaData {
   std::string name;
   Version version;
   std::string libName;
-  std::string grpcServer;
+  std::filesystem::path grpcServer;
 };
 
 class ModuleInterface {
@@ -24,6 +25,7 @@ public:
   virtual ~ModuleInterface() = default;
   virtual MetaData metaData() = 0;
   virtual void start() = 0;
+  virtual void runServer() = 0;
 
 protected:
   MetaData metaData_;

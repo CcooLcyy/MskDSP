@@ -21,6 +21,7 @@ public:
 
   virtual ::ModuleInterface::MetaData metaData() override;
   virtual void start() override;
+  virtual void runServer() override;
 
   void loadModule();
 };
