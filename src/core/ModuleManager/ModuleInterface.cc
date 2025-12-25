@@ -18,7 +18,9 @@ ModuleInterface::ModuleInterface(std::stop_source stopSource) :
   stopSource_(stopSource) {
   stopToken_ = stopSource_.get_token();
 }
-ModuleInterface::~ModuleInterface() {}
+ModuleInterface::~ModuleInterface() {
+  stopGrpcServer();
+}
 void ModuleInterface::stop() {
   stopGrpcServer();
   stopSource_.request_stop();

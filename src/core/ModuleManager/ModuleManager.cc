@@ -25,9 +25,7 @@ ModuleManager::ModuleManager(std::stop_source stopSource) :
   metaData_.outerGRPCServer = std::string("0.0.0.0:7000");
   initModuleInfos();
 }
-ModuleManager::~ModuleManager() {
-  stopGrpcServer();
-}
+ModuleManager::~ModuleManager() {}
 void ModuleManager::start() {
   ServiceImpl service;
   service.getModuleManager(this);

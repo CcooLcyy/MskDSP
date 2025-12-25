@@ -1,11 +1,11 @@
 #pragma once
 
-#include <string>
+#include "LibInfoTemp.h"
 
-inline struct LibInfo {
-  const std::string VERSION_MAJOR{"@VERSION_MAJOR@"};
-  const std::string VERSION_MINOR{"@VERSION_MINOR@"};
-  const std::string VERSION_PATCH{"@VERSION_PATCH@"};
-  const std::string VERSION{"@VERSION@"};
-  const std::string LIB_NAME{"@LIB_NAME@"};
-} @LIB_NAME@LibInfo;  // namespace @LIB_NAME@ LibInfo
+inline LibInfo @LIB_NAME@LibInfo = {
+    "@VERSION_MAJOR@",
+    "@VERSION_MINOR@",
+    "@VERSION_PATCH@",
+    "@VERSION@",
+    "@LIB_NAME@"
+};

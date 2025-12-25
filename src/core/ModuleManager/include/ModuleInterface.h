@@ -7,6 +7,7 @@
 #include <stop_token>
 #include <string>
 
+#include "LibInfoTemp.h"
 #include "moduleManagerLibInfo.h"
 
 namespace ModuleInterface {
@@ -38,6 +39,7 @@ public:
   void runOuterServer(std::vector<grpc::Service *> outerServices);
 
 protected:
+  void initLibInfo(LibInfo libInfo);
   void grpcServerBuilder(std::vector<grpc::Service *> services, std::string grpcServer, std::unique_ptr<grpc::Server> &server);
   MetaData metaData_;
   std::stop_token stopToken_;

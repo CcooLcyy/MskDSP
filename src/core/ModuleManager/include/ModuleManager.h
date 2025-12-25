@@ -23,6 +23,7 @@ public:
 
   virtual void start() override;
 
+  void loadModule();
   ModuleManagerProto::ModuleInfos &getModuleInfos();
 
 private:
