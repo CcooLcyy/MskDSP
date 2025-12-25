@@ -1,5 +1,6 @@
 #include "ModuleInterface.h"
 
+#include <grpcpp/ext/proto_server_reflection_plugin.h>
 #include <grpcpp/server.h>
 #include <grpcpp/server_builder.h>
 
@@ -61,6 +62,7 @@ void ModuleInterface::grpcServerBuilder(std::vector<grpc::Service *> services, s
   for (auto service : services) {
     builder.RegisterService(service);
   }
+  grpc::reflection::InitProtoReflectionServerBuilderPlugin();
   builder.AddListeningPort(grpcServer, grpc::InsecureServerCredentials());
   std::unique_ptr<grpc::Server> tmpServer(builder.BuildAndStart());
   server = std::move(tmpServer);

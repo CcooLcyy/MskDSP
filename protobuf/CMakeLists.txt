@@ -5,6 +5,7 @@ set_target_properties(dspProto PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(dspProto PUBLIC 
   gRPC::grpc++
   protobuf::libprotobuf
+  gRPC::grpc++_reflection
 )
 
 protobuf_generate(TARGET dspProto)
