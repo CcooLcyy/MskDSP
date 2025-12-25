@@ -7,10 +7,13 @@
 #include <grpcpp/security/server_credentials.h>
 #include <grpcpp/server.h>
 
+#include <boost/dll/shared_library.hpp>
 #include <chrono>
 #include <filesystem>
+#include <memory>
 #include <stop_token>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "ModuleInterface.h"
@@ -19,7 +22,7 @@
 #include "moduleManagerLibInfo.h"
 
 namespace ModuleManager {
-ModuleManager::ModuleManager(std::stop_source stopSource) :
+ModuleManager::ModuleManager(std::shared_ptr<std::stop_source> stopSource) :
   ModuleInterface::ModuleInterface(stopSource) {
   initLibInfo(moduleManagerLibInfo);
   metaData_.outerGRPCServer = std::string("0.0.0.0:7000");
@@ -36,6 +39,23 @@ void ModuleManager::start() {
   while (!stopToken_.stop_requested()) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
+}
+void ModuleManager::loadModule(ModuleManagerProto::ModuleInfo moduleInfo) {
+  boost::dll::shared_library lib(std::string("./lib/") + moduleInfo.lib_name());
+  if (!lib.has("create")) {
+    lib.unload();
+    return;
+  }
+  auto create = lib.get<ModuleInterface *(void *)>("create");
+  std::shared_ptr<std::stop_source> stopSource{std::make_shared<std::stop_source>()};
+  std::shared_ptr<ModuleInterface> instance(create(stopSource.get()));
+  LibInfo libInfo;
+  libInfo.metaData = instance->metaData();
+  libInfo.lib = std::move(lib);
+  libInfo.instance = instance;
+  libInfo.stopSource = stopSource;
+  libInfo.thread = std::move(std::jthread([&]() { instance->start(); }));
+  libInfoVec_.emplace_back(std::move(libInfo));
 }
 ModuleManagerProto::ModuleInfos &ModuleManager::getModuleInfos() {
   return moduleInfos_;

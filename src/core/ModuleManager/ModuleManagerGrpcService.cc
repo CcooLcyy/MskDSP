@@ -15,7 +15,10 @@ grpc::Status ServiceImpl::GetModuleInfo(grpc::ServerContext *context, const Modu
   moduleInfos->CopyFrom(moduleManager_->getModuleInfos());
   return grpc::Status::OK;
 }
-grpc::Status ServiceImpl::StartModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo *moduleInfo, ModuleManagerProto::Empty *) {}
+grpc::Status ServiceImpl::StartModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo *moduleInfo, ModuleManagerProto::Empty *) {
+  moduleManager_->loadModule(*moduleInfo);
+  return grpc::Status::OK;
+}
 grpc::Status ServiceImpl::StopModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo *moduleInfo, ModuleManagerProto::Empty *) {}
 grpc::Status ServiceImpl::UploadModule(grpc::ServerContext *context, const ModuleManagerProto::Empty *, ModuleManagerProto::Empty *) {}
 grpc::Status ServiceImpl::DeleteModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo *moduleInfo, ModuleManagerProto::Empty *) {}

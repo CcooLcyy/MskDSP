@@ -14,16 +14,16 @@
 #include "moduleManagerLibInfo.h"
 
 namespace ModuleInterface {
-ModuleInterface::ModuleInterface(std::stop_source stopSource) :
+ModuleInterface::ModuleInterface(std::shared_ptr<std::stop_source> stopSource) :
   stopSource_(stopSource) {
-  stopToken_ = stopSource_.get_token();
+  stopToken_ = stopSource_->get_token();
 }
 ModuleInterface::~ModuleInterface() {
   stopGrpcServer();
 }
 void ModuleInterface::stop() {
   stopGrpcServer();
-  stopSource_.request_stop();
+  stopSource_->request_stop();
 }
 MetaData ModuleInterface::metaData() {
   return metaData_;

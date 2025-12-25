@@ -8,7 +8,6 @@
 #include <string>
 
 #include "LibInfoTemp.h"
-#include "moduleManagerLibInfo.h"
 
 namespace ModuleInterface {
 struct Version {
@@ -28,7 +27,7 @@ struct MetaData {
 
 class ModuleInterface {
 public:
-  explicit ModuleInterface(std::stop_source stopSource);
+  explicit ModuleInterface(std::shared_ptr<std::stop_source> stopSource);
   virtual ~ModuleInterface();
   virtual void start() = 0;
   void stop();
@@ -43,7 +42,7 @@ protected:
   void grpcServerBuilder(std::vector<grpc::Service *> services, std::string grpcServer, std::unique_ptr<grpc::Server> &server);
   MetaData metaData_;
   std::stop_token stopToken_;
-  std::stop_source stopSource_;
+  std::shared_ptr<std::stop_source> stopSource_;
   std::unique_ptr<grpc::Server> innerServer_;
   std::unique_ptr<grpc::Server> outerServer_;
 
