@@ -2,6 +2,7 @@
 
 #include <boost/dll.hpp>
 #include <memory>
+#include <stop_token>
 #include <thread>
 
 #include "ModuleInterface.h"
@@ -16,7 +17,7 @@ struct LibInfo {
 
 class ModuleManager : public ModuleInterface::ModuleInterface {
 public:
-  explicit ModuleManager(std::stop_token stopToken);
+  explicit ModuleManager(std::stop_source stopSource);
   ~ModuleManager();
 
   virtual ::ModuleInterface::MetaData metaData() override;

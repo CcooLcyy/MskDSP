@@ -3,7 +3,6 @@
 #include <grpcpp/impl/service_type.h>
 #include <grpcpp/server.h>
 
-#include <functional>
 #include <memory>
 #include <stop_token>
 #include <string>
@@ -28,11 +27,12 @@ struct MetaData {
 
 class ModuleInterface {
 public:
-  explicit ModuleInterface(std::stop_token stopToken);
-  virtual ~ModuleInterface() = default;
+  explicit ModuleInterface(std::stop_source stopSource);
+  virtual ~ModuleInterface();
   void initLibInfo(LibInfo libInfo);
   virtual MetaData metaData() = 0;
   virtual void start() = 0;
+  void stop();
 
   void stopGrpcServer();
   void runInnerServer(std::vector<grpc::Service *> innerServices);
@@ -42,7 +42,11 @@ protected:
   void grpcServerBuilder(std::vector<grpc::Service *> services, std::string grpcServer, std::unique_ptr<grpc::Server> &server);
   MetaData metaData_;
   std::stop_token stopToken_;
+  std::stop_source stopSource_;
   std::unique_ptr<grpc::Server> innerServer_;
   std::unique_ptr<grpc::Server> outerServer_;
+
+private:
+  int getRandomPort();
 };
 }  // namespace ModuleInterface

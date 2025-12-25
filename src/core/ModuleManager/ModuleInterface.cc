@@ -6,12 +6,22 @@
 #include <filesystem>
 #include <format>
 #include <memory>
-#include <thread>
+#include <random>
+#include <stop_token>
+#include <string>
 
 #include "moduleManagerLibInfo.h"
 
 namespace ModuleInterface {
-ModuleInterface::ModuleInterface(std::stop_token stopToken) {}
+ModuleInterface::ModuleInterface(std::stop_source stopSource) :
+  stopSource_(stopSource) {
+  stopToken_ = stopSource_.get_token();
+}
+ModuleInterface::~ModuleInterface() {}
+void ModuleInterface::stop() {
+  stopGrpcServer();
+  stopSource_.request_stop();
+}
 void ModuleInterface::initLibInfo(LibInfo libInfo) {
   metaData_.name = libInfo.LIB_NAME;
   metaData_.libName = std::format("{}{}{}", "lib", libInfo.LIB_NAME, ".so");
@@ -34,7 +44,7 @@ void ModuleInterface::initLibInfo(LibInfo libInfo) {
   }
   metaData_.innerGRPCServer = sockPath;
 
-  // metaData_.outterGRPCServer = 
+  metaData_.outterGRPCServer = std::string("0.0.0.0") + std::to_string(getRandomPort());
 }
 void ModuleInterface::stopGrpcServer() {
   innerServer_->Shutdown();
@@ -56,5 +66,11 @@ void ModuleInterface::grpcServerBuilder(std::vector<grpc::Service *> services, s
   server = std::move(tmpServer);
 
   server->Wait();
+}
+int ModuleInterface::getRandomPort() {
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::uniform_int_distribution<> distrib(7001, 7999);
+  return distrib(gen);
 }
 }  // namespace ModuleInterface
