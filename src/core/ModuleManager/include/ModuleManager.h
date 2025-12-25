@@ -21,7 +21,6 @@ public:
   explicit ModuleManager(std::stop_source stopSource);
   ~ModuleManager();
 
-  virtual ::ModuleInterface::MetaData metaData() override;
   virtual void start() override;
 
   ModuleManagerProto::ModuleInfos &getModuleInfos();

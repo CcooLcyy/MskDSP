@@ -29,10 +29,9 @@ class ModuleInterface {
 public:
   explicit ModuleInterface(std::stop_source stopSource);
   virtual ~ModuleInterface();
-  void initLibInfo(LibInfo libInfo);
-  virtual MetaData metaData() = 0;
   virtual void start() = 0;
   void stop();
+  MetaData metaData();
 
   void stopGrpcServer();
   void runInnerServer(std::vector<grpc::Service *> innerServices);

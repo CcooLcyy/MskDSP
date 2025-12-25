@@ -28,9 +28,6 @@ ModuleManager::ModuleManager(std::stop_source stopSource) :
 ModuleManager::~ModuleManager() {
   stopGrpcServer();
 }
-::ModuleInterface::MetaData ModuleManager::metaData() {
-  return metaData_;
-}
 void ModuleManager::start() {
   ServiceImpl service;
   service.getModuleManager(this);

@@ -23,6 +23,9 @@ void ModuleInterface::stop() {
   stopGrpcServer();
   stopSource_.request_stop();
 }
+MetaData ModuleInterface::metaData() {
+  return metaData_;
+}
 void ModuleInterface::initLibInfo(LibInfo libInfo) {
   metaData_.name = libInfo.LIB_NAME;
   metaData_.libName = std::format("{}{}{}", "lib", libInfo.LIB_NAME, ".so");
