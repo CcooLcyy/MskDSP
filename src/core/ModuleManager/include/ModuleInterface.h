@@ -22,7 +22,7 @@ struct MetaData {
   Version version;
   std::string libName;
   std::string innerGRPCServer;
-  std::string outterGRPCServer;
+  std::string outerGRPCServer;
 };
 
 class ModuleInterface {

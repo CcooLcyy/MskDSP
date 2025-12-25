@@ -45,7 +45,7 @@ void ModuleInterface::initLibInfo(LibInfo libInfo) {
   }
   metaData_.innerGRPCServer = sockPath;
 
-  metaData_.outterGRPCServer = std::string("0.0.0.0") + std::to_string(getRandomPort());
+  metaData_.outerGRPCServer = std::string("0.0.0.0") + std::to_string(getRandomPort());
 }
 void ModuleInterface::stopGrpcServer() {
   innerServer_->Shutdown();
@@ -55,7 +55,7 @@ void ModuleInterface::runInnerServer(std::vector<grpc::Service *> innerServices)
   grpcServerBuilder(innerServices, metaData_.innerGRPCServer, innerServer_);
 }
 void ModuleInterface::runOuterServer(std::vector<grpc::Service *> outerServices) {
-  grpcServerBuilder(outerServices, metaData_.outterGRPCServer, outerServer_);
+  grpcServerBuilder(outerServices, metaData_.outerGRPCServer, outerServer_);
 }
 void ModuleInterface::grpcServerBuilder(std::vector<grpc::Service *> services, std::string grpcServer, std::unique_ptr<grpc::Server> &server) {
   grpc::ServerBuilder builder;

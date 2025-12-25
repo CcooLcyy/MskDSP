@@ -6,6 +6,7 @@
 #include <thread>
 
 #include "ModuleInterface.h"
+#include "ModuleManager.pb.h"
 
 namespace ModuleManager {
 struct LibInfo {
@@ -23,6 +24,9 @@ public:
   virtual ::ModuleInterface::MetaData metaData() override;
   virtual void start() override;
 
-  void loadModule();
+  ModuleManagerProto::ModuleInfos &getModuleInfo();
+
+private:
+  ModuleManagerProto::ModuleInfos moduleInfos_;
 };
 }  // namespace ModuleManager

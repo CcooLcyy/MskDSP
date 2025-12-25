@@ -2,27 +2,43 @@ syntax = "proto3";
 
 package ModuleManagerProto;
 
-// 请求消息
-message HelloRequest {
-  string          name  = 1;
+import "google/protobuf/empty.proto";
+
+// 空参数实现
+message Empty {}
+
+// 模块版本
+message ModuleVersion {
+  string major   = 1;
+  string minor   = 2;
+  string patch   = 3;
+  string version = 4;
 }
 
-// 响应消息
-message HelloReply {
-  string message   = 1;
+// 模块信息
+message ModuleInfo {
+  string        module_name       = 1;
+  ModuleVersion version           = 2;
+  string        lib_name          = 3;
+  string        inner_grpc_server = 4;
+  string        outer_grpc_server = 5;
 }
 
-// 测试服务
-service Greeter {
-  // 简单RPC
-  rpc SayHello (HelloRequest) returns (HelloReply) {}
+// 模块信息数组
+message ModuleInfos {
+  repeated ModuleInfo module_infos = 1;
+}
 
-  // 服务器端流式RPC
-  rpc SayHelloStream (HelloRequest) returns (stream HelloReply) {}
-
-  // 客户端端流式RPC
-  rpc SayHelloClientStream (stream HelloRequest) returns (HelloReply) {}
-
-  // 双向流式RPC
-  rpc SayHelloBidiStream (stream HelloRequest) returns (stream HelloReply) {}
+// 模块管理功能
+service ModuleManage {
+  // 获取模块信息
+  rpc GetModuleInfo(Empty) returns (ModuleInfos) {}
+  // 启动模块
+  rpc StartModule(ModuleInfo) returns (Empty) {}
+  // 停止模块
+  rpc StopModule(ModuleInfo) returns (Empty) {}
+  // 上传模块
+  rpc UploadModule(Empty) returns (Empty) {}
+  // 删除模块
+  rpc DeleteModule(ModuleInfo) returns (Empty) {}
 }

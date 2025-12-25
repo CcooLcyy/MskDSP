@@ -1,16 +1,25 @@
 #pragma once
+#include <grpcpp/impl/service_type.h>
 #include <grpcpp/server_context.h>
 #include <grpcpp/support/status.h>
 #include <grpcpp/support/sync_stream.h>
 
+#include <memory>
+
 #include "ModuleManager.grpc.pb.h"
+#include "ModuleManager.h"
 #include "ModuleManager.pb.h"
 
 namespace ModuleManager {
-class ServiceImpl : public ModuleManagerProto::Greeter::Service {
-  grpc::Status SayHello(grpc::ServerContext *context, const ModuleManagerProto::HelloRequest *request, ModuleManagerProto::HelloReply *reply) override;
-  grpc::Status SayHelloStream(grpc::ServerContext *context, const ModuleManagerProto::HelloRequest *request, grpc::ServerWriter<ModuleManagerProto::HelloReply> *writer) override;
-  grpc::Status SayHelloClientStream(grpc::ServerContext *context, grpc::ServerReader<ModuleManagerProto::HelloRequest> *reader, ModuleManagerProto::HelloReply *reply) override;
-  grpc::Status SayHelloBidiStream(grpc::ServerContext *context, grpc::ServerReaderWriter<ModuleManagerProto::HelloReply, ModuleManagerProto::HelloRequest> *stream) override;
+class ServiceImpl : public ModuleManagerProto::ModuleManage::Service {
+public:
+  grpc::Status GetModuleInfo(grpc::ServerContext *context, const ModuleManagerProto::Empty, ModuleManagerProto::ModuleInfos *moduleInfos);
+  grpc::Status StartModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo moduleInfo, ModuleManagerProto::Empty *);
+  grpc::Status StopModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo moduleInfo, ModuleManagerProto::Empty *);
+  grpc::Status UploadModule(grpc::ServerContext *context, const ModuleManagerProto::Empty, ModuleManagerProto::Empty *);
+  grpc::Status DeleteModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo moduleInfo, ModuleManagerProto::Empty *);
+
+private:
+  std::shared_ptr<ModuleManager> moduleManager_;
 };
 }  // namespace ModuleManager

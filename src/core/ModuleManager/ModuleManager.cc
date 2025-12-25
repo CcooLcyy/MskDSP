@@ -20,7 +20,7 @@ namespace ModuleManager {
 ModuleManager::ModuleManager(std::stop_source stopSource) :
   ModuleInterface::ModuleInterface(stopSource) {
   initLibInfo(moduleManagerLibInfo);
-  metaData_.outterGRPCServer = std::string("0.0.0.0:7000");
+  metaData_.outerGRPCServer = std::string("0.0.0.0:7000");
 }
 ModuleManager::~ModuleManager() {
   stopGrpcServer();
@@ -38,5 +38,7 @@ void ModuleManager::start() {
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
 }
-void ModuleManager::loadModule() {}
+ModuleManagerProto::ModuleInfos &ModuleManager::getModuleInfo() {
+  return moduleInfos_;
+}
 }  // namespace ModuleManager
