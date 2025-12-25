@@ -7,6 +7,7 @@
 #include <grpcpp/security/server_credentials.h>
 #include <grpcpp/server.h>
 
+#include <algorithm>
 #include <boost/dll/shared_library.hpp>
 #include <chrono>
 #include <filesystem>
@@ -56,6 +57,15 @@ void ModuleManager::loadModule(ModuleManagerProto::ModuleInfo moduleInfo) {
   libInfo.stopSource = stopSource;
   libInfo.thread = std::move(std::jthread([&]() { instance->start(); }));
   libInfoVec_.emplace_back(std::move(libInfo));
+}
+void ModuleManager::unloadModule(ModuleManagerProto::ModuleInfo moduleInfo) {
+  auto libInfoIt = std::find_if(libInfoVec_.begin(), libInfoVec_.end(), [&](const LibInfo &elem) {
+    return elem.metaData.libName == moduleInfo.lib_name();
+  });
+  if (libInfoIt != libInfoVec_.end()) {
+    libInfoIt->stopSource->request_stop();
+    libInfoVec_.erase(libInfoIt);
+  }
 }
 ModuleManagerProto::ModuleInfos &ModuleManager::getModuleInfos() {
   return moduleInfos_;

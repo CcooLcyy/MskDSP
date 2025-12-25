@@ -20,6 +20,7 @@ void DataCenter::start() {
     std::cout << "正在运行DataCenter" << std::endl;
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
+  std::cout << "DataCenter模块停止" << std::endl;
 }
 }  // namespace DataCenter
 

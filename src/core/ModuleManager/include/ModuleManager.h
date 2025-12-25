@@ -25,6 +25,7 @@ public:
   virtual void start() override;
 
   void loadModule(ModuleManagerProto::ModuleInfo moduleInfo);
+  void unloadModule(ModuleManagerProto::ModuleInfo moduleInfo);
   ModuleManagerProto::ModuleInfos &getModuleInfos();
 
 private:

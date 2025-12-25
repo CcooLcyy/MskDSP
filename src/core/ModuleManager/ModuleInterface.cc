@@ -30,7 +30,7 @@ MetaData ModuleInterface::metaData() {
 }
 void ModuleInterface::initLibInfo(LibInfo libInfo) {
   metaData_.name = libInfo.LIB_NAME;
-  metaData_.libName = std::format("{}{}{}", "lib", libInfo.LIB_NAME, ".so");
+  metaData_.libName = std::format("{}{}{}.{}", "lib", libInfo.LIB_NAME, ".so", libInfo.VERSION);
   ::ModuleInterface::Version versionInfo{
       libInfo.VERSION_MAJOR,
       libInfo.VERSION_MINOR,
