@@ -24,9 +24,11 @@ public:
   virtual ::ModuleInterface::MetaData metaData() override;
   virtual void start() override;
 
-  ModuleManagerProto::ModuleInfos &getModuleInfo();
+  ModuleManagerProto::ModuleInfos &getModuleInfos();
 
 private:
+  void initModuleInfos();
+  ModuleManagerProto::ModuleVersion parseVersion(std::string libName);
   ModuleManagerProto::ModuleInfos moduleInfos_;
 };
 }  // namespace ModuleManager

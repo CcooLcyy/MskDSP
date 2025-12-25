@@ -17,16 +17,14 @@ message ModuleVersion {
 
 // 模块信息
 message ModuleInfo {
-  string        module_name       = 1;
-  ModuleVersion version           = 2;
-  string        lib_name          = 3;
-  string        inner_grpc_server = 4;
-  string        outer_grpc_server = 5;
+  string        module_name = 1;
+  ModuleVersion version     = 2;
+  string        lib_name    = 3;
 }
 
 // 模块信息数组
 message ModuleInfos {
-  repeated ModuleInfo module_infos = 1;
+  repeated ModuleInfo module_info = 1;
 }
 
 // 模块管理功能

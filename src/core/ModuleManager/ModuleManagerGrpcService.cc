@@ -2,15 +2,21 @@
 
 #include <grpcpp/support/status.h>
 
+#include <memory>
+
+#include "ModuleManager.h"
 #include "ModuleManager.pb.h"
 
 namespace ModuleManager {
-grpc::Status ServiceImpl::GetModuleInfo(grpc::ServerContext *context, const ModuleManagerProto::Empty, ModuleManagerProto::ModuleInfos *moduleInfos) {
-  *moduleInfos = moduleManager_->getModuleInfo();
+void ServiceImpl::getModuleManager(ModuleManager *moduleManager) {
+  moduleManager_ = std::shared_ptr<ModuleManager>(moduleManager);
+}
+grpc::Status ServiceImpl::GetModuleInfo(grpc::ServerContext *context, const ModuleManagerProto::Empty *, ModuleManagerProto::ModuleInfos *moduleInfos) {
+  moduleInfos->CopyFrom(moduleManager_->getModuleInfos());
   return grpc::Status::OK;
 }
-grpc::Status ServiceImpl::StartModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo moduleInfo, ModuleManagerProto::Empty *) {}
-grpc::Status ServiceImpl::StopModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo moduleInfo, ModuleManagerProto::Empty *) {}
-grpc::Status ServiceImpl::UploadModule(grpc::ServerContext *context, const ModuleManagerProto::Empty, ModuleManagerProto::Empty *) {}
-grpc::Status ServiceImpl::DeleteModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo moduleInfo, ModuleManagerProto::Empty *) {}
+grpc::Status ServiceImpl::StartModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo *moduleInfo, ModuleManagerProto::Empty *) {}
+grpc::Status ServiceImpl::StopModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo *moduleInfo, ModuleManagerProto::Empty *) {}
+grpc::Status ServiceImpl::UploadModule(grpc::ServerContext *context, const ModuleManagerProto::Empty *, ModuleManagerProto::Empty *) {}
+grpc::Status ServiceImpl::DeleteModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo *moduleInfo, ModuleManagerProto::Empty *) {}
 }  // namespace ModuleManager

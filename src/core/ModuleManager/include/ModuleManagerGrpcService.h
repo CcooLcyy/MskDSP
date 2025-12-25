@@ -13,11 +13,12 @@
 namespace ModuleManager {
 class ServiceImpl : public ModuleManagerProto::ModuleManage::Service {
 public:
-  grpc::Status GetModuleInfo(grpc::ServerContext *context, const ModuleManagerProto::Empty, ModuleManagerProto::ModuleInfos *moduleInfos);
-  grpc::Status StartModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo moduleInfo, ModuleManagerProto::Empty *);
-  grpc::Status StopModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo moduleInfo, ModuleManagerProto::Empty *);
-  grpc::Status UploadModule(grpc::ServerContext *context, const ModuleManagerProto::Empty, ModuleManagerProto::Empty *);
-  grpc::Status DeleteModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo moduleInfo, ModuleManagerProto::Empty *);
+  void getModuleManager(ModuleManager *moduleManager);
+  grpc::Status GetModuleInfo(grpc::ServerContext *context, const ModuleManagerProto::Empty *, ModuleManagerProto::ModuleInfos *moduleInfos) override;
+  grpc::Status StartModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo *moduleInfo, ModuleManagerProto::Empty *) override;
+  grpc::Status StopModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo *moduleInfo, ModuleManagerProto::Empty *) override;
+  grpc::Status UploadModule(grpc::ServerContext *context, const ModuleManagerProto::Empty *, ModuleManagerProto::Empty *) override;
+  grpc::Status DeleteModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo *moduleInfo, ModuleManagerProto::Empty *) override;
 
 private:
   std::shared_ptr<ModuleManager> moduleManager_;
