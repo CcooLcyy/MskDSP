@@ -1,7 +1,13 @@
 #pragma once
 
+#include <grpcpp/impl/service_type.h>
+#include <grpcpp/server.h>
+
+#include <functional>
+#include <memory>
 #include <stop_token>
 #include <string>
+
 #include "moduleManagerLibInfo.h"
 
 namespace ModuleInterface {
@@ -16,7 +22,8 @@ struct MetaData {
   std::string name;
   Version version;
   std::string libName;
-  std::string grpcServer;
+  std::string innerGRPCServer;
+  std::string outterGRPCServer;
 };
 
 class ModuleInterface {
@@ -26,10 +33,16 @@ public:
   void initLibInfo(LibInfo libInfo);
   virtual MetaData metaData() = 0;
   virtual void start() = 0;
-  virtual void runServer() = 0;
+
+  void stopGrpcServer();
+  void runInnerServer(std::vector<grpc::Service *> innerServices);
+  void runOuterServer(std::vector<grpc::Service *> outerServices);
 
 protected:
+  void grpcServerBuilder(std::vector<grpc::Service *> services, std::string grpcServer, std::unique_ptr<grpc::Server> &server);
   MetaData metaData_;
   std::stop_token stopToken_;
+  std::unique_ptr<grpc::Server> innerServer_;
+  std::unique_ptr<grpc::Server> outerServer_;
 };
 }  // namespace ModuleInterface
