@@ -9,9 +9,11 @@
 
 #include <algorithm>
 #include <boost/dll/shared_library.hpp>
+#include <chrono>
 #include <filesystem>
 #include <memory>
 #include <stop_token>
+#include <thread>
 #include <vector>
 
 #include "ModuleInterface.h"
@@ -25,26 +27,35 @@ ModuleManager::ModuleManager() :
   ModuleInterface::ModuleInterface() {
   initLibInfo(moduleManagerLibInfo);
   metaData_.outerGRPCServer = std::string("0.0.0.0:7000");
-  initModuleInfos();
 }
 ModuleManager::~ModuleManager() {}
 void ModuleManager::start(std::stop_token stopToken) {
   moduleManagerService_->getModuleManager(this);
   grpcServerBuilder(moduleManagerService_);
   while (!stopToken.stop_requested()) {
+    std::this_thread::sleep_for(std::chrono::seconds(1));
   }
 }
 void ModuleManager::loadModule(ModuleManagerProto::ModuleInfo moduleInfo) {
-  libInfoVec_.emplace_back(LibInfo::create(moduleInfo));
+  initModuleInfos();
+  auto moduleInfoIt = std::find_if(moduleInfos_.module_info().begin(), moduleInfos_.module_info().end(), [&](const ModuleManagerProto::ModuleInfo &elem) {
+    return elem.module_name() == moduleInfo.module_name();
+  });
+  if (moduleInfoIt != moduleInfos_.module_info().end()) {
+    libInfoVec_.emplace_back(LibInfo::create(moduleInfo));
+  }
 }
 void ModuleManager::unloadModule(ModuleManagerProto::ModuleInfo moduleInfo) {
   auto libInfoIt = std::find_if(libInfoVec_.begin(), libInfoVec_.end(), [&](const std::unique_ptr<LibInfo> &elem) {
     return elem->MetaData().libName == moduleInfo.lib_name();
   });
-  libInfoIt->get()->cleanUp();
-  libInfoVec_.erase(libInfoIt);
+  if (libInfoIt != libInfoVec_.end()) {
+    libInfoIt->get()->cleanUp();
+    libInfoVec_.erase(libInfoIt);
+  }
 }
 ModuleManagerProto::ModuleInfos &ModuleManager::getModuleInfos() {
+  initModuleInfos();
   return moduleInfos_;
 }
 ModuleManagerProto::ModuleRunningInfos ModuleManager::getModuleRunningInfos() {
@@ -65,6 +76,7 @@ ModuleManagerProto::ModuleRunningInfos ModuleManager::getModuleRunningInfos() {
   return result;
 }
 void ModuleManager::initModuleInfos() {
+  moduleInfos_.Clear();
   for (auto entry : std::filesystem::directory_iterator("./lib")) {
     if (!entry.is_symlink()) {
       auto moduleInfo = moduleInfos_.add_module_info();

@@ -12,11 +12,8 @@
 #include <thread>
 
 namespace ModuleInterface {
-ModuleInterface::ModuleInterface() {
-}
-ModuleInterface::~ModuleInterface() {
-  std::cout << "销毁MI" << std::endl;
-}
+ModuleInterface::ModuleInterface() {}
+ModuleInterface::~ModuleInterface() {}
 void ModuleInterface::stop() {
   stopGrpcServer();
 }
