@@ -8,22 +8,17 @@
 #include <format>
 #include <memory>
 #include <random>
-#include <stop_token>
 #include <string>
-
-#include "moduleManagerLibInfo.h"
+#include <thread>
 
 namespace ModuleInterface {
-ModuleInterface::ModuleInterface(std::shared_ptr<std::stop_source> stopSource) :
-  stopSource_(stopSource) {
-  stopToken_ = stopSource_->get_token();
+ModuleInterface::ModuleInterface() {
 }
 ModuleInterface::~ModuleInterface() {
-  stopGrpcServer();
+  std::cout << "销毁MI" << std::endl;
 }
 void ModuleInterface::stop() {
   stopGrpcServer();
-  stopSource_->request_stop();
 }
 MetaData ModuleInterface::metaData() {
   return metaData_;
@@ -50,34 +45,34 @@ void ModuleInterface::initLibInfo(LibInfo libInfo) {
   }
   metaData_.innerGRPCServer = sockPath;
 
-  metaData_.outerGRPCServer = std::string("0.0.0.0") + std::to_string(getRandomPort());
+  metaData_.outerGRPCServer = std::format("0.0.0.0:{}", getRandomPort());
 }
 void ModuleInterface::stopGrpcServer() {
   innerServer_->Shutdown();
   outerServer_->Shutdown();
 }
-void ModuleInterface::runInnerServer(std::vector<grpc::Service *> innerServices) {
-  grpcServerBuilder(innerServices, metaData_.innerGRPCServer, innerServer_);
-}
-void ModuleInterface::runOuterServer(std::vector<grpc::Service *> outerServices) {
-  grpcServerBuilder(outerServices, metaData_.outerGRPCServer, outerServer_);
-}
-void ModuleInterface::grpcServerBuilder(std::vector<grpc::Service *> services, std::string grpcServer, std::unique_ptr<grpc::Server> &server) {
-  grpc::ServerBuilder builder;
-  for (auto service : services) {
-    builder.RegisterService(service);
-  }
+void ModuleInterface::grpcServerBuilder(std::shared_ptr<grpc::Service> service) {
+  grpc::ServerBuilder innerServerbuilder;
+  innerServerbuilder.RegisterService(service.get());
   grpc::reflection::InitProtoReflectionServerBuilderPlugin();
-  builder.AddListeningPort(grpcServer, grpc::InsecureServerCredentials());
-  std::unique_ptr<grpc::Server> tmpServer(builder.BuildAndStart());
-  server = std::move(tmpServer);
+  innerServerbuilder.AddListeningPort(metaData_.innerGRPCServer, grpc::InsecureServerCredentials());
+  std::unique_ptr<grpc::Server> innerTmpServer(innerServerbuilder.BuildAndStart());
+  innerServer_ = std::move(innerTmpServer);
 
-  server->Wait();
+  grpc::ServerBuilder outerServerBuilder;
+  outerServerBuilder.RegisterService(service.get());
+  grpc::reflection::InitProtoReflectionServerBuilderPlugin();
+  outerServerBuilder.AddListeningPort(metaData_.outerGRPCServer, grpc::InsecureServerCredentials());
+  std::unique_ptr<grpc::Server> outerTmpServer(outerServerBuilder.BuildAndStart());
+  outerServer_ = std::move(outerTmpServer);
+
+  std::jthread([&]() { innerServer_->Wait(); }).detach();
+  std::jthread([&]() { outerServer_->Wait(); }).detach();
 }
-int ModuleInterface::getRandomPort() {
+std::string ModuleInterface::getRandomPort() {
   std::random_device rd;
   std::mt19937 gen(rd());
-  std::uniform_int_distribution<> distrib(7001, 7999);
-  return distrib(gen);
+  std::uniform_int_distribution<> dist(7001, 7999);
+  return std::to_string(dist(gen));
 }
 }  // namespace ModuleInterface

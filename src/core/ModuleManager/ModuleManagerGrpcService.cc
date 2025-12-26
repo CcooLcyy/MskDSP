@@ -8,21 +8,25 @@
 #include "ModuleManager.pb.h"
 
 namespace ModuleManager {
-void ServiceImpl::getModuleManager(ModuleManager *moduleManager) {
-  moduleManager_ = std::shared_ptr<ModuleManager>(moduleManager);
+void ModuleManagerServiceImpl::getModuleManager(ModuleManager *moduleManager) {
+  moduleManager_ = moduleManager;
 }
-grpc::Status ServiceImpl::GetModuleInfo(grpc::ServerContext *context, const ModuleManagerProto::Empty *, ModuleManagerProto::ModuleInfos *moduleInfos) {
+grpc::Status ModuleManagerServiceImpl::GetModuleInfo(grpc::ServerContext *context, const ModuleManagerProto::Empty *, ModuleManagerProto::ModuleInfos *moduleInfos) {
   moduleInfos->CopyFrom(moduleManager_->getModuleInfos());
   return grpc::Status::OK;
 }
-grpc::Status ServiceImpl::StartModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo *moduleInfo, ModuleManagerProto::Empty *) {
+grpc::Status ModuleManagerServiceImpl::StartModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo *moduleInfo, ModuleManagerProto::Empty *) {
   moduleManager_->loadModule(*moduleInfo);
   return grpc::Status::OK;
 }
-grpc::Status ServiceImpl::StopModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo *moduleInfo, ModuleManagerProto::Empty *) {
+grpc::Status ModuleManagerServiceImpl::StopModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo *moduleInfo, ModuleManagerProto::Empty *) {
   moduleManager_->unloadModule(*moduleInfo);
   return grpc::Status::OK;
 }
-grpc::Status ServiceImpl::UploadModule(grpc::ServerContext *context, const ModuleManagerProto::Empty *, ModuleManagerProto::Empty *) {}
-grpc::Status ServiceImpl::DeleteModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo *moduleInfo, ModuleManagerProto::Empty *) {}
+grpc::Status ModuleManagerServiceImpl::UploadModule(grpc::ServerContext *context, const ModuleManagerProto::Empty *, ModuleManagerProto::Empty *) {
+  return grpc::Status::OK;
+}
+grpc::Status ModuleManagerServiceImpl::DeleteModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo *moduleInfo, ModuleManagerProto::Empty *) {
+  return grpc::Status::OK;
+}
 }  // namespace ModuleManager

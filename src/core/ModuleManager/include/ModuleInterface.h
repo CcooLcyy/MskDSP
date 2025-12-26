@@ -27,26 +27,24 @@ struct MetaData {
 
 class ModuleInterface {
 public:
-  explicit ModuleInterface(std::shared_ptr<std::stop_source> stopSource);
-  virtual ~ModuleInterface();
-  virtual void start() = 0;
+  explicit ModuleInterface();
+  virtual ~ModuleInterface() = 0;
+  virtual void start(std::stop_token stopToken) = 0;
   void stop();
   MetaData metaData();
 
   void stopGrpcServer();
-  void runInnerServer(std::vector<grpc::Service *> innerServices);
-  void runOuterServer(std::vector<grpc::Service *> outerServices);
 
 protected:
   void initLibInfo(LibInfo libInfo);
-  void grpcServerBuilder(std::vector<grpc::Service *> services, std::string grpcServer, std::unique_ptr<grpc::Server> &server);
+  void grpcServerBuilder(std::shared_ptr<grpc::Service> service);
   MetaData metaData_;
-  std::stop_token stopToken_;
-  std::shared_ptr<std::stop_source> stopSource_;
   std::unique_ptr<grpc::Server> innerServer_;
   std::unique_ptr<grpc::Server> outerServer_;
 
 private:
-  int getRandomPort();
+  // 对外服务端口从7001开始
+  int port_{7001};
+  std::string getRandomPort();
 };
 }  // namespace ModuleInterface

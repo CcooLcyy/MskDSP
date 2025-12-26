@@ -7,16 +7,22 @@
 #include <thread>
 
 #include "DataCenter.h"
+#include "DataCenterGrpcService.h"
 #include "dataCenterLibInfo.h"
 
 namespace DataCenter {
-DataCenter::DataCenter(std::shared_ptr<std::stop_source> stopSource) :
-  ModuleInterface(stopSource) {
+DataCenter::DataCenter() :
+  ModuleInterface(),
+  dataCenterService_(std::make_shared<DataCenterGrpcServiceImpl>()) {
   initLibInfo(dataCenterLibInfo);
 }
-DataCenter::~DataCenter() {}
-void DataCenter::start() {
-  while (!stopToken_.stop_requested()) {
+DataCenter::~DataCenter() {
+  std::cout << "销毁DC" << std::endl;
+}
+void DataCenter::start(std::stop_token stopToken) {
+  dataCenterService_->getDataCenter(this);
+  grpcServerBuilder(dataCenterService_);
+  while (!stopToken.stop_requested()) {
     std::cout << "正在运行DataCenter" << std::endl;
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
@@ -24,7 +30,6 @@ void DataCenter::start() {
 }
 }  // namespace DataCenter
 
-extern "C" BOOST_SYMBOL_EXPORT DataCenter::DataCenter *create(void *stopSource) {
-  std::shared_ptr<std::stop_source> stopSourcePtr = std::shared_ptr<std::stop_source>(reinterpret_cast<std::stop_source *>(stopSource));
-  return new DataCenter::DataCenter(stopSourcePtr);
+extern "C" BOOST_SYMBOL_EXPORT DataCenter::DataCenter *create() {
+  return new DataCenter::DataCenter();
 }

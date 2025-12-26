@@ -9,7 +9,6 @@
 
 #include <algorithm>
 #include <boost/dll/shared_library.hpp>
-#include <chrono>
 #include <filesystem>
 #include <memory>
 #include <stop_token>
@@ -23,49 +22,29 @@
 #include "moduleManagerLibInfo.h"
 
 namespace ModuleManager {
-ModuleManager::ModuleManager(std::shared_ptr<std::stop_source> stopSource) :
-  ModuleInterface::ModuleInterface(stopSource) {
+ModuleManager::ModuleManager() :
+  moduleManagerService_(std::make_shared<ModuleManagerServiceImpl>()),
+  ModuleInterface::ModuleInterface() {
   initLibInfo(moduleManagerLibInfo);
   metaData_.outerGRPCServer = std::string("0.0.0.0:7000");
   initModuleInfos();
 }
 ModuleManager::~ModuleManager() {}
-void ModuleManager::start() {
-  ServiceImpl service;
-  service.getModuleManager(this);
-  std::vector<grpc::Service *> services;
-  services.emplace_back(&service);
-  std::jthread innerServerThread([&]() { runInnerServer(services); });
-  std::jthread outerServerThread([&]() { runOuterServer(services); });
-  while (!stopToken_.stop_requested()) {
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+void ModuleManager::start(std::stop_token stopToken) {
+  moduleManagerService_->getModuleManager(this);
+  grpcServerBuilder(moduleManagerService_);
+  while (!stopToken.stop_requested()) {
   }
 }
 void ModuleManager::loadModule(ModuleManagerProto::ModuleInfo moduleInfo) {
-  boost::dll::shared_library lib(std::string("./lib/") + moduleInfo.lib_name());
-  if (!lib.has("create")) {
-    lib.unload();
-    return;
-  }
-  auto create = lib.get<ModuleInterface *(void *)>("create");
-  std::shared_ptr<std::stop_source> stopSource{std::make_shared<std::stop_source>()};
-  std::shared_ptr<ModuleInterface> instance(create(stopSource.get()));
-  LibInfo libInfo;
-  libInfo.metaData = instance->metaData();
-  libInfo.lib = std::move(lib);
-  libInfo.instance = instance;
-  libInfo.stopSource = stopSource;
-  libInfo.thread = std::move(std::jthread([&]() { instance->start(); }));
-  libInfoVec_.emplace_back(std::move(libInfo));
+  libInfoVec_.emplace_back(LibInfo::create(moduleInfo));
 }
 void ModuleManager::unloadModule(ModuleManagerProto::ModuleInfo moduleInfo) {
-  auto libInfoIt = std::find_if(libInfoVec_.begin(), libInfoVec_.end(), [&](const LibInfo &elem) {
-    return elem.metaData.libName == moduleInfo.lib_name();
+  auto libInfoIt = std::find_if(libInfoVec_.begin(), libInfoVec_.end(), [&](const std::unique_ptr<LibInfo> &elem) {
+    return elem->MetaData().libName == moduleInfo.lib_name();
   });
-  if (libInfoIt != libInfoVec_.end()) {
-    libInfoIt->stopSource->request_stop();
-    libInfoVec_.erase(libInfoIt);
-  }
+  libInfoIt->get()->cleanUp();
+  libInfoVec_.erase(libInfoIt);
 }
 ModuleManagerProto::ModuleInfos &ModuleManager::getModuleInfos() {
   return moduleInfos_;

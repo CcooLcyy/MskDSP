@@ -11,7 +11,7 @@
 #include "ModuleManager.pb.h"
 
 namespace ModuleManager {
-class ServiceImpl : public ModuleManagerProto::ModuleManage::Service {
+class ModuleManagerServiceImpl : public ModuleManagerProto::ModuleManage::Service {
 public:
   void getModuleManager(ModuleManager *moduleManager);
   grpc::Status GetModuleInfo(grpc::ServerContext *context, const ModuleManagerProto::Empty *, ModuleManagerProto::ModuleInfos *moduleInfos) override;
@@ -21,6 +21,6 @@ public:
   grpc::Status DeleteModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo *moduleInfo, ModuleManagerProto::Empty *) override;
 
 private:
-  std::shared_ptr<ModuleManager> moduleManager_;
+  ModuleManager* moduleManager_;
 };
 }  // namespace ModuleManager

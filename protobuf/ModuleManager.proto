@@ -2,9 +2,7 @@ syntax = "proto3";
 
 package ModuleManagerProto;
 
-import "google/protobuf/empty.proto";
-
-// 空参数实现
+// 空参数
 message Empty {}
 
 // 模块版本

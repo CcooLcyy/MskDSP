@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <boost/dll.hpp>
 #include <memory>
 #include <stop_token>
@@ -9,20 +10,55 @@
 #include "ModuleManager.pb.h"
 
 namespace ModuleManager {
-struct LibInfo {
-  ModuleInterface::MetaData metaData;
+class ModuleManagerServiceImpl;
+class LibInfo {
+public:
+  LibInfo() = default;
+  LibInfo(const LibInfo &) = delete;
+  LibInfo &operator=(const LibInfo &) = delete;
+
+  static std::unique_ptr<LibInfo> create(ModuleManagerProto::ModuleInfo moduleInfo) {
+    auto module = std::unique_ptr<LibInfo>(new LibInfo());
+
+    module->stopSource = {std::make_shared<std::stop_source>()};
+    module->lib.load(std::string("./lib/") + moduleInfo.lib_name());
+    auto create = module->lib.get<ModuleInterface::ModuleInterface *()>("create");
+    module->instance = std::shared_ptr<ModuleInterface::ModuleInterface>((create()));
+    std::jthread([&]() { module->instance->start(module->stopSource->get_token()); }).detach();
+    module->metaData = module->instance->metaData();
+    return module;
+  }
+  ModuleInterface::MetaData MetaData() {
+    return metaData;
+  }
+  void cleanUp() {
+    if (stopSource) {
+      stopSource->request_stop();
+    }
+    if (thread.joinable()) {
+      thread.join();
+    }
+    instance.reset();
+    if (lib.is_loaded()) {
+      lib.unload();
+    }
+    stopSource.reset();
+  }
+
+private:
+  std::shared_ptr<std::stop_source> stopSource;
   boost::dll::shared_library lib;
   std::shared_ptr<ModuleInterface::ModuleInterface> instance;
   std::jthread thread;
-  std::shared_ptr<std::stop_source> stopSource;
+  ModuleInterface::MetaData metaData;
 };
 
 class ModuleManager : public ModuleInterface::ModuleInterface {
 public:
-  explicit ModuleManager(std::shared_ptr<std::stop_source> stopSource);
+  explicit ModuleManager();
   ~ModuleManager();
 
-  virtual void start() override;
+  virtual void start(std::stop_token stopToken) override;
 
   void loadModule(ModuleManagerProto::ModuleInfo moduleInfo);
   void unloadModule(ModuleManagerProto::ModuleInfo moduleInfo);
@@ -32,6 +68,7 @@ private:
   void initModuleInfos();
   ModuleManagerProto::ModuleVersion parseVersion(std::string libName);
   ModuleManagerProto::ModuleInfos moduleInfos_;
-  std::vector<LibInfo> libInfoVec_;
+  std::vector<std::unique_ptr<LibInfo>> libInfoVec_;
+  std::shared_ptr<ModuleManagerServiceImpl> moduleManagerService_;
 };
 }  // namespace ModuleManager

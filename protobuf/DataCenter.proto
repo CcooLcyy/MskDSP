@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package DataCenterProto;
+
+// 空参数
+message Empty {}
+
+// 数据中心服务
+service DataCenterService {
+  // 获取数据模型
+  rpc GetDataModule(Empty) returns (Empty);
+}
