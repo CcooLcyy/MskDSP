@@ -26,6 +26,7 @@ ModuleManager::ModuleManager() :
   moduleManagerService_(std::make_shared<ModuleManagerServiceImpl>()),
   ModuleInterface::ModuleInterface() {
   initLibInfo(moduleManagerLibInfo);
+  releasePort(metaData_.outerGRPCServer);
   metaData_.outerGRPCServer = std::string("0.0.0.0:7000");
 }
 ModuleManager::~ModuleManager() {}

@@ -13,9 +13,9 @@
 
 namespace ModuleInterface {
 ModuleInterface::ModuleInterface() {}
-ModuleInterface::~ModuleInterface() {}
-void ModuleInterface::stop() {
-  stopGrpcServer();
+ModuleInterface::~ModuleInterface() {
+  // 当模块卸载后需要将占用的端口释放
+  releasePort(metaData_.outerGRPCServer);
 }
 MetaData ModuleInterface::metaData() {
   return metaData_;
@@ -42,11 +42,8 @@ void ModuleInterface::initLibInfo(LibInfo libInfo) {
   }
   metaData_.innerGRPCServer = sockPath;
 
-  metaData_.outerGRPCServer = std::format("0.0.0.0:{}", getRandomPort());
-}
-void ModuleInterface::stopGrpcServer() {
-  innerServer_->Shutdown();
-  outerServer_->Shutdown();
+  auto port = getRandomPort();
+  metaData_.outerGRPCServer = std::format("0.0.0.0:{}", port);
 }
 void ModuleInterface::grpcServerBuilder(std::shared_ptr<grpc::Service> service) {
   grpc::ServerBuilder innerServerbuilder;
@@ -66,10 +63,27 @@ void ModuleInterface::grpcServerBuilder(std::shared_ptr<grpc::Service> service) 
   std::jthread([&]() { innerServer_->Wait(); }).detach();
   std::jthread([&]() { outerServer_->Wait(); }).detach();
 }
+void ModuleInterface::releasePort(std::string address) {
+  auto port = address.substr(address.find(':') + 1);
+  portSet_.erase(port);
+}
 std::string ModuleInterface::getRandomPort() {
-  std::random_device rd;
-  std::mt19937 gen(rd());
-  std::uniform_int_distribution<> dist(7001, 7999);
-  return std::to_string(dist(gen));
+  std::string port;
+  auto genRandomPort = [&]() {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dist(7001, 7999);
+    port = std::to_string(dist(gen));
+  };
+  genRandomPort();
+  while (isSamePort(port)) {
+    genRandomPort();
+  }
+  portSet_.emplace(port);
+  return port;
+}
+bool ModuleInterface::isSamePort(std::string port) {
+  auto portIt = portSet_.find(port);
+  return portIt == portSet_.end() ? false : true;
 }
 }  // namespace ModuleInterface

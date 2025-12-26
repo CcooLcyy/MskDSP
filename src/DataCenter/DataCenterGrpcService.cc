@@ -2,8 +2,6 @@
 
 #include <grpcpp/support/status.h>
 
-#include <memory>
-
 #include "DataCenter.h"
 #include "DataCenterGrpcService.h"
 
