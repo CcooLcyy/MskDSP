@@ -25,10 +25,25 @@ message ModuleInfos {
   repeated ModuleInfo module_info = 1;
 }
 
+// 模块运行时信息
+message ModuleRunningInfo {
+  string        module_name       = 1;
+  ModuleVersion version           = 2;
+  string        lib_name          = 3;
+  string        inner_grpc_server = 4;
+  string        outer_grpc_server = 5;
+}
+
+message ModuleRunningInfos {
+  repeated ModuleRunningInfo module_running_info = 1;
+}
+
 // 模块管理功能
 service ModuleManage {
   // 获取模块信息
   rpc GetModuleInfo(Empty) returns (ModuleInfos) {}
+  // 获取模块时信息
+  rpc GetRunningModuleInfo(Empty) returns (ModuleRunningInfos) {}
   // 启动模块
   rpc StartModule(ModuleInfo) returns (Empty) {}
   // 停止模块

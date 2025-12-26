@@ -16,9 +16,7 @@ DataCenter::DataCenter() :
   dataCenterService_(std::make_shared<DataCenterGrpcServiceImpl>()) {
   initLibInfo(dataCenterLibInfo);
 }
-DataCenter::~DataCenter() {
-  std::cout << "销毁DC" << std::endl;
-}
+DataCenter::~DataCenter() {}
 void DataCenter::start(std::stop_token stopToken) {
   dataCenterService_->getDataCenter(this);
   grpcServerBuilder(dataCenterService_);

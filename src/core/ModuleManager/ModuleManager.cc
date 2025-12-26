@@ -12,8 +12,6 @@
 #include <filesystem>
 #include <memory>
 #include <stop_token>
-#include <thread>
-#include <utility>
 #include <vector>
 
 #include "ModuleInterface.h"
@@ -48,6 +46,23 @@ void ModuleManager::unloadModule(ModuleManagerProto::ModuleInfo moduleInfo) {
 }
 ModuleManagerProto::ModuleInfos &ModuleManager::getModuleInfos() {
   return moduleInfos_;
+}
+ModuleManagerProto::ModuleRunningInfos ModuleManager::getModuleRunningInfos() {
+  ModuleManagerProto::ModuleRunningInfos result;
+  for (const auto &lib : libInfoVec_) {
+    auto moduleRunningInfo = result.add_module_running_info();
+    auto libMetaData = lib->MetaData();
+    moduleRunningInfo->set_module_name(libMetaData.name);
+    auto version = moduleRunningInfo->mutable_version();
+    version->set_major(libMetaData.version.major);
+    version->set_minor(libMetaData.version.minor);
+    version->set_patch(libMetaData.version.patch);
+    version->set_version(libMetaData.version.version);
+    moduleRunningInfo->set_lib_name(libMetaData.libName);
+    moduleRunningInfo->set_inner_grpc_server(libMetaData.innerGRPCServer);
+    moduleRunningInfo->set_outer_grpc_server(libMetaData.outerGRPCServer);
+  }
+  return result;
 }
 void ModuleManager::initModuleInfos() {
   for (auto entry : std::filesystem::directory_iterator("./lib")) {

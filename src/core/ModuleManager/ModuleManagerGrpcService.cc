@@ -2,8 +2,6 @@
 
 #include <grpcpp/support/status.h>
 
-#include <memory>
-
 #include "ModuleManager.h"
 #include "ModuleManager.pb.h"
 
@@ -27,6 +25,10 @@ grpc::Status ModuleManagerServiceImpl::UploadModule(grpc::ServerContext *context
   return grpc::Status::OK;
 }
 grpc::Status ModuleManagerServiceImpl::DeleteModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo *moduleInfo, ModuleManagerProto::Empty *) {
+  return grpc::Status::OK;
+}
+grpc::Status ModuleManagerServiceImpl::GetRunningModuleInfo(grpc::ServerContext *context, const ModuleManagerProto::Empty *, ModuleManagerProto::ModuleRunningInfos *moduleRunningInfos) {
+  moduleRunningInfos->CopyFrom(moduleManager_->getModuleRunningInfos());
   return grpc::Status::OK;
 }
 }  // namespace ModuleManager

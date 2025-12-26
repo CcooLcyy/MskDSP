@@ -4,8 +4,6 @@
 #include <grpcpp/support/status.h>
 #include <grpcpp/support/sync_stream.h>
 
-#include <memory>
-
 #include "ModuleManager.grpc.pb.h"
 #include "ModuleManager.h"
 #include "ModuleManager.pb.h"
@@ -19,8 +17,9 @@ public:
   grpc::Status StopModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo *moduleInfo, ModuleManagerProto::Empty *) override;
   grpc::Status UploadModule(grpc::ServerContext *context, const ModuleManagerProto::Empty *, ModuleManagerProto::Empty *) override;
   grpc::Status DeleteModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo *moduleInfo, ModuleManagerProto::Empty *) override;
+  grpc::Status GetRunningModuleInfo(grpc::ServerContext *context, const ModuleManagerProto::Empty *, ModuleManagerProto::ModuleRunningInfos *moduleRunningInfos) override;
 
 private:
-  ModuleManager* moduleManager_;
+  ModuleManager *moduleManager_;
 };
 }  // namespace ModuleManager

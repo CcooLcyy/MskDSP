@@ -1,6 +1,5 @@
 #pragma once
 
-#include <algorithm>
 #include <boost/dll.hpp>
 #include <memory>
 #include <stop_token>
@@ -63,6 +62,7 @@ public:
   void loadModule(ModuleManagerProto::ModuleInfo moduleInfo);
   void unloadModule(ModuleManagerProto::ModuleInfo moduleInfo);
   ModuleManagerProto::ModuleInfos &getModuleInfos();
+  ModuleManagerProto::ModuleRunningInfos getModuleRunningInfos();
 
 private:
   void initModuleInfos();
