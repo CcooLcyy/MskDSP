@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package IEC104Proto;
+
+// 空参数
+message Empty {}
+
+// 数据中心服务
+service IEC104Service {
+  // 获取数据模型
+  rpc Test(Empty) returns (Empty);
+}
