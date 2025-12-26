@@ -1,6 +1,7 @@
 #pragma once
 
 #include <boost/dll.hpp>
+#include <boost/dll/runtime_symbol_info.hpp>
 #include <memory>
 #include <stop_token>
 #include <thread>
@@ -16,14 +17,14 @@ public:
   LibInfo(const LibInfo &) = delete;
   LibInfo &operator=(const LibInfo &) = delete;
 
-  static std::unique_ptr<LibInfo> create(ModuleManagerProto::ModuleInfo moduleInfo) {
-    auto module = std::unique_ptr<LibInfo>(new LibInfo());
+  static std::shared_ptr<LibInfo> create(ModuleManagerProto::ModuleInfo moduleInfo) {
+    auto module = std::shared_ptr<LibInfo>(new LibInfo());
 
     module->stopSource = {std::make_shared<std::stop_source>()};
     module->lib.load(std::string("./lib/") + moduleInfo.lib_name());
     auto create = module->lib.get<ModuleInterface::ModuleInterface *()>("create");
     module->instance = std::shared_ptr<ModuleInterface::ModuleInterface>((create()));
-    std::jthread([&]() { module->instance->start(module->stopSource->get_token()); }).detach();
+    std::jthread([module]() { module->instance->start(module->stopSource->get_token()); }).detach();
     module->metaData = module->instance->metaData();
     return module;
   }
@@ -68,7 +69,7 @@ private:
   void initModuleInfos();
   ModuleManagerProto::ModuleVersion parseVersion(std::string libName);
   ModuleManagerProto::ModuleInfos moduleInfos_;
-  std::vector<std::unique_ptr<LibInfo>> libInfoVec_;
+  std::vector<std::shared_ptr<LibInfo>> libInfoVec_;
   std::shared_ptr<ModuleManagerServiceImpl> moduleManagerService_;
 };
 }  // namespace ModuleManager

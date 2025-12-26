@@ -46,7 +46,7 @@ void ModuleManager::loadModule(ModuleManagerProto::ModuleInfo moduleInfo) {
   }
 }
 void ModuleManager::unloadModule(ModuleManagerProto::ModuleInfo moduleInfo) {
-  auto libInfoIt = std::find_if(libInfoVec_.begin(), libInfoVec_.end(), [&](const std::unique_ptr<LibInfo> &elem) {
+  auto libInfoIt = std::find_if(libInfoVec_.begin(), libInfoVec_.end(), [&](const std::shared_ptr<LibInfo> &elem) {
     return elem->MetaData().libName == moduleInfo.lib_name();
   });
   if (libInfoIt != libInfoVec_.end()) {
