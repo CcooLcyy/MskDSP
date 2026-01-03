@@ -52,4 +52,6 @@ service ModuleManage {
   rpc UploadModule(Empty) returns (Empty) {}
   // 删除模块
   rpc DeleteModule(ModuleInfo) returns (Empty) {}
+  // 保存启动模块信息
+  rpc SaveModuleStartConfig(ModuleInfos) returns (Empty) {}
 }

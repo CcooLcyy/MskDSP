@@ -24,7 +24,7 @@ public:
     module->lib.load(std::string("./lib/") + moduleInfo.lib_name());
     auto create = module->lib.get<ModuleInterface::ModuleInterface *()>("create");
     module->instance = std::shared_ptr<ModuleInterface::ModuleInterface>((create()));
-    std::jthread([module]() { module->instance->start(module->stopSource->get_token()); }).detach();
+    module->thread = std::jthread([module]() { module->instance->start(module->stopSource->get_token()); });
     module->metaData = module->instance->metaData();
     return module;
   }
@@ -34,6 +34,9 @@ public:
   void cleanUp() {
     if (stopSource) {
       stopSource->request_stop();
+    }
+    if (instance) {
+      instance->shutdownServers();
     }
     if (thread.joinable()) {
       thread.join();
@@ -64,6 +67,7 @@ public:
   void unloadModule(ModuleManagerProto::ModuleInfo moduleInfo);
   ModuleManagerProto::ModuleInfos &getModuleInfos();
   ModuleManagerProto::ModuleRunningInfos getModuleRunningInfos();
+  void saveModuleStartConfig(ModuleManagerProto::ModuleInfos moduleInfos);
 
 private:
   void initModuleInfos();
@@ -71,5 +75,6 @@ private:
   ModuleManagerProto::ModuleInfos moduleInfos_;
   std::vector<std::shared_ptr<LibInfo>> libInfoVec_;
   std::shared_ptr<ModuleManagerServiceImpl> moduleManagerService_;
+  ModuleManagerProto::ModuleInfos moduleConfig_;
 };
 }  // namespace ModuleManager

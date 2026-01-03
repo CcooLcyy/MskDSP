@@ -11,7 +11,9 @@
 #include <boost/dll/shared_library.hpp>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <memory>
+#include <sstream>
 #include <stop_token>
 #include <thread>
 #include <vector>
@@ -28,6 +30,7 @@ ModuleManager::ModuleManager() :
   initLibInfo(moduleManagerLibInfo);
   releasePort(metaData_.outerGRPCServer);
   metaData_.outerGRPCServer = std::string("0.0.0.0:7000");
+  reservePort(metaData_.outerGRPCServer);
 }
 ModuleManager::~ModuleManager() {}
 void ModuleManager::start(std::stop_token stopToken) {
@@ -76,25 +79,66 @@ ModuleManagerProto::ModuleRunningInfos ModuleManager::getModuleRunningInfos() {
   }
   return result;
 }
+void ModuleManager::saveModuleStartConfig(ModuleManagerProto::ModuleInfos moduleInfos) {
+  std::string configBin("modConf.bin");
+  auto confDir = std::filesystem::path("./conf");
+  if (!std::filesystem::exists(confDir)) {
+    std::filesystem::create_directories(confDir);
+  }
+  std::ofstream ofs(confDir / configBin, std::ios::binary | std::ios::trunc);
+  if (ofs.is_open()) {
+    moduleInfos.SerializeToOstream(&ofs);
+    moduleConfig_ = moduleInfos;
+  }
+}
 void ModuleManager::initModuleInfos() {
   moduleInfos_.Clear();
-  for (auto entry : std::filesystem::directory_iterator("./lib")) {
-    if (!entry.is_symlink()) {
-      auto moduleInfo = moduleInfos_.add_module_info();
-      std::string fileName = entry.path().filename();
-      std::string moduleName = fileName.substr(3, fileName.find(".so") - 3);
-      moduleInfo->set_module_name(moduleName);
-      moduleInfo->set_lib_name(fileName);
-      moduleInfo->mutable_version()->CopyFrom(parseVersion(fileName));
+  const std::filesystem::path libDir("./lib");
+  if (!std::filesystem::exists(libDir) || !std::filesystem::is_directory(libDir)) {
+    return;
+  }
+
+  for (const auto &entry : std::filesystem::directory_iterator(libDir)) {
+    if (entry.is_symlink() || !entry.is_regular_file()) {
+      continue;
     }
+    const std::string fileName = entry.path().filename().string();
+    auto soPos = fileName.find(".so");
+    if (soPos == std::string::npos || soPos <= 3) {
+      continue;
+    }
+
+    auto moduleInfo = moduleInfos_.add_module_info();
+    auto moduleName = fileName.substr(3, soPos - 3);
+    moduleInfo->set_module_name(moduleName);
+    moduleInfo->set_lib_name(fileName);
+    moduleInfo->mutable_version()->CopyFrom(parseVersion(fileName));
   }
 }
 ModuleManagerProto::ModuleVersion ModuleManager::parseVersion(std::string libName) {
   ModuleManagerProto::ModuleVersion version;
-  version.set_version(libName.substr(libName.size() - 5, 5));
-  version.set_major(version.version().substr(0, 1));
-  version.set_minor(version.version().substr(2, 1));
-  version.set_patch(version.version().substr(4, 1));
+  auto versionPos = libName.find(".so.");
+  if (versionPos == std::string::npos || versionPos + 4 >= libName.size()) {
+    return version;
+  }
+  auto versionStr = libName.substr(versionPos + 4);
+  version.set_version(versionStr);
+
+  std::stringstream ss(versionStr);
+  std::string segment;
+  std::vector<std::string> parts;
+  while (std::getline(ss, segment, '.')) {
+    parts.emplace_back(segment);
+  }
+  if (!parts.empty()) {
+    version.set_major(parts[0]);
+  }
+  if (parts.size() > 1) {
+    version.set_minor(parts[1]);
+  }
+  if (parts.size() > 2) {
+    version.set_patch(parts[2]);
+  }
   return version;
 }
 }  // namespace ModuleManager

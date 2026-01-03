@@ -12,10 +12,11 @@
 #include <thread>
 
 namespace ModuleInterface {
+std::set<std::string> ModuleInterface::allocatedPorts_;
+std::mutex ModuleInterface::portMutex_;
 ModuleInterface::ModuleInterface() {}
 ModuleInterface::~ModuleInterface() {
-  // 当模块卸载后需要将占用的端口释放
-  releasePort(metaData_.outerGRPCServer);
+  shutdownServers();
 }
 MetaData ModuleInterface::metaData() {
   return metaData_;
@@ -60,30 +61,63 @@ void ModuleInterface::grpcServerBuilder(std::shared_ptr<grpc::Service> service) 
   std::unique_ptr<grpc::Server> outerTmpServer(outerServerBuilder.BuildAndStart());
   outerServer_ = std::move(outerTmpServer);
 
-  std::jthread([&]() { innerServer_->Wait(); }).detach();
-  std::jthread([&]() { outerServer_->Wait(); }).detach();
+  innerServerThread_ = std::jthread([this]() {
+    if (innerServer_) {
+      innerServer_->Wait();
+    }
+  });
+  outerServerThread_ = std::jthread([this]() {
+    if (outerServer_) {
+      outerServer_->Wait();
+    }
+  });
+}
+void ModuleInterface::shutdownServers() {
+  if (innerServer_) {
+    innerServer_->Shutdown();
+  }
+  if (outerServer_) {
+    outerServer_->Shutdown();
+  }
+  if (innerServerThread_.joinable()) {
+    innerServerThread_.join();
+  }
+  if (outerServerThread_.joinable()) {
+    outerServerThread_.join();
+  }
+  // 当模块卸载后需要将占用的端口释放
+  releasePort(metaData_.outerGRPCServer);
 }
 void ModuleInterface::releasePort(std::string address) {
-  auto port = address.substr(address.find(':') + 1);
-  portSet_.erase(port);
+  auto pos = address.find(':');
+  if (pos == std::string::npos) {
+    return;
+  }
+  auto port = address.substr(pos + 1);
+  std::lock_guard<std::mutex> lock(portMutex_);
+  allocatedPorts_.erase(port);
+}
+void ModuleInterface::reservePort(std::string address) {
+  auto pos = address.find(':');
+  if (pos == std::string::npos) {
+    return;
+  }
+  auto port = address.substr(pos + 1);
+  std::lock_guard<std::mutex> lock(portMutex_);
+  allocatedPorts_.emplace(port);
 }
 std::string ModuleInterface::getRandomPort() {
-  std::string port;
-  auto genRandomPort = [&]() {
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<> dist(7001, 7999);
-    port = std::to_string(dist(gen));
-  };
-  genRandomPort();
-  while (isSamePort(port)) {
-    genRandomPort();
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::uniform_int_distribution<> dist(7001, 7999);
+
+  while (true) {
+    auto port = std::to_string(dist(gen));
+    std::lock_guard<std::mutex> lock(portMutex_);
+    auto [_, inserted] = allocatedPorts_.emplace(port);
+    if (inserted) {
+      return port;
+    }
   }
-  portSet_.emplace(port);
-  return port;
-}
-bool ModuleInterface::isSamePort(std::string port) {
-  auto portIt = portSet_.find(port);
-  return portIt == portSet_.end() ? false : true;
 }
 }  // namespace ModuleInterface

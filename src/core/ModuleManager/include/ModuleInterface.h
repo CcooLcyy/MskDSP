@@ -4,6 +4,8 @@
 #include <grpcpp/server.h>
 
 #include <memory>
+#include <thread>
+#include <mutex>
 #include <set>
 #include <stop_token>
 #include <string>
@@ -33,14 +35,18 @@ public:
   // 由模块管理器控制的停止标志
   virtual void start(std::stop_token stopToken) = 0;
   MetaData metaData();
+  void shutdownServers();
 
 protected:
   void initLibInfo(LibInfo libInfo);
   void grpcServerBuilder(std::shared_ptr<grpc::Service> service);
   void releasePort(std::string addr);
+  void reservePort(std::string addr);
   MetaData metaData_;
   std::unique_ptr<grpc::Server> innerServer_;
   std::unique_ptr<grpc::Server> outerServer_;
+  std::jthread innerServerThread_;
+  std::jthread outerServerThread_;
 
   // 模块内部停止标志
   std::stop_source stopSource_;
@@ -49,8 +55,8 @@ protected:
 private:
   // 对外服务端口从7001开始
   int port_{7001};
-  std::set<std::string> portSet_;
+  static std::set<std::string> allocatedPorts_;
+  static std::mutex portMutex_;
   std::string getRandomPort();
-  bool isSamePort(std::string port);
 };
 }  // namespace ModuleInterface

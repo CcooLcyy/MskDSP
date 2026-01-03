@@ -31,4 +31,8 @@ grpc::Status ModuleManagerServiceImpl::GetRunningModuleInfo(grpc::ServerContext 
   moduleRunningInfos->CopyFrom(moduleManager_->getModuleRunningInfos());
   return grpc::Status::OK;
 }
+grpc::Status ModuleManagerServiceImpl::SaveModuleStartConfig(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfos *moduleInfos, ModuleManagerProto::Empty *) {
+  moduleManager_->saveModuleStartConfig(*moduleInfos);
+  return grpc::Status::OK;
+}
 }  // namespace ModuleManager
