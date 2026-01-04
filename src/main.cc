@@ -2,6 +2,7 @@
 #include <stop_token>
 #include <thread>
 
+#include "Logger.h"
 #include "ModuleManager.h"
 
 int main() {

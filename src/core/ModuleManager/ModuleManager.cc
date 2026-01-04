@@ -18,6 +18,7 @@
 #include <thread>
 #include <vector>
 
+#include "Logger.h"
 #include "ModuleInterface.h"
 #include "ModuleManager.pb.h"
 #include "ModuleManagerGrpcService.h"
@@ -34,6 +35,7 @@ ModuleManager::ModuleManager() :
 }
 ModuleManager::~ModuleManager() {}
 void ModuleManager::start(std::stop_token stopToken) {
+  LOG_INFO("正在启动模块管理器");
   moduleManagerService_->getModuleManager(this);
   grpcServerBuilder(moduleManagerService_);
   while (!stopToken.stop_requested()) {
@@ -92,6 +94,7 @@ void ModuleManager::saveModuleStartConfig(ModuleManagerProto::ModuleInfos module
   }
 }
 void ModuleManager::initModuleInfos() {
+  LOG_INFO("初始化模块信息");
   moduleInfos_.Clear();
   const std::filesystem::path libDir("./lib");
   if (!std::filesystem::exists(libDir) || !std::filesystem::is_directory(libDir)) {
@@ -107,13 +110,13 @@ void ModuleManager::initModuleInfos() {
     if (soPos == std::string::npos || soPos <= 3) {
       continue;
     }
-
     auto moduleInfo = moduleInfos_.add_module_info();
     auto moduleName = fileName.substr(3, soPos - 3);
     moduleInfo->set_module_name(moduleName);
     moduleInfo->set_lib_name(fileName);
     moduleInfo->mutable_version()->CopyFrom(parseVersion(fileName));
   }
+  LOG_INFO("模块信息初始化结束");
 }
 ModuleManagerProto::ModuleVersion ModuleManager::parseVersion(std::string libName) {
   ModuleManagerProto::ModuleVersion version;

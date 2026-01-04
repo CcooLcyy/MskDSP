@@ -1,3 +1,6 @@
 [submodule "3rdlibs/siren"]
 	path = 3rdlibs/siren
 	url = ssh://git@frp-mom.com:32122/CcooLcyy/siren.git
+[submodule "protobuf"]
+	path = protobuf
+	url = ssh://git@frp-mom.com:32122/CcooLcyy/dsp_proto.git

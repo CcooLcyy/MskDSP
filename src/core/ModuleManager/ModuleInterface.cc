@@ -11,10 +11,14 @@
 #include <string>
 #include <thread>
 
+#include "Logger.h"
+
 namespace ModuleInterface {
 std::set<std::string> ModuleInterface::allocatedPorts_;
 std::mutex ModuleInterface::portMutex_;
-ModuleInterface::ModuleInterface() {}
+ModuleInterface::ModuleInterface() {
+  ModuleManager::Logger::init();
+}
 ModuleInterface::~ModuleInterface() {
   shutdownServers();
 }
@@ -53,6 +57,7 @@ void ModuleInterface::grpcServerBuilder(std::shared_ptr<grpc::Service> service) 
   innerServerbuilder.AddListeningPort(metaData_.innerGRPCServer, grpc::InsecureServerCredentials());
   std::unique_ptr<grpc::Server> innerTmpServer(innerServerbuilder.BuildAndStart());
   innerServer_ = std::move(innerTmpServer);
+  LOG_INFO("\n已启动内部服务\nname:\t{}\nlibNmae:\t{}\nversion:\t{}\ninner grpc server:\t{}\nouter grpc server:\t{}", metaData_.name, metaData_.libName, metaData_.version.version, metaData_.innerGRPCServer, metaData_.outerGRPCServer);
 
   grpc::ServerBuilder outerServerBuilder;
   outerServerBuilder.RegisterService(service.get());
@@ -60,6 +65,7 @@ void ModuleInterface::grpcServerBuilder(std::shared_ptr<grpc::Service> service) 
   outerServerBuilder.AddListeningPort(metaData_.outerGRPCServer, grpc::InsecureServerCredentials());
   std::unique_ptr<grpc::Server> outerTmpServer(outerServerBuilder.BuildAndStart());
   outerServer_ = std::move(outerTmpServer);
+  LOG_INFO("已启动外部服务");
 
   innerServerThread_ = std::jthread([this]() {
     if (innerServer_) {

@@ -2,6 +2,9 @@
 
 #include <grpcpp/support/status.h>
 
+#include <format>
+
+#include "Logger.h"
 #include "ModuleManager.h"
 #include "ModuleManager.pb.h"
 
@@ -14,6 +17,7 @@ grpc::Status ModuleManagerServiceImpl::GetModuleInfo(grpc::ServerContext *contex
   return grpc::Status::OK;
 }
 grpc::Status ModuleManagerServiceImpl::StartModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo *moduleInfo, ModuleManagerProto::Empty *) {
+  LOG_INFO("启动模块: {}", moduleInfo->module_name());
   moduleManager_->loadModule(*moduleInfo);
   return grpc::Status::OK;
 }

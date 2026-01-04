@@ -8,6 +8,7 @@ build
 package/lib/*
 package/MskDSP
 package/test*
+package/log
 
 # 屏蔽所有版本文件
 **/*LibInfo.h
