@@ -12,6 +12,11 @@ MskDSP 是一个基于 C++23 的模块化系统：核心由 `ModuleManager` 管�
 ## 新增模块（开发指南）
 新增模块可以参考现有示例 `src/DataCenter/` 与 `src/IEC104/`，核心步骤如下：
 
+可使用脚手架快速生成骨架：
+```bash
+bash script/new_module.sh <NewModule>
+```
+
 1. 新建目录：在 `src/` 下创建 `src/<NewModule>/`（建议包含 `include/`、`cmake/` 子目录）。
 2. 实现模块类：
    - 继承 `ModuleInterface::ModuleInterface`，实现 `start(std::stop_token)`。
