@@ -2,8 +2,6 @@
 
 #include <grpcpp/support/status.h>
 
-#include <format>
-
 #include "Logger.h"
 #include "ModuleManager.h"
 #include "ModuleManager.pb.h"
@@ -22,6 +20,7 @@ grpc::Status ModuleManagerServiceImpl::StartModule(grpc::ServerContext *context,
   return grpc::Status::OK;
 }
 grpc::Status ModuleManagerServiceImpl::StopModule(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfo *moduleInfo, ModuleManagerProto::Empty *) {
+  LOG_INFO("停止模块: {}", moduleInfo->module_name());
   moduleManager_->unloadModule(*moduleInfo);
   return grpc::Status::OK;
 }

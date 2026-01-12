@@ -57,7 +57,6 @@ void ModuleInterface::grpcServerBuilder(std::shared_ptr<grpc::Service> service) 
   innerServerbuilder.AddListeningPort(metaData_.innerGRPCServer, grpc::InsecureServerCredentials());
   std::unique_ptr<grpc::Server> innerTmpServer(innerServerbuilder.BuildAndStart());
   innerServer_ = std::move(innerTmpServer);
-  LOG_INFO("\n已启动内部服务\nname:\t{}\nlibNmae:\t{}\nversion:\t{}\ninner grpc server:\t{}\nouter grpc server:\t{}", metaData_.name, metaData_.libName, metaData_.version.version, metaData_.innerGRPCServer, metaData_.outerGRPCServer);
 
   grpc::ServerBuilder outerServerBuilder;
   outerServerBuilder.RegisterService(service.get());
@@ -65,7 +64,8 @@ void ModuleInterface::grpcServerBuilder(std::shared_ptr<grpc::Service> service) 
   outerServerBuilder.AddListeningPort(metaData_.outerGRPCServer, grpc::InsecureServerCredentials());
   std::unique_ptr<grpc::Server> outerTmpServer(outerServerBuilder.BuildAndStart());
   outerServer_ = std::move(outerTmpServer);
-  LOG_INFO("已启动外部服务");
+
+  LOG_INFO("模块信息: \nname:\t\t{}\nlibNmae:\t{}\nversion:\t{}\ninner server:\t{}\nouter server:\t{}", metaData_.name, metaData_.libName, metaData_.version.version, metaData_.innerGRPCServer, metaData_.outerGRPCServer);
 
   innerServerThread_ = std::jthread([this]() {
     if (innerServer_) {

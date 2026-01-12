@@ -12,3 +12,4 @@ package/log
 
 # 屏蔽所有版本文件
 **/*LibInfo.h
+package/conf/modConf.bin
