@@ -1,26 +1,31 @@
-# Repository Guidelines
+# 仓库指南
 
-## Project Structure & Module Organization
-Core code lives in `src/`: `core/ModuleManager` manages module lifecycles and exposes gRPC services; `DataCenter` and `IEC104` are plugin-style shared libraries linked through the manager; `main.cc` boots the manager on a background thread. Protobuf contracts are in `protobuf/` and generate gRPC stubs linked by `dspProto`. Third-party code sits in `3rdlibs/siren/` (built as a subproject). Build outputs land in `package/` (`package/MskDSP` for the executable, `package/lib` for shared libs, `package/conf` for generated config headers). Helper scripts live in `script/`.
+## 项目结构与模块组织
+核心代码位于 `src/`：`core/ModuleManager` 负责管理模块生命周期并暴露 gRPC 服务；`DataCenter` 与 `IEC104` 是插件式共享库，通过管理器进行链接；`main.cc` 在后台线程启动管理器。Protobuf 协议位于 `protobuf/`，生成的 gRPC 桩由 `dspProto` 目标统一链接。第三方代码位于 `3rdlibs/siren/`（以子工程方式构建）。构建产物输出到 `package/`（`package/MskDSP` 可执行文件、`package/lib` 共享库、`package/conf` 生成的配置头文件）。辅助脚本位于 `script/`。
 
-## Build, Test, and Development Commands
-Dependencies are managed via CMake with vcpkg manifests (`vcpkg*.json`) for gRPC, Protobuf, Boost, and GTest. Typical workflow:
+## 构建、测试与开发命令
+依赖通过 CMake + vcpkg manifest（`vcpkg*.json`）管理，包含 gRPC、Protobuf、Boost、GTest。典型流程：
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
 cmake --build build --parallel
-ctest --test-dir build        # when tests are defined
+ctest --test-dir build        # 当定义了测试时
 ```
-Run `cmake --build build --target install` if you need to stage artifacts; binaries and libs will appear under `package/`. Use `CMAKE_BUILD_TYPE=Release` for production binaries.
+如需安装/落地构建产物，执行 `cmake --build build --target install`；二进制与库会出现在 `package/` 下。生产构建使用带调试信息的 Release（`-DCMAKE_BUILD_TYPE=RelWithDebInfo`）。
 
-## Coding Style & Naming Conventions
-Formatting is enforced by `.clang-format` (Google base): 2-space indents, no tabs, unlimited line length, brace lists tightened. Write modern C++23 and prefer RAII; keep pointer alignment on the right (`Type* ptr`). gRPC/Proto files should use PascalCase messages and service names; generated headers should be consumed via the `dspProto` target. Keep module library names consistent with their `cmake/LibInfo.cmake` settings.
+## 编码风格与命名约定
+格式由 `.clang-format`（Google base）约束：2 空格缩进、无 Tab、不限制行宽、brace 列表更紧凑。使用现代 C++23，并优先采用 RAII；指针对齐风格为右贴（`Type* ptr`）。gRPC/Proto 文件中 Message/Service 使用 PascalCase；生成头文件通过 `dspProto` 目标引入与使用。模块库名称需与 `cmake/LibInfo.cmake` 中的设置保持一致。
 
-## Testing Guidelines
-Unit tests use GTest (enabled in Debug for `3rdlibs/siren`; add top-level tests under `test/` or module-specific `test` folders). Name files `*_test.cc`, register with `add_test`, and run with `ctest --output-on-failure`. Cover module lifecycle edges (load/unload, port reuse) and protobuf/grpc contract compatibility. Favor deterministic tests; avoid binding real service ports unless isolated via random available ports.
+## 改动原则
+在满足需求与修复问题的前提下，改动尽量小且聚焦；避免无关重构、批量格式化或大范围重命名。
 
-## Commit & Pull Request Guidelines
-Recent history uses bracketed prefixes (`[feature]`, etc.) plus concise Mandarin summaries. Follow that pattern (`[fix]`, `[refactor]` as appropriate) and keep the first line under ~72 chars. For PRs, include: scope/intent, key changes per module, build/test commands run, and any port/config changes. Link related issues and attach screenshots or logs for protocol/interop changes when relevant.
+在开始任何实际改动（包括代码、文档、配置文件）之前，先与用户讨论目标/范围/方案；仅在用户明确确认“可以修改”后，才进行文件编辑或执行会写入仓库的命令。
 
-## Architecture Notes
-Modules are shared libraries loaded by the manager; version metadata is generated via `cmake/LibInfo.h.in` into each module’s `include/`. gRPC services are the primary integration surface—update `.proto` files first, then regenerate via CMake. Keep `package/conf` under source control only for templates; avoid committing local runtime artifacts.
+## 测试规范
+单元测试使用 GTest（`3rdlibs/siren` 在 Debug 下启用；顶层测试放在 `test/` 或模块内 `test` 目录）。测试文件命名为 `*_test.cc`，通过 `add_test` 注册，使用 `ctest --output-on-failure` 运行。覆盖模块生命周期边界（load/unload、端口复用）以及 protobuf/grpc 协议兼容性。优先确定性测试；避免绑定固定服务端口，必要时通过随机可用端口进行隔离。
+
+## 提交与 PR 规范
+近期提交历史使用方括号前缀（如 `[feature]`）+ 简短中文摘要。保持该风格（可用 `[fix]`、`[refactor]` 等），首行尽量控制在 ~72 字符内。PR 建议包含：范围/目的、各模块关键变更、已执行的构建/测试命令、端口/配置变更。关联相关 issue；协议/互操作变更附带截图或日志。
+
+## 架构说明
+模块以共享库形式由管理器动态加载；版本元信息由 `cmake/LibInfo.h.in` 生成到各模块的 `include/` 中。gRPC 服务是主要集成面：先更新 `.proto`，再通过 CMake 重新生成。`package/conf` 仅保留模板纳入版本控制，避免提交本地运行时产物。
