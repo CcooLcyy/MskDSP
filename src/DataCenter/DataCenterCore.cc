@@ -108,6 +108,49 @@ grpc::Status DataCenterCore::GetPointTable(uint32_t connId, DataCenterProto::Poi
   return grpc::Status::OK;
 }
 
+grpc::Status DataCenterCore::ReplacePointTablesConfig(const DataCenterProto::PointTablesConfig& config) {
+  std::unordered_map<uint32_t, std::unordered_set<std::string>> next;
+  for (const auto& table : config.point_tables()) {
+    if (table.conn_id() == 0) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "point_tables contains conn_id=0");
+    }
+    auto& set = next[table.conn_id()];
+    for (const auto& tag : table.tags()) {
+      if (tag.empty()) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "point_tables contains empty tag");
+      }
+      set.emplace(tag);
+    }
+  }
+  pointTables_ = std::move(next);
+  return grpc::Status::OK;
+}
+
+DataCenterProto::PointTablesConfig DataCenterCore::DumpPointTablesConfig() const {
+  DataCenterProto::PointTablesConfig config;
+  std::vector<uint32_t> connIds;
+  connIds.reserve(pointTables_.size());
+  for (const auto& [connId, _] : pointTables_) {
+    connIds.emplace_back(connId);
+  }
+  std::sort(connIds.begin(), connIds.end());
+
+  for (auto connId : connIds) {
+    auto it = pointTables_.find(connId);
+    if (it == pointTables_.end()) {
+      continue;
+    }
+    auto* table = config.add_point_tables();
+    table->set_conn_id(connId);
+    std::vector<std::string> tags(it->second.begin(), it->second.end());
+    std::sort(tags.begin(), tags.end());
+    for (const auto& tag : tags) {
+      table->add_tags(tag);
+    }
+  }
+  return config;
+}
+
 grpc::Status DataCenterCore::UpsertRoutes(const DataCenterProto::UpsertRoutesRequest& request) {
   if (request.replace()) {
     routes_.clear();
@@ -199,6 +242,45 @@ DataCenterProto::ListRoutesResponse DataCenterCore::ListRoutes(const DataCenterP
     *resp.add_routes() = route;
   }
   return resp;
+}
+
+grpc::Status DataCenterCore::ReplaceRoutesConfig(const DataCenterProto::RoutesConfig& config) {
+  std::unordered_map<EndpointKey, EndpointKeySet, EndpointKeyHash> next;
+  for (const auto& route : config.routes()) {
+    auto status = validateEndpoint(route.src().conn_id(), route.src().tag());
+    if (!status.ok()) {
+      return status;
+    }
+    status = validateEndpoint(route.dst().conn_id(), route.dst().tag());
+    if (!status.ok()) {
+      return status;
+    }
+    status = validateEndpointAgainstPointTable(route.src().conn_id(), route.src().tag());
+    if (!status.ok()) {
+      return status;
+    }
+    status = validateEndpointAgainstPointTable(route.dst().conn_id(), route.dst().tag());
+    if (!status.ok()) {
+      return status;
+    }
+
+    EndpointKey src{route.src().conn_id(), route.src().tag()};
+    EndpointKey dst{route.dst().conn_id(), route.dst().tag()};
+    next[std::move(src)].emplace(std::move(dst));
+  }
+
+  routes_ = std::move(next);
+  return grpc::Status::OK;
+}
+
+DataCenterProto::RoutesConfig DataCenterCore::DumpRoutesConfig() const {
+  DataCenterProto::RoutesConfig config;
+  DataCenterProto::ListRoutesRequest request;
+  const auto resp = ListRoutes(request);
+  for (const auto& route : resp.routes()) {
+    *config.add_routes() = route;
+  }
+  return config;
 }
 
 grpc::Status DataCenterCore::Publish(const DataCenterProto::PublishRequest& request, std::vector<DataCenterProto::PointUpdate>* outUpdates) {

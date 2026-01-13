@@ -18,10 +18,14 @@ public:
 
   grpc::Status UpsertPointTable(const DataCenterProto::UpsertPointTableRequest& request);
   grpc::Status GetPointTable(uint32_t connId, DataCenterProto::PointTable* out) const;
+  grpc::Status ReplacePointTablesConfig(const DataCenterProto::PointTablesConfig& config);
+  DataCenterProto::PointTablesConfig DumpPointTablesConfig() const;
 
   grpc::Status UpsertRoutes(const DataCenterProto::UpsertRoutesRequest& request);
   grpc::Status DeleteRoutes(const DataCenterProto::DeleteRoutesRequest& request);
   DataCenterProto::ListRoutesResponse ListRoutes(const DataCenterProto::ListRoutesRequest& request) const;
+  grpc::Status ReplaceRoutesConfig(const DataCenterProto::RoutesConfig& config);
+  DataCenterProto::RoutesConfig DumpRoutesConfig() const;
 
   grpc::Status Publish(const DataCenterProto::PublishRequest& request, std::vector<DataCenterProto::PointUpdate>* outUpdates);
   grpc::Status BatchPublish(const DataCenterProto::BatchPublishRequest& request, std::vector<DataCenterProto::PointUpdate>* outUpdates);
@@ -53,4 +57,3 @@ private:
   std::unordered_map<EndpointKey, DataCenterProto::PointUpdate, EndpointKeyHash> latestByDst_;
 };
 }  // namespace DataCenter
-

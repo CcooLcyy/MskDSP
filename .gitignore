@@ -8,8 +8,12 @@ build
 package/lib/*
 package/MskDSP
 package/test*
+**/*_test
 package/log
 
 # 屏蔽所有版本文件
 **/*LibInfo.h
 package/conf/modConf.bin
+
+# runtime DataCenter configs
+package/conf/dataCenter/*.pb*

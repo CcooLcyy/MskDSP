@@ -8,6 +8,8 @@ DataCenter 是进程内的“数据总线/转发枢纽”，用于在不同协�
 - 点位对齐：通过 `tag`（逻辑点名，可中文）对齐跨协议的同一业务量
 - 有向路由：按点位维度配置 `src -> dst` 的转发规则，支持一对一与一对多
 - 最新值缓存：可用于订阅端启动时拉取最新值（当前规划）
+- 点表配置持久化：将点表配置落盘到 `./conf/dataCenter/point_tables.pb`，重启后自动恢复（当前实现）
+- 路由配置持久化：将路由配置落盘到 `./conf/dataCenter/routes.pb`，重启后自动恢复（当前实现）
 
 不在当前范围内：
 - 历史数据存储/查询
@@ -46,6 +48,7 @@ DataCenter 对外提供一组面向“连接/点表/路由/转发”的 gRPC 接
   - 列出已注册连接信息（用于 UI/配置工具展示）。
 - `UpsertPointTable(UpsertPointTableRequest) -> Empty`
   - 注册/更新某连接点表（`replace=true` 全量覆盖；否则增量追加）。
+  - 说明：该 RPC 成功后会触发点表配置落盘；若落盘失败会返回 `INTERNAL`（内存中的点表不会回滚）。
 - `GetPointTable(GetPointTableRequest) -> PointTable`
   - 获取某连接点表；若未注册返回 `NOT_FOUND`。
   - 说明：点表并非硬依赖；但当点表存在时，`UpsertRoutes` 会校验 `tag` 必须在点表中，避免配置错误。
@@ -54,8 +57,10 @@ DataCenter 对外提供一组面向“连接/点表/路由/转发”的 gRPC 接
 - `UpsertRoutes(UpsertRoutesRequest) -> Empty`
   - 配置路由；`replace=true` 会清空后重新写入。
   - 支持一对一与一对多；多对一暂不保证行为（建议避免）。
+  - 说明：该 RPC 成功后会触发路由配置落盘；若落盘失败会返回 `INTERNAL`（内存中的路由不会回滚）。
 - `DeleteRoutes(DeleteRoutesRequest) -> Empty`
   - 删除指定路由绑定。
+  - 说明：该 RPC 成功后会触发路由配置落盘；若落盘失败会返回 `INTERNAL`（内存中的路由不会回滚）。
 - `ListRoutes(ListRoutesRequest) -> ListRoutesResponse`
   - 查询路由；支持按 `src/dst` 的 `conn_id/tag` 进行可选过滤。
 
@@ -78,10 +83,42 @@ DataCenter 对外提供一组面向“连接/点表/路由/转发”的 gRPC 接
 2. 在 DataCenter 中配置路由方向（有向绑定）：基于源/目的两侧点表中已知的 `connId + tag` 建立 `src -> dst` 规则（支持一对多）。
 3. 启动模块：通过管理器启动 DataCenter 与各协议模块；采集端向 DataCenter 发布数据，上送端订阅/获取对应 `tag` 的更新进行上报。
 
-## 运行与地址
-- 对外 gRPC：随机选择 `0.0.0.0:<port>`（7001–7999）
-- 内部 gRPC：`unix socket`：`./socket/dataCenter.sock`
-- 运行时可通过管理器 `GetRunningModuleInfo` 查询实际地址
+## 点表配置持久化（当前实现）
+DataCenter 会将点表配置落盘到工作目录下的 `./conf/dataCenter/point_tables.pb`，用于进程重启后的自动恢复。
 
-## 构建产物
-- 共享库：`package/lib/libdataCenter.so.<version>`（版本见 `src/DataCenter/include/dataCenterLibInfo.h`）
+### 文件与策略
+- 主文件：`./conf/dataCenter/point_tables.pb`
+- 备份文件：`./conf/dataCenter/point_tables.pb.bak`（上一份“可解析且校验通过”的配置）
+- 临时文件：`./conf/dataCenter/point_tables.pb.tmp`（用于安全写入，避免写坏主文件）
+- 隔离文件：`./conf/dataCenter/point_tables.pb.corrupt.<timestamp>`（当发现主文件损坏时保留原件，便于排查）
+
+### 保存时机与语义
+- 每次 `UpsertPointTable` 成功后自动落盘。
+- 落盘失败会返回 `INTERNAL`，但内存中的点表不会回滚（配置端可重试）。
+
+### 启动恢复
+- 若主文件存在且可用：加载主文件。
+- 若主文件损坏：尝试使用备份文件启动；若备份可用，会将损坏主文件隔离，并用备份内容恢复出新的主文件（best-effort）。
+- 若主/备均不可用：以空点表启动，等待重新下发。
+
+## 路由配置持久化（当前实现）
+DataCenter 会将路由配置落盘到工作目录下的 `./conf/dataCenter/routes.pb`，用于进程重启后的自动恢复。
+
+### 文件与策略
+- 主文件：`./conf/dataCenter/routes.pb`
+- 备份文件：`./conf/dataCenter/routes.pb.bak`（上一份“可解析且校验通过”的配置）
+- 临时文件：`./conf/dataCenter/routes.pb.tmp`（用于安全写入，避免写坏主文件）
+- 隔离文件：`./conf/dataCenter/routes.pb.corrupt.<timestamp>`（当发现主文件损坏时保留原件，便于排查）
+
+### 保存时机与语义
+- 每次 `UpsertRoutes` / `DeleteRoutes` 成功后自动落盘。
+- 落盘失败会返回 `INTERNAL`，但内存中的路由不会回滚（配置端可重试）。
+
+### 启动恢复
+- 若主文件存在且可用：加载主文件。
+- 若主文件损坏：尝试使用备份文件启动；若备份可用，会将损坏主文件隔离，并用备份内容恢复出新的主文件（best-effort）。
+- 若主/备均不可用：以空路由启动，等待重新下发。
+- 若路由配置可解析但与已加载点表校验冲突：记录日志并不应用该路由配置。
+
+## 其他内容
+运行时工作目录、socket 目录、端口策略与构建产物路径遵循项目通用约定，详见 [README.md](../../../README.md) 与 [src/core/ModuleManager/doc/README.md](../../core/ModuleManager/doc/README.md)。

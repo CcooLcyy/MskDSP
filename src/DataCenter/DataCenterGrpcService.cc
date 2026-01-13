@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <format>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -12,6 +13,9 @@
 #include <vector>
 
 #include "DataCenterCore.h"
+#include "DataCenterPointTableStore.h"
+#include "DataCenterRouteStore.h"
+#include "Logger.h"
 
 namespace DataCenter {
 struct DataCenterGrpcServiceImpl::Impl {
@@ -35,6 +39,8 @@ struct DataCenterGrpcServiceImpl::Impl {
 
   std::mutex mu;
   DataCenterCore core;
+  DataCenterPointTableStore pointTableStore;
+  DataCenterRouteStore routeStore;
 
   uint64_t nextSubscriberId{0};
   std::unordered_map<uint32_t, std::unordered_map<uint64_t, std::shared_ptr<Subscriber>>> subscribersByConn;
@@ -87,7 +93,43 @@ struct DataCenterGrpcServiceImpl::Impl {
 };
 
 DataCenterGrpcServiceImpl::DataCenterGrpcServiceImpl() :
-  impl_(std::make_unique<DataCenterGrpcServiceImpl::Impl>()) {}
+  impl_(std::make_unique<DataCenterGrpcServiceImpl::Impl>()) {
+  {
+    DataCenterProto::PointTablesConfig config;
+    auto status = impl_->pointTableStore.Load(&config);
+    if (!status.ok()) {
+      const auto message = status.error_message();
+      LOG_INFO("DataCenter 点表加载失败: {}", message);
+    } else if (config.point_tables_size() > 0) {
+      status = impl_->core.ReplacePointTablesConfig(config);
+      if (!status.ok()) {
+        const auto message = status.error_message();
+        LOG_INFO("DataCenter 点表应用失败: {}", message);
+      } else {
+        const auto count = config.point_tables_size();
+        LOG_INFO("DataCenter 已加载点表配置: {} 个连接", count);
+      }
+    }
+  }
+
+  {
+    DataCenterProto::RoutesConfig config;
+    auto status = impl_->routeStore.Load(&config);
+    if (!status.ok()) {
+      const auto message = status.error_message();
+      LOG_INFO("DataCenter 路由加载失败: {}", message);
+    } else if (config.routes_size() > 0) {
+      status = impl_->core.ReplaceRoutesConfig(config);
+      if (!status.ok()) {
+        const auto message = status.error_message();
+        LOG_INFO("DataCenter 路由应用失败: {}", message);
+      } else {
+        const auto count = config.routes_size();
+        LOG_INFO("DataCenter 已加载路由配置: {} 条", count);
+      }
+    }
+  }
+}
 DataCenterGrpcServiceImpl::~DataCenterGrpcServiceImpl() = default;
 
 grpc::Status DataCenterGrpcServiceImpl::UpsertConnection(grpc::ServerContext*, const DataCenterProto::UpsertConnectionRequest* request, DataCenterProto::Empty*) {
@@ -112,7 +154,17 @@ grpc::Status DataCenterGrpcServiceImpl::UpsertPointTable(grpc::ServerContext*, c
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request is null");
   }
   std::lock_guard<std::mutex> lock(impl_->mu);
-  return impl_->core.UpsertPointTable(*request);
+  auto status = impl_->core.UpsertPointTable(*request);
+  if (!status.ok()) {
+    return status;
+  }
+  auto config = impl_->core.DumpPointTablesConfig();
+  status = impl_->pointTableStore.Save(config);
+  if (!status.ok()) {
+    const auto message = status.error_message();
+    LOG_INFO("DataCenter 点表落盘失败: {}", message);
+  }
+  return status;
 }
 
 grpc::Status DataCenterGrpcServiceImpl::GetPointTable(grpc::ServerContext*, const DataCenterProto::GetPointTableRequest* request, DataCenterProto::PointTable* response) {
@@ -128,7 +180,17 @@ grpc::Status DataCenterGrpcServiceImpl::UpsertRoutes(grpc::ServerContext*, const
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request is null");
   }
   std::lock_guard<std::mutex> lock(impl_->mu);
-  return impl_->core.UpsertRoutes(*request);
+  auto status = impl_->core.UpsertRoutes(*request);
+  if (!status.ok()) {
+    return status;
+  }
+  auto config = impl_->core.DumpRoutesConfig();
+  status = impl_->routeStore.Save(config);
+  if (!status.ok()) {
+    const auto message = status.error_message();
+    LOG_INFO("DataCenter 路由落盘失败: {}", message);
+  }
+  return status;
 }
 
 grpc::Status DataCenterGrpcServiceImpl::DeleteRoutes(grpc::ServerContext*, const DataCenterProto::DeleteRoutesRequest* request, DataCenterProto::Empty*) {
@@ -136,7 +198,17 @@ grpc::Status DataCenterGrpcServiceImpl::DeleteRoutes(grpc::ServerContext*, const
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request is null");
   }
   std::lock_guard<std::mutex> lock(impl_->mu);
-  return impl_->core.DeleteRoutes(*request);
+  auto status = impl_->core.DeleteRoutes(*request);
+  if (!status.ok()) {
+    return status;
+  }
+  auto config = impl_->core.DumpRoutesConfig();
+  status = impl_->routeStore.Save(config);
+  if (!status.ok()) {
+    const auto message = status.error_message();
+    LOG_INFO("DataCenter 路由落盘失败: {}", message);
+  }
+  return status;
 }
 
 grpc::Status DataCenterGrpcServiceImpl::ListRoutes(grpc::ServerContext*, const DataCenterProto::ListRoutesRequest* request, DataCenterProto::ListRoutesResponse* response) {

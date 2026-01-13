@@ -11,6 +11,12 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug \
 cmake --build build --parallel
 ctest --test-dir build        # 当定义了测试时
 ```
+
+VSCode CMake Tools（用户确认可用的配置命令）：
+```bash
+/usr/bin/cmake -DCMAKE_BUILD_TYPE:STRING=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS:BOOL=TRUE -DCMAKE_C_COMPILER:FILEPATH=/usr/bin/gcc-14 -DCMAKE_CXX_COMPILER:FILEPATH=/usr/bin/g++-14 -DCMAKE_TOOLCHAIN_FILE=/data/3rdlibs/vcpkg/scripts/buildsystems/vcpkg.cmake --no-warn-unused-cli -S /data/code/mskdsp -B /data/code/mskdsp/build -G "Unix Makefiles"
+```
+
 如需安装/落地构建产物，执行 `cmake --build build --target install`；二进制与库会出现在 `package/` 下。生产构建使用带调试信息的 Release（`-DCMAKE_BUILD_TYPE=RelWithDebInfo`）。
 
 ## 编码风格与命名约定
@@ -19,7 +25,9 @@ ctest --test-dir build        # 当定义了测试时
 ## 改动原则
 在满足需求与修复问题的前提下，改动尽量小且聚焦；避免无关重构、批量格式化或大范围重命名。
 
-在开始任何实际改动（包括代码、文档、配置文件）之前，先与用户讨论目标/范围/方案；仅在用户明确确认“可以修改”后，才进行文件编辑或执行会写入仓库的命令。
+- 在开始任何实际改动（包括代码、文档、配置文件）之前，先与用户讨论目标/范围/方案；仅在用户明确确认“可以修改”后，才进行文件编辑或执行会写入仓库的命令。
+- 除非用户允许，否则不要执行任何 `git ...` 命令（包括 `git status/diff/add/restore/commit/reset` 等）；需要 git 操作时要询问并请求用户统一。
+- 新增的 C++ 模板代码文件使用 `.hpp` 后缀（例如 `Foo.hpp`）。
 
 ## 测试规范
 单元测试使用 GTest（`3rdlibs/siren` 在 Debug 下启用；顶层测试放在 `test/` 或模块内 `test` 目录）。测试文件命名为 `*_test.cc`，通过 `add_test` 注册，使用 `ctest --output-on-failure` 运行。覆盖模块生命周期边界（load/unload、端口复用）以及 protobuf/grpc 协议兼容性。优先确定性测试；避免绑定固定服务端口，必要时通过随机可用端口进行隔离。

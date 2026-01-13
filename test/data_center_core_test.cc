@@ -130,3 +130,109 @@ TEST(DataCenterCoreTest, GetLatestReturnsLastRoutedValueByDstEndpoint) {
   EXPECT_EQ(latestResp.updates(0).src_conn_id(), 1u);
   EXPECT_EQ(latestResp.updates(0).src_tag(), "电压");
 }
+
+TEST(DataCenterCoreTest, DumpAndReplacePointTablesConfigRoundtrip) {
+  DataCenterCore core;
+
+  DataCenterProto::UpsertPointTableRequest pt;
+  pt.set_conn_id(1);
+  pt.set_replace(true);
+  pt.add_tags("点1");
+  pt.add_tags("点2");
+  ASSERT_TRUE(core.UpsertPointTable(pt).ok());
+
+  auto config = core.DumpPointTablesConfig();
+
+  DataCenterCore restored;
+  ASSERT_TRUE(restored.ReplacePointTablesConfig(config).ok());
+
+  DataCenterProto::PointTable table;
+  ASSERT_TRUE(restored.GetPointTable(1, &table).ok());
+  ASSERT_EQ(table.tags_size(), 2);
+  EXPECT_EQ(table.tags(0), "点1");
+  EXPECT_EQ(table.tags(1), "点2");
+}
+
+TEST(DataCenterCoreTest, ReplacePointTablesConfigMergesAndDeduplicatesByConnId) {
+  DataCenterCore core;
+
+  DataCenterProto::PointTablesConfig config;
+  auto* t1 = config.add_point_tables();
+  t1->set_conn_id(1);
+  t1->add_tags("A");
+  t1->add_tags("B");
+
+  auto* t2 = config.add_point_tables();
+  t2->set_conn_id(1);
+  t2->add_tags("B");
+  t2->add_tags("C");
+
+  ASSERT_TRUE(core.ReplacePointTablesConfig(config).ok());
+
+  DataCenterProto::PointTable table;
+  ASSERT_TRUE(core.GetPointTable(1, &table).ok());
+  ASSERT_EQ(table.tags_size(), 3);
+  EXPECT_EQ(table.tags(0), "A");
+  EXPECT_EQ(table.tags(1), "B");
+  EXPECT_EQ(table.tags(2), "C");
+}
+
+TEST(DataCenterCoreTest, DumpAndReplaceRoutesConfigRoundtrip) {
+  DataCenterCore core;
+
+  DataCenterProto::UpsertRoutesRequest routes;
+  routes.set_replace(true);
+  *routes.add_routes() = MakeRoute(1, "源点", 2, "目的点");
+  *routes.add_routes() = MakeRoute(1, "源点", 3, "目的点2");
+  ASSERT_TRUE(core.UpsertRoutes(routes).ok());
+
+  auto config = core.DumpRoutesConfig();
+
+  DataCenterCore restored;
+  ASSERT_TRUE(restored.ReplaceRoutesConfig(config).ok());
+
+  DataCenterProto::ListRoutesRequest req;
+  auto resp = restored.ListRoutes(req);
+  ASSERT_EQ(resp.routes_size(), 2);
+  EXPECT_EQ(resp.routes(0).src().conn_id(), 1u);
+  EXPECT_EQ(resp.routes(0).src().tag(), "源点");
+  EXPECT_EQ(resp.routes(0).dst().conn_id(), 2u);
+  EXPECT_EQ(resp.routes(0).dst().tag(), "目的点");
+  EXPECT_EQ(resp.routes(1).dst().conn_id(), 3u);
+  EXPECT_EQ(resp.routes(1).dst().tag(), "目的点2");
+}
+
+TEST(DataCenterCoreTest, ReplaceRoutesConfigDeduplicatesBySrcDst) {
+  DataCenterCore core;
+
+  DataCenterProto::RoutesConfig config;
+  *config.add_routes() = MakeRoute(1, "A", 2, "B");
+  *config.add_routes() = MakeRoute(1, "A", 2, "B");
+
+  ASSERT_TRUE(core.ReplaceRoutesConfig(config).ok());
+
+  DataCenterProto::ListRoutesRequest req;
+  auto resp = core.ListRoutes(req);
+  ASSERT_EQ(resp.routes_size(), 1);
+  EXPECT_EQ(resp.routes(0).src().conn_id(), 1u);
+  EXPECT_EQ(resp.routes(0).src().tag(), "A");
+  EXPECT_EQ(resp.routes(0).dst().conn_id(), 2u);
+  EXPECT_EQ(resp.routes(0).dst().tag(), "B");
+}
+
+TEST(DataCenterCoreTest, ReplaceRoutesConfigValidatesAgainstPointTableWhenPresent) {
+  DataCenterCore core;
+
+  DataCenterProto::UpsertPointTableRequest pt;
+  pt.set_conn_id(1);
+  pt.set_replace(true);
+  pt.add_tags("存在的点");
+  ASSERT_TRUE(core.UpsertPointTable(pt).ok());
+
+  DataCenterProto::RoutesConfig config;
+  *config.add_routes() = MakeRoute(1, "不存在的点", 2, "目的点");
+
+  auto status = core.ReplaceRoutesConfig(config);
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
