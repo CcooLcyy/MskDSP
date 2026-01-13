@@ -22,6 +22,23 @@
 - `GetRunningModuleInfo`：返回已启动模块的运行时信息（版本、inner/outer gRPC 地址等）。
 - `SaveModuleStartConfig`：保存模块启动配置到 `./conf/modConf.bin`（当前实现仅保存，未看到启动时自动读取逻辑）。
 
+## 上位机对接建议
+本项目有配套上位机/配置工具，建议按以下方式对接模块生命周期与地址发现。
+
+### 入口与地址
+- 上位机入口：连接模块管理器对外地址 `0.0.0.0:7000`。
+- `inner_grpc_server`（unix socket）：用于进程内模块间互联；一般不建议上位机使用。
+- `outer_grpc_server`（TCP）：用于上位机调用；普通模块端口为随机 7001–7999，重启后可能变化。
+
+### 推荐调用流程
+1. `GetModuleInfo`：发现可用模块（从 `./lib` 扫描）。
+2. `StartModule`：启动所需模块（建议包含 `DataCenter` 与各协议模块）。
+3. `GetRunningModuleInfo`：获取已启动模块的 `outer_grpc_server`，上位机据此建立到各模块的 gRPC 连接并进行后续配置/运行期调用。
+
+### 稳定性与容错
+- 模块重启/Stop 后其 `outer_grpc_server` 可能变化，上位机应在连接失败时重新调用 `GetRunningModuleInfo` 刷新地址并重连。
+- `StartModule` 返回后模块线程已启动，但服务就绪可能存在短暂延迟；建议上位机对目标模块做一次健康探测/重试连接后再进入配置流程。
+
 ## 端口策略
 - 模块管理器对外 gRPC：固定监听 `0.0.0.0:7000`。
 - 普通模块对外 gRPC：随机选择 7001–7999（进程内避免冲突）。

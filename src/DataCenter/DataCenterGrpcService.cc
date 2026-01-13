@@ -4,7 +4,6 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
-#include <format>
 #include <memory>
 #include <mutex>
 #include <unordered_map>

@@ -5,11 +5,13 @@ DataCenter 是进程内的“数据总线/转发枢纽”，用于在不同协�
 
 ## 能力清单
 - 连接级隔离：通过 `connId` 区分不同连接/通信链路
+- 连接注册中心：按 `(module_name, conn_name)` 分配/查询 `connId`（全局唯一、可持久化）
 - 点位对齐：通过 `tag`（逻辑点名，可中文）对齐跨协议的同一业务量
 - 有向路由：按点位维度配置 `src -> dst` 的转发规则，支持一对一与一对多
-- 最新值缓存：可用于订阅端启动时拉取最新值（当前规划）
+- 最新值缓存：支持 `GetLatest` / `Subscribe(snapshot=true)` 获取目的连接内的最新值（best-effort）
 - 点表配置持久化：将点表配置落盘到 `./conf/dataCenter/point_tables.pb`，重启后自动恢复（当前实现）
 - 路由配置持久化：将路由配置落盘到 `./conf/dataCenter/routes.pb`，重启后自动恢复（当前实现）
+- 连接注册表持久化：将连接注册表落盘到 `./conf/dataCenter/connections.pb`，重启后自动恢复（当前实现）
 
 不在当前范围内：
 - 历史数据存储/查询
@@ -89,6 +91,28 @@ DataCenter 对外提供一组面向“连接/点表/路由/转发”的 gRPC 接
 2. 在 DataCenter 中为源/目的两侧连接下发点表（可选但建议）：`UpsertPointTable(connId, tags...)`。
 3. 在 DataCenter 中配置路由方向（有向绑定）：基于源/目的两侧点表中已知的 `connId + tag` 建立 `src -> dst` 规则（支持一对多）。
 4. 启动模块：通过管理器启动 DataCenter 与各协议模块；采集端向 DataCenter 发布数据，上送端订阅/获取对应 `tag` 的更新进行上报。
+
+## 上位机设计建议
+上位机在设计 DataCenter 的配置/联调流程时，建议优先遵循以下约束，以降低“重启/重连/改名”带来的配置漂移与联调成本。
+
+### 1) 连接主键与命名
+- `ConnectionKey = (module_name, conn_name)` 是 `connId` 分配的唯一主键：两者都应当稳定且可预测，避免运行期随机字符串。
+- `module_name` 建议与模块标识保持一致（例如 `IEC104`、`modbus`），用于区分不同协议模块空间。
+- `conn_name` 建议由上位机统一规划并保证同一 `module_name` 内唯一（例如 `104-主站A`、`modbus-1#RTU`）。
+
+### 2) connId 分配策略（推荐）
+- 上位机/协议模块在“配置阶段”先调用 `GetOrCreateConnection` 获取 `connId`，并将返回的 `connId` 固化到该连接配置中（后续运行期 `Publish/Subscribe` 使用同一 `connId`）。
+- `RenameConnection` 用于仅修改主键（`connId` 不变）：因此路由、点表不需要改写，只需更新显示/引用主键即可。
+- `DeleteConnection` 为破坏性操作：会清理该 `connId` 的点表/路由/最新值缓存，并关闭该 `connId` 的订阅者连接（best-effort）；上位机应在 UI 上做二次确认，并按需重建配置。
+
+### 3) 配置幂等与下发顺序
+- 建议在上位机侧把“连接、点表、路由”都做成幂等下发：配置工具反复点击/重复下发不应产生副作用。
+- 推荐顺序：先 `GetOrCreateConnection` → 再 `UpsertPointTable`（如启用点表校验）→ 再 `UpsertRoutes`。
+- 当点表存在时，路由会校验 `tag` 必须在点表中；因此点表/路由的 UI 编辑可通过 `GetPointTable` / `ListRoutes` 做回读校验与展示。
+
+### 4) 数据接收侧建议
+- 接收方启动后若希望“先拿到当前值再跟随实时更新”，建议使用 `Subscribe(snapshot=true)`；若只关心一次性拉取，则使用 `GetLatest`。
+- 订阅为 best-effort：消费过慢时服务端会丢弃过旧消息以限制队列增长；上位机若需要强一致/不丢数据，需要引入独立的历史存储或 ACK/重传机制（不在 DataCenter 当前范围内）。
 
 ## 连接注册表持久化（当前实现）
 DataCenter 会将连接注册表落盘到工作目录下的 `./conf/dataCenter/connections.pb`，用于 `connId` 的稳定分配与重启后的自动恢复。
