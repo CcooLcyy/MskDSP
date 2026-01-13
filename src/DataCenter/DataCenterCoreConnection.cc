@@ -1,8 +1,8 @@
-#include "DataCenterCore.h"
-
 #include <algorithm>
 #include <utility>
 #include <vector>
+
+#include "DataCenterCore.h"
 
 namespace DataCenter {
 grpc::Status DataCenterCore::GetConnectionByKey(const DataCenterProto::ConnectionKey &key, DataCenterProto::ConnectionInfo *out) const {
@@ -285,4 +285,3 @@ DataCenterProto::ListConnectionsResponse DataCenterCore::ListConnections() const
   return resp;
 }
 }  // namespace DataCenter
-

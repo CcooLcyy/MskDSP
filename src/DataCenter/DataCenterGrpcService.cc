@@ -36,6 +36,7 @@ struct DataCenterGrpcServiceImpl::Impl {
   };
 
   static constexpr size_t kMaxQueueSize = 10000;
+  static constexpr auto kSubscriberWaitTimeout = std::chrono::milliseconds(200);
 
   std::mutex mu;
   DataCenterCore core;
@@ -110,6 +111,36 @@ struct DataCenterGrpcServiceImpl::Impl {
     }
     subscribersByConn.erase(it);
   }
+
+  grpc::Status saveConnectionsLocked() {
+    auto config = core.DumpConnectionsConfig();
+    auto status = connectionStore.Save(config);
+    if (!status.ok()) {
+      const auto message = status.error_message();
+      LOG_INFO("DataCenter 连接注册表落盘失败: {}", message);
+    }
+    return status;
+  }
+
+  grpc::Status savePointTablesLocked() {
+    auto config = core.DumpPointTablesConfig();
+    auto status = pointTableStore.Save(config);
+    if (!status.ok()) {
+      const auto message = status.error_message();
+      LOG_INFO("DataCenter 点表落盘失败: {}", message);
+    }
+    return status;
+  }
+
+  grpc::Status saveRoutesLocked() {
+    auto config = core.DumpRoutesConfig();
+    auto status = routeStore.Save(config);
+    if (!status.ok()) {
+      const auto message = status.error_message();
+      LOG_INFO("DataCenter 路由落盘失败: {}", message);
+    }
+    return status;
+  }
 };
 
 DataCenterGrpcServiceImpl::DataCenterGrpcServiceImpl() :
@@ -179,13 +210,7 @@ grpc::Status DataCenterGrpcServiceImpl::UpsertConnection(grpc::ServerContext*, c
   if (!status.ok()) {
     return status;
   }
-  auto config = impl_->core.DumpConnectionsConfig();
-  status = impl_->connectionStore.Save(config);
-  if (!status.ok()) {
-    const auto message = status.error_message();
-    LOG_INFO("DataCenter 连接注册表落盘失败: {}", message);
-  }
-  return status;
+  return impl_->saveConnectionsLocked();
 }
 
 grpc::Status DataCenterGrpcServiceImpl::ListConnections(grpc::ServerContext*, const DataCenterProto::Empty*, DataCenterProto::ListConnectionsResponse* response) {
@@ -207,13 +232,7 @@ grpc::Status DataCenterGrpcServiceImpl::GetOrCreateConnection(grpc::ServerContex
   if (!status.ok()) {
     return status;
   }
-  auto config = impl_->core.DumpConnectionsConfig();
-  status = impl_->connectionStore.Save(config);
-  if (!status.ok()) {
-    const auto message = status.error_message();
-    LOG_INFO("DataCenter 连接注册表落盘失败: {}", message);
-  }
-  return status;
+  return impl_->saveConnectionsLocked();
 }
 
 grpc::Status DataCenterGrpcServiceImpl::RenameConnection(grpc::ServerContext*, const DataCenterProto::RenameConnectionRequest* request, DataCenterProto::ConnectionInfo* response) {
@@ -226,13 +245,7 @@ grpc::Status DataCenterGrpcServiceImpl::RenameConnection(grpc::ServerContext*, c
   if (!status.ok()) {
     return status;
   }
-  auto config = impl_->core.DumpConnectionsConfig();
-  status = impl_->connectionStore.Save(config);
-  if (!status.ok()) {
-    const auto message = status.error_message();
-    LOG_INFO("DataCenter 连接注册表落盘失败: {}", message);
-  }
-  return status;
+  return impl_->saveConnectionsLocked();
 }
 
 grpc::Status DataCenterGrpcServiceImpl::DeleteConnection(grpc::ServerContext*, const DataCenterProto::DeleteConnectionRequest* request, DataCenterProto::Empty*) {
@@ -255,27 +268,18 @@ grpc::Status DataCenterGrpcServiceImpl::DeleteConnection(grpc::ServerContext*, c
 
   impl_->closeSubscribersLocked(conn.conn_id());
 
-  auto connConfig = impl_->core.DumpConnectionsConfig();
-  status = impl_->connectionStore.Save(connConfig);
+  status = impl_->saveConnectionsLocked();
   if (!status.ok()) {
-    const auto message = status.error_message();
-    LOG_INFO("DataCenter 连接注册表落盘失败: {}", message);
     return status;
   }
 
-  auto ptConfig = impl_->core.DumpPointTablesConfig();
-  status = impl_->pointTableStore.Save(ptConfig);
+  status = impl_->savePointTablesLocked();
   if (!status.ok()) {
-    const auto message = status.error_message();
-    LOG_INFO("DataCenter 点表落盘失败: {}", message);
     return status;
   }
 
-  auto routesConfig = impl_->core.DumpRoutesConfig();
-  status = impl_->routeStore.Save(routesConfig);
+  status = impl_->saveRoutesLocked();
   if (!status.ok()) {
-    const auto message = status.error_message();
-    LOG_INFO("DataCenter 路由落盘失败: {}", message);
     return status;
   }
   return grpc::Status::OK;
@@ -290,13 +294,7 @@ grpc::Status DataCenterGrpcServiceImpl::UpsertPointTable(grpc::ServerContext*, c
   if (!status.ok()) {
     return status;
   }
-  auto config = impl_->core.DumpPointTablesConfig();
-  status = impl_->pointTableStore.Save(config);
-  if (!status.ok()) {
-    const auto message = status.error_message();
-    LOG_INFO("DataCenter 点表落盘失败: {}", message);
-  }
-  return status;
+  return impl_->savePointTablesLocked();
 }
 
 grpc::Status DataCenterGrpcServiceImpl::GetPointTable(grpc::ServerContext*, const DataCenterProto::GetPointTableRequest* request, DataCenterProto::PointTable* response) {
@@ -316,13 +314,7 @@ grpc::Status DataCenterGrpcServiceImpl::UpsertRoutes(grpc::ServerContext*, const
   if (!status.ok()) {
     return status;
   }
-  auto config = impl_->core.DumpRoutesConfig();
-  status = impl_->routeStore.Save(config);
-  if (!status.ok()) {
-    const auto message = status.error_message();
-    LOG_INFO("DataCenter 路由落盘失败: {}", message);
-  }
-  return status;
+  return impl_->saveRoutesLocked();
 }
 
 grpc::Status DataCenterGrpcServiceImpl::DeleteRoutes(grpc::ServerContext*, const DataCenterProto::DeleteRoutesRequest* request, DataCenterProto::Empty*) {
@@ -334,13 +326,7 @@ grpc::Status DataCenterGrpcServiceImpl::DeleteRoutes(grpc::ServerContext*, const
   if (!status.ok()) {
     return status;
   }
-  auto config = impl_->core.DumpRoutesConfig();
-  status = impl_->routeStore.Save(config);
-  if (!status.ok()) {
-    const auto message = status.error_message();
-    LOG_INFO("DataCenter 路由落盘失败: {}", message);
-  }
-  return status;
+  return impl_->saveRoutesLocked();
 }
 
 grpc::Status DataCenterGrpcServiceImpl::ListRoutes(grpc::ServerContext*, const DataCenterProto::ListRoutesRequest* request, DataCenterProto::ListRoutesResponse* response) {
@@ -491,7 +477,7 @@ grpc::Status DataCenterGrpcServiceImpl::Subscribe(grpc::ServerContext* context, 
     DataCenterProto::PointUpdate update;
     {
       std::unique_lock<std::mutex> lock(subscriber->mu);
-      subscriber->cv.wait_for(lock, std::chrono::milliseconds(200), [&subscriber]() { return subscriber->closed || !subscriber->queue.empty(); });
+      subscriber->cv.wait_for(lock, Impl::kSubscriberWaitTimeout, [&subscriber]() { return subscriber->closed || !subscriber->queue.empty(); });
       if (subscriber->closed) {
         break;
       }

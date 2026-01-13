@@ -20,7 +20,7 @@ VSCode CMake Tools（用户确认可用的配置命令）：
 如需安装/落地构建产物，执行 `cmake --build build --target install`；二进制与库会出现在 `package/` 下。生产构建使用带调试信息的 Release（`-DCMAKE_BUILD_TYPE=RelWithDebInfo`）。
 
 ## 编码风格与命名约定
-格式由 `.clang-format`（Google base）约束：2 空格缩进、无 Tab、不限制行宽、brace 列表更紧凑。使用现代 C++23，并优先采用 RAII；指针对齐风格为右贴（`Type* ptr`）。gRPC/Proto 文件中 Message/Service 使用 PascalCase；生成头文件通过 `dspProto` 目标引入与使用。模块库名称需与 `cmake/LibInfo.cmake` 中的设置保持一致。
+格式由 `.clang-format`（Google base）约束：2 空格缩进、无 Tab、不限制行宽、brace 列表更紧凑。使用现代 C++23，并优先采用 RAII；指针/引用对齐遵循 `.clang-format`，当前为贴变量名风格（`Type *ptr` / `Type &ref`）。gRPC/Proto 文件中 Message/Service 使用 PascalCase；生成头文件通过 `dspProto` 目标引入与使用。模块库名称需与 `cmake/LibInfo.cmake` 中的设置保持一致。
 
 ## 改动原则
 在满足需求与修复问题的前提下，改动尽量小且聚焦；避免无关重构、批量格式化或大范围重命名。

@@ -1,5 +1,7 @@
 #include "DataCenterConnectionStore.h"
 
+#include <cstddef>
+#include <functional>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -8,11 +10,17 @@
 
 namespace DataCenter {
 namespace {
+constexpr size_t kHashCombineMagic = static_cast<size_t>(0x9e3779b9);
+
+inline size_t hashCombine(size_t seed, size_t value) noexcept {
+  return seed ^ (value + kHashCombineMagic + (seed << 6) + (seed >> 2));
+}
+
 struct ConnectionKeyHash {
   size_t operator()(const std::pair<std::string, std::string>& key) const noexcept {
     size_t h1 = std::hash<std::string>{}(key.first);
     size_t h2 = std::hash<std::string>{}(key.second);
-    return h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2));
+    return hashCombine(h1, h2);
   }
 };
 
@@ -73,4 +81,3 @@ std::filesystem::path DataCenterConnectionStore::tmpPath() const {
   return store.tmpPath();
 }
 }  // namespace DataCenter
-
