@@ -23,4 +23,6 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${libPath})
 add_subdirectory(3rdlibs)
 add_subdirectory(protobuf)
 add_subdirectory(src)
+
+enable_testing()
 add_subdirectory(test)

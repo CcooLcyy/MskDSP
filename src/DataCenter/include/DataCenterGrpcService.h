@@ -1,22 +1,37 @@
 #pragma once
 
-#include <grpcpp/impl/service_type.h>
+#include "DataCenter.grpc.pb.h"
+
 #include <grpcpp/server_context.h>
 #include <grpcpp/support/status.h>
+#include <grpcpp/support/sync_stream.h>
 
 #include <memory>
-
-#include "DataCenter.grpc.pb.h"
-#include "DataCenter.h"
-#include "DataCenter.pb.h"
 
 namespace DataCenter {
 class DataCenterGrpcServiceImpl : public DataCenterProto::DataCenterService::Service {
 public:
-  void getDataCenter(DataCenter *dataCenter);
-  grpc::Status GetDataModule(grpc::ServerContext *context, const DataCenterProto::Empty *, DataCenterProto::Empty *) override;
+  DataCenterGrpcServiceImpl();
+  ~DataCenterGrpcServiceImpl() override;
+
+  grpc::Status UpsertConnection(grpc::ServerContext* context, const DataCenterProto::UpsertConnectionRequest* request, DataCenterProto::Empty* response) override;
+  grpc::Status ListConnections(grpc::ServerContext* context, const DataCenterProto::Empty* request, DataCenterProto::ListConnectionsResponse* response) override;
+
+  grpc::Status UpsertPointTable(grpc::ServerContext* context, const DataCenterProto::UpsertPointTableRequest* request, DataCenterProto::Empty* response) override;
+  grpc::Status GetPointTable(grpc::ServerContext* context, const DataCenterProto::GetPointTableRequest* request, DataCenterProto::PointTable* response) override;
+
+  grpc::Status UpsertRoutes(grpc::ServerContext* context, const DataCenterProto::UpsertRoutesRequest* request, DataCenterProto::Empty* response) override;
+  grpc::Status DeleteRoutes(grpc::ServerContext* context, const DataCenterProto::DeleteRoutesRequest* request, DataCenterProto::Empty* response) override;
+  grpc::Status ListRoutes(grpc::ServerContext* context, const DataCenterProto::ListRoutesRequest* request, DataCenterProto::ListRoutesResponse* response) override;
+
+  grpc::Status Publish(grpc::ServerContext* context, const DataCenterProto::PublishRequest* request, DataCenterProto::Empty* response) override;
+  grpc::Status BatchPublish(grpc::ServerContext* context, const DataCenterProto::BatchPublishRequest* request, DataCenterProto::Empty* response) override;
+
+  grpc::Status GetLatest(grpc::ServerContext* context, const DataCenterProto::GetLatestRequest* request, DataCenterProto::GetLatestResponse* response) override;
+  grpc::Status Subscribe(grpc::ServerContext* context, const DataCenterProto::SubscribeRequest* request, grpc::ServerWriter<DataCenterProto::PointUpdate>* writer) override;
 
 private:
-  DataCenter *dataCenter_;
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
 };
 }  // namespace DataCenter

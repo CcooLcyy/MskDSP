@@ -6,7 +6,6 @@
 #include <stop_token>
 #include <thread>
 
-#include "DataCenter.h"
 #include "DataCenterGrpcService.h"
 #include "dataCenterLibInfo.h"
 
@@ -18,16 +17,13 @@ DataCenter::DataCenter() :
 }
 DataCenter::~DataCenter() {}
 void DataCenter::start(std::stop_token stopToken) {
-  dataCenterService_->getDataCenter(this);
   grpcServerBuilder(dataCenterService_);
   while (!stopToken.stop_requested()) {
-    std::cout << "正在运行DataCenter" << std::endl;
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
-  std::cout << "DataCenter模块停止" << std::endl;
 }
 }  // namespace DataCenter
 
-extern "C" BOOST_SYMBOL_EXPORT DataCenter::DataCenter *create() {
+extern "C" BOOST_SYMBOL_EXPORT ModuleInterface::ModuleInterface* create() {
   return new DataCenter::DataCenter();
 }
