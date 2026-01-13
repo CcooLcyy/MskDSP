@@ -1,6 +1,6 @@
 #include "DataCenterPointTableStore.h"
 
-#include "ProtoFileStore.hpp"
+#include "detail/ProtoFileStore.hpp"
 
 namespace DataCenter {
 namespace {

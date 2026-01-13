@@ -1,10 +1,10 @@
 #include "DataCenter.h"
 
 #include <boost/dll.hpp>
-#include <chrono>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <stop_token>
-#include <thread>
 
 #include "DataCenterGrpcService.h"
 #include "dataCenterLibInfo.h"
@@ -18,9 +18,13 @@ DataCenter::DataCenter() :
 DataCenter::~DataCenter() {}
 void DataCenter::start(std::stop_token stopToken) {
   grpcServerBuilder(dataCenterService_);
-  while (!stopToken.stop_requested()) {
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-  }
+
+  std::mutex mu;
+  std::condition_variable_any cv;
+  std::stop_callback cb(stopToken, [&cv]() { cv.notify_all(); });
+
+  std::unique_lock lock(mu);
+  cv.wait(lock, [&stopToken]() { return stopToken.stop_requested(); });
 }
 }  // namespace DataCenter
 
