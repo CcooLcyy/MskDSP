@@ -12,7 +12,7 @@ MskDSP 是一个基于 C++23 的模块化系统：核心由 `ModuleManager` 管�
 ## 开发指南
 
 ### 现有模块目录
-- [src/DataCenter/](./src/DataCenter/)：数据中心相关能力（示例模块，[文档](./src/DataCenter/doc/README.md)）
+- [src/DataCenter/](./src/DataCenter/)：跨协议数据总线/数据转发枢纽（以逻辑点名/tag 进行对齐，[文档](./src/DataCenter/doc/README.md)）
 - [src/IEC104/](./src/IEC104/)：IEC 60870-5-104 协议相关能力（示例模块，[文档](./src/IEC104/doc/README.md)）
 - [src/DLT645/](./src/DLT645/)：DLT645 协议相关能力（示例模块，[文档](./src/DLT645/doc/README.md)）
 - [src/Modbus/](./src/Modbus/)：Modbus 协议相关能力（示例模块，[文档](./src/Modbus/doc/README.md)）
