@@ -131,6 +131,73 @@ TEST(DataCenterCoreTest, GetLatestReturnsLastRoutedValueByDstEndpoint) {
   EXPECT_EQ(latestResp.updates(0).src_tag(), "电压");
 }
 
+TEST(DataCenterCoreTest, BatchPublishPublishesAllPointsWhenValid) {
+  DataCenterCore core;
+
+  DataCenterProto::UpsertRoutesRequest routes;
+  routes.set_replace(true);
+  *routes.add_routes() = MakeRoute(1, "A", 2, "B");
+  *routes.add_routes() = MakeRoute(1, "C", 2, "D");
+  ASSERT_TRUE(core.UpsertRoutes(routes).ok());
+
+  DataCenterProto::BatchPublishRequest batch;
+  auto* p1 = batch.add_points();
+  p1->set_conn_id(1);
+  p1->set_tag("A");
+  p1->mutable_value()->set_int_value(10);
+
+  auto* p2 = batch.add_points();
+  p2->set_conn_id(1);
+  p2->set_tag("C");
+  p2->mutable_value()->set_int_value(20);
+
+  std::vector<DataCenterProto::PointUpdate> updates;
+  ASSERT_TRUE(core.BatchPublish(batch, &updates).ok());
+  ASSERT_EQ(updates.size(), 2u);
+
+  DataCenterProto::GetLatestRequest latestReq;
+  latestReq.set_conn_id(2);
+  DataCenterProto::GetLatestResponse latestResp;
+  ASSERT_TRUE(core.GetLatest(latestReq, &latestResp).ok());
+  ASSERT_EQ(latestResp.updates_size(), 2);
+  EXPECT_EQ(latestResp.updates(0).dst_tag(), "B");
+  EXPECT_EQ(latestResp.updates(0).value().int_value(), 10);
+  EXPECT_EQ(latestResp.updates(1).dst_tag(), "D");
+  EXPECT_EQ(latestResp.updates(1).value().int_value(), 20);
+}
+
+TEST(DataCenterCoreTest, BatchPublishIsAtomicAndDoesNotUpdateLatestOnValidationFailure) {
+  DataCenterCore core;
+
+  DataCenterProto::UpsertRoutesRequest routes;
+  routes.set_replace(true);
+  *routes.add_routes() = MakeRoute(1, "A", 2, "B");
+  ASSERT_TRUE(core.UpsertRoutes(routes).ok());
+
+  DataCenterProto::BatchPublishRequest batch;
+  auto* p1 = batch.add_points();
+  p1->set_conn_id(1);
+  p1->set_tag("A");
+  p1->mutable_value()->set_int_value(10);
+
+  auto* p2 = batch.add_points();
+  p2->set_conn_id(1);
+  p2->set_tag("");
+  p2->mutable_value()->set_int_value(20);
+
+  std::vector<DataCenterProto::PointUpdate> updates;
+  auto status = core.BatchPublish(batch, &updates);
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  EXPECT_TRUE(updates.empty());
+
+  DataCenterProto::GetLatestRequest latestReq;
+  latestReq.set_conn_id(2);
+  DataCenterProto::GetLatestResponse latestResp;
+  ASSERT_TRUE(core.GetLatest(latestReq, &latestResp).ok());
+  EXPECT_EQ(latestResp.updates_size(), 0);
+}
+
 TEST(DataCenterCoreTest, DumpAndReplacePointTablesConfigRoundtrip) {
   DataCenterCore core;
 

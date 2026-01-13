@@ -7,17 +7,17 @@
 #include <utility>
 
 namespace DataCenter {
-bool DataCenterCore::EndpointKey::operator==(const EndpointKey& other) const {
+bool DataCenterCore::EndpointKey::operator==(const EndpointKey &other) const {
   return connId == other.connId && tag == other.tag;
 }
 
-size_t DataCenterCore::EndpointKeyHash::operator()(const EndpointKey& key) const noexcept {
+size_t DataCenterCore::EndpointKeyHash::operator()(const EndpointKey &key) const noexcept {
   size_t h1 = std::hash<uint32_t>{}(key.connId);
   size_t h2 = std::hash<std::string>{}(key.tag);
   return h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2));
 }
 
-grpc::Status DataCenterCore::validateEndpoint(uint32_t connId, const std::string& tag) {
+grpc::Status DataCenterCore::validateEndpoint(uint32_t connId, const std::string &tag) {
   if (connId == 0) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id is required");
   }
@@ -27,7 +27,7 @@ grpc::Status DataCenterCore::validateEndpoint(uint32_t connId, const std::string
   return grpc::Status::OK;
 }
 
-grpc::Status DataCenterCore::validateEndpointAgainstPointTable(uint32_t connId, const std::string& tag) const {
+grpc::Status DataCenterCore::validateEndpointAgainstPointTable(uint32_t connId, const std::string &tag) const {
   auto it = pointTables_.find(connId);
   if (it == pointTables_.end()) {
     return grpc::Status::OK;
@@ -43,8 +43,8 @@ int64_t DataCenterCore::nowMs() {
   return now.time_since_epoch().count();
 }
 
-grpc::Status DataCenterCore::UpsertConnection(const DataCenterProto::UpsertConnectionRequest& request) {
-  const auto& conn = request.conn();
+grpc::Status DataCenterCore::UpsertConnection(const DataCenterProto::UpsertConnectionRequest &request) {
+  const auto &conn = request.conn();
   if (conn.conn_id() == 0) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id is required");
   }
@@ -56,37 +56,37 @@ DataCenterProto::ListConnectionsResponse DataCenterCore::ListConnections() const
   DataCenterProto::ListConnectionsResponse resp;
   std::vector<DataCenterProto::ConnectionInfo> tmp;
   tmp.reserve(connections_.size());
-  for (const auto& [_, conn] : connections_) {
+  for (const auto &[_, conn] : connections_) {
     tmp.emplace_back(conn);
   }
-  std::sort(tmp.begin(), tmp.end(), [](const auto& a, const auto& b) { return a.conn_id() < b.conn_id(); });
-  for (const auto& conn : tmp) {
+  std::sort(tmp.begin(), tmp.end(), [](const auto &a, const auto &b) { return a.conn_id() < b.conn_id(); });
+  for (const auto &conn : tmp) {
     *resp.add_conns() = conn;
   }
   return resp;
 }
 
-grpc::Status DataCenterCore::UpsertPointTable(const DataCenterProto::UpsertPointTableRequest& request) {
+grpc::Status DataCenterCore::UpsertPointTable(const DataCenterProto::UpsertPointTableRequest &request) {
   if (request.conn_id() == 0) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id is required");
   }
-  for (const auto& tag : request.tags()) {
+  for (const auto &tag : request.tags()) {
     if (tag.empty()) {
       return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tags contains empty string");
     }
   }
 
-  auto& table = pointTables_[request.conn_id()];
+  auto &table = pointTables_[request.conn_id()];
   if (request.replace()) {
     table.clear();
   }
-  for (const auto& tag : request.tags()) {
+  for (const auto &tag : request.tags()) {
     table.emplace(tag);
   }
   return grpc::Status::OK;
 }
 
-grpc::Status DataCenterCore::GetPointTable(uint32_t connId, DataCenterProto::PointTable* out) const {
+grpc::Status DataCenterCore::GetPointTable(uint32_t connId, DataCenterProto::PointTable *out) const {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
   }
@@ -102,20 +102,20 @@ grpc::Status DataCenterCore::GetPointTable(uint32_t connId, DataCenterProto::Poi
   out->set_conn_id(connId);
   std::vector<std::string> tags(it->second.begin(), it->second.end());
   std::sort(tags.begin(), tags.end());
-  for (const auto& tag : tags) {
+  for (const auto &tag : tags) {
     out->add_tags(tag);
   }
   return grpc::Status::OK;
 }
 
-grpc::Status DataCenterCore::ReplacePointTablesConfig(const DataCenterProto::PointTablesConfig& config) {
+grpc::Status DataCenterCore::ReplacePointTablesConfig(const DataCenterProto::PointTablesConfig &config) {
   std::unordered_map<uint32_t, std::unordered_set<std::string>> next;
-  for (const auto& table : config.point_tables()) {
+  for (const auto &table : config.point_tables()) {
     if (table.conn_id() == 0) {
       return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "point_tables contains conn_id=0");
     }
-    auto& set = next[table.conn_id()];
-    for (const auto& tag : table.tags()) {
+    auto &set = next[table.conn_id()];
+    for (const auto &tag : table.tags()) {
       if (tag.empty()) {
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "point_tables contains empty tag");
       }
@@ -130,7 +130,7 @@ DataCenterProto::PointTablesConfig DataCenterCore::DumpPointTablesConfig() const
   DataCenterProto::PointTablesConfig config;
   std::vector<uint32_t> connIds;
   connIds.reserve(pointTables_.size());
-  for (const auto& [connId, _] : pointTables_) {
+  for (const auto &[connId, _] : pointTables_) {
     connIds.emplace_back(connId);
   }
   std::sort(connIds.begin(), connIds.end());
@@ -140,23 +140,23 @@ DataCenterProto::PointTablesConfig DataCenterCore::DumpPointTablesConfig() const
     if (it == pointTables_.end()) {
       continue;
     }
-    auto* table = config.add_point_tables();
+    auto *table = config.add_point_tables();
     table->set_conn_id(connId);
     std::vector<std::string> tags(it->second.begin(), it->second.end());
     std::sort(tags.begin(), tags.end());
-    for (const auto& tag : tags) {
+    for (const auto &tag : tags) {
       table->add_tags(tag);
     }
   }
   return config;
 }
 
-grpc::Status DataCenterCore::UpsertRoutes(const DataCenterProto::UpsertRoutesRequest& request) {
+grpc::Status DataCenterCore::UpsertRoutes(const DataCenterProto::UpsertRoutesRequest &request) {
   if (request.replace()) {
     routes_.clear();
   }
 
-  for (const auto& route : request.routes()) {
+  for (const auto &route : request.routes()) {
     auto status = validateEndpoint(route.src().conn_id(), route.src().tag());
     if (!status.ok()) {
       return status;
@@ -181,8 +181,8 @@ grpc::Status DataCenterCore::UpsertRoutes(const DataCenterProto::UpsertRoutesReq
   return grpc::Status::OK;
 }
 
-grpc::Status DataCenterCore::DeleteRoutes(const DataCenterProto::DeleteRoutesRequest& request) {
-  for (const auto& route : request.routes()) {
+grpc::Status DataCenterCore::DeleteRoutes(const DataCenterProto::DeleteRoutesRequest &request) {
+  for (const auto &route : request.routes()) {
     auto status = validateEndpoint(route.src().conn_id(), route.src().tag());
     if (!status.ok()) {
       return status;
@@ -207,16 +207,16 @@ grpc::Status DataCenterCore::DeleteRoutes(const DataCenterProto::DeleteRoutesReq
   return grpc::Status::OK;
 }
 
-DataCenterProto::ListRoutesResponse DataCenterCore::ListRoutes(const DataCenterProto::ListRoutesRequest& request) const {
+DataCenterProto::ListRoutesResponse DataCenterCore::ListRoutes(const DataCenterProto::ListRoutesRequest &request) const {
   std::vector<DataCenterProto::Route> tmp;
-  for (const auto& [src, dstSet] : routes_) {
+  for (const auto &[src, dstSet] : routes_) {
     if (request.src_conn_id() != 0 && request.src_conn_id() != src.connId) {
       continue;
     }
     if (!request.src_tag().empty() && request.src_tag() != src.tag) {
       continue;
     }
-    for (const auto& dst : dstSet) {
+    for (const auto &dst : dstSet) {
       if (request.dst_conn_id() != 0 && request.dst_conn_id() != dst.connId) {
         continue;
       }
@@ -232,21 +232,21 @@ DataCenterProto::ListRoutesResponse DataCenterCore::ListRoutes(const DataCenterP
     }
   }
 
-  std::sort(tmp.begin(), tmp.end(), [](const auto& a, const auto& b) {
+  std::sort(tmp.begin(), tmp.end(), [](const auto &a, const auto &b) {
     return std::make_tuple(a.src().conn_id(), a.src().tag(), a.dst().conn_id(), a.dst().tag()) <
-           std::make_tuple(b.src().conn_id(), b.src().tag(), b.dst().conn_id(), b.dst().tag());
+        std::make_tuple(b.src().conn_id(), b.src().tag(), b.dst().conn_id(), b.dst().tag());
   });
 
   DataCenterProto::ListRoutesResponse resp;
-  for (const auto& route : tmp) {
+  for (const auto &route : tmp) {
     *resp.add_routes() = route;
   }
   return resp;
 }
 
-grpc::Status DataCenterCore::ReplaceRoutesConfig(const DataCenterProto::RoutesConfig& config) {
+grpc::Status DataCenterCore::ReplaceRoutesConfig(const DataCenterProto::RoutesConfig &config) {
   std::unordered_map<EndpointKey, EndpointKeySet, EndpointKeyHash> next;
-  for (const auto& route : config.routes()) {
+  for (const auto &route : config.routes()) {
     auto status = validateEndpoint(route.src().conn_id(), route.src().tag());
     if (!status.ok()) {
       return status;
@@ -277,13 +277,13 @@ DataCenterProto::RoutesConfig DataCenterCore::DumpRoutesConfig() const {
   DataCenterProto::RoutesConfig config;
   DataCenterProto::ListRoutesRequest request;
   const auto resp = ListRoutes(request);
-  for (const auto& route : resp.routes()) {
+  for (const auto &route : resp.routes()) {
     *config.add_routes() = route;
   }
   return config;
 }
 
-grpc::Status DataCenterCore::Publish(const DataCenterProto::PublishRequest& request, std::vector<DataCenterProto::PointUpdate>* outUpdates) {
+grpc::Status DataCenterCore::Publish(const DataCenterProto::PublishRequest &request, std::vector<DataCenterProto::PointUpdate> *outUpdates) {
   if (outUpdates == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "outUpdates is null");
   }
@@ -308,7 +308,7 @@ grpc::Status DataCenterCore::Publish(const DataCenterProto::PublishRequest& requ
   }
 
   outUpdates->reserve(it->second.size());
-  for (const auto& dst : it->second) {
+  for (const auto &dst : it->second) {
     DataCenterProto::PointUpdate update;
     update.set_src_conn_id(request.conn_id());
     update.set_src_tag(request.tag());
@@ -324,30 +324,73 @@ grpc::Status DataCenterCore::Publish(const DataCenterProto::PublishRequest& requ
   return grpc::Status::OK;
 }
 
-grpc::Status DataCenterCore::BatchPublish(const DataCenterProto::BatchPublishRequest& request, std::vector<DataCenterProto::PointUpdate>* outUpdates) {
+grpc::Status DataCenterCore::BatchPublish(const DataCenterProto::BatchPublishRequest &request, std::vector<DataCenterProto::PointUpdate> *outUpdates) {
   if (outUpdates == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "outUpdates is null");
   }
   outUpdates->clear();
-  for (const auto& point : request.points()) {
-    std::vector<DataCenterProto::PointUpdate> updates;
-    auto status = Publish(point, &updates);
+
+  for (const auto &point : request.points()) {
+    auto status = validateEndpoint(point.conn_id(), point.tag());
     if (!status.ok()) {
       return status;
     }
-    outUpdates->insert(outUpdates->end(), std::make_move_iterator(updates.begin()), std::make_move_iterator(updates.end()));
+    if (point.value().kind_case() == DataCenterProto::PointValue::KIND_NOT_SET) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "value is required");
+    }
+  }
+
+  size_t estimatedUpdates = 0;
+  for (const auto &point : request.points()) {
+    EndpointKey src{point.conn_id(), point.tag()};
+    auto it = routes_.find(src);
+    if (it == routes_.end()) {
+      continue;
+    }
+    estimatedUpdates += it->second.size();
+  }
+  outUpdates->reserve(estimatedUpdates);
+
+  for (const auto &point : request.points()) {
+    int64_t tsMs = point.ts_ms();
+    if (tsMs <= 0) {
+      tsMs = nowMs();
+    }
+
+    EndpointKey src{point.conn_id(), point.tag()};
+    auto it = routes_.find(src);
+    if (it == routes_.end()) {
+      continue;
+    }
+
+    for (const auto &dst : it->second) {
+      DataCenterProto::PointUpdate update;
+      update.set_src_conn_id(point.conn_id());
+      update.set_src_tag(point.tag());
+      update.set_dst_conn_id(dst.connId);
+      update.set_dst_tag(dst.tag);
+      update.mutable_value()->CopyFrom(point.value());
+      update.set_ts_ms(tsMs);
+      update.set_quality(point.quality());
+      outUpdates->emplace_back(std::move(update));
+    }
+  }
+
+  for (const auto &update : *outUpdates) {
+    EndpointKey dst{update.dst_conn_id(), update.dst_tag()};
+    latestByDst_[std::move(dst)] = update;
   }
   return grpc::Status::OK;
 }
 
-grpc::Status DataCenterCore::GetLatest(const DataCenterProto::GetLatestRequest& request, DataCenterProto::GetLatestResponse* out) const {
+grpc::Status DataCenterCore::GetLatest(const DataCenterProto::GetLatestRequest &request, DataCenterProto::GetLatestResponse *out) const {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
   }
   if (request.conn_id() == 0) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id is required");
   }
-  for (const auto& tag : request.tags()) {
+  for (const auto &tag : request.tags()) {
     if (tag.empty()) {
       return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tags contains empty string");
     }
@@ -356,13 +399,13 @@ grpc::Status DataCenterCore::GetLatest(const DataCenterProto::GetLatestRequest& 
   std::unordered_set<std::string> filter;
   if (request.tags_size() > 0) {
     filter.reserve(static_cast<size_t>(request.tags_size()));
-    for (const auto& tag : request.tags()) {
+    for (const auto &tag : request.tags()) {
       filter.emplace(tag);
     }
   }
 
   std::vector<DataCenterProto::PointUpdate> tmp;
-  for (const auto& [dst, update] : latestByDst_) {
+  for (const auto &[dst, update] : latestByDst_) {
     if (dst.connId != request.conn_id()) {
       continue;
     }
@@ -372,10 +415,10 @@ grpc::Status DataCenterCore::GetLatest(const DataCenterProto::GetLatestRequest& 
     tmp.emplace_back(update);
   }
 
-  std::sort(tmp.begin(), tmp.end(), [](const auto& a, const auto& b) { return a.dst_tag() < b.dst_tag(); });
+  std::sort(tmp.begin(), tmp.end(), [](const auto &a, const auto &b) { return a.dst_tag() < b.dst_tag(); });
 
   out->Clear();
-  for (const auto& update : tmp) {
+  for (const auto &update : tmp) {
     *out->add_updates() = update;
   }
   return grpc::Status::OK;

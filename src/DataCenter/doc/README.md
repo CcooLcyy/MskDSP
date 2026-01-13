@@ -70,7 +70,7 @@ DataCenter 对外提供一组面向“连接/点表/路由/转发”的 gRPC 接
   - DataCenter 按路由生成 `PointUpdate`，推送给目的连接的订阅者，并更新目的端点的“最新值缓存”。
   - `ts_ms<=0` 时由 DataCenter 填充当前毫秒时间戳。
 - `BatchPublish(BatchPublishRequest) -> Empty`
-  - 批量发布（减少 RPC 次数）；非事务语义：若中途出现参数错误，已处理的数据不会回滚。
+  - 批量发布（减少 RPC 次数）；原子语义：会先校验全部点，若任一参数错误则整批失败且不产生任何更新（不更新最新值缓存/不推送订阅更新）。
 - `GetLatest(GetLatestRequest) -> GetLatestResponse`
   - 拉取目的连接内的最新值（best-effort，仅最新值，不含历史）；`tags` 为空表示拉取该连接全部已缓存点。
 - `Subscribe(SubscribeRequest) -> stream PointUpdate`
