@@ -9,8 +9,16 @@ MskDSP 是一个基于 C++23 的模块化系统：核心由 `ModuleManager` 管�
 - 服务约定：每个模块基于 `ModuleInterface` 同时启动两套 gRPC Server：内部 `unix socket`（`./socket/<模块名>.sock`）+ 对外 `0.0.0.0:<端口>`（默认范围 7001–7999）。
 - 管理端口：模块管理器对外 gRPC 固定监听 `0.0.0.0:7000`。
 
-## 新增模块（开发指南）
-新增模块可以参考现有示例 `src/DataCenter/` 与 `src/IEC104/`，核心步骤如下：
+## 开发指南
+
+### 现有模块目录
+- [src/DataCenter/](./src/DataCenter/)：数据中心相关能力（示例模块，[文档](./src/DataCenter/doc/README.md)）
+- [src/IEC104/](./src/IEC104/)：IEC 60870-5-104 协议相关能力（示例模块，[文档](./src/IEC104/doc/README.md)）
+- [src/DLT645/](./src/DLT645/)：DLT645 协议相关能力（示例模块，[文档](./src/DLT645/doc/README.md)）
+- [src/Modbus/](./src/Modbus/)：Modbus 协议相关能力（示例模块，[文档](./src/Modbus/doc/README.md)）
+
+### 新增模块
+新增模块可以参考现有示例 `src/DataCenter/`、`src/IEC104/`、`src/DLT645/` 与 `src/Modbus/`，核心步骤如下：
 
 可使用脚手架快速生成骨架：
 ```bash
@@ -78,5 +86,4 @@ ctest --test-dir build --output-on-failure
 统一规范见 `AGENTS.md`（项目结构、编码风格、测试与提交/PR 约定等）。
 
 ## 相关文档
-- [模块管理协议（Protobuf/gRPC）](./protobuf/ModuleManager.proto)
 - [模块管理器说明](./src/core/ModuleManager/doc/README.md)

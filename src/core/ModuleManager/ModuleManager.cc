@@ -94,7 +94,6 @@ void ModuleManager::saveModuleStartConfig(ModuleManagerProto::ModuleInfos module
   }
 }
 void ModuleManager::initModuleInfos() {
-  LOG_INFO("初始化模块信息");
   moduleInfos_.Clear();
   const std::filesystem::path libDir("./lib");
   if (!std::filesystem::exists(libDir) || !std::filesystem::is_directory(libDir)) {
@@ -116,7 +115,6 @@ void ModuleManager::initModuleInfos() {
     moduleInfo->set_lib_name(fileName);
     moduleInfo->mutable_version()->CopyFrom(parseVersion(fileName));
   }
-  LOG_INFO("模块信息初始化结束");
 }
 ModuleManagerProto::ModuleVersion ModuleManager::parseVersion(std::string libName) {
   ModuleManagerProto::ModuleVersion version;

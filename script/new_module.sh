@@ -13,6 +13,7 @@ usage() {
       * 若 <ModuleName> 形如 DataCenter（第2个字符为小写），默认 LibName=dataCenter
       * 若 <ModuleName> 形如 IEC104（全大写/数字），默认 LibName=IEC104
   - 生成的模块会被追加到 src/CMakeLists.txt 的 add_subdirectory 列表中
+  - 同时生成模块文档骨架：src/<ModuleName>/doc/README.md
 
 示例:
   bash script/new_module.sh MyModule
@@ -113,6 +114,7 @@ VAR_PREFIX="$(member_prefix "$MODULE_NAME")"
 MODULE_DIR="${SRC_DIR}/${MODULE_NAME}"
 MODULE_INCLUDE_DIR="${MODULE_DIR}/include"
 MODULE_CMAKE_DIR="${MODULE_DIR}/cmake"
+MODULE_DOC_DIR="${MODULE_DIR}/doc"
 PROTO_FILE="${PROTO_DIR}/${MODULE_NAME}.proto"
 
 if [[ -e "$MODULE_DIR" && "$FORCE" -ne 1 ]]; then
@@ -122,7 +124,7 @@ if [[ -e "$PROTO_FILE" && "$NO_PROTO" -ne 1 && "$FORCE" -ne 1 ]]; then
   die "协议文件已存在: ${PROTO_FILE}（如需覆盖请使用 --force 或 --no-proto）"
 fi
 
-mkdir -p "$MODULE_INCLUDE_DIR" "$MODULE_CMAKE_DIR"
+mkdir -p "$MODULE_INCLUDE_DIR" "$MODULE_CMAKE_DIR" "$MODULE_DOC_DIR"
 
 cat > "${MODULE_CMAKE_DIR}/LibInfo.cmake" <<EOF
 set(LIB_NAME ${LIB_NAME})
@@ -130,6 +132,31 @@ set(VERSION_MAJOR 0)
 set(VERSION_MINOR 0)
 set(VERSION_PATCH 1)
 set(VERSION "\${VERSION_MAJOR}.\${VERSION_MINOR}.\${VERSION_PATCH}")
+EOF
+
+cat > "${MODULE_DOC_DIR}/README.md" <<EOF
+# ${MODULE_NAME} 模块
+
+## 简介
+TODO：一句话说明模块职责/边界。
+
+## 能力清单
+- TODO
+
+## 接口与协议
+- Protobuf：\`protobuf/${MODULE_NAME}.proto\`
+- gRPC Service：\`${MODULE_NAME}Proto::${MODULE_NAME}Service\`
+
+## 运行与地址
+- 对外 gRPC：随机选择 \`0.0.0.0:<port>\`（7001–7999）
+- 内部 gRPC：\`unix socket\`：\`./socket/${LIB_NAME}.sock\`
+- 运行时可通过管理器 \`GetRunningModuleInfo\` 查询实际地址
+
+## 配置与数据
+- TODO：运行时配置项、文件位置、持久化数据目录等
+
+## 构建产物
+- 共享库：\`package/lib/lib${LIB_NAME}.so.<version>\`（版本见 \`src/${MODULE_NAME}/cmake/LibInfo.cmake\`）
 EOF
 
 cat > "${MODULE_DIR}/CMakeLists.txt" <<EOF
