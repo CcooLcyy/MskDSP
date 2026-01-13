@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -13,6 +14,13 @@
 namespace DataCenter {
 class DataCenterCore {
 public:
+  grpc::Status GetOrCreateConnection(const DataCenterProto::GetOrCreateConnectionRequest& request, DataCenterProto::ConnectionInfo* out);
+  grpc::Status RenameConnection(const DataCenterProto::RenameConnectionRequest& request, DataCenterProto::ConnectionInfo* out);
+  grpc::Status DeleteConnection(const DataCenterProto::DeleteConnectionRequest& request);
+  grpc::Status GetConnectionByKey(const DataCenterProto::ConnectionKey& key, DataCenterProto::ConnectionInfo* out) const;
+  grpc::Status ReplaceConnectionsConfig(const DataCenterProto::ConnectionsConfig& config);
+  DataCenterProto::ConnectionsConfig DumpConnectionsConfig() const;
+
   grpc::Status UpsertConnection(const DataCenterProto::UpsertConnectionRequest& request);
   DataCenterProto::ListConnectionsResponse ListConnections() const;
 
@@ -33,6 +41,17 @@ public:
   grpc::Status GetLatest(const DataCenterProto::GetLatestRequest& request, DataCenterProto::GetLatestResponse* out) const;
 
 private:
+  struct ConnKey {
+    std::string moduleName;
+    std::string connName;
+
+    bool operator==(const ConnKey& other) const;
+  };
+
+  struct ConnKeyHash {
+    size_t operator()(const ConnKey& key) const noexcept;
+  };
+
   struct EndpointKey {
     uint32_t connId{};
     std::string tag;
@@ -46,12 +65,16 @@ private:
 
   using EndpointKeySet = std::unordered_set<EndpointKey, EndpointKeyHash>;
 
+  static grpc::Status validateConnKey(const DataCenterProto::ConnectionKey& key);
+
   static grpc::Status validateEndpoint(uint32_t connId, const std::string& tag);
   grpc::Status validateEndpointAgainstPointTable(uint32_t connId, const std::string& tag) const;
 
   static int64_t nowMs();
 
   std::unordered_map<uint32_t, DataCenterProto::ConnectionInfo> connections_;
+  std::unordered_map<ConnKey, uint32_t, ConnKeyHash> connIdsByKey_;
+  uint32_t nextConnId_{1};
   std::unordered_map<uint32_t, std::unordered_set<std::string>> pointTables_;
   std::unordered_map<EndpointKey, EndpointKeySet, EndpointKeyHash> routes_;
   std::unordered_map<EndpointKey, DataCenterProto::PointUpdate, EndpointKeyHash> latestByDst_;

@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "DataCenterConnectionStore.h"
 #include "DataCenterCore.h"
 #include "DataCenterPointTableStore.h"
 #include "DataCenterRouteStore.h"
@@ -39,6 +40,7 @@ struct DataCenterGrpcServiceImpl::Impl {
 
   std::mutex mu;
   DataCenterCore core;
+  DataCenterConnectionStore connectionStore;
   DataCenterPointTableStore pointTableStore;
   DataCenterRouteStore routeStore;
 
@@ -90,10 +92,47 @@ struct DataCenterGrpcServiceImpl::Impl {
       subscribersByConn.erase(it);
     }
   }
+
+  void closeSubscribersLocked(uint32_t connId) {
+    auto it = subscribersByConn.find(connId);
+    if (it == subscribersByConn.end()) {
+      return;
+    }
+
+    for (const auto &[_, sub] : it->second) {
+      if (!sub) {
+        continue;
+      }
+      {
+        std::lock_guard<std::mutex> lock(sub->mu);
+        sub->closed = true;
+      }
+      sub->cv.notify_all();
+    }
+    subscribersByConn.erase(it);
+  }
 };
 
 DataCenterGrpcServiceImpl::DataCenterGrpcServiceImpl() :
   impl_(std::make_unique<DataCenterGrpcServiceImpl::Impl>()) {
+  {
+    DataCenterProto::ConnectionsConfig config;
+    auto status = impl_->connectionStore.Load(&config);
+    if (!status.ok()) {
+      const auto message = status.error_message();
+      LOG_INFO("DataCenter 连接注册表加载失败: {}", message);
+    } else if (config.conns_size() > 0 || config.next_conn_id() != 0) {
+      status = impl_->core.ReplaceConnectionsConfig(config);
+      if (!status.ok()) {
+        const auto message = status.error_message();
+        LOG_INFO("DataCenter 连接注册表应用失败: {}", message);
+      } else {
+        const auto count = config.conns_size();
+        LOG_INFO("DataCenter 已加载连接注册表: {} 条", count);
+      }
+    }
+  }
+
   {
     DataCenterProto::PointTablesConfig config;
     auto status = impl_->pointTableStore.Load(&config);
@@ -137,7 +176,17 @@ grpc::Status DataCenterGrpcServiceImpl::UpsertConnection(grpc::ServerContext*, c
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request is null");
   }
   std::lock_guard<std::mutex> lock(impl_->mu);
-  return impl_->core.UpsertConnection(*request);
+  auto status = impl_->core.UpsertConnection(*request);
+  if (!status.ok()) {
+    return status;
+  }
+  auto config = impl_->core.DumpConnectionsConfig();
+  status = impl_->connectionStore.Save(config);
+  if (!status.ok()) {
+    const auto message = status.error_message();
+    LOG_INFO("DataCenter 连接注册表落盘失败: {}", message);
+  }
+  return status;
 }
 
 grpc::Status DataCenterGrpcServiceImpl::ListConnections(grpc::ServerContext*, const DataCenterProto::Empty*, DataCenterProto::ListConnectionsResponse* response) {
@@ -146,6 +195,90 @@ grpc::Status DataCenterGrpcServiceImpl::ListConnections(grpc::ServerContext*, co
   }
   std::lock_guard<std::mutex> lock(impl_->mu);
   *response = impl_->core.ListConnections();
+  return grpc::Status::OK;
+}
+
+grpc::Status DataCenterGrpcServiceImpl::GetOrCreateConnection(grpc::ServerContext*, const DataCenterProto::GetOrCreateConnectionRequest* request, DataCenterProto::ConnectionInfo* response) {
+  if (request == nullptr || response == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request/response is null");
+  }
+
+  std::lock_guard<std::mutex> lock(impl_->mu);
+  auto status = impl_->core.GetOrCreateConnection(*request, response);
+  if (!status.ok()) {
+    return status;
+  }
+  auto config = impl_->core.DumpConnectionsConfig();
+  status = impl_->connectionStore.Save(config);
+  if (!status.ok()) {
+    const auto message = status.error_message();
+    LOG_INFO("DataCenter 连接注册表落盘失败: {}", message);
+  }
+  return status;
+}
+
+grpc::Status DataCenterGrpcServiceImpl::RenameConnection(grpc::ServerContext*, const DataCenterProto::RenameConnectionRequest* request, DataCenterProto::ConnectionInfo* response) {
+  if (request == nullptr || response == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request/response is null");
+  }
+
+  std::lock_guard<std::mutex> lock(impl_->mu);
+  auto status = impl_->core.RenameConnection(*request, response);
+  if (!status.ok()) {
+    return status;
+  }
+  auto config = impl_->core.DumpConnectionsConfig();
+  status = impl_->connectionStore.Save(config);
+  if (!status.ok()) {
+    const auto message = status.error_message();
+    LOG_INFO("DataCenter 连接注册表落盘失败: {}", message);
+  }
+  return status;
+}
+
+grpc::Status DataCenterGrpcServiceImpl::DeleteConnection(grpc::ServerContext*, const DataCenterProto::DeleteConnectionRequest* request, DataCenterProto::Empty*) {
+  if (request == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request is null");
+  }
+
+  std::lock_guard<std::mutex> lock(impl_->mu);
+
+  DataCenterProto::ConnectionInfo conn;
+  auto status = impl_->core.GetConnectionByKey(request->key(), &conn);
+  if (!status.ok()) {
+    return status;
+  }
+
+  status = impl_->core.DeleteConnection(*request);
+  if (!status.ok()) {
+    return status;
+  }
+
+  impl_->closeSubscribersLocked(conn.conn_id());
+
+  auto connConfig = impl_->core.DumpConnectionsConfig();
+  status = impl_->connectionStore.Save(connConfig);
+  if (!status.ok()) {
+    const auto message = status.error_message();
+    LOG_INFO("DataCenter 连接注册表落盘失败: {}", message);
+    return status;
+  }
+
+  auto ptConfig = impl_->core.DumpPointTablesConfig();
+  status = impl_->pointTableStore.Save(ptConfig);
+  if (!status.ok()) {
+    const auto message = status.error_message();
+    LOG_INFO("DataCenter 点表落盘失败: {}", message);
+    return status;
+  }
+
+  auto routesConfig = impl_->core.DumpRoutesConfig();
+  status = impl_->routeStore.Save(routesConfig);
+  if (!status.ok()) {
+    const auto message = status.error_message();
+    LOG_INFO("DataCenter 路由落盘失败: {}", message);
+    return status;
+  }
   return grpc::Status::OK;
 }
 

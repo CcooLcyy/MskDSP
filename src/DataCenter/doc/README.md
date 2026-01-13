@@ -17,7 +17,7 @@ DataCenter 是进程内的“数据总线/转发枢纽”，用于在不同协�
 - 多对一仲裁（多个源同时写入同一目的点时暂不保证行为）
 
 ## 关键概念
-- `connId`：连接的全局唯一 ID（建议使用无符号整型），由各协议模块配置产生；要求重启后保持不变。
+- `connId`：连接的全局唯一 ID（建议使用无符号整型），建议通过 DataCenter 的连接注册中心按 `(module_name, conn_name)` 分配/查询；要求重启后保持不变。
 - `tag`：逻辑点名（UTF-8，可使用中文），用于跨协议对齐同一业务量；协议地址（IOA/寄存器等）应由各协议模块自身点表维护。
 - `Endpoint`：`(connId, tag)`，表示某连接中的一个逻辑点。
 - `Route`：有向路由绑定，表示数据从 `src Endpoint` 转发到一个或多个 `dst Endpoint`。
@@ -42,8 +42,14 @@ DataCenter 对外提供一组面向“连接/点表/路由/转发”的 gRPC 接
 - `PointUpdate`：路由后的更新，包含 `src/dst` 端点信息与 `value/ts_ms/quality`。
 
 ### 连接/点表（用于展示与校验，可选）
+- `GetOrCreateConnection(GetOrCreateConnectionRequest) -> ConnectionInfo`
+  - 连接注册中心：按 `(module_name, conn_name)` 分配/查询 `conn_id`（若已存在则返回既有 `conn_id`；否则分配新 ID 并落盘持久化）。
+- `RenameConnection(RenameConnectionRequest) -> ConnectionInfo`
+  - 重命名连接主键：将 `old_key` 改为 `new_key`，并保持 `conn_id` 不变；若 `new_key` 已存在则返回 `ALREADY_EXISTS`。
+- `DeleteConnection(DeleteConnectionRequest) -> Empty`
+  - 删除连接（按 `(module_name, conn_name)`）；会同步删除该 `conn_id` 关联的点表/路由/最新值缓存，并关闭该 `conn_id` 的订阅者连接（best-effort），随后落盘持久化。
 - `UpsertConnection(UpsertConnectionRequest) -> Empty`
-  - 注册/更新连接信息（`conn_id` 必填且全局唯一；同一 `conn_id` 后写覆盖前写）。
+  - 兼容接口：更新已分配 `conn_id` 的连接信息（不负责分配 `conn_id`；若 `conn_id` 未在注册表中会返回 `NOT_FOUND`）。
 - `ListConnections(Empty) -> ListConnectionsResponse`
   - 列出已注册连接信息（用于 UI/配置工具展示）。
 - `UpsertPointTable(UpsertPointTableRequest) -> Empty`
@@ -79,9 +85,28 @@ DataCenter 对外提供一组面向“连接/点表/路由/转发”的 gRPC 接
   - 说明：订阅端消费过慢时，服务端会丢弃过旧消息以避免无限堆积（best-effort，不保证每条更新都可达）。
 
 ## 配置与使用流程（建议）
-1. 在各协议模块（IEC104/Modbus/DLT645/…）中为每条连接配置 `connId`（全局唯一）并完成点表配置；为每个点配置 `tag`（逻辑点名，可中文）。
-2. 在 DataCenter 中配置路由方向（有向绑定）：基于源/目的两侧点表中已知的 `connId + tag` 建立 `src -> dst` 规则（支持一对多）。
-3. 启动模块：通过管理器启动 DataCenter 与各协议模块；采集端向 DataCenter 发布数据，上送端订阅/获取对应 `tag` 的更新进行上报。
+1. 在各协议模块（IEC104/Modbus/DLT645/…）配置阶段，通过 DataCenter 的 `GetOrCreateConnection(module_name, conn_name)` 获取 `connId`（全局唯一且持久化），并将该 `connId` 写入该连接的配置；为每个点配置 `tag`（逻辑点名，可中文）。
+2. 在 DataCenter 中为源/目的两侧连接下发点表（可选但建议）：`UpsertPointTable(connId, tags...)`。
+3. 在 DataCenter 中配置路由方向（有向绑定）：基于源/目的两侧点表中已知的 `connId + tag` 建立 `src -> dst` 规则（支持一对多）。
+4. 启动模块：通过管理器启动 DataCenter 与各协议模块；采集端向 DataCenter 发布数据，上送端订阅/获取对应 `tag` 的更新进行上报。
+
+## 连接注册表持久化（当前实现）
+DataCenter 会将连接注册表落盘到工作目录下的 `./conf/dataCenter/connections.pb`，用于 `connId` 的稳定分配与重启后的自动恢复。
+
+### 文件与策略
+- 主文件：`./conf/dataCenter/connections.pb`
+- 备份文件：`./conf/dataCenter/connections.pb.bak`（上一份“可解析且校验通过”的配置）
+- 临时文件：`./conf/dataCenter/connections.pb.tmp`（用于安全写入，避免写坏主文件）
+- 隔离文件：`./conf/dataCenter/connections.pb.corrupt.<timestamp>`（当发现主文件损坏时保留原件，便于排查）
+
+### 保存时机与语义
+- 每次 `GetOrCreateConnection` / `RenameConnection` / `DeleteConnection` / `UpsertConnection` 成功后自动落盘。
+- 落盘失败会返回 `INTERNAL`，但内存中的连接注册表不会回滚（配置端可重试）。
+
+### 启动恢复
+- 若主文件存在且可用：加载主文件。
+- 若主文件损坏：尝试使用备份文件启动；若备份可用，会将损坏主文件隔离，并用备份内容恢复出新的主文件（best-effort）。
+- 若主/备均不可用：以空连接注册表启动（下次调用 `GetOrCreateConnection` 时会重新分配/创建）。
 
 ## 点表配置持久化（当前实现）
 DataCenter 会将点表配置落盘到工作目录下的 `./conf/dataCenter/point_tables.pb`，用于进程重启后的自动恢复。

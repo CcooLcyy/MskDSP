@@ -16,6 +16,9 @@ public:
 
   grpc::Status UpsertConnection(grpc::ServerContext* context, const DataCenterProto::UpsertConnectionRequest* request, DataCenterProto::Empty* response) override;
   grpc::Status ListConnections(grpc::ServerContext* context, const DataCenterProto::Empty* request, DataCenterProto::ListConnectionsResponse* response) override;
+  grpc::Status GetOrCreateConnection(grpc::ServerContext* context, const DataCenterProto::GetOrCreateConnectionRequest* request, DataCenterProto::ConnectionInfo* response) override;
+  grpc::Status RenameConnection(grpc::ServerContext* context, const DataCenterProto::RenameConnectionRequest* request, DataCenterProto::ConnectionInfo* response) override;
+  grpc::Status DeleteConnection(grpc::ServerContext* context, const DataCenterProto::DeleteConnectionRequest* request, DataCenterProto::Empty* response) override;
 
   grpc::Status UpsertPointTable(grpc::ServerContext* context, const DataCenterProto::UpsertPointTableRequest* request, DataCenterProto::Empty* response) override;
   grpc::Status GetPointTable(grpc::ServerContext* context, const DataCenterProto::GetPointTableRequest* request, DataCenterProto::PointTable* response) override;

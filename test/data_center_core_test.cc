@@ -21,7 +21,125 @@ DataCenterProto::Route MakeRoute(uint32_t srcConnId, std::string srcTag, uint32_
   *route.mutable_dst() = MakeEndpoint(dstConnId, std::move(dstTag));
   return route;
 }
+
+DataCenterProto::ConnectionKey MakeConnKey(std::string moduleName, std::string connName) {
+  DataCenterProto::ConnectionKey key;
+  key.set_module_name(std::move(moduleName));
+  key.set_conn_name(std::move(connName));
+  return key;
+}
 }  // namespace
+
+TEST(DataCenterCoreTest, GetOrCreateConnectionReturnsStableConnIdByKey) {
+  DataCenterCore core;
+
+  DataCenterProto::GetOrCreateConnectionRequest req;
+  *req.mutable_key() = MakeConnKey("IEC104", "104-1");
+
+  DataCenterProto::ConnectionInfo conn1;
+  ASSERT_TRUE(core.GetOrCreateConnection(req, &conn1).ok());
+  EXPECT_GT(conn1.conn_id(), 0u);
+  EXPECT_EQ(conn1.module_name(), "IEC104");
+  EXPECT_EQ(conn1.conn_name(), "104-1");
+
+  DataCenterProto::ConnectionInfo conn2;
+  ASSERT_TRUE(core.GetOrCreateConnection(req, &conn2).ok());
+  EXPECT_EQ(conn2.conn_id(), conn1.conn_id());
+}
+
+TEST(DataCenterCoreTest, RenameConnectionKeepsConnId) {
+  DataCenterCore core;
+
+  DataCenterProto::GetOrCreateConnectionRequest createReq;
+  *createReq.mutable_key() = MakeConnKey("Modbus", "mb-1");
+
+  DataCenterProto::ConnectionInfo created;
+  ASSERT_TRUE(core.GetOrCreateConnection(createReq, &created).ok());
+
+  DataCenterProto::RenameConnectionRequest renameReq;
+  *renameReq.mutable_old_key() = MakeConnKey("Modbus", "mb-1");
+  *renameReq.mutable_new_key() = MakeConnKey("Modbus", "mb-rename");
+
+  DataCenterProto::ConnectionInfo renamed;
+  ASSERT_TRUE(core.RenameConnection(renameReq, &renamed).ok());
+  EXPECT_EQ(renamed.conn_id(), created.conn_id());
+  EXPECT_EQ(renamed.module_name(), "Modbus");
+  EXPECT_EQ(renamed.conn_name(), "mb-rename");
+
+  DataCenterProto::ConnectionInfo gotOld;
+  auto oldStatus = core.GetConnectionByKey(renameReq.old_key(), &gotOld);
+  EXPECT_FALSE(oldStatus.ok());
+  EXPECT_EQ(oldStatus.error_code(), grpc::StatusCode::NOT_FOUND);
+
+  DataCenterProto::GetOrCreateConnectionRequest getReq;
+  *getReq.mutable_key() = renameReq.new_key();
+  DataCenterProto::ConnectionInfo gotNew;
+  ASSERT_TRUE(core.GetOrCreateConnection(getReq, &gotNew).ok());
+  EXPECT_EQ(gotNew.conn_id(), created.conn_id());
+}
+
+TEST(DataCenterCoreTest, DeleteConnectionCleansPointTableRoutesAndLatest) {
+  DataCenterCore core;
+
+  DataCenterProto::GetOrCreateConnectionRequest createSrc;
+  *createSrc.mutable_key() = MakeConnKey("Modbus", "mb-src");
+  DataCenterProto::ConnectionInfo src;
+  ASSERT_TRUE(core.GetOrCreateConnection(createSrc, &src).ok());
+
+  DataCenterProto::GetOrCreateConnectionRequest createDst;
+  *createDst.mutable_key() = MakeConnKey("IEC104", "104-dst");
+  DataCenterProto::ConnectionInfo dst;
+  ASSERT_TRUE(core.GetOrCreateConnection(createDst, &dst).ok());
+
+  DataCenterProto::UpsertPointTableRequest srcPt;
+  srcPt.set_conn_id(src.conn_id());
+  srcPt.set_replace(true);
+  srcPt.add_tags("A");
+  ASSERT_TRUE(core.UpsertPointTable(srcPt).ok());
+
+  DataCenterProto::UpsertPointTableRequest dstPt;
+  dstPt.set_conn_id(dst.conn_id());
+  dstPt.set_replace(true);
+  dstPt.add_tags("B");
+  ASSERT_TRUE(core.UpsertPointTable(dstPt).ok());
+
+  DataCenterProto::UpsertRoutesRequest routes;
+  routes.set_replace(true);
+  *routes.add_routes() = MakeRoute(src.conn_id(), "A", dst.conn_id(), "B");
+  ASSERT_TRUE(core.UpsertRoutes(routes).ok());
+
+  DataCenterProto::PublishRequest pub;
+  pub.set_conn_id(src.conn_id());
+  pub.set_tag("A");
+  pub.mutable_value()->set_int_value(123);
+
+  std::vector<DataCenterProto::PointUpdate> updates;
+  ASSERT_TRUE(core.Publish(pub, &updates).ok());
+  ASSERT_EQ(updates.size(), 1u);
+
+  DataCenterProto::GetLatestRequest latestReq;
+  latestReq.set_conn_id(dst.conn_id());
+  DataCenterProto::GetLatestResponse latestResp;
+  ASSERT_TRUE(core.GetLatest(latestReq, &latestResp).ok());
+  ASSERT_EQ(latestResp.updates_size(), 1);
+
+  DataCenterProto::DeleteConnectionRequest delReq;
+  *delReq.mutable_key() = createSrc.key();
+  ASSERT_TRUE(core.DeleteConnection(delReq).ok());
+
+  DataCenterProto::PointTable table;
+  auto ptStatus = core.GetPointTable(src.conn_id(), &table);
+  EXPECT_FALSE(ptStatus.ok());
+  EXPECT_EQ(ptStatus.error_code(), grpc::StatusCode::NOT_FOUND);
+
+  DataCenterProto::ListRoutesRequest listReq;
+  auto listResp = core.ListRoutes(listReq);
+  EXPECT_EQ(listResp.routes_size(), 0);
+
+  DataCenterProto::GetLatestResponse afterDel;
+  ASSERT_TRUE(core.GetLatest(latestReq, &afterDel).ok());
+  EXPECT_EQ(afterDel.updates_size(), 0);
+}
 
 TEST(DataCenterCoreTest, UpsertRoutesValidatesAgainstPointTableWhenPresent) {
   DataCenterCore core;

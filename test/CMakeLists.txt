@@ -49,3 +49,19 @@ target_link_libraries(dataCenterRouteStore_test PRIVATE
 )
 
 add_test(NAME dataCenterRouteStore_test COMMAND dataCenterRouteStore_test)
+
+add_executable(dataCenterConnectionStore_test
+  data_center_connection_store_test.cc
+  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterConnectionStore.cc
+)
+
+target_include_directories(dataCenterConnectionStore_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/DataCenter/include
+)
+
+target_link_libraries(dataCenterConnectionStore_test PRIVATE
+  GTest::gtest_main
+  dspProto
+)
+
+add_test(NAME dataCenterConnectionStore_test COMMAND dataCenterConnectionStore_test)
