@@ -5,6 +5,10 @@ find_package(GTest CONFIG REQUIRED)
 add_executable(dataCenterCore_test
   data_center_core_test.cc
   ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCore.cc
+  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCoreConnection.cc
+  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCorePointTable.cc
+  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCoreRoutes.cc
+  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCorePublish.cc
 )
 
 target_include_directories(dataCenterCore_test PRIVATE
