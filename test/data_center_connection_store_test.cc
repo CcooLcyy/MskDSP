@@ -55,6 +55,7 @@ DataCenterProto::ConnectionsConfig MakeConfig(uint32_t nextConnId, std::initiali
 }
 }  // namespace
 
+// 验证：当连接配置文件不存在时，Load 返回空配置且不报错。
 TEST(DataCenterConnectionStoreTest, LoadReturnsEmptyWhenNoFiles) {
   ScopedTempDir dir;
   DataCenterConnectionStore store(dir.path() / "connections.pb");
@@ -64,6 +65,7 @@ TEST(DataCenterConnectionStoreTest, LoadReturnsEmptyWhenNoFiles) {
   EXPECT_EQ(cfg.conns_size(), 0);
 }
 
+// 验证：Save 后可被 Load 读取，且内容一致（roundtrip）。
 TEST(DataCenterConnectionStoreTest, SaveAndLoadRoundtrip) {
   ScopedTempDir dir;
   DataCenterConnectionStore store(dir.path() / "connections.pb");
@@ -80,6 +82,7 @@ TEST(DataCenterConnectionStoreTest, SaveAndLoadRoundtrip) {
   EXPECT_EQ(ToSet(loaded), ToSet(cfg));
 }
 
+// 验证：Save 会拒绝非法配置（例如 conn_id=0）。
 TEST(DataCenterConnectionStoreTest, SaveRejectsInvalidConfig) {
   ScopedTempDir dir;
   DataCenterConnectionStore store(dir.path() / "connections.pb");
@@ -95,6 +98,7 @@ TEST(DataCenterConnectionStoreTest, SaveRejectsInvalidConfig) {
   EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
 }
 
+// 验证：主文件损坏时 Load 会回退到备份文件，并 best-effort 恢复主文件。
 TEST(DataCenterConnectionStoreTest, LoadFallsBackToBackupWhenMainCorruptedAndRestoresMainBestEffort) {
   ScopedTempDir dir;
   const auto base = dir.path() / "connections.pb";
@@ -140,4 +144,3 @@ TEST(DataCenterConnectionStoreTest, LoadFallsBackToBackupWhenMainCorruptedAndRes
   }
   EXPECT_TRUE(foundCorrupt);
 }
-

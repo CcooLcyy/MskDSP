@@ -56,6 +56,7 @@ DataCenterProto::PointTablesConfig MakeConfig(std::initializer_list<std::pair<ui
 }
 }  // namespace
 
+// 验证：当点表配置文件不存在时，Load 返回空配置且不报错。
 TEST(DataCenterPointTableStoreTest, LoadReturnsEmptyWhenNoFiles) {
   ScopedTempDir dir;
   DataCenterPointTableStore store(dir.path() / "point_tables.pb");
@@ -65,6 +66,7 @@ TEST(DataCenterPointTableStoreTest, LoadReturnsEmptyWhenNoFiles) {
   EXPECT_EQ(cfg.point_tables_size(), 0);
 }
 
+// 验证：Save 后可被 Load 读取，且内容一致（roundtrip）。
 TEST(DataCenterPointTableStoreTest, SaveAndLoadRoundtrip) {
   ScopedTempDir dir;
   DataCenterPointTableStore store(dir.path() / "point_tables.pb");
@@ -80,6 +82,7 @@ TEST(DataCenterPointTableStoreTest, SaveAndLoadRoundtrip) {
   EXPECT_EQ(ToMap(loaded), ToMap(cfg));
 }
 
+// 验证：Save 会拒绝非法配置（例如 conn_id=0 或空 tag）。
 TEST(DataCenterPointTableStoreTest, SaveRejectsInvalidConfig) {
   ScopedTempDir dir;
   DataCenterPointTableStore store(dir.path() / "point_tables.pb");
@@ -94,6 +97,7 @@ TEST(DataCenterPointTableStoreTest, SaveRejectsInvalidConfig) {
   EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
 }
 
+// 验证：主文件损坏时 Load 会回退到备份文件，并 best-effort 恢复主文件。
 TEST(DataCenterPointTableStoreTest, LoadFallsBackToBackupWhenMainCorruptedAndRestoresMainBestEffort) {
   ScopedTempDir dir;
   const auto base = dir.path() / "point_tables.pb";
@@ -137,4 +141,3 @@ TEST(DataCenterPointTableStoreTest, LoadFallsBackToBackupWhenMainCorruptedAndRes
   }
   EXPECT_TRUE(foundCorrupt);
 }
-

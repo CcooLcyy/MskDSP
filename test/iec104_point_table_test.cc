@@ -14,6 +14,7 @@ IEC104Proto::TelemetryPoint MakePoint(const char* tag, uint32_t ioa) {
 }
 }  // namespace
 
+// 验证：点表 replace 更新与双向查询（tag->ioa、ioa->tag）以及稳定输出顺序。
 TEST(IEC104PointTableTest, ReplaceAndLookup) {
   PointTable table;
 
@@ -40,6 +41,7 @@ TEST(IEC104PointTableTest, ReplaceAndLookup) {
   EXPECT_EQ(out.points(1).tag(), "B");
 }
 
+// 验证：点表拒绝非法点（tag/ioa/type 必填校验）。
 TEST(IEC104PointTableTest, RejectsInvalidPoint) {
   PointTable table;
 
@@ -71,6 +73,7 @@ TEST(IEC104PointTableTest, RejectsInvalidPoint) {
   EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
 }
 
+// 验证：点表拒绝冲突映射（同 tag 不同 ioa、同 ioa 不同 tag）。
 TEST(IEC104PointTableTest, RejectsConflictingMappings) {
   PointTable table;
 
@@ -91,4 +94,3 @@ TEST(IEC104PointTableTest, RejectsConflictingMappings) {
   st = table.Upsert(req3.points(), req3.replace());
   EXPECT_EQ(st.error_code(), grpc::StatusCode::ALREADY_EXISTS);
 }
-

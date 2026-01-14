@@ -30,6 +30,7 @@ DataCenterProto::ConnectionKey MakeConnKey(std::string moduleName, std::string c
 }
 }  // namespace
 
+// 验证：GetOrCreateConnection 对相同 (module_name, conn_name) 返回稳定的 conn_id。
 TEST(DataCenterCoreTest, GetOrCreateConnectionReturnsStableConnIdByKey) {
   DataCenterCore core;
 
@@ -47,6 +48,7 @@ TEST(DataCenterCoreTest, GetOrCreateConnectionReturnsStableConnIdByKey) {
   EXPECT_EQ(conn2.conn_id(), conn1.conn_id());
 }
 
+// 验证：RenameConnection 保持 conn_id 不变，且旧 key 不再可查询。
 TEST(DataCenterCoreTest, RenameConnectionKeepsConnId) {
   DataCenterCore core;
 
@@ -78,6 +80,7 @@ TEST(DataCenterCoreTest, RenameConnectionKeepsConnId) {
   EXPECT_EQ(gotNew.conn_id(), created.conn_id());
 }
 
+// 验证：DeleteConnection 会清理该连接关联的点表/路由/最新值缓存。
 TEST(DataCenterCoreTest, DeleteConnectionCleansPointTableRoutesAndLatest) {
   DataCenterCore core;
 
@@ -141,6 +144,7 @@ TEST(DataCenterCoreTest, DeleteConnectionCleansPointTableRoutesAndLatest) {
   EXPECT_EQ(afterDel.updates_size(), 0);
 }
 
+// 验证：当点表存在时，UpsertRoutes 会校验 tag 必须在点表内。
 TEST(DataCenterCoreTest, UpsertRoutesValidatesAgainstPointTableWhenPresent) {
   DataCenterCore core;
 
@@ -159,6 +163,7 @@ TEST(DataCenterCoreTest, UpsertRoutesValidatesAgainstPointTableWhenPresent) {
   EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
 }
 
+// 验证：Publish 按路由进行 tag 重写（srcTag -> dstTag）的一对一转发。
 TEST(DataCenterCoreTest, PublishRoutesWithTagRewriteOneToOne) {
   DataCenterCore core;
 
@@ -195,6 +200,7 @@ TEST(DataCenterCoreTest, PublishRoutesWithTagRewriteOneToOne) {
   EXPECT_GT(updates[0].ts_ms(), 0);
 }
 
+// 验证：Publish 支持一对多路由，生成多个目的端点的更新。
 TEST(DataCenterCoreTest, PublishRoutesOneToMany) {
   DataCenterCore core;
 
@@ -222,6 +228,7 @@ TEST(DataCenterCoreTest, PublishRoutesOneToMany) {
   EXPECT_EQ(dsts[1], (std::pair<uint32_t, std::string>{3u, "功率"}));
 }
 
+// 验证：GetLatest 返回目标连接内“按目的端点”最新一次路由后的值（按 dst_tag 排序）。
 TEST(DataCenterCoreTest, GetLatestReturnsLastRoutedValueByDstEndpoint) {
   DataCenterCore core;
 
@@ -249,6 +256,7 @@ TEST(DataCenterCoreTest, GetLatestReturnsLastRoutedValueByDstEndpoint) {
   EXPECT_EQ(latestResp.updates(0).src_tag(), "电压");
 }
 
+// 验证：BatchPublish 在输入合法时会发布全部点并生成对应路由更新。
 TEST(DataCenterCoreTest, BatchPublishPublishesAllPointsWhenValid) {
   DataCenterCore core;
 
@@ -284,6 +292,7 @@ TEST(DataCenterCoreTest, BatchPublishPublishesAllPointsWhenValid) {
   EXPECT_EQ(latestResp.updates(1).value().int_value(), 20);
 }
 
+// 验证：BatchPublish 在校验失败时具有原子性（不输出 updates 且不更新 latest）。
 TEST(DataCenterCoreTest, BatchPublishIsAtomicAndDoesNotUpdateLatestOnValidationFailure) {
   DataCenterCore core;
 
@@ -316,6 +325,7 @@ TEST(DataCenterCoreTest, BatchPublishIsAtomicAndDoesNotUpdateLatestOnValidationF
   EXPECT_EQ(latestResp.updates_size(), 0);
 }
 
+// 验证：DumpPointTablesConfig 与 ReplacePointTablesConfig 可 roundtrip 恢复点表配置。
 TEST(DataCenterCoreTest, DumpAndReplacePointTablesConfigRoundtrip) {
   DataCenterCore core;
 
@@ -338,6 +348,7 @@ TEST(DataCenterCoreTest, DumpAndReplacePointTablesConfigRoundtrip) {
   EXPECT_EQ(table.tags(1), "点2");
 }
 
+// 验证：ReplacePointTablesConfig 会按 conn_id 合并并去重 tags。
 TEST(DataCenterCoreTest, ReplacePointTablesConfigMergesAndDeduplicatesByConnId) {
   DataCenterCore core;
 
@@ -362,6 +373,7 @@ TEST(DataCenterCoreTest, ReplacePointTablesConfigMergesAndDeduplicatesByConnId) 
   EXPECT_EQ(table.tags(2), "C");
 }
 
+// 验证：DumpRoutesConfig 与 ReplaceRoutesConfig 可 roundtrip 恢复路由配置。
 TEST(DataCenterCoreTest, DumpAndReplaceRoutesConfigRoundtrip) {
   DataCenterCore core;
 
@@ -387,6 +399,7 @@ TEST(DataCenterCoreTest, DumpAndReplaceRoutesConfigRoundtrip) {
   EXPECT_EQ(resp.routes(1).dst().tag(), "目的点2");
 }
 
+// 验证：ReplaceRoutesConfig 会按 (src,dst) 对路由去重。
 TEST(DataCenterCoreTest, ReplaceRoutesConfigDeduplicatesBySrcDst) {
   DataCenterCore core;
 
@@ -405,6 +418,7 @@ TEST(DataCenterCoreTest, ReplaceRoutesConfigDeduplicatesBySrcDst) {
   EXPECT_EQ(resp.routes(0).dst().tag(), "B");
 }
 
+// 验证：当点表存在时，ReplaceRoutesConfig 会校验 tag 必须在点表内。
 TEST(DataCenterCoreTest, ReplaceRoutesConfigValidatesAgainstPointTableWhenPresent) {
   DataCenterCore core;
 

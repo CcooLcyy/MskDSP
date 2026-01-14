@@ -170,6 +170,7 @@ IEC104Proto::UpsertLinkRequest MakeClientLinkReq(const char* connName) {
 }
 }  // namespace
 
+// 验证：create_only UpsertLink 会向 DataCenter 取/建 conn_id，并回填到 LinkInfo。
 TEST(IEC104LinkManagerTest, UpsertLinkCreateOnlyReturnsConnId) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
@@ -186,6 +187,7 @@ TEST(IEC104LinkManagerTest, UpsertLinkCreateOnlyReturnsConnId) {
   EXPECT_TRUE(state.HasConnection("IEC104", "conn-1"));
 }
 
+// 验证：当 DataCenter 已存在相同 (module_name, conn_name) 时，create_only UpsertLink 返回 ALREADY_EXISTS。
 TEST(IEC104LinkManagerTest, UpsertLinkCreateOnlyRejectsWhenDataCenterAlreadyHasKey) {
   FakeDataCenterState state;
   state.AddConnection(42, "IEC104", "dup");
@@ -200,6 +202,7 @@ TEST(IEC104LinkManagerTest, UpsertLinkCreateOnlyRejectsWhenDataCenterAlreadyHasK
   EXPECT_EQ(st.error_code(), grpc::StatusCode::ALREADY_EXISTS);
 }
 
+// 验证：DeleteLink 会调用 DataCenter.DeleteConnection，并移除本地 link 配置。
 TEST(IEC104LinkManagerTest, DeleteLinkCallsDataCenterDeleteAndRemovesLocal) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
@@ -220,6 +223,7 @@ TEST(IEC104LinkManagerTest, DeleteLinkCallsDataCenterDeleteAndRemovesLocal) {
   EXPECT_EQ(st.error_code(), grpc::StatusCode::NOT_FOUND);
 }
 
+// 验证：当 DataCenter 删除失败时，DeleteLink 标记 PENDING_DELETE 且保留本地配置以便重试。
 TEST(IEC104LinkManagerTest, DeleteLinkFailureMarksPendingDeleteAndKeepsLocal) {
   FakeDataCenterState state;
   state.FailDeleteForConnName("conn-fail");
@@ -240,6 +244,7 @@ TEST(IEC104LinkManagerTest, DeleteLinkFailureMarksPendingDeleteAndKeepsLocal) {
   EXPECT_EQ(got.state(), IEC104Proto::LINK_STATE_PENDING_DELETE);
 }
 
+// 验证：当 DataCenter 返回 NOT_FOUND 时，DeleteLink 视为幂等成功并移除本地配置。
 TEST(IEC104LinkManagerTest, DeleteLinkTreatsDataCenterNotFoundAsSuccess) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
@@ -260,4 +265,3 @@ TEST(IEC104LinkManagerTest, DeleteLinkTreatsDataCenterNotFoundAsSuccess) {
   auto st = mgr.GetLink("conn-nf", &got);
   EXPECT_EQ(st.error_code(), grpc::StatusCode::NOT_FOUND);
 }
-

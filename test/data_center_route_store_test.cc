@@ -55,6 +55,7 @@ DataCenterProto::RoutesConfig MakeConfig(std::initializer_list<std::tuple<uint32
 }
 }  // namespace
 
+// 验证：当路由配置文件不存在时，Load 返回空配置且不报错。
 TEST(DataCenterRouteStoreTest, LoadReturnsEmptyWhenNoFiles) {
   ScopedTempDir dir;
   DataCenterRouteStore store(dir.path() / "routes.pb");
@@ -64,6 +65,7 @@ TEST(DataCenterRouteStoreTest, LoadReturnsEmptyWhenNoFiles) {
   EXPECT_EQ(cfg.routes_size(), 0);
 }
 
+// 验证：Save 后可被 Load 读取，且内容一致（roundtrip）。
 TEST(DataCenterRouteStoreTest, SaveAndLoadRoundtrip) {
   ScopedTempDir dir;
   DataCenterRouteStore store(dir.path() / "routes.pb");
@@ -79,6 +81,7 @@ TEST(DataCenterRouteStoreTest, SaveAndLoadRoundtrip) {
   EXPECT_EQ(ToSet(loaded), ToSet(cfg));
 }
 
+// 验证：Save 会拒绝非法配置（例如 src/dst conn_id=0 或空 tag）。
 TEST(DataCenterRouteStoreTest, SaveRejectsInvalidConfig) {
   ScopedTempDir dir;
   DataCenterRouteStore store(dir.path() / "routes.pb");
@@ -95,6 +98,7 @@ TEST(DataCenterRouteStoreTest, SaveRejectsInvalidConfig) {
   EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
 }
 
+// 验证：主文件损坏时 Load 会回退到备份文件，并 best-effort 恢复主文件。
 TEST(DataCenterRouteStoreTest, LoadFallsBackToBackupWhenMainCorruptedAndRestoresMainBestEffort) {
   ScopedTempDir dir;
   const auto base = dir.path() / "routes.pb";
@@ -139,4 +143,3 @@ TEST(DataCenterRouteStoreTest, LoadFallsBackToBackupWhenMainCorruptedAndRestores
   }
   EXPECT_TRUE(foundCorrupt);
 }
-
