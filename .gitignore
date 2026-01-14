@@ -17,3 +17,4 @@ package/conf/modConf.bin
 
 # runtime DataCenter configs
 package/conf/dataCenter/*.pb*
+IEC104/*

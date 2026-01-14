@@ -41,7 +41,7 @@ void ModuleInterface::initLibInfo(LibInfo libInfo) {
   }
   auto absPath = std::filesystem::canonical(path.parent_path());
   auto absFilePath = std::format("{}/{}.sock", absPath.c_str(), metaData_.name);
-  auto sockPath = std::format("unix:/{}", absFilePath);
+  auto sockPath = std::format("unix:{}", absFilePath);
   if (std::filesystem::exists(absFilePath)) {
     std::filesystem::remove(absFilePath);
   }
