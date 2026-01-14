@@ -90,6 +90,7 @@ add_executable(iec104LinkManager_test
   iec104_link_manager_test.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104DataCenterClient.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104LinkManager.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104LinkManagerDataCenter.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104PointTable.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104TcpLink.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104TcpSession.cc
