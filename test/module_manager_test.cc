@@ -1,0 +1,207 @@
+#include <gtest/gtest.h>
+
+#include <filesystem>
+#include <fstream>
+#include <string>
+
+#include <grpcpp/server_context.h>
+
+#include "ModuleManager.h"
+#include "ModuleManagerGrpcService.h"
+
+namespace {
+namespace fs = std::filesystem;
+
+constexpr const char *kDummyModuleName = "Dummy";
+
+fs::path LibDir() { return fs::path("lib"); }
+fs::path ConfDir() { return fs::path("conf"); }
+fs::path SocketDir() { return fs::path("socket"); }
+fs::path LogDir() { return fs::path("log"); }
+
+std::string DummyLibPrefix() { return std::string("lib") + kDummyModuleName + ".so"; }
+
+std::string FindDummyLibFileName() {
+  const auto prefix = DummyLibPrefix();
+  for (const auto &entry : fs::directory_iterator(LibDir())) {
+    if (entry.is_symlink() || !entry.is_regular_file()) {
+      continue;
+    }
+    const auto name = entry.path().filename().string();
+    if (name.rfind(prefix, 0) == 0) {
+      return name;
+    }
+  }
+  return {};
+}
+
+void CleanTestEnvKeepDummyLib() {
+  // Fresh conf/socket/log so that code paths for directory creation are covered.
+  fs::remove_all(ConfDir());
+  fs::remove_all(SocketDir());
+  fs::remove_all(LogDir());
+  fs::create_directories(ConfDir());
+
+  // Keep the dummy module shared library (and its symlink chain), remove any
+  // other artifacts created by tests.
+  fs::create_directories(LibDir());
+  const auto prefix = DummyLibPrefix();
+  for (const auto &entry : fs::directory_iterator(LibDir())) {
+    const auto name = entry.path().filename().string();
+    if (name.rfind(prefix, 0) == 0) {
+      continue;
+    }
+    fs::remove_all(entry.path());
+  }
+}
+
+ModuleManagerProto::ModuleInfo FindModuleInfoByName(const ModuleManagerProto::ModuleInfos &infos, const std::string &name) {
+  for (const auto &info : infos.module_info()) {
+    if (info.module_name() == name) {
+      return info;
+    }
+  }
+  ADD_FAILURE() << "ModuleInfo not found for module_name=" << name;
+  return {};
+}
+
+bool HasModuleInfoByName(const ModuleManagerProto::ModuleInfos &infos, const std::string &name) {
+  for (const auto &info : infos.module_info()) {
+    if (info.module_name() == name) {
+      return true;
+    }
+  }
+  return false;
+}
+
+class ModuleManagerTest : public ::testing::Test {
+protected:
+  void SetUp() override {
+    CleanTestEnvKeepDummyLib();
+    ASSERT_TRUE(fs::exists(LibDir())) << "`lib/` must exist in test WORKING_DIRECTORY";
+
+    // Ensure the dummy module has been built and placed under `./lib`.
+    ASSERT_FALSE(FindDummyLibFileName().empty())
+        << "Dummy module shared library not found under `./lib` (expected prefix: " << DummyLibPrefix() << ")";
+  }
+};
+}  // namespace
+
+// 验证：getModuleInfos 会扫描 ./lib 中的模块，并解析 .so.<version> 版本字符串。
+TEST_F(ModuleManagerTest, GetModuleInfosScansLibDirAndParsesVersion) {
+  // Create extra entries to cover scan filters/branches.
+  std::ofstream(LibDir() / "libNoVersion.so").put('\n');
+  std::ofstream(LibDir() / "ab.so.0.0.1").put('\n');  // ".so" is too early, should be ignored.
+  fs::create_directory(LibDir() / "libDir.so.0.0.1");  // Not a regular file, should be ignored.
+
+  // A symlink should be ignored.
+  const auto dummyFile = FindDummyLibFileName();
+  ASSERT_FALSE(dummyFile.empty());
+  fs::create_symlink(dummyFile, LibDir() / "libSymlink.so.0.0.1");
+
+  ModuleManager::ModuleManager mgr;
+  const auto &infos = mgr.getModuleInfos();
+
+  const auto dummyInfo = FindModuleInfoByName(infos, kDummyModuleName);
+  EXPECT_EQ(dummyInfo.lib_name(), dummyFile);
+  EXPECT_EQ(dummyInfo.version().version(), "0.0.1");
+  EXPECT_EQ(dummyInfo.version().major(), "0");
+  EXPECT_EQ(dummyInfo.version().minor(), "0");
+  EXPECT_EQ(dummyInfo.version().patch(), "1");
+
+  const auto noVerInfo = FindModuleInfoByName(infos, "NoVersion");
+  EXPECT_EQ(noVerInfo.lib_name(), "libNoVersion.so");
+  EXPECT_TRUE(noVerInfo.version().version().empty());
+  EXPECT_TRUE(noVerInfo.version().major().empty());
+  EXPECT_TRUE(noVerInfo.version().minor().empty());
+  EXPECT_TRUE(noVerInfo.version().patch().empty());
+
+  // Ensure filtered entries are not included.
+  EXPECT_FALSE(HasModuleInfoByName(infos, "Symlink"));
+  EXPECT_FALSE(HasModuleInfoByName(infos, "Dir"));
+}
+
+// 验证：loadModule/unloadModule 会启动/停止模块线程，并维护运行中模块列表。
+TEST_F(ModuleManagerTest, LoadAndUnloadModuleUpdatesRunningInfos) {
+  ModuleManager::ModuleManager mgr;
+  const auto &infos = mgr.getModuleInfos();
+
+  auto missing = ModuleManagerProto::ModuleInfo{};
+  missing.set_module_name("Missing");
+  missing.set_lib_name("libMissing.so.0.0.1");
+  mgr.loadModule(missing);
+  EXPECT_EQ(mgr.getModuleRunningInfos().module_running_info_size(), 0);
+
+  const auto dummyInfo = FindModuleInfoByName(infos, kDummyModuleName);
+  mgr.loadModule(dummyInfo);
+  auto running = mgr.getModuleRunningInfos();
+  ASSERT_EQ(running.module_running_info_size(), 1);
+  EXPECT_EQ(running.module_running_info(0).module_name(), kDummyModuleName);
+  EXPECT_EQ(running.module_running_info(0).lib_name(), dummyInfo.lib_name());
+  EXPECT_FALSE(running.module_running_info(0).inner_grpc_server().empty());
+  EXPECT_FALSE(running.module_running_info(0).outer_grpc_server().empty());
+
+  auto wrongLibName = dummyInfo;
+  wrongLibName.set_lib_name("libDummy.so.9.9.9");
+  mgr.unloadModule(wrongLibName);
+  EXPECT_EQ(mgr.getModuleRunningInfos().module_running_info_size(), 1);
+
+  mgr.unloadModule(dummyInfo);
+  EXPECT_EQ(mgr.getModuleRunningInfos().module_running_info_size(), 0);
+
+  // Unloading a non-running module should be a no-op.
+  mgr.unloadModule(dummyInfo);
+}
+
+// 验证：saveModuleStartConfig 会写入 ./conf/modConf.bin，且可反序列化回原数据。
+TEST_F(ModuleManagerTest, SaveModuleStartConfigWritesConfigBin) {
+  ModuleManager::ModuleManager mgr;
+  const auto &infos = mgr.getModuleInfos();
+  const auto dummyInfo = FindModuleInfoByName(infos, kDummyModuleName);
+
+  ModuleManagerProto::ModuleInfos config;
+  config.add_module_info()->CopyFrom(dummyInfo);
+
+  mgr.saveModuleStartConfig(config);
+
+  const auto bin = ConfDir() / "modConf.bin";
+  ASSERT_TRUE(fs::exists(bin));
+
+  std::ifstream ifs(bin, std::ios::binary);
+  ASSERT_TRUE(ifs.is_open());
+
+  ModuleManagerProto::ModuleInfos loaded;
+  ASSERT_TRUE(loaded.ParseFromIstream(&ifs));
+  EXPECT_EQ(loaded.SerializeAsString(), config.SerializeAsString());
+}
+
+// 验证：ModuleManagerGrpcService 将 RPC 调用正确委派给 ModuleManager。
+TEST_F(ModuleManagerTest, GrpcServiceDelegatesToModuleManager) {
+  ModuleManager::ModuleManager mgr;
+  ModuleManager::ModuleManagerServiceImpl service;
+  service.getModuleManager(&mgr);
+
+  grpc::ServerContext context;
+  ModuleManagerProto::Empty empty;
+
+  ModuleManagerProto::ModuleInfos infos;
+  ASSERT_TRUE(service.GetModuleInfo(&context, &empty, &infos).ok());
+  const auto dummyInfo = FindModuleInfoByName(infos, kDummyModuleName);
+
+  ModuleManagerProto::Empty out;
+  ASSERT_TRUE(service.StartModule(&context, &dummyInfo, &out).ok());
+  EXPECT_EQ(mgr.getModuleRunningInfos().module_running_info_size(), 1);
+
+  ModuleManagerProto::ModuleRunningInfos running;
+  ASSERT_TRUE(service.GetRunningModuleInfo(&context, &empty, &running).ok());
+  EXPECT_EQ(running.module_running_info_size(), 1);
+
+  ASSERT_TRUE(service.SaveModuleStartConfig(&context, &infos, &out).ok());
+  EXPECT_TRUE(fs::exists(ConfDir() / "modConf.bin"));
+
+  ASSERT_TRUE(service.StopModule(&context, &dummyInfo, &out).ok());
+  EXPECT_EQ(mgr.getModuleRunningInfos().module_running_info_size(), 0);
+
+  ASSERT_TRUE(service.UploadModule(&context, &empty, &out).ok());
+  ASSERT_TRUE(service.DeleteModule(&context, &dummyInfo, &out).ok());
+}
