@@ -18,6 +18,11 @@ ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104，并按
 - 内部 gRPC：`unix socket`：`./socket/ConfigPusher.sock`
 - 运行时可通过管理器 `GetRunningModuleInfo` 查询实际地址
 
+## 启动方式
+- 默认由 ModuleManager 的 `StartModule` 启动。
+- 如需随系统启动自动加载，在 `./conf/module_manager.jsonc` 的 `auto_start_modules` 中加入 `ConfigPusher`。
+- 建议：自启动列表仅填写 `ConfigPusher`，其余模块由 ConfigPusher 按配置按需启动。
+
 ## 配置与数据
 - 配置文件：`./conf/configPusher/iec104.jsonc`
 - 使用 Protobuf JSON 映射：枚举需写全名（例如 `ROLE_SERVER`、`TELEMETRY_TYPE_FLOAT`）

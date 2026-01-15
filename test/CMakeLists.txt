@@ -56,6 +56,23 @@ set_tests_properties(moduleInterface_test PROPERTIES
   WORKING_DIRECTORY "${MSKDSP_MODULE_INTERFACE_TEST_ENV_DIR}"
 )
 
+set(MSKDSP_LOGGER_TEST_ENV_DIR "${CMAKE_BINARY_DIR}/test_env/logger")
+file(MAKE_DIRECTORY "${MSKDSP_LOGGER_TEST_ENV_DIR}")
+
+add_executable(logger_test
+  logger_test.cc
+)
+
+target_link_libraries(logger_test PRIVATE
+  GTest::gtest_main
+  moduleManager
+)
+
+add_test(NAME logger_test COMMAND logger_test)
+set_tests_properties(logger_test PROPERTIES
+  WORKING_DIRECTORY "${MSKDSP_LOGGER_TEST_ENV_DIR}"
+)
+
 add_executable(dataCenterCore_test
   data_center_core_test.cc
   ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCore.cc
@@ -220,6 +237,7 @@ add_test(NAME agcGroupManager_test COMMAND agcGroupManager_test)
 set(MSKDSP_TEST_TARGETS
   moduleManager_test
   moduleInterface_test
+  logger_test
   dataCenterCore_test
   dataCenterPointTableStore_test
   dataCenterRouteStore_test

@@ -61,19 +61,19 @@ TEST(DataCenterCoreTest, RenameConnectionKeepsConnId) {
   DataCenterCore core;
 
   DataCenterProto::GetOrCreateConnectionRequest createReq;
-  *createReq.mutable_key() = MakeConnKey("Modbus", "mb-1");
+  *createReq.mutable_key() = MakeConnKey("ModbusRTU", "mb-1");
 
   DataCenterProto::ConnectionInfo created;
   ASSERT_TRUE(core.GetOrCreateConnection(createReq, &created).ok());
 
   DataCenterProto::RenameConnectionRequest renameReq;
-  *renameReq.mutable_old_key() = MakeConnKey("Modbus", "mb-1");
-  *renameReq.mutable_new_key() = MakeConnKey("Modbus", "mb-rename");
+  *renameReq.mutable_old_key() = MakeConnKey("ModbusRTU", "mb-1");
+  *renameReq.mutable_new_key() = MakeConnKey("ModbusRTU", "mb-rename");
 
   DataCenterProto::ConnectionInfo renamed;
   ASSERT_TRUE(core.RenameConnection(renameReq, &renamed).ok());
   EXPECT_EQ(renamed.conn_id(), created.conn_id());
-  EXPECT_EQ(renamed.module_name(), "Modbus");
+  EXPECT_EQ(renamed.module_name(), "ModbusRTU");
   EXPECT_EQ(renamed.conn_name(), "mb-rename");
 
   DataCenterProto::ConnectionInfo gotOld;
@@ -93,7 +93,7 @@ TEST(DataCenterCoreTest, DeleteConnectionCleansPointTableRoutesAndLatest) {
   DataCenterCore core;
 
   DataCenterProto::GetOrCreateConnectionRequest createSrc;
-  *createSrc.mutable_key() = MakeConnKey("Modbus", "mb-src");
+  *createSrc.mutable_key() = MakeConnKey("ModbusRTU", "mb-src");
   DataCenterProto::ConnectionInfo src;
   ASSERT_TRUE(core.GetOrCreateConnection(createSrc, &src).ok());
 

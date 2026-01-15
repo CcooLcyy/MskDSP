@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <stop_token>
 #include <string>
 
 #include <grpcpp/server_context.h>
@@ -18,6 +19,7 @@ fs::path LibDir() { return fs::path("lib"); }
 fs::path ConfDir() { return fs::path("conf"); }
 fs::path SocketDir() { return fs::path("socket"); }
 fs::path LogDir() { return fs::path("log"); }
+fs::path AutoStartConfigPath() { return ConfDir() / "module_manager.jsonc"; }
 
 std::string DummyLibPrefix() { return std::string("lib") + kDummyModuleName + ".so"; }
 
@@ -55,6 +57,12 @@ void CleanTestEnvKeepDummyLib() {
   }
 }
 
+void WriteAutoStartConfig(const std::string &content) {
+  fs::create_directories(ConfDir());
+  std::ofstream ofs(AutoStartConfigPath(), std::ios::trunc);
+  ofs << content;
+}
+
 ModuleManagerProto::ModuleInfo FindModuleInfoByName(const ModuleManagerProto::ModuleInfos &infos, const std::string &name) {
   for (const auto &info : infos.module_info()) {
     if (info.module_name() == name) {
@@ -87,7 +95,7 @@ protected:
 };
 }  // namespace
 
-// 验证：getModuleInfos 会扫描 ./lib 中的模块，并解析 .so.<version> 版本字符串。
+// 验证：getModuleInfos 会扫描 ./lib 中的模块，并读取 manifest 与 manifest_error。
 TEST_F(ModuleManagerTest, GetModuleInfosScansLibDirAndParsesVersion) {
   // Create extra entries to cover scan filters/branches.
   std::ofstream(LibDir() / "libNoVersion.so").put('\n');
@@ -108,6 +116,7 @@ TEST_F(ModuleManagerTest, GetModuleInfosScansLibDirAndParsesVersion) {
   EXPECT_EQ(dummyInfo.version().major(), "0");
   EXPECT_EQ(dummyInfo.version().minor(), "0");
   EXPECT_EQ(dummyInfo.version().patch(), "1");
+  EXPECT_TRUE(dummyInfo.manifest_error().empty());
 
   const auto noVerInfo = FindModuleInfoByName(infos, "NoVersion");
   EXPECT_EQ(noVerInfo.lib_name(), "libNoVersion.so");
@@ -115,6 +124,7 @@ TEST_F(ModuleManagerTest, GetModuleInfosScansLibDirAndParsesVersion) {
   EXPECT_TRUE(noVerInfo.version().major().empty());
   EXPECT_TRUE(noVerInfo.version().minor().empty());
   EXPECT_TRUE(noVerInfo.version().patch().empty());
+  EXPECT_FALSE(noVerInfo.manifest_error().empty());
 
   // Ensure filtered entries are not included.
   EXPECT_FALSE(HasModuleInfoByName(infos, "Symlink"));
@@ -129,11 +139,13 @@ TEST_F(ModuleManagerTest, LoadAndUnloadModuleUpdatesRunningInfos) {
   auto missing = ModuleManagerProto::ModuleInfo{};
   missing.set_module_name("Missing");
   missing.set_lib_name("libMissing.so.0.0.1");
-  mgr.loadModule(missing);
+  auto missingResult = mgr.loadModule(missing);
+  EXPECT_FALSE(missingResult.ok());
   EXPECT_EQ(mgr.getModuleRunningInfos().module_running_info_size(), 0);
 
   const auto dummyInfo = FindModuleInfoByName(infos, kDummyModuleName);
-  mgr.loadModule(dummyInfo);
+  auto startResult = mgr.loadModule(dummyInfo);
+  EXPECT_TRUE(startResult.ok());
   auto running = mgr.getModuleRunningInfos();
   ASSERT_EQ(running.module_running_info_size(), 1);
   EXPECT_EQ(running.module_running_info(0).module_name(), kDummyModuleName);
@@ -143,14 +155,40 @@ TEST_F(ModuleManagerTest, LoadAndUnloadModuleUpdatesRunningInfos) {
 
   auto wrongLibName = dummyInfo;
   wrongLibName.set_lib_name("libDummy.so.9.9.9");
-  mgr.unloadModule(wrongLibName);
+  auto wrongStop = mgr.unloadModule(wrongLibName);
+  EXPECT_FALSE(wrongStop.ok());
   EXPECT_EQ(mgr.getModuleRunningInfos().module_running_info_size(), 1);
 
-  mgr.unloadModule(dummyInfo);
+  auto stopResult = mgr.unloadModule(dummyInfo);
+  EXPECT_TRUE(stopResult.ok());
   EXPECT_EQ(mgr.getModuleRunningInfos().module_running_info_size(), 0);
 
   // Unloading a non-running module should be a no-op.
+  auto stopAgain = mgr.unloadModule(dummyInfo);
+  EXPECT_TRUE(stopAgain.ok());
+}
+
+// 验证：启动时读取 module_manager.jsonc 的 auto_start_modules 并自动加载模块。
+TEST_F(ModuleManagerTest, AutoStartModulesFromJsonConfig) {
+  WriteAutoStartConfig(R"jsonc(
+{
+  // 自动加载的模块列表
+  "auto_start_modules": ["Dummy"]
+}
+)jsonc");
+
+  ModuleManager::ModuleManager mgr;
+  std::stop_source stopSource;
+  stopSource.request_stop();
+  mgr.start(stopSource.get_token());
+
+  auto running = mgr.getModuleRunningInfos();
+  ASSERT_EQ(running.module_running_info_size(), 1);
+  EXPECT_EQ(running.module_running_info(0).module_name(), kDummyModuleName);
+
+  const auto dummyInfo = FindModuleInfoByName(mgr.getModuleInfos(), kDummyModuleName);
   mgr.unloadModule(dummyInfo);
+  EXPECT_EQ(mgr.getModuleRunningInfos().module_running_info_size(), 0);
 }
 
 // 验证：saveModuleStartConfig 会写入 ./conf/modConf.bin，且可反序列化回原数据。

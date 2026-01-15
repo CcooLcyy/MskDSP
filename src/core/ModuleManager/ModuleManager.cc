@@ -11,10 +11,13 @@
 
 #include <algorithm>
 #include <boost/dll/shared_library.hpp>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <stop_token>
 #include <string_view>
@@ -117,6 +120,307 @@ bool readFile(const std::filesystem::path &path, std::string *out) {
   *out = oss.str();
   return true;
 }
+
+struct VersionConstraint {
+  enum class Op {
+    kEq,
+    kLt,
+    kLte,
+    kGt,
+    kGte,
+  };
+  Op op;
+  std::vector<int> version;
+};
+
+std::string joinNames(const std::vector<std::string> &names, std::string_view sep) {
+  if (names.empty()) {
+    return {};
+  }
+  std::ostringstream oss;
+  for (size_t i = 0; i < names.size(); ++i) {
+    if (i != 0) {
+      oss << sep;
+    }
+    oss << names[i];
+  }
+  return oss.str();
+}
+
+std::string extractModuleNameFromLibName(const std::string &libName) {
+  auto soPos = libName.find(".so");
+  if (soPos == std::string::npos || soPos <= 3) {
+    return {};
+  }
+  if (libName.rfind("lib", 0) != 0) {
+    return {};
+  }
+  return libName.substr(3, soPos - 3);
+}
+
+bool parseVersionParts(const std::string &version, std::vector<int> *parts, std::string *error) {
+  if (parts == nullptr) {
+    return false;
+  }
+  parts->clear();
+  if (version.empty()) {
+    if (error != nullptr) {
+      *error = "version is empty";
+    }
+    return false;
+  }
+
+  size_t start = 0;
+  while (start < version.size()) {
+    size_t end = version.find('.', start);
+    auto segment = version.substr(start, end == std::string::npos ? std::string::npos : end - start);
+    if (segment.empty()) {
+      if (error != nullptr) {
+        *error = "version segment is empty";
+      }
+      return false;
+    }
+    for (const auto ch : segment) {
+      if (!std::isdigit(static_cast<unsigned char>(ch))) {
+        if (error != nullptr) {
+          *error = "version segment is not numeric";
+        }
+        return false;
+      }
+    }
+    parts->push_back(std::stoi(segment));
+    if (end == std::string::npos) {
+      break;
+    }
+    start = end + 1;
+  }
+  return true;
+}
+
+int compareVersions(const std::vector<int> &lhs, const std::vector<int> &rhs) {
+  const auto maxSize = std::max(lhs.size(), rhs.size());
+  for (size_t i = 0; i < maxSize; ++i) {
+    const auto left = i < lhs.size() ? lhs[i] : 0;
+    const auto right = i < rhs.size() ? rhs[i] : 0;
+    if (left < right) {
+      return -1;
+    }
+    if (left > right) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+bool parseVersionRange(const std::string &expr, std::vector<VersionConstraint> *constraints, std::string *error) {
+  if (constraints == nullptr) {
+    return false;
+  }
+  constraints->clear();
+  if (expr.empty()) {
+    return true;
+  }
+
+  std::istringstream iss(expr);
+  std::string token;
+  while (iss >> token) {
+    std::string op;
+    std::string version;
+    if (token == "<" || token == "<=" || token == ">" || token == ">=" || token == "=") {
+      op = token;
+      if (!(iss >> version)) {
+        if (error != nullptr) {
+          *error = "missing version after operator";
+        }
+        return false;
+      }
+    } else {
+      if (token.rfind("==", 0) == 0) {
+        if (error != nullptr) {
+          *error = "operator '==' is not supported";
+        }
+        return false;
+      }
+      if (token.rfind(">=", 0) == 0 || token.rfind("<=", 0) == 0) {
+        op = token.substr(0, 2);
+        version = token.substr(2);
+      } else if (!token.empty() && (token[0] == '>' || token[0] == '<' || token[0] == '=')) {
+        op = token.substr(0, 1);
+        version = token.substr(1);
+      } else {
+        op = "=";
+        version = token;
+      }
+    }
+    if (version.empty()) {
+      if (error != nullptr) {
+        *error = "missing version in constraint";
+      }
+      return false;
+    }
+
+    std::vector<int> parts;
+    std::string parseError;
+    if (!parseVersionParts(version, &parts, &parseError)) {
+      if (error != nullptr) {
+        *error = parseError;
+      }
+      return false;
+    }
+
+    VersionConstraint::Op opValue = VersionConstraint::Op::kEq;
+    if (op == "=") {
+      opValue = VersionConstraint::Op::kEq;
+    } else if (op == "<") {
+      opValue = VersionConstraint::Op::kLt;
+    } else if (op == "<=") {
+      opValue = VersionConstraint::Op::kLte;
+    } else if (op == ">") {
+      opValue = VersionConstraint::Op::kGt;
+    } else if (op == ">=") {
+      opValue = VersionConstraint::Op::kGte;
+    } else {
+      if (error != nullptr) {
+        *error = "unknown operator";
+      }
+      return false;
+    }
+    constraints->push_back({opValue, std::move(parts)});
+  }
+
+  if (constraints->empty()) {
+    if (error != nullptr) {
+      *error = "empty version constraint";
+    }
+    return false;
+  }
+  return true;
+}
+
+bool isVersionSatisfied(const std::vector<int> &version, const std::vector<VersionConstraint> &constraints) {
+  for (const auto &constraint : constraints) {
+    const auto cmp = compareVersions(version, constraint.version);
+    switch (constraint.op) {
+      case VersionConstraint::Op::kEq:
+        if (cmp != 0) {
+          return false;
+        }
+        break;
+      case VersionConstraint::Op::kLt:
+        if (cmp >= 0) {
+          return false;
+        }
+        break;
+      case VersionConstraint::Op::kLte:
+        if (cmp > 0) {
+          return false;
+        }
+        break;
+      case VersionConstraint::Op::kGt:
+        if (cmp <= 0) {
+          return false;
+        }
+        break;
+      case VersionConstraint::Op::kGte:
+        if (cmp < 0) {
+          return false;
+        }
+        break;
+    }
+  }
+  return true;
+}
+
+bool loadModuleManifest(const std::filesystem::path &libPath, ModuleManagerProto::ModuleManifest *manifest, std::string *error) {
+  if (manifest == nullptr) {
+    return false;
+  }
+  try {
+    boost::dll::shared_library lib;
+    lib.load(libPath.string(), boost::dll::load_mode::rtld_lazy);
+    if (!lib.has("GetModuleManifestPb")) {
+      if (error != nullptr) {
+        *error = "manifest symbol GetModuleManifestPb not found";
+      }
+      return false;
+    }
+    using ManifestFn = bool (*)(const uint8_t **, size_t *);
+    auto fn = lib.get<ManifestFn>("GetModuleManifestPb");
+    const uint8_t *data = nullptr;
+    size_t size = 0;
+    if (!fn(&data, &size)) {
+      if (error != nullptr) {
+        *error = "manifest function returned false";
+      }
+      return false;
+    }
+    if (data == nullptr || size == 0) {
+      if (error != nullptr) {
+        *error = "manifest returned empty payload";
+      }
+      return false;
+    }
+    if (!manifest->ParseFromArray(data, static_cast<int>(size))) {
+      if (error != nullptr) {
+        *error = "manifest parse failed";
+      }
+      return false;
+    }
+    return true;
+  } catch (const std::exception &ex) {
+    if (error != nullptr) {
+      *error = ex.what();
+    }
+    return false;
+  }
+}
+
+bool validateManifest(const ModuleManagerProto::ModuleManifest &manifest, const std::string &expectedName, std::string *error) {
+  if (manifest.module_name().empty()) {
+    if (error != nullptr) {
+      *error = "manifest module_name is empty";
+    }
+    return false;
+  }
+  if (manifest.module_name() != expectedName) {
+    if (error != nullptr) {
+      *error = "manifest module_name mismatch: expected " + expectedName + " got " + manifest.module_name();
+    }
+    return false;
+  }
+  if (manifest.version().version().empty()) {
+    if (error != nullptr) {
+      *error = "manifest version is empty";
+    }
+    return false;
+  }
+  std::string parseError;
+  std::vector<int> versionParts;
+  if (!parseVersionParts(manifest.version().version(), &versionParts, &parseError)) {
+    if (error != nullptr) {
+      *error = "manifest version invalid: " + parseError;
+    }
+    return false;
+  }
+  for (const auto &dependency : manifest.dependencies()) {
+    if (dependency.module_name().empty()) {
+      if (error != nullptr) {
+        *error = "dependency module_name is empty";
+      }
+      return false;
+    }
+    if (!dependency.version_range().empty()) {
+      std::vector<VersionConstraint> constraints;
+      if (!parseVersionRange(dependency.version_range(), &constraints, &parseError)) {
+        if (error != nullptr) {
+          *error = "dependency " + dependency.module_name() + " version_range invalid: " + parseError;
+        }
+        return false;
+      }
+    }
+  }
+  return true;
+}
 }  // namespace
 
 namespace ModuleManager {
@@ -134,9 +438,15 @@ void ModuleManager::start(std::stop_token stopToken) {
   LOG_INFO("正在启动模块管理器");
   moduleManagerService_->getModuleManager(this);
   grpcServerBuilder(moduleManagerService_);
+  initModuleInfos();
   autoStartModulesFromConfig();
   while (!stopToken.stop_requested()) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
+  }
+}
+void ModuleManager::ensureModuleInfos() {
+  if (!moduleInfosReady_) {
+    initModuleInfos();
   }
 }
 void ModuleManager::autoStartModulesFromConfig() {
@@ -178,7 +488,7 @@ void ModuleManager::autoStartModulesFromConfig() {
     return;
   }
 
-  initModuleInfos();
+  ensureModuleInfos();
   int started = 0;
   for (const auto &value : list.values()) {
     if (value.kind_case() != google::protobuf::Value::kStringValue) {
@@ -190,50 +500,289 @@ void ModuleManager::autoStartModulesFromConfig() {
       LOG_WARNING("Auto-start module entry is empty");
       continue;
     }
-    auto runningIt = std::find_if(libInfoVec_.begin(), libInfoVec_.end(), [&](const std::shared_ptr<LibInfo> &lib) {
-      return lib->MetaData().name == moduleName;
-    });
-    if (runningIt != libInfoVec_.end()) {
-      LOG_INFO("Auto-start skip, module already running: {}", moduleName);
-      continue;
-    }
-
-    auto moduleInfoIt = std::find_if(moduleInfos_.module_info().begin(), moduleInfos_.module_info().end(), [&](const ModuleManagerProto::ModuleInfo &elem) {
-      return elem.module_name() == moduleName;
-    });
-    if (moduleInfoIt == moduleInfos_.module_info().end()) {
-      LOG_WARNING("Auto-start module not found in ./lib: {}", moduleName);
-      continue;
-    }
-
     LOG_INFO("Auto-start module: {}", moduleName);
-    libInfoVec_.emplace_back(LibInfo::create(*moduleInfoIt));
+    auto result = startModuleByName(moduleName);
+    if (!result.ok()) {
+      LOG_ERROR("Auto-start module {} failed: {}", moduleName, result.message);
+      continue;
+    }
     ++started;
   }
 
   LOG_INFO("Auto-start completed, started {}", started);
 }
-void ModuleManager::loadModule(ModuleManagerProto::ModuleInfo moduleInfo) {
-  initModuleInfos();
-  auto moduleInfoIt = std::find_if(moduleInfos_.module_info().begin(), moduleInfos_.module_info().end(), [&](const ModuleManagerProto::ModuleInfo &elem) {
-    return elem.module_name() == moduleInfo.module_name();
-  });
-  if (moduleInfoIt != moduleInfos_.module_info().end()) {
-    libInfoVec_.emplace_back(LibInfo::create(moduleInfo));
+ModuleOpResult ModuleManager::loadModule(ModuleManagerProto::ModuleInfo moduleInfo) {
+  ensureModuleInfos();
+  std::string moduleName;
+  auto resolveResult = resolveModuleName(moduleInfo, &moduleName);
+  if (!resolveResult.ok()) {
+    return resolveResult;
   }
+  return startModuleByName(moduleName);
 }
-void ModuleManager::unloadModule(ModuleManagerProto::ModuleInfo moduleInfo) {
-  auto libInfoIt = std::find_if(libInfoVec_.begin(), libInfoVec_.end(), [&](const std::shared_ptr<LibInfo> &elem) {
-    return elem->MetaData().libName == moduleInfo.lib_name();
-  });
-  if (libInfoIt != libInfoVec_.end()) {
-    libInfoIt->get()->cleanUp();
-    libInfoVec_.erase(libInfoIt);
+ModuleOpResult ModuleManager::unloadModule(ModuleManagerProto::ModuleInfo moduleInfo) {
+  ensureModuleInfos();
+  std::string moduleName;
+  auto resolveResult = resolveModuleName(moduleInfo, &moduleName);
+  if (!resolveResult.ok()) {
+    return resolveResult;
   }
+  return stopModuleByName(moduleName);
 }
 ModuleManagerProto::ModuleInfos &ModuleManager::getModuleInfos() {
-  initModuleInfos();
+  ensureModuleInfos();
   return moduleInfos_;
+}
+ModuleOpResult ModuleManager::resolveModuleName(const ModuleManagerProto::ModuleInfo &moduleInfo, std::string *moduleName) {
+  if (moduleName == nullptr) {
+    return {ModuleOpError::kInternal, "moduleName output is null"};
+  }
+  if (!moduleInfo.module_name().empty()) {
+    *moduleName = moduleInfo.module_name();
+  } else if (!moduleInfo.lib_name().empty()) {
+    *moduleName = extractModuleNameFromLibName(moduleInfo.lib_name());
+  }
+  if (moduleName->empty()) {
+    if (moduleInfo.lib_name().empty()) {
+      return {ModuleOpError::kInvalidArgument, "module_name or lib_name is required"};
+    }
+    return {ModuleOpError::kInvalidArgument, "lib_name is invalid"};
+  }
+
+  auto infoIt = moduleInfoByName_.find(*moduleName);
+  if (infoIt == moduleInfoByName_.end()) {
+    return {ModuleOpError::kNotFound, "module not found: " + *moduleName};
+  }
+  if (!moduleInfo.lib_name().empty() && moduleInfo.lib_name() != infoIt->second.lib_name()) {
+    return {ModuleOpError::kInvalidArgument, "lib_name mismatch for module: " + *moduleName};
+  }
+  return {ModuleOpError::kOk, {}};
+}
+ModuleOpResult ModuleManager::startModuleByName(const std::string &moduleName) {
+  auto infoIt = moduleInfoByName_.find(moduleName);
+  if (infoIt == moduleInfoByName_.end()) {
+    return {ModuleOpError::kNotFound, "module not found: " + moduleName};
+  }
+  if (!infoIt->second.manifest_error().empty()) {
+    return {ModuleOpError::kFailedPrecondition, "module manifest_error: " + infoIt->second.manifest_error()};
+  }
+  if (isModuleRunning(moduleName)) {
+    LOG_INFO("模块已在运行，跳过启动: {}", moduleName);
+    return {ModuleOpError::kOk, {}};
+  }
+
+  std::vector<std::string> order;
+  auto resolveResult = resolveStartOrder(moduleName, &order);
+  if (!resolveResult.ok()) {
+    LOG_ERROR("模块 {} 依赖解析失败: {}", moduleName, resolveResult.message);
+    return resolveResult;
+  }
+  LOG_INFO("启动模块 {}，依赖顺序: {}", moduleName, joinNames(order, " -> "));
+
+  std::vector<std::string> started;
+  for (const auto &name : order) {
+    if (isModuleRunning(name)) {
+      LOG_INFO("模块已在运行，跳过启动: {}", name);
+      continue;
+    }
+    const auto info = moduleInfoByName_.at(name);
+    try {
+      libInfoVec_.emplace_back(LibInfo::create(info));
+    } catch (const std::exception &ex) {
+      LOG_ERROR("启动模块 {} 失败: {}", name, ex.what());
+      for (auto it = started.rbegin(); it != started.rend(); ++it) {
+        if (stopRunningModuleByName(*it)) {
+          LOG_INFO("回滚停止模块: {}", *it);
+        }
+      }
+      return {ModuleOpError::kInternal, std::string("start module failed: ") + ex.what()};
+    }
+    started.push_back(name);
+    LOG_INFO("模块启动完成: {}", name);
+  }
+  return {ModuleOpError::kOk, {}};
+}
+ModuleOpResult ModuleManager::stopModuleByName(const std::string &moduleName) {
+  auto infoIt = moduleInfoByName_.find(moduleName);
+  if (infoIt == moduleInfoByName_.end()) {
+    return {ModuleOpError::kNotFound, "module not found: " + moduleName};
+  }
+
+  std::vector<std::string> order;
+  auto resolveResult = resolveStopOrder(moduleName, &order);
+  if (!resolveResult.ok()) {
+    LOG_ERROR("模块 {} 级联解析失败: {}", moduleName, resolveResult.message);
+    return resolveResult;
+  }
+  LOG_INFO("停止模块 {}，级联顺序: {}", moduleName, joinNames(order, " -> "));
+
+  for (const auto &name : order) {
+    if (!isModuleRunning(name)) {
+      LOG_INFO("模块未运行，跳过停止: {}", name);
+      continue;
+    }
+    if (!stopRunningModuleByName(name)) {
+      LOG_ERROR("停止模块失败: {}", name);
+      return {ModuleOpError::kInternal, "stop module failed: " + name};
+    }
+    LOG_INFO("模块停止完成: {}", name);
+  }
+  return {ModuleOpError::kOk, {}};
+}
+ModuleOpResult ModuleManager::resolveStartOrder(const std::string &moduleName, std::vector<std::string> *order) {
+  if (order == nullptr) {
+    return {ModuleOpError::kInternal, "order output is null"};
+  }
+  order->clear();
+
+  enum class VisitState {
+    kVisiting,
+    kVisited,
+  };
+  std::unordered_map<std::string, VisitState> states;
+  std::vector<std::string> stack;
+  std::string error;
+
+  std::function<bool(const std::string &)> dfs = [&](const std::string &name) {
+    const auto stateIt = states.find(name);
+    if (stateIt != states.end()) {
+      if (stateIt->second == VisitState::kVisiting) {
+        auto cycleStart = std::find(stack.begin(), stack.end(), name);
+        std::vector<std::string> cycle(cycleStart, stack.end());
+        cycle.push_back(name);
+        error = "检测到依赖环: " + joinNames(cycle, " -> ");
+        return false;
+      }
+      return true;
+    }
+
+    auto infoIt = moduleInfoByName_.find(name);
+    if (infoIt == moduleInfoByName_.end()) {
+      error = "依赖模块不存在: " + name;
+      return false;
+    }
+    const auto &info = infoIt->second;
+    if (!info.manifest_error().empty()) {
+      error = "模块不可用: " + name + " (" + info.manifest_error() + ")";
+      return false;
+    }
+
+    states.emplace(name, VisitState::kVisiting);
+    stack.push_back(name);
+    for (const auto &dependency : info.dependencies()) {
+      if (dependency.module_name().empty()) {
+        error = "模块依赖名为空: " + name;
+        return false;
+      }
+      auto depIt = moduleInfoByName_.find(dependency.module_name());
+      if (depIt == moduleInfoByName_.end()) {
+        error = "模块 " + name + " 依赖缺失: " + dependency.module_name();
+        return false;
+      }
+      if (!depIt->second.manifest_error().empty()) {
+        error = "模块 " + name + " 依赖不可用: " + dependency.module_name() + " (" + depIt->second.manifest_error() + ")";
+        return false;
+      }
+
+      if (!dependency.version_range().empty()) {
+        std::vector<VersionConstraint> constraints;
+        std::string parseError;
+        if (!parseVersionRange(dependency.version_range(), &constraints, &parseError)) {
+          error = "模块 " + name + " 依赖版本约束非法: " + dependency.module_name() + " (" + parseError + ")";
+          return false;
+        }
+        if (depIt->second.version().version().empty()) {
+          error = "依赖模块版本缺失: " + dependency.module_name();
+          return false;
+        }
+        std::vector<int> versionParts;
+        if (!parseVersionParts(depIt->second.version().version(), &versionParts, &parseError)) {
+          error = "依赖模块版本非法: " + dependency.module_name() + " (" + parseError + ")";
+          return false;
+        }
+        if (!isVersionSatisfied(versionParts, constraints)) {
+          error = "模块 " + name + " 依赖版本不满足: " + dependency.module_name() + " 约束 " + dependency.version_range() + " 实际 " + depIt->second.version().version();
+          return false;
+        }
+      }
+
+      if (!dfs(dependency.module_name())) {
+        return false;
+      }
+    }
+    stack.pop_back();
+    states[name] = VisitState::kVisited;
+    order->push_back(name);
+    return true;
+  };
+
+  if (!dfs(moduleName)) {
+    return {ModuleOpError::kFailedPrecondition, error};
+  }
+  return {ModuleOpError::kOk, {}};
+}
+ModuleOpResult ModuleManager::resolveStopOrder(const std::string &moduleName, std::vector<std::string> *order) {
+  if (order == nullptr) {
+    return {ModuleOpError::kInternal, "order output is null"};
+  }
+  order->clear();
+
+  enum class VisitState {
+    kVisiting,
+    kVisited,
+  };
+  std::unordered_map<std::string, VisitState> states;
+  std::vector<std::string> stack;
+  std::string error;
+
+  std::function<bool(const std::string &)> dfs = [&](const std::string &name) {
+    const auto stateIt = states.find(name);
+    if (stateIt != states.end()) {
+      if (stateIt->second == VisitState::kVisiting) {
+        auto cycleStart = std::find(stack.begin(), stack.end(), name);
+        std::vector<std::string> cycle(cycleStart, stack.end());
+        cycle.push_back(name);
+        error = "检测到依赖环: " + joinNames(cycle, " -> ");
+        return false;
+      }
+      return true;
+    }
+    states.emplace(name, VisitState::kVisiting);
+    stack.push_back(name);
+    const auto reverseIt = reverseDependencies_.find(name);
+    if (reverseIt != reverseDependencies_.end()) {
+      for (const auto &dependent : reverseIt->second) {
+        if (!dfs(dependent)) {
+          return false;
+        }
+      }
+    }
+    stack.pop_back();
+    states[name] = VisitState::kVisited;
+    order->push_back(name);
+    return true;
+  };
+
+  if (!dfs(moduleName)) {
+    return {ModuleOpError::kFailedPrecondition, error};
+  }
+  return {ModuleOpError::kOk, {}};
+}
+bool ModuleManager::isModuleRunning(const std::string &moduleName) const {
+  return std::any_of(libInfoVec_.begin(), libInfoVec_.end(), [&](const std::shared_ptr<LibInfo> &lib) {
+    return lib->MetaData().name == moduleName;
+  });
+}
+bool ModuleManager::stopRunningModuleByName(const std::string &moduleName) {
+  auto libInfoIt = std::find_if(libInfoVec_.begin(), libInfoVec_.end(), [&](const std::shared_ptr<LibInfo> &elem) {
+    return elem->MetaData().name == moduleName;
+  });
+  if (libInfoIt == libInfoVec_.end()) {
+    return false;
+  }
+  libInfoIt->get()->cleanUp();
+  libInfoVec_.erase(libInfoIt);
+  return true;
 }
 ModuleManagerProto::ModuleRunningInfos ModuleManager::getModuleRunningInfos() {
   ModuleManagerProto::ModuleRunningInfos result;
@@ -266,26 +815,66 @@ void ModuleManager::saveModuleStartConfig(ModuleManagerProto::ModuleInfos module
 }
 void ModuleManager::initModuleInfos() {
   moduleInfos_.Clear();
+  moduleInfoByName_.clear();
+  reverseDependencies_.clear();
+  moduleInfosReady_ = true;
   const std::filesystem::path libDir("./lib");
   if (!std::filesystem::exists(libDir) || !std::filesystem::is_directory(libDir)) {
+    LOG_WARNING("模块目录不存在或不可访问: {}", libDir.string());
     return;
   }
 
+  int total = 0;
+  int available = 0;
+  int invalid = 0;
   for (const auto &entry : std::filesystem::directory_iterator(libDir)) {
     if (entry.is_symlink() || !entry.is_regular_file()) {
       continue;
     }
     const std::string fileName = entry.path().filename().string();
-    auto soPos = fileName.find(".so");
-    if (soPos == std::string::npos || soPos <= 3) {
+    auto moduleName = extractModuleNameFromLibName(fileName);
+    if (moduleName.empty()) {
       continue;
     }
+    ++total;
     auto moduleInfo = moduleInfos_.add_module_info();
-    auto moduleName = fileName.substr(3, soPos - 3);
     moduleInfo->set_module_name(moduleName);
     moduleInfo->set_lib_name(fileName);
-    moduleInfo->mutable_version()->CopyFrom(parseVersion(fileName));
+
+    ModuleManagerProto::ModuleManifest manifest;
+    std::string error;
+    if (!loadModuleManifest(entry.path(), &manifest, &error)) {
+      moduleInfo->set_manifest_error(error);
+      ++invalid;
+      LOG_ERROR("模块 {} manifest 读取失败: {}", moduleName, error);
+    } else if (!validateManifest(manifest, moduleName, &error)) {
+      moduleInfo->set_manifest_error(error);
+      ++invalid;
+      LOG_ERROR("模块 {} manifest 校验失败: {}", moduleName, error);
+    } else {
+      moduleInfo->mutable_version()->CopyFrom(manifest.version());
+      for (const auto &dependency : manifest.dependencies()) {
+        moduleInfo->add_dependencies()->CopyFrom(dependency);
+      }
+      ++available;
+      auto fileVersion = parseVersion(fileName);
+      if (!fileVersion.version().empty() && fileVersion.version() != manifest.version().version()) {
+        LOG_WARNING("模块 {} 版本不一致: manifest {} lib {}", moduleName, manifest.version().version(), fileVersion.version());
+      }
+    }
+    moduleInfoByName_[moduleName] = *moduleInfo;
   }
+
+  for (const auto &entry : moduleInfoByName_) {
+    const auto &info = entry.second;
+    if (!info.manifest_error().empty()) {
+      continue;
+    }
+    for (const auto &dependency : info.dependencies()) {
+      reverseDependencies_[dependency.module_name()].push_back(info.module_name());
+    }
+  }
+  LOG_INFO("模块清单扫描完成: total {}, available {}, invalid {}", total, available, invalid);
 }
 ModuleManagerProto::ModuleVersion ModuleManager::parseVersion(std::string libName) {
   ModuleManagerProto::ModuleVersion version;

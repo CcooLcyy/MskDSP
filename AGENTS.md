@@ -1,7 +1,7 @@
 # 仓库指南
 
 ## 项目结构与模块组织
-核心代码位于 `src/`：`core/ModuleManager` 负责管理模块生命周期并暴露 gRPC 服务；`DataCenter` 与 `IEC104` 是插件式共享库，通过管理器进行链接；`main.cc` 在后台线程启动管理器。Protobuf 协议位于 `protobuf/`，生成的 gRPC 桩由 `dspProto` 目标统一链接。第三方代码位于 `3rdlibs/siren/`（以子工程方式构建）。构建产物输出到 `package/`（`package/MskDSP` 可执行文件、`package/lib` 共享库、`package/conf` 生成的配置头文件）。辅助脚本位于 `script/`。
+核心代码位于 `src/`：`core/ModuleManager` 负责管理模块生命周期并暴露 gRPC 服务；`DataCenter` 与 `IEC104` 是插件式共享库，通过管理器进行链接；`main.cc` 在后台线程启动管理器。Protobuf 协议位于 `protobuf/`，生成的 gRPC 桩由 `dspProto` 目标统一链接。第三方代码位于 `3rdlibs/siren/`（以子工程方式构建）。构建产物输出到 `package/`（`package/MskDSP` 可执行文件、`package/lib` 共享库、`package/conf` 生成的配置头文件）；`package/conf/configPusher/` 下所有配置仅供 configPusher 下发/示例使用，不作为具体模块运行时配置来源。辅助脚本位于 `script/`。
 
 ## 构建、测试与开发命令
 依赖通过 CMake + vcpkg manifest（`vcpkg*.json`）管理，包含 gRPC、Protobuf、Boost、GTest。典型流程：

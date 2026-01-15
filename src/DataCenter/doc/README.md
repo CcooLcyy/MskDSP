@@ -1,7 +1,7 @@
 # DataCenter 模块
 
 ## 定位与边界
-DataCenter 是进程内的“数据总线/转发枢纽”，用于在不同协议连接之间转发数据（例如 Modbus 抄表 → IEC104 上报），以实现跨协议的数据互通。
+DataCenter 是进程内的“数据总线/转发枢纽”，用于在不同协议连接之间转发数据（例如 ModbusRTU 抄表 → IEC104 上报），以实现跨协议的数据互通。
 
 ## 能力清单
 - 连接级隔离：通过 `connId` 区分不同连接/通信链路
@@ -87,7 +87,7 @@ DataCenter 对外提供一组面向“连接/点表/路由/转发”的 gRPC 接
   - 说明：订阅端消费过慢时，服务端会丢弃过旧消息以避免无限堆积（best-effort，不保证每条更新都可达）。
 
 ## 配置与使用流程（建议）
-1. 在各协议模块（IEC104/Modbus/DLT645/…）配置阶段，通过 DataCenter 的 `GetOrCreateConnection(module_name, conn_name)` 获取 `connId`（全局唯一且持久化），并将该 `connId` 写入该连接的配置；为每个点配置 `tag`（逻辑点名，可中文）。
+1. 在各协议模块（IEC104/ModbusRTU/DLT645/…）配置阶段，通过 DataCenter 的 `GetOrCreateConnection(module_name, conn_name)` 获取 `connId`（全局唯一且持久化），并将该 `connId` 写入该连接的配置；为每个点配置 `tag`（逻辑点名，可中文）。
 2. 在 DataCenter 中为源/目的两侧连接下发点表（可选但建议）：`UpsertPointTable(connId, tags...)`。
 3. 在 DataCenter 中配置路由方向（有向绑定）：基于源/目的两侧点表中已知的 `connId + tag` 建立 `src -> dst` 规则（支持一对多）。
 4. 启动模块：通过管理器启动 DataCenter 与各协议模块；采集端向 DataCenter 发布数据，上送端订阅/获取对应 `tag` 的更新进行上报。
@@ -97,8 +97,8 @@ DataCenter 对外提供一组面向“连接/点表/路由/转发”的 gRPC 接
 
 ### 1) 连接主键与命名
 - `ConnectionKey = (module_name, conn_name)` 是 `connId` 分配的唯一主键：两者都应当稳定且可预测，避免运行期随机字符串。
-- `module_name` 建议与模块标识保持一致（例如 `IEC104`、`modbus`），用于区分不同协议模块空间。
-- `conn_name` 建议由上位机统一规划并保证同一 `module_name` 内唯一（例如 `104-主站A`、`modbus-1#RTU`）。
+- `module_name` 建议与模块标识保持一致（例如 `IEC104`、`ModbusRTU`），用于区分不同协议模块空间。
+- `conn_name` 建议由上位机统一规划并保证同一 `module_name` 内唯一（例如 `104-主站A`、`ModbusRTU-1#RTU`）。
 
 ### 2) connId 分配策略（推荐）
 - 上位机/协议模块在“配置阶段”先调用 `GetOrCreateConnection` 获取 `connId`，并将返回的 `connId` 固化到该连接配置中（后续运行期 `Publish/Subscribe` 使用同一 `connId`）。

@@ -72,7 +72,7 @@ TEST(DataCenterConnectionStoreTest, SaveAndLoadRoundtrip) {
 
   auto cfg = MakeConfig(100, {
                               {1, "IEC104", "104-1"},
-                              {2, "Modbus", "mb-1"},
+                              {2, "ModbusRTU", "mb-1"},
                           });
   ASSERT_TRUE(store.Save(cfg).ok());
 
@@ -109,7 +109,7 @@ TEST(DataCenterConnectionStoreTest, LoadFallsBackToBackupWhenMainCorruptedAndRes
                              });
   auto cfg2 = MakeConfig(11, {
                                  {1, "IEC104", "104-1"},
-                                 {2, "Modbus", "mb-1"},
+                                 {2, "ModbusRTU", "mb-1"},
                              });
 
   ASSERT_TRUE(store.Save(cfg1).ok());

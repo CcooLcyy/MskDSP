@@ -8,7 +8,7 @@
 
 #include <grpcpp/grpcpp.h>
 
-#include "Modbus.grpc.pb.h"
+#include "ModbusRTU.grpc.pb.h"
 #include "ModuleInterface.h"
 
 namespace {
@@ -24,9 +24,9 @@ public:
   void ReleasePortForTest(std::string address) { releasePort(std::move(address)); }
 };
 
-class ModbusPingService final : public ModbusProto::ModbusService::Service {
+class ModbusRTUPingService final : public ModbusRTUProto::ModbusRTUService::Service {
 public:
-  grpc::Status Ping(grpc::ServerContext *, const ModbusProto::Empty *, ModbusProto::Empty *) override {
+  grpc::Status Ping(grpc::ServerContext *, const ModbusRTUProto::Empty *, ModbusRTUProto::Empty *) override {
     return grpc::Status::OK;
   }
 };
@@ -91,7 +91,7 @@ TEST(ModuleInterfaceTest, GrpcServerBuilderServesPingAndShutdownServersCleansUp)
   };
   module.InitForTest(libInfo);
 
-  auto service = std::make_shared<ModbusPingService>();
+  auto service = std::make_shared<ModbusRTUPingService>();
   module.BuildServers(service);
 
   const auto addr = LoopbackAddress(module.metaData().outerGRPCServer);
@@ -100,10 +100,10 @@ TEST(ModuleInterfaceTest, GrpcServerBuilderServesPingAndShutdownServersCleansUp)
   auto channel = grpc::CreateChannel(addr, grpc::InsecureChannelCredentials());
   ASSERT_TRUE(channel->WaitForConnected(std::chrono::system_clock::now() + std::chrono::seconds(2)));
 
-  auto stub = ModbusProto::ModbusService::NewStub(channel);
+  auto stub = ModbusRTUProto::ModbusRTUService::NewStub(channel);
   grpc::ClientContext ctx;
-  ModbusProto::Empty req;
-  ModbusProto::Empty resp;
+  ModbusRTUProto::Empty req;
+  ModbusRTUProto::Empty resp;
   const auto status = stub->Ping(&ctx, req, &resp);
   EXPECT_TRUE(status.ok());
 

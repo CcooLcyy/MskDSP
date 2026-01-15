@@ -4,7 +4,10 @@
 #include <boost/dll/runtime_symbol_info.hpp>
 #include <memory>
 #include <stop_token>
+#include <string>
 #include <thread>
+#include <unordered_map>
+#include <vector>
 
 #include "Logger.h"
 #include "ModuleInterface.h"
@@ -12,6 +15,24 @@
 
 namespace ModuleManager {
 class ModuleManagerServiceImpl;
+
+enum class ModuleOpError {
+  kOk,
+  kNotFound,
+  kInvalidArgument,
+  kFailedPrecondition,
+  kInternal,
+};
+
+struct ModuleOpResult {
+  ModuleOpError error;
+  std::string message;
+
+  bool ok() const {
+    return error == ModuleOpError::kOk;
+  }
+};
+
 class LibInfo {
 public:
   LibInfo() = default;
@@ -67,19 +88,31 @@ public:
 
   virtual void start(std::stop_token stopToken) override;
 
-  void loadModule(ModuleManagerProto::ModuleInfo moduleInfo);
-  void unloadModule(ModuleManagerProto::ModuleInfo moduleInfo);
+  ModuleOpResult loadModule(ModuleManagerProto::ModuleInfo moduleInfo);
+  ModuleOpResult unloadModule(ModuleManagerProto::ModuleInfo moduleInfo);
   ModuleManagerProto::ModuleInfos &getModuleInfos();
   ModuleManagerProto::ModuleRunningInfos getModuleRunningInfos();
   void saveModuleStartConfig(ModuleManagerProto::ModuleInfos moduleInfos);
 
 private:
   void autoStartModulesFromConfig();
+  void ensureModuleInfos();
   void initModuleInfos();
   ModuleManagerProto::ModuleVersion parseVersion(std::string libName);
+  ModuleOpResult resolveModuleName(const ModuleManagerProto::ModuleInfo &moduleInfo, std::string *moduleName);
+  ModuleOpResult startModuleByName(const std::string &moduleName);
+  ModuleOpResult stopModuleByName(const std::string &moduleName);
+  ModuleOpResult resolveStartOrder(const std::string &moduleName, std::vector<std::string> *order);
+  ModuleOpResult resolveStopOrder(const std::string &moduleName, std::vector<std::string> *order);
+  bool isModuleRunning(const std::string &moduleName) const;
+  bool stopRunningModuleByName(const std::string &moduleName);
+
   ModuleManagerProto::ModuleInfos moduleInfos_;
   std::vector<std::shared_ptr<LibInfo>> libInfoVec_;
   std::shared_ptr<ModuleManagerServiceImpl> moduleManagerService_;
   ModuleManagerProto::ModuleInfos moduleConfig_;
+  std::unordered_map<std::string, ModuleManagerProto::ModuleInfo> moduleInfoByName_;
+  std::unordered_map<std::string, std::vector<std::string>> reverseDependencies_;
+  bool moduleInfosReady_{false};
 };
 }  // namespace ModuleManager

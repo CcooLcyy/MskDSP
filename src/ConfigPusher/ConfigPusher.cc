@@ -7,6 +7,7 @@
 #include <boost/dll.hpp>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -24,7 +25,24 @@
 #include "ConfigPusherLibInfo.h"
 #include "IEC104.grpc.pb.h"
 #include "Logger.h"
+#include "ModuleManager.pb.h"
 #include "ModuleManager.grpc.pb.h"
+
+namespace {
+const std::string &GetSerializedManifest() {
+  static const std::string kSerialized = []() {
+    ModuleManagerProto::ModuleManifest manifest;
+    manifest.set_module_name(ConfigPusherLibInfo.LIB_NAME);
+    auto version = manifest.mutable_version();
+    version->set_major(ConfigPusherLibInfo.VERSION_MAJOR);
+    version->set_minor(ConfigPusherLibInfo.VERSION_MINOR);
+    version->set_patch(ConfigPusherLibInfo.VERSION_PATCH);
+    version->set_version(ConfigPusherLibInfo.VERSION);
+    return manifest.SerializeAsString();
+  }();
+  return kSerialized;
+}
+}  // namespace
 
 namespace ConfigPusher {
 namespace {
@@ -375,4 +393,14 @@ void ConfigPusher::applyConfig() {
 
 extern "C" BOOST_SYMBOL_EXPORT ModuleInterface::ModuleInterface *create() {
   return new ConfigPusher::ConfigPusher();
+}
+
+extern "C" BOOST_SYMBOL_EXPORT bool GetModuleManifestPb(const uint8_t **data, size_t *size) {
+  if (data == nullptr || size == nullptr) {
+    return false;
+  }
+  const auto &serialized = GetSerializedManifest();
+  *data = reinterpret_cast<const uint8_t *>(serialized.data());
+  *size = serialized.size();
+  return true;
 }

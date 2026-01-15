@@ -8,17 +8,34 @@
           "config": {
             "conn_name": "line-1",
             "role": "ROLE_SERVER",
-            "local": { "ip": "0.0.0.0", "port": 2404 },
-            "remote": { "ip": "", "port": 0 },
+            "local": {
+              "ip": "0.0.0.0",
+              "port": 2404
+            },
+            "remote": {
+              "ip": "",
+              "port": 0
+            },
             "ca": 1,
             "oa": 1,
-            "apci": { "k": 12, "w": 8, "t0": 30, "t1": 15, "t2": 10, "t3": 20 }
+            "apci": {
+              "k": 12,
+              "w": 8,
+              "t0": 30,
+              "t1": 15,
+              "t2": 10,
+              "t3": 20
+            }
           }
         },
         "point_table": {
           "replace": true,
           "points": [
-            { "tag": "Ua", "ioa": 100, "type": "TELEMETRY_TYPE_FLOAT" }
+            {
+              "tag": "Ua",
+              "ioa": 100,
+              "type": "TELEMETRY_TYPE_FLOAT"
+            }
           ]
         },
         "start": true

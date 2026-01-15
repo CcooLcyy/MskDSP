@@ -15,12 +15,12 @@ MskDSP 是一个基于 C++23 的模块化系统：核心由 `ModuleManager` 管�
 - [src/DataCenter/](./src/DataCenter/)：跨协议数据总线/数据转发枢纽（以逻辑点名/tag 进行对齐，[文档](./src/DataCenter/doc/README.md)）
 - [src/IEC104/](./src/IEC104/)：IEC 60870-5-104 协议相关能力（示例模块，[文档](./src/IEC104/doc/README.md)）
 - [src/DLT645/](./src/DLT645/)：DLT645 协议相关能力（示例模块，[文档](./src/DLT645/doc/README.md)）
-- [src/Modbus/](./src/Modbus/)：Modbus 协议相关能力（示例模块，[文档](./src/Modbus/doc/README.md)）
+- [src/ModbusRTU/](./src/ModbusRTU/)：ModbusRTU 协议相关能力（示例模块，[文档](./src/ModbusRTU/doc/README.md)）
 - [src/AGVC/AGC/](./src/AGVC/AGC/)：AGC 自动功率控制（总设定拆分/派生点计算，通过 DataCenter 路由与上下游联动，[文档](./src/AGVC/AGC/doc/README.md)）
 - [src/AGVC/AVC/](./src/AGVC/AVC/)：AVC 自动电压控制（骨架/预留模块）
 
 ### 新增模块
-新增模块可以参考现有示例 `src/DataCenter/`、`src/IEC104/`、`src/DLT645/` 与 `src/Modbus/`，核心步骤如下：
+新增模块可以参考现有示例 `src/DataCenter/`、`src/IEC104/`、`src/DLT645/` 与 `src/ModbusRTU/`，核心步骤如下：
 
 可使用脚手架快速生成骨架：
 ```bash
@@ -72,6 +72,21 @@ cmake --build build --parallel
 ```bash
 cd package
 ./MskDSP
+```
+
+### 启动自加载配置
+可选配置文件：`./conf/module_manager.jsonc`（JSONC，支持注释），用于控制 ModuleManager 启动时自动加载的模块列表。
+- 字段：`auto_start_modules`（字符串数组，模块名应与 `lib<模块名>.so.<version>` 匹配）
+- 缺失或为空：跳过自加载
+- 模板：`package/conf/module_manager.jsonc`（可直接修改并随包部署）
+- 建议：自启动列表仅填写 `ConfigPusher`，其余模块由 ConfigPusher 按配置按需启动
+
+示例：
+```jsonc
+{
+  // ModuleManager 启动时自动加载的模块列表。
+  "auto_start_modules": ["ConfigPusher"]
+}
 ```
 
 ### 运行测试

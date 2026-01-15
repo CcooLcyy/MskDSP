@@ -55,38 +55,40 @@ std::string formatLog(std::string_view fmt, Args&&... args) {
 }  // namespace detail
 }  // namespace ModuleManager
 
+#ifndef NDEBUG
+#define LOG_CONTEXT_STREAM                                         \
+  << "[" << __FILE_NAME__ << ": " << __LINE__ << "] "              \
+  << "[" << __FUNCTION__ << "] "
+#else
+#define LOG_CONTEXT_STREAM
+#endif
+
 #define LOG_TRACE(fmt, ...)                                                        \
   BOOST_LOG_STREAM_SEV(::ModuleManager::Logger::get(), boost::log::trivial::trace) \
-      << "[" << __FILE_NAME__ << ": " << __LINE__ << "] "                          \
-      << "[" << __FUNCTION__ << "] "                                               \
+      LOG_CONTEXT_STREAM                                                           \
       << ::ModuleManager::detail::formatLog(fmt __VA_OPT__(,) __VA_ARGS__)
 
 #define LOG_DEBUG(fmt, ...)                                                          \
   BOOST_LOG_STREAM_SEV((::ModuleManager::Logger::get()), boost::log::trivial::debug) \
-      << "[" << __FILE_NAME__ << ": " << __LINE__ << "] "                            \
-      << "[" << __FUNCTION__ << "] "                                                 \
+      LOG_CONTEXT_STREAM                                                             \
       << ::ModuleManager::detail::formatLog(fmt __VA_OPT__(,) __VA_ARGS__)
 
 #define LOG_INFO(fmt, ...)                                                        \
   BOOST_LOG_STREAM_SEV(::ModuleManager::Logger::get(), boost::log::trivial::info) \
-      << "[" << __FILE_NAME__ << ": " << __LINE__ << "] "                         \
-      << "[" << __FUNCTION__ << "] "                                              \
+      LOG_CONTEXT_STREAM                                                          \
       << ::ModuleManager::detail::formatLog(fmt __VA_OPT__(,) __VA_ARGS__)
 
 #define LOG_WARNING(fmt, ...)                                                          \
   BOOST_LOG_STREAM_SEV((::ModuleManager::Logger::get()), boost::log::trivial::warning) \
-      << "[" << __FILE_NAME__ << ": " << __LINE__ << "] "                              \
-      << "[" << __FUNCTION__ << "] "                                                   \
+      LOG_CONTEXT_STREAM                                                               \
       << ::ModuleManager::detail::formatLog(fmt __VA_OPT__(,) __VA_ARGS__)
 
 #define LOG_ERROR(fmt, ...)                                                          \
   BOOST_LOG_STREAM_SEV((::ModuleManager::Logger::get()), boost::log::trivial::error) \
-      << "[" << __FILE_NAME__ << ": " << __LINE__ << "] "                            \
-      << "[" << __FUNCTION__ << "] "                                                 \
+      LOG_CONTEXT_STREAM                                                             \
       << ::ModuleManager::detail::formatLog(fmt __VA_OPT__(,) __VA_ARGS__)
 
 #define LOG_FATAL(fmt, ...)                                                          \
   BOOST_LOG_STREAM_SEV((::ModuleManager::Logger::get()), boost::log::trivial::fatal) \
-      << "[" << __FILE_NAME__ << ": " << __LINE__ << "] "                            \
-      << "[" << __FUNCTION__ << "] "                                                 \
+      LOG_CONTEXT_STREAM                                                             \
       << ::ModuleManager::detail::formatLog(fmt __VA_OPT__(,) __VA_ARGS__)

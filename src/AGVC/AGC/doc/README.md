@@ -1,7 +1,7 @@
 # AGC 模块
 
 ## 简介
-AGC（Automatic Generation Control）自动功率控制模块：从 DataCenter 订阅“总有功设定/成员量测”等点值，在模块内部按策略拆分后发布“各成员有功设定”以及派生点（例如台区总实时功率），并通过 DataCenter 有向路由转发到上下游连接（IEC104、Modbus 等）。
+AGC（Automatic Generation Control）自动功率控制模块：从 DataCenter 订阅“总有功设定/成员量测”等点值，在模块内部按策略拆分后发布“各成员有功设定”以及派生点（例如台区总实时功率），并通过 DataCenter 有向路由转发到上下游连接（IEC104、ModbusRTU 等）。
 
 ## 能力清单
 - 按连接管理控制组：一个 `group_name` 对应 DataCenter 的一条连接 `(module_name="AGC", conn_name=group_name) -> conn_id`
@@ -26,7 +26,7 @@ AGC 仅与两端通信：
 - 上位机 ↔ AGC：通过 `AGCService` 下发/查询配置、启停控制组
 - AGC ↔ DataCenter：通过 DataCenter gRPC（建议走 inner unix socket）订阅/发布点值
 
-AGC 不直接对接 IEC104/Modbus；上下游均通过 DataCenter 的有向路由做点值转发。
+AGC 不直接对接 IEC104/ModbusRTU；上下游均通过 DataCenter 的有向路由做点值转发。
 
 ### 关键概念
 - `group_name`：上位机指定的控制组名（模块内唯一）；同时作为 DataCenter 连接主键的 `conn_name`
@@ -62,12 +62,12 @@ AGC 不直接对接 IEC104/Modbus；上下游均通过 DataCenter 的有向路�
 2. 上位机连接 AGC gRPC，调用 `UpsertGroup(create_only=true)` 创建控制组并获取 `conn_id`
 3. 在 DataCenter 配置路由（示例）：
    - 主站设点（IEC104 conn）→ AGC：`(conn_id_104, P_CMD_SRC) -> (conn_id_agc, p_cmd.signal.tag)`
-   - 成员量测（Modbus conn）→ AGC：`(conn_id_inv1, P_MEAS) -> (conn_id_agc, members[0].p_meas.tag)`（依次类推）
+   - 成员量测（ModbusRTU conn）→ AGC：`(conn_id_inv1, P_MEAS) -> (conn_id_agc, members[0].p_meas.tag)`（依次类推）
    - AGC 成员设点 → 成员控制点：`(conn_id_agc, members[0].p_set.signal.tag) -> (conn_id_inv1, P_SET)`（依次类推）
    - 台区总实时 → 主站：`(conn_id_agc, outputs.p_total_meas.tag) -> (conn_id_104, P_TOTAL_DST)`
 4. 调用 `StartGroup` 启动控制组
 
-> 注意：路由与点表的具体 `tag`/单位由上位机配置决定；AGC 本身不关心 IEC104/Modbus 的地址映射。
+> 注意：路由与点表的具体 `tag`/单位由上位机配置决定；AGC 本身不关心 IEC104/ModbusRTU 的地址映射。
 
 ### 配置持久化（当前实现）
 当前版本的 `GroupConfig`/运行态不落盘：进程重启后需要上位机重新下发 `UpsertGroup` 并重建 DataCenter 路由。

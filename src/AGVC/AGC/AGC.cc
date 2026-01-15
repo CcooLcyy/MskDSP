@@ -2,6 +2,7 @@
 
 #include <boost/dll.hpp>
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <stop_token>
 #include <thread>
@@ -9,6 +10,36 @@
 #include "AGCGrpcService.h"
 #include "AGCLibInfo.h"
 #include "Logger.h"
+#include "ModuleManager.pb.h"
+
+namespace {
+const std::string &GetSerializedManifest() {
+  static const std::string kSerialized = []() {
+    ModuleManagerProto::ModuleManifest manifest;
+    manifest.set_module_name(AGCLibInfo.LIB_NAME);
+    auto version = manifest.mutable_version();
+    version->set_major(AGCLibInfo.VERSION_MAJOR);
+    version->set_minor(AGCLibInfo.VERSION_MINOR);
+    version->set_patch(AGCLibInfo.VERSION_PATCH);
+    version->set_version(AGCLibInfo.VERSION);
+
+    auto depDataCenter = manifest.add_dependencies();
+    depDataCenter->set_module_name("DataCenter");
+    depDataCenter->set_version_range("=0.0.1");
+
+    auto depIEC104 = manifest.add_dependencies();
+    depIEC104->set_module_name("IEC104");
+    depIEC104->set_version_range("=0.0.1");
+
+    auto depModbusRTU = manifest.add_dependencies();
+    depModbusRTU->set_module_name("ModbusRTU");
+    depModbusRTU->set_version_range("=0.0.1");
+
+    return manifest.SerializeAsString();
+  }();
+  return kSerialized;
+}
+}  // namespace
 
 namespace AGC {
 AGC::AGC() :
@@ -20,6 +51,7 @@ AGC::AGC() :
 AGC::~AGC() {}
 void AGC::start(std::stop_token stopToken) {
   LOG_INFO("AGC 模块启动");
+  LOG_INFO("AGC 依赖模块: DataCenter, IEC104, ModbusRTU");
   agcService_->getAGC(this);
   grpcServerBuilder(agcService_);
   while (!stopToken.stop_requested()) {
@@ -39,4 +71,14 @@ const GroupManager& AGC::groupManager() const {
 
 extern "C" BOOST_SYMBOL_EXPORT ModuleInterface::ModuleInterface* create() {
   return new AGC::AGC();
+}
+
+extern "C" BOOST_SYMBOL_EXPORT bool GetModuleManifestPb(const uint8_t **data, size_t *size) {
+  if (data == nullptr || size == nullptr) {
+    return false;
+  }
+  const auto &serialized = GetSerializedManifest();
+  *data = reinterpret_cast<const uint8_t *>(serialized.data());
+  *size = serialized.size();
+  return true;
 }

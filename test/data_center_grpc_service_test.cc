@@ -146,7 +146,7 @@ protected:
 
 // 验证：连接生命周期（创建/重命名/删除）与 UpsertConnection 的冲突/未分配错误能正确返回。
 TEST_F(DataCenterGrpcServiceTest, ConnectionLifecycleAndUpsertConnectionValidations) {
-  const auto conn1 = GetOrCreateConnection("Modbus", "mb-1");
+  const auto conn1 = GetOrCreateConnection("ModbusRTU", "mb-1");
   const auto conn2 = GetOrCreateConnection("IEC104", "104-1");
   ASSERT_NE(conn1.conn_id(), 0u);
   ASSERT_NE(conn2.conn_id(), 0u);
@@ -162,9 +162,9 @@ TEST_F(DataCenterGrpcServiceTest, ConnectionLifecycleAndUpsertConnectionValidati
   {
     grpc::ClientContext ctx;
     DataCenterProto::RenameConnectionRequest req;
-    req.mutable_old_key()->set_module_name("Modbus");
+    req.mutable_old_key()->set_module_name("ModbusRTU");
     req.mutable_old_key()->set_conn_name("mb-1");
-    req.mutable_new_key()->set_module_name("Modbus");
+    req.mutable_new_key()->set_module_name("ModbusRTU");
     req.mutable_new_key()->set_conn_name("mb-renamed");
     DataCenterProto::ConnectionInfo resp;
     auto status = stub_->RenameConnection(&ctx, req, &resp);
@@ -218,7 +218,7 @@ TEST_F(DataCenterGrpcServiceTest, ConnectionLifecycleAndUpsertConnectionValidati
 
 // 验证：Subscribe(snapshot=true) 会先推送快照；并按 tags 过滤实时更新；DeleteConnection 会关闭订阅流（best-effort）。
 TEST_F(DataCenterGrpcServiceTest, PublishSubscribeSnapshotFilteringAndDeleteConnectionClosesStream) {
-  const auto src = GetOrCreateConnection("Modbus", "src");
+  const auto src = GetOrCreateConnection("ModbusRTU", "src");
   const auto dst = GetOrCreateConnection("IEC104", "dst");
 
   UpsertPointTable(src.conn_id(), {"A", "C"});
@@ -335,7 +335,7 @@ TEST_F(DataCenterGrpcServiceTest, PublishSubscribeSnapshotFilteringAndDeleteConn
 
 // 验证：DeleteRoutes 可删除指定路由，且不会再产生最新值缓存。
 TEST_F(DataCenterGrpcServiceTest, DeleteRoutesRemovesRouteAndStopsLatestUpdates) {
-  const auto src = GetOrCreateConnection("Modbus", "src");
+  const auto src = GetOrCreateConnection("ModbusRTU", "src");
   const auto dst = GetOrCreateConnection("IEC104", "dst");
 
   UpsertRoutes({
