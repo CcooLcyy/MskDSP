@@ -7,13 +7,13 @@
 #include <stop_token>
 
 #include "DataCenterGrpcService.h"
-#include "dataCenterLibInfo.h"
+#include "DataCenterLibInfo.h"
 
 namespace DataCenter {
 DataCenter::DataCenter() :
   ModuleInterface(),
   dataCenterService_(std::make_shared<DataCenterGrpcServiceImpl>()) {
-  initLibInfo(dataCenterLibInfo);
+  initLibInfo(DataCenterLibInfo);
 }
 DataCenter::~DataCenter() {}
 void DataCenter::start(std::stop_token stopToken) {

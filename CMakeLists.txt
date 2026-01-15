@@ -21,8 +21,22 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${packPath})
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${libPath})
 
 add_subdirectory(3rdlibs)
+
+set(MSKDSP_BUILD_TESTS_DEFAULT OFF)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(MSKDSP_BUILD_TESTS_DEFAULT ON)
+endif()
+option(MSKDSP_BUILD_TESTS "Build tests (enables coverage & auto report)" ${MSKDSP_BUILD_TESTS_DEFAULT})
+
+if(MSKDSP_BUILD_TESTS)
+  include(${CMAKE_SOURCE_DIR}/cmake/Coverage.cmake)
+  mskdsp_enable_coverage_flags()
+endif()
+
 add_subdirectory(protobuf)
 add_subdirectory(src)
 
-enable_testing()
-add_subdirectory(test)
+if(MSKDSP_BUILD_TESTS)
+  enable_testing()
+  add_subdirectory(test)
+endif()

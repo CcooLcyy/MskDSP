@@ -76,6 +76,18 @@ cd package
 ```bash
 ctest --test-dir build --output-on-failure
 ```
+如未开启测试构建（`MSKDSP_BUILD_TESTS=OFF`），则不会生成/执行任何测试用例。
+
+### 测试覆盖率
+开启 `MSKDSP_BUILD_TESTS` 后会在构建时自动运行测试并生成覆盖率报告（要求使用 GCC/Clang 编译，并安装 `gcovr`）。默认值：`Debug=ON`，其他构建类型为 `OFF`。
+```bash
+cmake -S . -B build-cov -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake \
+  -DMSKDSP_BUILD_TESTS=ON
+cmake --build build-cov --parallel
+```
+报告输出：`build-cov/coverage/index.html`
+如本机存在多个 GCC 版本，可通过 `-DGCOV_EXECUTABLE=/usr/bin/gcov-<版本>` 指定与编译器匹配的 `gcov`；`gcovr` 路径可用 `-DGCOVR_EXECUTABLE=/path/to/gcovr` 指定。
 
 ## 构建产物
 - `package/MskDSP`：主程序（Windows 下可能为 `MskDSP.exe`）

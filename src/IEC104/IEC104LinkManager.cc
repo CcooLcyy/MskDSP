@@ -3,16 +3,16 @@
 #include <format>
 #include <string>
 #include <utility>
-#include <vector>
 
 namespace IEC104 {
 namespace {
-grpc::Status makeNotFound(const std::string& connName) {
+grpc::Status makeNotFound(const std::string &connName) {
   return grpc::Status(grpc::StatusCode::NOT_FOUND, std::format("link not found: {}", connName));
 }
 }  // namespace
 
-LinkManager::LinkManager(std::string moduleName) : dataCenter_(std::move(moduleName)) {}
+LinkManager::LinkManager(std::string moduleName) :
+  dataCenter_(std::move(moduleName)) {}
 
 void LinkManager::setDataCenterServerAddress(std::string address) {
   dataCenter_.setServerAddress(std::move(address));
@@ -22,14 +22,14 @@ void LinkManager::setDataCenterStub(std::shared_ptr<DataCenterProto::DataCenterS
   dataCenter_.setStub(std::move(stub));
 }
 
-grpc::Status LinkManager::validateConnName(const std::string& connName) {
+grpc::Status LinkManager::validateConnName(const std::string &connName) {
   if (connName.empty()) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_name is required");
   }
   return grpc::Status::OK;
 }
 
-grpc::Status LinkManager::validateLinkConfig(const IEC104Proto::LinkConfig& config) {
+grpc::Status LinkManager::validateLinkConfig(const IEC104Proto::LinkConfig &config) {
   auto s = validateConnName(config.conn_name());
   if (!s.ok()) {
     return s;
@@ -56,7 +56,7 @@ grpc::Status LinkManager::validateLinkConfig(const IEC104Proto::LinkConfig& conf
   return grpc::Status::OK;
 }
 
-grpc::Status LinkManager::fillLinkInfoLocked(const LinkRuntime& link, IEC104Proto::LinkInfo* out) const {
+grpc::Status LinkManager::fillLinkInfoLocked(const LinkRuntime &link, IEC104Proto::LinkInfo *out) const {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
   }
@@ -68,7 +68,7 @@ grpc::Status LinkManager::fillLinkInfoLocked(const LinkRuntime& link, IEC104Prot
   return grpc::Status::OK;
 }
 
-grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest& request, IEC104Proto::LinkInfo* out) {
+grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &request, IEC104Proto::LinkInfo *out) {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
   }
@@ -133,7 +133,7 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest& reque
   return fillLinkInfoLocked(it->second, out);
 }
 
-grpc::Status LinkManager::GetLink(const std::string& connName, IEC104Proto::LinkInfo* out) const {
+grpc::Status LinkManager::GetLink(const std::string &connName, IEC104Proto::LinkInfo *out) const {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
   }
@@ -150,25 +150,25 @@ grpc::Status LinkManager::GetLink(const std::string& connName, IEC104Proto::Link
   return fillLinkInfoLocked(it->second, out);
 }
 
-grpc::Status LinkManager::ListLinks(IEC104Proto::ListLinksResponse* out) const {
+grpc::Status LinkManager::ListLinks(IEC104Proto::ListLinksResponse *out) const {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
   }
   std::lock_guard<std::mutex> lock(mu_);
   out->Clear();
-  for (const auto& [_, link] : linksByName_) {
-    auto* elem = out->add_links();
+  for (const auto &[_, link] : linksByName_) {
+    auto *elem = out->add_links();
     fillLinkInfoLocked(link, elem);
   }
   return grpc::Status::OK;
 }
 
-void LinkManager::configureTransportCallbacksLocked(const std::string& connName, LinkRuntime* link) {
+void LinkManager::configureTransportCallbacksLocked(const std::string &connName, LinkRuntime *link) {
   if (link == nullptr || !link->transport) {
     return;
   }
   if (link->config.role() == IEC104Proto::ROLE_CLIENT) {
-    link->transport->SetMeasuredValueCallback([this, connName](const MeasuredValue& mv) {
+    link->transport->SetMeasuredValueCallback([this, connName](const MeasuredValue &mv) {
       (void)handleClientMeasuredValue(connName, mv);
     });
   }
@@ -177,7 +177,7 @@ void LinkManager::configureTransportCallbacksLocked(const std::string& connName,
   }
 }
 
-grpc::Status LinkManager::StartLink(const std::string& connName) {
+grpc::Status LinkManager::StartLink(const std::string &connName) {
   auto status = validateConnName(connName);
   if (!status.ok()) {
     return status;
@@ -188,7 +188,7 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
   if (it == linksByName_.end()) {
     return makeNotFound(connName);
   }
-  auto& link = it->second;
+  auto &link = it->second;
   if (link.state == IEC104Proto::LINK_STATE_PENDING_DELETE) {
     return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "link is pending delete");
   }
@@ -214,7 +214,7 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
   return grpc::Status::OK;
 }
 
-grpc::Status LinkManager::StopLink(const std::string& connName) {
+grpc::Status LinkManager::StopLink(const std::string &connName) {
   auto status = validateConnName(connName);
   if (!status.ok()) {
     return status;
@@ -240,7 +240,7 @@ grpc::Status LinkManager::StopLink(const std::string& connName) {
   return grpc::Status::OK;
 }
 
-grpc::Status LinkManager::DeleteLink(const std::string& connName) {
+grpc::Status LinkManager::DeleteLink(const std::string &connName) {
   auto status = validateConnName(connName);
   if (!status.ok()) {
     return status;
@@ -267,7 +267,7 @@ grpc::Status LinkManager::DeleteLink(const std::string& connName) {
   return grpc::Status::OK;
 }
 
-grpc::Status LinkManager::UpsertPointTable(const IEC104Proto::UpsertPointTableRequest& request) {
+grpc::Status LinkManager::UpsertPointTable(const IEC104Proto::UpsertPointTableRequest &request) {
   auto status = validateConnName(request.conn_name());
   if (!status.ok()) {
     return status;
@@ -312,7 +312,7 @@ grpc::Status LinkManager::UpsertPointTable(const IEC104Proto::UpsertPointTableRe
   return grpc::Status::OK;
 }
 
-grpc::Status LinkManager::GetPointTable(const std::string& connName, IEC104Proto::PointTable* out) const {
+grpc::Status LinkManager::GetPointTable(const std::string &connName, IEC104Proto::PointTable *out) const {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
   }

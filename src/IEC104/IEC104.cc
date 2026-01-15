@@ -26,15 +26,15 @@ void IEC104::start(std::stop_token stopToken) {
   cv.wait(lock, [&stopToken]() { return stopToken.stop_requested(); });
 }
 
-LinkManager& IEC104::linkManager() {
+LinkManager &IEC104::linkManager() {
   return linkManager_;
 }
 
-const LinkManager& IEC104::linkManager() const {
+const LinkManager &IEC104::linkManager() const {
   return linkManager_;
 }
 }  // namespace IEC104
 
-extern "C" BOOST_SYMBOL_EXPORT ModuleInterface::ModuleInterface* create() {
+extern "C" BOOST_SYMBOL_EXPORT ModuleInterface::ModuleInterface *create() {
   return new IEC104::IEC104();
 }
