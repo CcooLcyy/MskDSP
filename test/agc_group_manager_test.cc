@@ -264,3 +264,37 @@ TEST(AgcGroupManagerTest, DeleteGroupFailureMarksPendingDeleteAndKeepsLocal) {
   EXPECT_FALSE(got.last_error().empty());
 }
 
+// 验证：当 ValueSpec 使用 BASE_TAG 时，UpsertGroup 会把 base_tag 一并注册到 DataCenter 点表。
+TEST(AgcGroupManagerTest, UpsertGroupRegistersBaseTagToDataCenterPointTable) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  EXPECT_CALL(*stub, UpsertPointTable(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext*, const DataCenterProto::UpsertPointTableRequest& req, DataCenterProto::Empty*) {
+        EXPECT_NE(req.conn_id(), 0u);
+        EXPECT_TRUE(req.replace());
+
+        std::unordered_set<std::string> tags;
+        for (const auto& t : req.tags()) {
+          tags.emplace(t);
+        }
+        EXPECT_TRUE(tags.contains("P_CMD"));
+        EXPECT_TRUE(tags.contains("P_BASE"));
+        EXPECT_TRUE(tags.contains("INV1_P_MEAS"));
+        EXPECT_TRUE(tags.contains("INV1_P_SET"));
+        EXPECT_TRUE(tags.contains("INV2_P_MEAS"));
+        EXPECT_TRUE(tags.contains("INV2_P_SET"));
+        EXPECT_TRUE(tags.contains("P_TOTAL"));
+        return grpc::Status::OK;
+      }));
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  auto req = MakeGroupReq("g-base");
+  req.mutable_config()->mutable_p_cmd()->set_mode(AGCProto::VALUE_MODE_DELTA);
+  req.mutable_config()->mutable_p_cmd()->set_delta_base(AGCProto::DELTA_BASE_BASE_TAG);
+  req.mutable_config()->mutable_p_cmd()->set_base_tag("P_BASE");
+
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+}

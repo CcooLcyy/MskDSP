@@ -1,7 +1,7 @@
 # AVC 模块
 
 ## 简介
-TODO：一句话说明模块职责/边界。
+AVC（Automatic Voltage Control）自动电压控制模块（骨架/预留）：后续计划与 AGC 类似，通过 DataCenter 订阅/发布点值并基于策略计算派生点与控制设定点。
 
 ## 能力清单
 - TODO
