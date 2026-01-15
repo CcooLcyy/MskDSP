@@ -40,6 +40,15 @@ VSCode CMake Tools（用户确认可用的配置命令）：
 单元测试使用 GTest（`3rdlibs/siren` 在 Debug 下启用；顶层测试放在 `test/` 或模块内 `test` 目录）。测试文件命名为 `*_test.cc`，通过 `add_test` 注册，使用 `ctest --output-on-failure` 运行。覆盖模块生命周期边界（load/unload、端口复用）以及 protobuf/grpc 协议兼容性。优先确定性测试；避免绑定固定服务端口，必要时通过随机可用端口进行隔离。
 
 - 所有自有测试用例（`test/` 与 `src/**/test`）需要在每个 `TEST/TEST_F/TEST_P` 前增加一行注释，明确该用例验证的功能点/边界条件；`3rdlibs/` 下的第三方测试不要求遵守本条。
+- 后续模块测试若需依赖 DataCenter，一律使用 `test/support/FakeDataCenter.hpp` 的 `FakeDataCenterState/MakeStub` 进行 gmock，不启动真实 DataCenter 服务。
+  例如：
+  ```cpp
+  #include "support/FakeDataCenter.hpp"
+
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  mgr.setDataCenterStub(stub);
+  ```
 
 ## 提交与 PR 规范
 近期提交历史使用方括号前缀（如 `[feature]`）+ 简短中文摘要。保持该风格（可用 `[fix]`、`[refactor]` 等），首行尽量控制在 ~72 字符内。PR 建议包含：范围/目的、各模块关键变更、已执行的构建/测试命令、端口/配置变更。关联相关 issue；协议/互操作变更附带截图或日志。

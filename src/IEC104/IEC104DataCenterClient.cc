@@ -9,7 +9,7 @@
 
 namespace IEC104 {
 namespace {
-constexpr const char* kDefaultDataCenterModuleName = "dataCenter";
+constexpr const char* kDefaultDataCenterModuleName = "DataCenter";
 }  // namespace
 
 DataCenterClient::DataCenterClient(std::string moduleName) :
