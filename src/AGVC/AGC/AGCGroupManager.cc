@@ -9,8 +9,6 @@
 
 #include <grpcpp/client_context.h>
 
-#include "Logger.h"
-
 namespace AGC {
 namespace {
 grpc::Status makeNotFound(const std::string& groupName) {
@@ -776,4 +774,3 @@ void GroupManager::controlTick(const std::string& groupName) {
 }
 
 }  // namespace AGC
-

@@ -124,6 +124,32 @@ target_link_libraries(dataCenterConnectionStore_test PRIVATE
 
 add_test(NAME dataCenterConnectionStore_test COMMAND dataCenterConnectionStore_test)
 
+add_executable(dataCenterGrpcService_test
+  data_center_grpc_service_test.cc
+  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterGrpcService.cc
+  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCore.cc
+  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCoreConnection.cc
+  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCorePointTable.cc
+  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCoreRoutes.cc
+  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCorePublish.cc
+  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterPointTableStore.cc
+  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterRouteStore.cc
+  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterConnectionStore.cc
+)
+
+target_include_directories(dataCenterGrpcService_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/DataCenter/include
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+)
+
+target_link_libraries(dataCenterGrpcService_test PRIVATE
+  GTest::gtest_main
+  dspProto
+  moduleManager
+)
+
+add_test(NAME dataCenterGrpcService_test COMMAND dataCenterGrpcService_test)
+
 add_executable(iec104PointTable_test
   iec104_point_table_test.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104PointTable.cc
@@ -174,6 +200,23 @@ target_link_libraries(agvcStrategy_test PRIVATE
 
 add_test(NAME agvcStrategy_test COMMAND agvcStrategy_test)
 
+add_executable(agcGroupManager_test
+  agc_group_manager_test.cc
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCGroupManager.cc
+)
+
+target_include_directories(agcGroupManager_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/include
+)
+
+target_link_libraries(agcGroupManager_test PRIVATE
+  GTest::gtest_main
+  GTest::gmock
+  agvcCommon
+)
+
+add_test(NAME agcGroupManager_test COMMAND agcGroupManager_test)
+
 set(MSKDSP_TEST_TARGETS
   moduleManager_test
   moduleInterface_test
@@ -181,9 +224,11 @@ set(MSKDSP_TEST_TARGETS
   dataCenterPointTableStore_test
   dataCenterRouteStore_test
   dataCenterConnectionStore_test
+  dataCenterGrpcService_test
   iec104PointTable_test
   iec104LinkManager_test
   agvcStrategy_test
+  agcGroupManager_test
 )
 
 # Allow overriding via -DGCOVR_EXECUTABLE=/path/to/gcovr (cache variable).

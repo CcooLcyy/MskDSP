@@ -141,3 +141,14 @@ TEST(DataCenterPointTableStoreTest, LoadFallsBackToBackupWhenMainCorruptedAndRes
   }
   EXPECT_TRUE(foundCorrupt);
 }
+
+// 验证：backupPath/tmpPath 派生规则与构造路径一致。
+TEST(DataCenterPointTableStoreTest, BackupAndTmpPathsAreDerivedFromBasePath) {
+  ScopedTempDir dir;
+  const auto base = dir.path() / "point_tables.pb";
+  DataCenterPointTableStore store(base);
+
+  EXPECT_EQ(store.pointTablesPath(), base);
+  EXPECT_EQ(store.backupPath(), std::filesystem::path(base.string() + ".bak"));
+  EXPECT_EQ(store.tmpPath(), std::filesystem::path(base.string() + ".tmp"));
+}
