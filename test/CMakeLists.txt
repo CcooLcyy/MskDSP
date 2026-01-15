@@ -2,6 +2,60 @@ enable_testing()
 
 find_package(GTest CONFIG REQUIRED)
 
+set(MSKDSP_MODULE_MANAGER_TEST_ENV_DIR "${CMAKE_BINARY_DIR}/test_env/moduleManager")
+set(MSKDSP_MODULE_MANAGER_TEST_LIB_DIR "${MSKDSP_MODULE_MANAGER_TEST_ENV_DIR}/lib")
+file(MAKE_DIRECTORY "${MSKDSP_MODULE_MANAGER_TEST_LIB_DIR}")
+
+add_library(moduleManagerDummyModule SHARED
+  module_manager_dummy_module.cc
+)
+
+set_target_properties(moduleManagerDummyModule PROPERTIES
+  OUTPUT_NAME Dummy
+  VERSION 0.0.1
+  SOVERSION 0
+  LIBRARY_OUTPUT_DIRECTORY "${MSKDSP_MODULE_MANAGER_TEST_LIB_DIR}"
+)
+
+target_link_libraries(moduleManagerDummyModule PRIVATE
+  moduleManager
+)
+
+add_executable(moduleManager_test
+  module_manager_test.cc
+)
+
+target_link_libraries(moduleManager_test PRIVATE
+  GTest::gtest_main
+  moduleManager
+)
+
+add_dependencies(moduleManager_test
+  moduleManagerDummyModule
+)
+
+add_test(NAME moduleManager_test COMMAND moduleManager_test)
+set_tests_properties(moduleManager_test PROPERTIES
+  WORKING_DIRECTORY "${MSKDSP_MODULE_MANAGER_TEST_ENV_DIR}"
+)
+
+set(MSKDSP_MODULE_INTERFACE_TEST_ENV_DIR "${CMAKE_BINARY_DIR}/test_env/moduleInterface")
+file(MAKE_DIRECTORY "${MSKDSP_MODULE_INTERFACE_TEST_ENV_DIR}")
+
+add_executable(moduleInterface_test
+  module_interface_test.cc
+)
+
+target_link_libraries(moduleInterface_test PRIVATE
+  GTest::gtest_main
+  moduleManager
+)
+
+add_test(NAME moduleInterface_test COMMAND moduleInterface_test)
+set_tests_properties(moduleInterface_test PROPERTIES
+  WORKING_DIRECTORY "${MSKDSP_MODULE_INTERFACE_TEST_ENV_DIR}"
+)
+
 add_executable(dataCenterCore_test
   data_center_core_test.cc
   ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCore.cc
@@ -110,6 +164,8 @@ target_link_libraries(iec104LinkManager_test PRIVATE
 add_test(NAME iec104LinkManager_test COMMAND iec104LinkManager_test)
 
 set(MSKDSP_TEST_TARGETS
+  moduleManager_test
+  moduleInterface_test
   dataCenterCore_test
   dataCenterPointTableStore_test
   dataCenterRouteStore_test
@@ -154,21 +210,23 @@ if(NOT EXISTS "${GCOV_EXECUTABLE}")
 endif()
 
 set(MSKDSP_COVERAGE_OUTPUT_DIR "${CMAKE_BINARY_DIR}/coverage")
-add_custom_target(coverage ALL
-  COMMAND ${CMAKE_COMMAND} -E rm -rf "${MSKDSP_COVERAGE_OUTPUT_DIR}"
-  COMMAND ${CMAKE_COMMAND} -E make_directory "${MSKDSP_COVERAGE_OUTPUT_DIR}"
-  COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
-  COMMAND "${GCOVR_EXECUTABLE}"
-    -r "${CMAKE_SOURCE_DIR}"
-    --object-directory "${CMAKE_BINARY_DIR}"
-    --gcov-executable "${GCOV_EXECUTABLE}"
-    --filter "(^|.*/)src/.*[.](cc|cpp|cxx|c|hpp)$"
-    --html-details
-    --print-summary
-    -o "${MSKDSP_COVERAGE_OUTPUT_DIR}/index.html"
-  WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
-  VERBATIM
-  USES_TERMINAL
-)
+  add_custom_target(coverage ALL
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "${MSKDSP_COVERAGE_OUTPUT_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${MSKDSP_COVERAGE_OUTPUT_DIR}"
+    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+    COMMAND "${GCOVR_EXECUTABLE}"
+      -r "${CMAKE_SOURCE_DIR}"
+      --object-directory "${CMAKE_BINARY_DIR}"
+      --gcov-executable "${GCOV_EXECUTABLE}"
+      --gcov-ignore-errors=no_working_dir_found
+      --merge-mode-functions=merge-use-line-min
+      --filter "(^|.*/)src/.*[.](cc|cpp|cxx|c|hpp)$"
+      --html-details
+      --print-summary
+      -o "${MSKDSP_COVERAGE_OUTPUT_DIR}/index.html"
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+    VERBATIM
+    USES_TERMINAL
+  )
 
 add_dependencies(coverage ${MSKDSP_TEST_TARGETS})

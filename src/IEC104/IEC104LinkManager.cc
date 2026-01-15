@@ -1,8 +1,14 @@
 #include "IEC104LinkManager.h"
 
+#include <cstdint>
 #include <format>
 #include <string>
 #include <utility>
+
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/ip/address.hpp>
+#include <boost/asio/ip/tcp.hpp>
+#include <boost/system/error_code.hpp>
 
 namespace IEC104 {
 namespace {
@@ -56,6 +62,94 @@ grpc::Status LinkManager::validateLinkConfig(const IEC104Proto::LinkConfig &conf
   return grpc::Status::OK;
 }
 
+bool LinkManager::listenEndpointsConflict(const ListenEndpoint &a, const ListenEndpoint &b) {
+  if (a.port != b.port) {
+    return false;
+  }
+  if (a.any || b.any) {
+    return true;
+  }
+  return a.ip == b.ip;
+}
+
+bool LinkManager::listenEndpointsEqual(const ListenEndpoint &a, const ListenEndpoint &b) {
+  return a.any == b.any && a.port == b.port && a.ip == b.ip;
+}
+
+std::string LinkManager::listenEndpointToString(const ListenEndpoint &ep) {
+  const auto ip = ep.any ? std::string("0.0.0.0") : (ep.ip.empty() ? std::string("0.0.0.0") : ep.ip);
+  return std::format("{}:{}", ip, ep.port);
+}
+
+grpc::Status LinkManager::makeListenEndpoint(const IEC104Proto::Endpoint &local, ListenEndpoint *out) {
+  if (out == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+  }
+  if (local.port() == 0) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "local.port is required");
+  }
+  if (local.port() > 65535) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "local.port must be <= 65535");
+  }
+
+  out->port = local.port();
+  const auto &ip = local.ip();
+  if (ip.empty() || ip == "0.0.0.0") {
+    out->any = true;
+    out->ip = "0.0.0.0";
+    return grpc::Status::OK;
+  }
+
+  boost::system::error_code ec;
+  auto addr = boost::asio::ip::make_address(ip, ec);
+  if (ec) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::format("invalid local.ip: {}", ip));
+  }
+
+  out->any = false;
+  out->ip = addr.to_string();
+  return grpc::Status::OK;
+}
+
+grpc::Status LinkManager::checkSystemListenAvailable(const ListenEndpoint &ep) {
+  namespace asio = boost::asio;
+  using tcp = asio::ip::tcp;
+
+  asio::io_context io;
+  tcp::acceptor acceptor(io);
+
+  boost::system::error_code ec;
+  tcp::endpoint endpoint;
+  if (ep.any) {
+    endpoint = tcp::endpoint(asio::ip::address_v4::any(), static_cast<uint16_t>(ep.port));
+  } else {
+    auto addr = asio::ip::make_address(ep.ip, ec);
+    if (ec) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::format("invalid local.ip: {}", ep.ip));
+    }
+    endpoint = tcp::endpoint(addr, static_cast<uint16_t>(ep.port));
+  }
+
+  acceptor.open(endpoint.protocol(), ec);
+  if (ec) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("acceptor open failed: {}", ec.message()));
+  }
+  acceptor.set_option(tcp::acceptor::reuse_address(true), ec);
+  if (ec) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("acceptor set_option failed: {}", ec.message()));
+  }
+  acceptor.bind(endpoint, ec);
+  if (ec) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("acceptor bind failed: {}", ec.message()));
+  }
+  acceptor.listen(tcp::acceptor::max_listen_connections, ec);
+  if (ec) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("acceptor listen failed: {}", ec.message()));
+  }
+
+  return grpc::Status::OK;
+}
+
 grpc::Status LinkManager::fillLinkInfoLocked(const LinkRuntime &link, IEC104Proto::LinkInfo *out) const {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
@@ -77,6 +171,14 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
     return status;
   }
   const auto connName = request.config().conn_name();
+  const bool isServer = (request.config().role() == IEC104Proto::ROLE_SERVER);
+  ListenEndpoint desiredListen;
+  if (isServer) {
+    status = makeListenEndpoint(request.config().local(), &desiredListen);
+    if (!status.ok()) {
+      return status;
+    }
+  }
 
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -91,19 +193,91 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
       if (it->second.state == IEC104Proto::LINK_STATE_PENDING_DELETE) {
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "link is pending delete");
       }
+
+      const bool wasServer = (it->second.config.role() == IEC104Proto::ROLE_SERVER);
+      if (isServer) {
+        ListenEndpoint currentListen;
+        bool needCheck = true;
+        if (wasServer) {
+          auto rIt = reservedServerListenByName_.find(connName);
+          if (rIt != reservedServerListenByName_.end()) {
+            currentListen = rIt->second;
+            needCheck = !listenEndpointsEqual(currentListen, desiredListen);
+          }
+        }
+
+        if (needCheck) {
+          for (const auto &[otherName, otherListen] : reservedServerListenByName_) {
+            if (otherName == connName) {
+              continue;
+            }
+            if (listenEndpointsConflict(otherListen, desiredListen)) {
+              return grpc::Status(
+                  grpc::StatusCode::ALREADY_EXISTS,
+                  std::format("listen endpoint {} conflicts with {} ({})",
+                              listenEndpointToString(desiredListen),
+                              otherName,
+                              listenEndpointToString(otherListen)));
+            }
+          }
+          status = checkSystemListenAvailable(desiredListen);
+          if (!status.ok()) {
+            return status;
+          }
+        }
+
+        reservedServerListenByName_[connName] = desiredListen;
+      } else if (wasServer) {
+        reservedServerListenByName_.erase(connName);
+      }
+
       it->second.config = request.config();
       it->second.lastError.clear();
       return fillLinkInfoLocked(it->second, out);
     }
+
+    if (pendingCreateByName_.contains(connName) || reservedServerListenByName_.contains(connName)) {
+      return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name already exists");
+    }
+
+    if (isServer) {
+      for (const auto &[otherName, otherListen] : reservedServerListenByName_) {
+        if (listenEndpointsConflict(otherListen, desiredListen)) {
+          return grpc::Status(
+              grpc::StatusCode::ALREADY_EXISTS,
+              std::format("listen endpoint {} conflicts with {} ({})",
+                          listenEndpointToString(desiredListen),
+                          otherName,
+                          listenEndpointToString(otherListen)));
+        }
+      }
+      status = checkSystemListenAvailable(desiredListen);
+      if (!status.ok()) {
+        return status;
+      }
+      // Reserve early to avoid races while we call DataCenter.
+      reservedServerListenByName_[connName] = desiredListen;
+    }
+    pendingCreateByName_.emplace(connName);
   }
+
+  auto rollbackPendingCreate = [this, &connName, isServer]() {
+    std::lock_guard<std::mutex> lock(mu_);
+    pendingCreateByName_.erase(connName);
+    if (isServer) {
+      reservedServerListenByName_.erase(connName);
+    }
+  };
 
   if (request.create_only()) {
     bool exists = false;
     status = dataCenter_.ConnectionExists(connName, &exists);
     if (!status.ok()) {
+      rollbackPendingCreate();
       return status;
     }
     if (exists) {
+      rollbackPendingCreate();
       return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name already exists");
     }
   }
@@ -111,17 +285,44 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
   DataCenterProto::ConnectionInfo connInfo;
   status = dataCenter_.GetOrCreateConnection(connName, &connInfo);
   if (!status.ok()) {
+    rollbackPendingCreate();
     return status;
   }
   if (connInfo.conn_id() == 0) {
+    rollbackPendingCreate();
     return grpc::Status(grpc::StatusCode::INTERNAL, "DataCenter returned conn_id=0");
   }
 
   std::lock_guard<std::mutex> lock(mu_);
+  pendingCreateByName_.erase(connName);
   auto [it, inserted] = linksByName_.try_emplace(connName);
   if (!inserted) {
+    // Another UpsertLink raced this one and already created the link.
     if (request.create_only()) {
+      if (isServer && it->second.config.role() != IEC104Proto::ROLE_SERVER) {
+        reservedServerListenByName_.erase(connName);
+      }
       return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name already exists");
+    }
+    if (it->second.state == IEC104Proto::LINK_STATE_RUNNING) {
+      if (isServer && it->second.config.role() != IEC104Proto::ROLE_SERVER) {
+        reservedServerListenByName_.erase(connName);
+      }
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "stop link before updating config");
+    }
+    if (it->second.state == IEC104Proto::LINK_STATE_PENDING_DELETE) {
+      if (isServer && it->second.config.role() != IEC104Proto::ROLE_SERVER) {
+        reservedServerListenByName_.erase(connName);
+      }
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "link is pending delete");
+    }
+
+    it->second.config = request.config();
+    it->second.lastError.clear();
+    if (isServer) {
+      reservedServerListenByName_[connName] = desiredListen;
+    } else {
+      reservedServerListenByName_.erase(connName);
     }
     return fillLinkInfoLocked(it->second, out);
   }
@@ -264,6 +465,7 @@ grpc::Status LinkManager::DeleteLink(const std::string &connName) {
 
   std::lock_guard<std::mutex> lock(mu_);
   linksByName_.erase(connName);
+  reservedServerListenByName_.erase(connName);
   return grpc::Status::OK;
 }
 

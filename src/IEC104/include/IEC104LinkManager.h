@@ -7,6 +7,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <grpcpp/client_context.h>
 #include <grpcpp/support/status.h>
@@ -36,6 +37,15 @@ public:
   grpc::Status GetPointTable(const std::string& connName, IEC104Proto::PointTable* out) const;
 
 private:
+  struct ListenEndpoint {
+    // Normalized listen address for ROLE_SERVER.
+    // - any=true means bind to 0.0.0.0:<port> (local.ip empty or "0.0.0.0").
+    // - any=false means bind to <ip>:<port> (ip is canonical string form).
+    bool any = false;
+    std::string ip;
+    uint32_t port = 0;
+  };
+
   struct LinkRuntime {
     IEC104Proto::LinkConfig config;
     uint32_t connId = 0;
@@ -52,6 +62,12 @@ private:
   static grpc::Status validateConnName(const std::string& connName);
   static grpc::Status validateLinkConfig(const IEC104Proto::LinkConfig& config);
 
+  static bool listenEndpointsConflict(const ListenEndpoint& a, const ListenEndpoint& b);
+  static bool listenEndpointsEqual(const ListenEndpoint& a, const ListenEndpoint& b);
+  static std::string listenEndpointToString(const ListenEndpoint& ep);
+  static grpc::Status makeListenEndpoint(const IEC104Proto::Endpoint& local, ListenEndpoint* out);
+  static grpc::Status checkSystemListenAvailable(const ListenEndpoint& ep);
+
   grpc::Status fillLinkInfoLocked(const LinkRuntime& link, IEC104Proto::LinkInfo* out) const;
 
   void configureTransportCallbacksLocked(const std::string& connName, LinkRuntime* link);
@@ -63,6 +79,10 @@ private:
 
   mutable std::mutex mu_;
   std::unordered_map<std::string, LinkRuntime> linksByName_;
+  // Tracks ports reserved by ROLE_SERVER link configs (including in-flight UpsertLink creates).
+  std::unordered_map<std::string, ListenEndpoint> reservedServerListenByName_;
+  // Blocks concurrent creation of the same conn_name while we call DataCenter.
+  std::unordered_set<std::string> pendingCreateByName_;
   DataCenterClient dataCenter_;
 };
 
