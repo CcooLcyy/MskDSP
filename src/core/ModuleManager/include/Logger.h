@@ -1,5 +1,6 @@
 #pragma once
 
+#include <format>
 #include <boost/log/core.hpp>
 #include <boost/log/expressions.hpp>
 #include <boost/log/sources/severity_logger.hpp>
@@ -13,6 +14,22 @@
 #include <string>
 
 namespace ModuleManager {
+inline constexpr char kLogTagModule[] = "Module";
+
+class LogModuleScope {
+public:
+  explicit LogModuleScope(std::string moduleName);
+  ~LogModuleScope();
+
+  LogModuleScope(const LogModuleScope &) = delete;
+  LogModuleScope &operator=(const LogModuleScope &) = delete;
+  LogModuleScope(LogModuleScope &&) = delete;
+  LogModuleScope &operator=(LogModuleScope &&) = delete;
+
+private:
+  std::string prevModuleName_;
+};
+
 class Logger {
 public:
   static void init(const std::string &logDir = "./log", const std::string &fileName = "module_manager.log");
@@ -30,7 +47,7 @@ private:
       << std::vformat(fmt, std::make_format_args(__VA_ARGS__))
 
 #define LOG_DEBUG(fmt, ...)                                                          \
-  BOOST_LOG_STREAM_SEV((::ModuleManager::logger::get()), boost::log::trivial::debug) \
+  BOOST_LOG_STREAM_SEV((::ModuleManager::Logger::get()), boost::log::trivial::debug) \
       << "[" << __FILE_NAME__ << ": " << __LINE__ << "] "                            \
       << "[" << __FUNCTION__ << "] "                                                 \
       << std::vformat(fmt, std::make_format_args(__VA_ARGS__))
@@ -42,19 +59,19 @@ private:
       << std::vformat(fmt, std::make_format_args(__VA_ARGS__))
 
 #define LOG_WARNING(fmt, ...)                                                          \
-  BOOST_LOG_STREAM_SEV((::ModuleManager::logger::get()), boost::log::trivial::warning) \
+  BOOST_LOG_STREAM_SEV((::ModuleManager::Logger::get()), boost::log::trivial::warning) \
       << "[" << __FILE_NAME__ << ": " << __LINE__ << "] "                              \
       << "[" << __FUNCTION__ << "] "                                                   \
       << std::vformat(fmt, std::make_format_args(__VA_ARGS__))
 
 #define LOG_ERROR(fmt, ...)                                                          \
-  BOOST_LOG_STREAM_SEV((::ModuleManager::logger::get()), boost::log::trivial::error) \
+  BOOST_LOG_STREAM_SEV((::ModuleManager::Logger::get()), boost::log::trivial::error) \
       << "[" << __FILE_NAME__ << ": " << __LINE__ << "] "                            \
       << "[" << __FUNCTION__ << "] "                                                 \
       << std::vformat(fmt, std::make_format_args(__VA_ARGS__))
 
 #define LOG_FATAL(fmt, ...)                                                          \
-  BOOST_LOG_STREAM_SEV((::ModuleManager::logger::get()), boost::log::trivial::fatal) \
+  BOOST_LOG_STREAM_SEV((::ModuleManager::Logger::get()), boost::log::trivial::fatal) \
       << "[" << __FILE_NAME__ << ": " << __LINE__ << "] "                            \
       << "[" << __FUNCTION__ << "] "                                                 \
       << std::vformat(fmt, std::make_format_args(__VA_ARGS__))

@@ -35,6 +35,7 @@ ModuleManager::ModuleManager() :
 }
 ModuleManager::~ModuleManager() {}
 void ModuleManager::start(std::stop_token stopToken) {
+  LogModuleScope moduleScope(metaData_.name);
   LOG_INFO("正在启动模块管理器");
   moduleManagerService_->getModuleManager(this);
   grpcServerBuilder(moduleManagerService_);

@@ -43,3 +43,12 @@
 - 模块管理器对外 gRPC：固定监听 `0.0.0.0:7000`。
 - 普通模块对外 gRPC：随机选择 7001–7999（进程内避免冲突）。
 - 模块内部 gRPC：使用 `./socket/<模块名>.sock`（实际监听为绝对路径形式的 unix domain socket）。
+
+## 日志（模块标识）
+为便于排查多模块并发运行时的日志来源，日志输出增加了「模块名」标识。
+
+- 日志格式增加 `[<模块名>]` 字段；当无法确定模块上下文时显示 `-`。
+- 模块名来源为 `ModuleInterface::initLibInfo(...)` 设置的 `LIB_NAME`（对应 `metaData_.name`），模块应在 `grpcServerBuilder(...)` 前完成初始化。
+- gRPC 自动标记：通过 `grpcServerBuilder(...)` 启动的 gRPC Server 会统一注入 server interceptor，在每个 RPC 处理线程中自动设置模块名上下文；RPC 处理函数里直接使用 `LOG_INFO/LOG_ERROR...` 即可。
+- 非 gRPC 线程：模块自行创建的后台线程需要在入口处手动创建 `ModuleManager::LogModuleScope scope(metaData_.name);`，否则该线程的日志模块名会是 `-`。
+- 如模块绕过 `grpcServerBuilder(...)` 自行创建 gRPC Server，需要自行注入拦截器或手动设置 `LogModuleScope`。

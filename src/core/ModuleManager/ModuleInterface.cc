@@ -3,15 +3,67 @@
 #include <grpcpp/ext/proto_server_reflection_plugin.h>
 #include <grpcpp/server.h>
 #include <grpcpp/server_builder.h>
+#include <grpcpp/support/server_interceptor.h>
 
 #include <filesystem>
 #include <format>
 #include <memory>
 #include <random>
+#include <utility>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "Logger.h"
+
+namespace {
+class ModuleLogInterceptor final : public grpc::experimental::Interceptor {
+public:
+  explicit ModuleLogInterceptor(std::string moduleName) :
+    moduleName_(std::move(moduleName)) {
+  }
+
+  void Intercept(grpc::experimental::InterceptorBatchMethods *methods) override {
+    if (methods == nullptr) {
+      return;
+    }
+
+    if (!moduleScope_) {
+      moduleScope_ = std::make_unique<ModuleManager::LogModuleScope>(moduleName_);
+    }
+
+    if (methods->QueryInterceptionHookPoint(grpc::experimental::InterceptionHookPoints::POST_RECV_CLOSE)) {
+      moduleScope_.reset();
+    }
+
+    methods->Proceed();
+  }
+
+private:
+  std::string moduleName_;
+  std::unique_ptr<ModuleManager::LogModuleScope> moduleScope_;
+};
+
+class ModuleLogInterceptorFactory final : public grpc::experimental::ServerInterceptorFactoryInterface {
+public:
+  explicit ModuleLogInterceptorFactory(std::string moduleName) :
+    moduleName_(std::move(moduleName)) {
+  }
+
+  grpc::experimental::Interceptor *CreateServerInterceptor(grpc::experimental::ServerRpcInfo *) override {
+    return new ModuleLogInterceptor(moduleName_);
+  }
+
+private:
+  std::string moduleName_;
+};
+
+std::vector<std::unique_ptr<grpc::experimental::ServerInterceptorFactoryInterface>> createInterceptorCreators(const std::string &moduleName) {
+  std::vector<std::unique_ptr<grpc::experimental::ServerInterceptorFactoryInterface>> creators;
+  creators.emplace_back(std::make_unique<ModuleLogInterceptorFactory>(moduleName));
+  return creators;
+}
+}  // namespace
 
 namespace ModuleInterface {
 std::set<std::string> ModuleInterface::allocatedPorts_;
@@ -54,6 +106,7 @@ void ModuleInterface::grpcServerBuilder(std::shared_ptr<grpc::Service> service) 
   grpc::ServerBuilder innerServerbuilder;
   innerServerbuilder.RegisterService(service.get());
   grpc::reflection::InitProtoReflectionServerBuilderPlugin();
+  innerServerbuilder.experimental().SetInterceptorCreators(createInterceptorCreators(metaData_.name));
   innerServerbuilder.AddListeningPort(metaData_.innerGRPCServer, grpc::InsecureServerCredentials());
   std::unique_ptr<grpc::Server> innerTmpServer(innerServerbuilder.BuildAndStart());
   innerServer_ = std::move(innerTmpServer);
@@ -61,6 +114,7 @@ void ModuleInterface::grpcServerBuilder(std::shared_ptr<grpc::Service> service) 
   grpc::ServerBuilder outerServerBuilder;
   outerServerBuilder.RegisterService(service.get());
   grpc::reflection::InitProtoReflectionServerBuilderPlugin();
+  outerServerBuilder.experimental().SetInterceptorCreators(createInterceptorCreators(metaData_.name));
   outerServerBuilder.AddListeningPort(metaData_.outerGRPCServer, grpc::InsecureServerCredentials());
   std::unique_ptr<grpc::Server> outerTmpServer(outerServerBuilder.BuildAndStart());
   outerServer_ = std::move(outerTmpServer);
