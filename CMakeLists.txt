@@ -14,8 +14,26 @@ set(libPath ${packPath}/lib)
 set(configPath ${packPath}/conf)
 file(MAKE_DIRECTORY ${packPath} ${libPath} ${configPath})
 
-set(CMAKE_C_COMPILER_LAUNCHER ccache)
-set(CMAKE_CXX_COMPILER_LAUNCHER ccache)
+option(MSKDSP_USE_CCACHE "Use ccache to speed up builds (if available)" ON)
+if(MSKDSP_USE_CCACHE)
+  find_program(CCACHE_PROGRAM ccache)
+  if(CCACHE_PROGRAM)
+    # Some environments (e.g. sandboxed builds) may not be able to write to the
+    # default ccache directory (usually under $HOME/.cache). When CCACHE_DIR is
+    # not explicitly set, use a build-local directory to avoid permission issues.
+    if(DEFINED ENV{CCACHE_DIR} AND NOT "$ENV{CCACHE_DIR}" STREQUAL "")
+      set(CMAKE_C_COMPILER_LAUNCHER ${CCACHE_PROGRAM})
+      set(CMAKE_CXX_COMPILER_LAUNCHER ${CCACHE_PROGRAM})
+    else()
+      set(MSKDSP_CCACHE_DIR "${CMAKE_BINARY_DIR}/.ccache")
+      file(MAKE_DIRECTORY "${MSKDSP_CCACHE_DIR}")
+      set(CMAKE_C_COMPILER_LAUNCHER
+          "${CMAKE_COMMAND};-E;env;CCACHE_DIR=${MSKDSP_CCACHE_DIR};${CCACHE_PROGRAM}")
+      set(CMAKE_CXX_COMPILER_LAUNCHER
+          "${CMAKE_COMMAND};-E;env;CCACHE_DIR=${MSKDSP_CCACHE_DIR};${CCACHE_PROGRAM}")
+    endif()
+  endif()
+endif()
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${packPath})
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${libPath})

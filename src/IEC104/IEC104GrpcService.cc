@@ -6,12 +6,6 @@ namespace IEC104 {
 void IEC104GrpcServiceImpl::getIEC104(IEC104 *iec104) {
   iec104_ = iec104;
 }
-grpc::Status IEC104GrpcServiceImpl::Ping(grpc::ServerContext *, const IEC104Proto::Empty *, IEC104Proto::Empty *) {
-  return grpc::Status::OK;
-}
-grpc::Status IEC104GrpcServiceImpl::Test(grpc::ServerContext *context, const IEC104Proto::Empty *, IEC104Proto::Empty *) {
-  return grpc::Status::OK;
-}
 
 grpc::Status IEC104GrpcServiceImpl::UpsertLink(
     grpc::ServerContext *, const IEC104Proto::UpsertLinkRequest *request, IEC104Proto::LinkInfo *response) {
