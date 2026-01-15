@@ -1,0 +1,4 @@
+{
+  // ModuleManager 启动时自动加载的模块列表。
+  "auto_start_modules": []
+}

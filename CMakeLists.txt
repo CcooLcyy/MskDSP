@@ -7,7 +7,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(gRPC CONFIG REQUIRED)
 find_package(Protobuf CONFIG REQUIRED)
-find_package(Boost REQUIRED COMPONENTS asio dll log log_setup)
+find_package(Boost REQUIRED COMPONENTS asio dll iostreams log log_setup)
+find_package(ZLIB REQUIRED)
 
 set(packPath ${CMAKE_SOURCE_DIR}/package)
 set(libPath ${packPath}/lib)

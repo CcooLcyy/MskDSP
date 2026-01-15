@@ -119,7 +119,7 @@ void ModuleInterface::grpcServerBuilder(std::shared_ptr<grpc::Service> service) 
   std::unique_ptr<grpc::Server> outerTmpServer(outerServerBuilder.BuildAndStart());
   outerServer_ = std::move(outerTmpServer);
 
-  LOG_INFO("模块信息: \nname:\t\t{}\nlibNmae:\t{}\nversion:\t{}\ninner server:\t{}\nouter server:\t{}", metaData_.name, metaData_.libName, metaData_.version.version, metaData_.innerGRPCServer, metaData_.outerGRPCServer);
+  LOG_INFO("模块信息:\n名称:\t\t{}\n库名:\t\t{}\n版本:\t\t{}\n内部服务:\t{}\n对外服务:\t{}", metaData_.name, metaData_.libName, metaData_.version.version, metaData_.innerGRPCServer, metaData_.outerGRPCServer);
 
   innerServerThread_ = std::jthread([this]() {
     if (innerServer_) {

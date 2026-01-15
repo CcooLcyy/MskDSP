@@ -1,5 +1,7 @@
 #include "ModuleManager.h"
 
+#include <google/protobuf/struct.pb.h>
+#include <google/protobuf/util/json_util.h>
 #include <grpcpp/completion_queue.h>
 #include <grpcpp/ext/proto_server_reflection_plugin.h>
 #include <grpcpp/grpcpp.h>
@@ -15,6 +17,7 @@
 #include <memory>
 #include <sstream>
 #include <stop_token>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -23,6 +26,98 @@
 #include "ModuleManager.pb.h"
 #include "ModuleManagerGrpcService.h"
 #include "moduleManagerLibInfo.h"
+
+namespace {
+constexpr const char *kAutoStartConfigPath = "./conf/module_manager.jsonc";
+
+std::string stripJsonComments(std::string_view input) {
+  std::string out;
+  out.reserve(input.size());
+
+  bool inString = false;
+  bool escape = false;
+  bool inLineComment = false;
+  bool inBlockComment = false;
+
+  for (size_t i = 0; i < input.size(); ++i) {
+    const char c = input[i];
+
+    if (inLineComment) {
+      if (c == '\n') {
+        inLineComment = false;
+        out.push_back(c);
+      }
+      continue;
+    }
+
+    if (inBlockComment) {
+      if (c == '*' && i + 1 < input.size() && input[i + 1] == '/') {
+        inBlockComment = false;
+        ++i;
+        continue;
+      }
+      if (c == '\n') {
+        out.push_back(c);
+      }
+      continue;
+    }
+
+    if (inString) {
+      out.push_back(c);
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (c == '\\') {
+        escape = true;
+        continue;
+      }
+      if (c == '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (c == '"') {
+      inString = true;
+      out.push_back(c);
+      continue;
+    }
+
+    if (c == '/' && i + 1 < input.size()) {
+      const char next = input[i + 1];
+      if (next == '/') {
+        inLineComment = true;
+        ++i;
+        continue;
+      }
+      if (next == '*') {
+        inBlockComment = true;
+        ++i;
+        continue;
+      }
+    }
+
+    out.push_back(c);
+  }
+
+  return out;
+}
+
+bool readFile(const std::filesystem::path &path, std::string *out) {
+  if (out == nullptr) {
+    return false;
+  }
+  std::ifstream ifs(path, std::ios::in | std::ios::binary);
+  if (!ifs.is_open()) {
+    return false;
+  }
+  std::ostringstream oss;
+  oss << ifs.rdbuf();
+  *out = oss.str();
+  return true;
+}
+}  // namespace
 
 namespace ModuleManager {
 ModuleManager::ModuleManager() :
@@ -39,9 +134,84 @@ void ModuleManager::start(std::stop_token stopToken) {
   LOG_INFO("正在启动模块管理器");
   moduleManagerService_->getModuleManager(this);
   grpcServerBuilder(moduleManagerService_);
+  autoStartModulesFromConfig();
   while (!stopToken.stop_requested()) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
+}
+void ModuleManager::autoStartModulesFromConfig() {
+  const std::filesystem::path configPath(kAutoStartConfigPath);
+  if (!std::filesystem::exists(configPath)) {
+    LOG_INFO("Auto-start config not found: {}", configPath.string());
+    return;
+  }
+
+  std::string raw;
+  if (!readFile(configPath, &raw)) {
+    LOG_ERROR("Auto-start config read failed: {}", configPath.string());
+    return;
+  }
+
+  auto json = stripJsonComments(raw);
+  google::protobuf::Struct config;
+  google::protobuf::util::JsonParseOptions options;
+  options.ignore_unknown_fields = true;
+  auto status = google::protobuf::util::JsonStringToMessage(json, &config, options);
+  if (!status.ok()) {
+    LOG_ERROR("Auto-start config parse failed: {}", status.ToString());
+    return;
+  }
+
+  auto fieldIt = config.fields().find("auto_start_modules");
+  if (fieldIt == config.fields().end()) {
+    LOG_INFO("Auto-start config has no auto_start_modules");
+    return;
+  }
+  if (fieldIt->second.kind_case() != google::protobuf::Value::kListValue) {
+    LOG_ERROR("Auto-start config auto_start_modules should be array");
+    return;
+  }
+
+  const auto &list = fieldIt->second.list_value();
+  if (list.values().empty()) {
+    LOG_INFO("Auto-start config auto_start_modules is empty");
+    return;
+  }
+
+  initModuleInfos();
+  int started = 0;
+  for (const auto &value : list.values()) {
+    if (value.kind_case() != google::protobuf::Value::kStringValue) {
+      LOG_WARNING("Auto-start module entry is not string");
+      continue;
+    }
+    const auto &moduleName = value.string_value();
+    if (moduleName.empty()) {
+      LOG_WARNING("Auto-start module entry is empty");
+      continue;
+    }
+    auto runningIt = std::find_if(libInfoVec_.begin(), libInfoVec_.end(), [&](const std::shared_ptr<LibInfo> &lib) {
+      return lib->MetaData().name == moduleName;
+    });
+    if (runningIt != libInfoVec_.end()) {
+      LOG_INFO("Auto-start skip, module already running: {}", moduleName);
+      continue;
+    }
+
+    auto moduleInfoIt = std::find_if(moduleInfos_.module_info().begin(), moduleInfos_.module_info().end(), [&](const ModuleManagerProto::ModuleInfo &elem) {
+      return elem.module_name() == moduleName;
+    });
+    if (moduleInfoIt == moduleInfos_.module_info().end()) {
+      LOG_WARNING("Auto-start module not found in ./lib: {}", moduleName);
+      continue;
+    }
+
+    LOG_INFO("Auto-start module: {}", moduleName);
+    libInfoVec_.emplace_back(LibInfo::create(*moduleInfoIt));
+    ++started;
+  }
+
+  LOG_INFO("Auto-start completed, started {}", started);
 }
 void ModuleManager::loadModule(ModuleManagerProto::ModuleInfo moduleInfo) {
   initModuleInfos();

@@ -11,7 +11,9 @@ add_library(${LIB_NAME} SHARED ${MODULEMANAGER_SRCS})
 target_include_directories(${LIB_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(${LIB_NAME} PUBLIC 
     Boost::dll
+    Boost::iostreams
     Boost::log
+    ZLIB::ZLIB
     dspProto
 )
 set_target_properties(${LIB_NAME} PROPERTIES

@@ -74,6 +74,7 @@ public:
   void saveModuleStartConfig(ModuleManagerProto::ModuleInfos moduleInfos);
 
 private:
+  void autoStartModulesFromConfig();
   void initModuleInfos();
   ModuleManagerProto::ModuleVersion parseVersion(std::string libName);
   ModuleManagerProto::ModuleInfos moduleInfos_;

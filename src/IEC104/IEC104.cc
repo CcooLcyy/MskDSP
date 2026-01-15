@@ -6,6 +6,7 @@
 
 #include "IEC104GrpcService.h"
 #include "IEC104LibInfo.h"
+#include "Logger.h"
 
 namespace IEC104 {
 IEC104::IEC104() :
@@ -16,6 +17,7 @@ IEC104::IEC104() :
 }
 IEC104::~IEC104() {}
 void IEC104::start(std::stop_token stopToken) {
+  LOG_INFO("IEC104 模块启动");
   iec104Service_->getIEC104(this);
   grpcServerBuilder(iec104Service_);
 
@@ -24,6 +26,7 @@ void IEC104::start(std::stop_token stopToken) {
   std::stop_callback cb(stopToken, [&cv]() { cv.notify_all(); });
   std::unique_lock lock(mu);
   cv.wait(lock, [&stopToken]() { return stopToken.stop_requested(); });
+  LOG_INFO("IEC104 模块停止");
 }
 
 LinkManager &IEC104::linkManager() {

@@ -8,6 +8,7 @@
 
 #include "AGCGrpcService.h"
 #include "AGCLibInfo.h"
+#include "Logger.h"
 
 namespace AGC {
 AGC::AGC() :
@@ -18,11 +19,13 @@ AGC::AGC() :
 }
 AGC::~AGC() {}
 void AGC::start(std::stop_token stopToken) {
+  LOG_INFO("AGC 模块启动");
   agcService_->getAGC(this);
   grpcServerBuilder(agcService_);
   while (!stopToken.stop_requested()) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
+  LOG_INFO("AGC 模块停止");
 }
 
 GroupManager& AGC::groupManager() {

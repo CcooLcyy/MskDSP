@@ -194,18 +194,33 @@ DataCenterGrpcServiceImpl::~DataCenterGrpcServiceImpl() = default;
 
 grpc::Status DataCenterGrpcServiceImpl::UpsertConnection(grpc::ServerContext*, const DataCenterProto::UpsertConnectionRequest* request, DataCenterProto::Empty*) {
   if (request == nullptr) {
+    LOG_ERROR("DataCenter UpsertConnection 请求为空");
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request is null");
   }
   std::lock_guard<std::mutex> lock(impl_->mu);
   auto status = impl_->core.UpsertConnection(*request);
   if (!status.ok()) {
+    const auto& conn = request->conn();
+    LOG_ERROR("DataCenter 更新连接失败: module_name={}, conn_name={}, conn_id={}, 原因={}",
+              conn.module_name(), conn.conn_name(), conn.conn_id(), status.error_message());
     return status;
   }
-  return impl_->saveConnectionsLocked();
+  status = impl_->saveConnectionsLocked();
+  if (!status.ok()) {
+    const auto& conn = request->conn();
+    LOG_ERROR("DataCenter 更新连接落盘失败: module_name={}, conn_name={}, conn_id={}, 原因={}",
+              conn.module_name(), conn.conn_name(), conn.conn_id(), status.error_message());
+    return status;
+  }
+  const auto& conn = request->conn();
+  LOG_INFO("DataCenter 已更新连接: module_name={}, conn_name={}, conn_id={}",
+           conn.module_name(), conn.conn_name(), conn.conn_id());
+  return grpc::Status::OK;
 }
 
 grpc::Status DataCenterGrpcServiceImpl::ListConnections(grpc::ServerContext*, const DataCenterProto::Empty*, DataCenterProto::ListConnectionsResponse* response) {
   if (response == nullptr) {
+    LOG_ERROR("DataCenter ListConnections 响应为空");
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "response is null");
   }
   std::lock_guard<std::mutex> lock(impl_->mu);
@@ -215,32 +230,63 @@ grpc::Status DataCenterGrpcServiceImpl::ListConnections(grpc::ServerContext*, co
 
 grpc::Status DataCenterGrpcServiceImpl::GetOrCreateConnection(grpc::ServerContext*, const DataCenterProto::GetOrCreateConnectionRequest* request, DataCenterProto::ConnectionInfo* response) {
   if (request == nullptr || response == nullptr) {
+    LOG_ERROR("DataCenter GetOrCreateConnection 请求为空");
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request/response is null");
   }
 
   std::lock_guard<std::mutex> lock(impl_->mu);
   auto status = impl_->core.GetOrCreateConnection(*request, response);
   if (!status.ok()) {
+    const auto& key = request->key();
+    LOG_ERROR("DataCenter 获取/创建连接失败: module_name={}, conn_name={}, 原因={}",
+              key.module_name(), key.conn_name(), status.error_message());
     return status;
   }
-  return impl_->saveConnectionsLocked();
+  status = impl_->saveConnectionsLocked();
+  if (!status.ok()) {
+    const auto& key = request->key();
+    LOG_ERROR("DataCenter 获取/创建连接落盘失败: module_name={}, conn_name={}, 原因={}",
+              key.module_name(), key.conn_name(), status.error_message());
+    return status;
+  }
+  LOG_INFO("DataCenter 已获取/创建连接: module_name={}, conn_name={}, conn_id={}",
+           response->module_name(), response->conn_name(), response->conn_id());
+  return grpc::Status::OK;
 }
 
 grpc::Status DataCenterGrpcServiceImpl::RenameConnection(grpc::ServerContext*, const DataCenterProto::RenameConnectionRequest* request, DataCenterProto::ConnectionInfo* response) {
   if (request == nullptr || response == nullptr) {
+    LOG_ERROR("DataCenter RenameConnection 请求为空");
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request/response is null");
   }
 
   std::lock_guard<std::mutex> lock(impl_->mu);
   auto status = impl_->core.RenameConnection(*request, response);
   if (!status.ok()) {
+    const auto& oldKey = request->old_key();
+    const auto& newKey = request->new_key();
+    LOG_ERROR("DataCenter 重命名连接失败: old=({}, {}), new=({}, {}), 原因={}",
+              oldKey.module_name(), oldKey.conn_name(), newKey.module_name(), newKey.conn_name(), status.error_message());
     return status;
   }
-  return impl_->saveConnectionsLocked();
+  status = impl_->saveConnectionsLocked();
+  if (!status.ok()) {
+    const auto& oldKey = request->old_key();
+    const auto& newKey = request->new_key();
+    LOG_ERROR("DataCenter 重命名连接落盘失败: old=({}, {}), new=({}, {}), 原因={}",
+              oldKey.module_name(), oldKey.conn_name(), newKey.module_name(), newKey.conn_name(), status.error_message());
+    return status;
+  }
+  const auto& oldKey = request->old_key();
+  const auto& newKey = request->new_key();
+  LOG_INFO("DataCenter 已重命名连接: old=({}, {}), new=({}, {}), conn_id={}",
+           oldKey.module_name(), oldKey.conn_name(), newKey.module_name(), newKey.conn_name(), response->conn_id());
+  return grpc::Status::OK;
 }
 
 grpc::Status DataCenterGrpcServiceImpl::DeleteConnection(grpc::ServerContext*, const DataCenterProto::DeleteConnectionRequest* request, DataCenterProto::Empty*) {
   if (request == nullptr) {
+    LOG_ERROR("DataCenter DeleteConnection 请求为空");
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request is null");
   }
 
@@ -249,11 +295,16 @@ grpc::Status DataCenterGrpcServiceImpl::DeleteConnection(grpc::ServerContext*, c
   DataCenterProto::ConnectionInfo conn;
   auto status = impl_->core.GetConnectionByKey(request->key(), &conn);
   if (!status.ok()) {
+    const auto& key = request->key();
+    LOG_ERROR("DataCenter 删除连接失败: module_name={}, conn_name={}, 原因={}",
+              key.module_name(), key.conn_name(), status.error_message());
     return status;
   }
 
   status = impl_->core.DeleteConnection(*request);
   if (!status.ok()) {
+    LOG_ERROR("DataCenter 删除连接失败: module_name={}, conn_name={}, conn_id={}, 原因={}",
+              conn.module_name(), conn.conn_name(), conn.conn_id(), status.error_message());
     return status;
   }
 
@@ -261,35 +312,55 @@ grpc::Status DataCenterGrpcServiceImpl::DeleteConnection(grpc::ServerContext*, c
 
   status = impl_->saveConnectionsLocked();
   if (!status.ok()) {
+    LOG_ERROR("DataCenter 删除连接落盘失败: module_name={}, conn_name={}, conn_id={}, 原因={}",
+              conn.module_name(), conn.conn_name(), conn.conn_id(), status.error_message());
     return status;
   }
 
   status = impl_->savePointTablesLocked();
   if (!status.ok()) {
+    LOG_ERROR("DataCenter 删除连接点表落盘失败: module_name={}, conn_name={}, conn_id={}, 原因={}",
+              conn.module_name(), conn.conn_name(), conn.conn_id(), status.error_message());
     return status;
   }
 
   status = impl_->saveRoutesLocked();
   if (!status.ok()) {
+    LOG_ERROR("DataCenter 删除连接路由落盘失败: module_name={}, conn_name={}, conn_id={}, 原因={}",
+              conn.module_name(), conn.conn_name(), conn.conn_id(), status.error_message());
     return status;
   }
+  LOG_INFO("DataCenter 已删除连接: module_name={}, conn_name={}, conn_id={}",
+           conn.module_name(), conn.conn_name(), conn.conn_id());
   return grpc::Status::OK;
 }
 
 grpc::Status DataCenterGrpcServiceImpl::UpsertPointTable(grpc::ServerContext*, const DataCenterProto::UpsertPointTableRequest* request, DataCenterProto::Empty*) {
   if (request == nullptr) {
+    LOG_ERROR("DataCenter UpsertPointTable 请求为空");
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request is null");
   }
   std::lock_guard<std::mutex> lock(impl_->mu);
   auto status = impl_->core.UpsertPointTable(*request);
   if (!status.ok()) {
+    LOG_ERROR("DataCenter 更新点表失败: conn_id={}, 点数={}, replace={}, 原因={}",
+              request->conn_id(), request->tags_size(), request->replace(), status.error_message());
     return status;
   }
-  return impl_->savePointTablesLocked();
+  status = impl_->savePointTablesLocked();
+  if (!status.ok()) {
+    LOG_ERROR("DataCenter 点表落盘失败: conn_id={}, 点数={}, replace={}, 原因={}",
+              request->conn_id(), request->tags_size(), request->replace(), status.error_message());
+    return status;
+  }
+  LOG_INFO("DataCenter 已更新点表: conn_id={}, 点数={}, replace={}",
+           request->conn_id(), request->tags_size(), request->replace());
+  return grpc::Status::OK;
 }
 
 grpc::Status DataCenterGrpcServiceImpl::GetPointTable(grpc::ServerContext*, const DataCenterProto::GetPointTableRequest* request, DataCenterProto::PointTable* response) {
   if (request == nullptr || response == nullptr) {
+    LOG_ERROR("DataCenter GetPointTable 请求为空");
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request/response is null");
   }
   std::lock_guard<std::mutex> lock(impl_->mu);
@@ -298,30 +369,49 @@ grpc::Status DataCenterGrpcServiceImpl::GetPointTable(grpc::ServerContext*, cons
 
 grpc::Status DataCenterGrpcServiceImpl::UpsertRoutes(grpc::ServerContext*, const DataCenterProto::UpsertRoutesRequest* request, DataCenterProto::Empty*) {
   if (request == nullptr) {
+    LOG_ERROR("DataCenter UpsertRoutes 请求为空");
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request is null");
   }
   std::lock_guard<std::mutex> lock(impl_->mu);
   auto status = impl_->core.UpsertRoutes(*request);
   if (!status.ok()) {
+    LOG_ERROR("DataCenter 更新路由失败: routes={}, replace={}, 原因={}",
+              request->routes_size(), request->replace(), status.error_message());
     return status;
   }
-  return impl_->saveRoutesLocked();
+  status = impl_->saveRoutesLocked();
+  if (!status.ok()) {
+    LOG_ERROR("DataCenter 路由落盘失败: routes={}, replace={}, 原因={}",
+              request->routes_size(), request->replace(), status.error_message());
+    return status;
+  }
+  LOG_INFO("DataCenter 已更新路由: routes={}, replace={}", request->routes_size(), request->replace());
+  return grpc::Status::OK;
 }
 
 grpc::Status DataCenterGrpcServiceImpl::DeleteRoutes(grpc::ServerContext*, const DataCenterProto::DeleteRoutesRequest* request, DataCenterProto::Empty*) {
   if (request == nullptr) {
+    LOG_ERROR("DataCenter DeleteRoutes 请求为空");
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request is null");
   }
   std::lock_guard<std::mutex> lock(impl_->mu);
   auto status = impl_->core.DeleteRoutes(*request);
   if (!status.ok()) {
+    LOG_ERROR("DataCenter 删除路由失败: routes={}, 原因={}", request->routes_size(), status.error_message());
     return status;
   }
-  return impl_->saveRoutesLocked();
+  status = impl_->saveRoutesLocked();
+  if (!status.ok()) {
+    LOG_ERROR("DataCenter 删除路由落盘失败: routes={}, 原因={}", request->routes_size(), status.error_message());
+    return status;
+  }
+  LOG_INFO("DataCenter 已删除路由: routes={}", request->routes_size());
+  return grpc::Status::OK;
 }
 
 grpc::Status DataCenterGrpcServiceImpl::ListRoutes(grpc::ServerContext*, const DataCenterProto::ListRoutesRequest* request, DataCenterProto::ListRoutesResponse* response) {
   if (request == nullptr || response == nullptr) {
+    LOG_ERROR("DataCenter ListRoutes 请求为空");
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request/response is null");
   }
   std::lock_guard<std::mutex> lock(impl_->mu);
@@ -331,6 +421,7 @@ grpc::Status DataCenterGrpcServiceImpl::ListRoutes(grpc::ServerContext*, const D
 
 grpc::Status DataCenterGrpcServiceImpl::Publish(grpc::ServerContext*, const DataCenterProto::PublishRequest* request, DataCenterProto::Empty*) {
   if (request == nullptr) {
+    LOG_ERROR("DataCenter Publish 请求为空");
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request is null");
   }
 
@@ -362,6 +453,7 @@ grpc::Status DataCenterGrpcServiceImpl::Publish(grpc::ServerContext*, const Data
 
 grpc::Status DataCenterGrpcServiceImpl::BatchPublish(grpc::ServerContext*, const DataCenterProto::BatchPublishRequest* request, DataCenterProto::Empty*) {
   if (request == nullptr) {
+    LOG_ERROR("DataCenter BatchPublish 请求为空");
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request is null");
   }
 
@@ -393,6 +485,7 @@ grpc::Status DataCenterGrpcServiceImpl::BatchPublish(grpc::ServerContext*, const
 
 grpc::Status DataCenterGrpcServiceImpl::GetLatest(grpc::ServerContext*, const DataCenterProto::GetLatestRequest* request, DataCenterProto::GetLatestResponse* response) {
   if (request == nullptr || response == nullptr) {
+    LOG_ERROR("DataCenter GetLatest 请求为空");
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request/response is null");
   }
   std::lock_guard<std::mutex> lock(impl_->mu);
@@ -401,9 +494,11 @@ grpc::Status DataCenterGrpcServiceImpl::GetLatest(grpc::ServerContext*, const Da
 
 grpc::Status DataCenterGrpcServiceImpl::Subscribe(grpc::ServerContext* context, const DataCenterProto::SubscribeRequest* request, grpc::ServerWriter<DataCenterProto::PointUpdate>* writer) {
   if (context == nullptr || request == nullptr || writer == nullptr) {
+    LOG_ERROR("DataCenter Subscribe 请求为空");
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "context/request/writer is null");
   }
   if (request->conn_id() == 0) {
+    LOG_ERROR("DataCenter Subscribe 参数缺失: conn_id");
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id is required");
   }
 

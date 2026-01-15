@@ -8,6 +8,7 @@
 
 #include "DataCenterGrpcService.h"
 #include "DataCenterLibInfo.h"
+#include "Logger.h"
 
 namespace DataCenter {
 DataCenter::DataCenter() :
@@ -17,6 +18,7 @@ DataCenter::DataCenter() :
 }
 DataCenter::~DataCenter() {}
 void DataCenter::start(std::stop_token stopToken) {
+  LOG_INFO("DataCenter 模块启动");
   grpcServerBuilder(dataCenterService_);
 
   std::mutex mu;
@@ -25,6 +27,7 @@ void DataCenter::start(std::stop_token stopToken) {
 
   std::unique_lock lock(mu);
   cv.wait(lock, [&stopToken]() { return stopToken.stop_requested(); });
+  LOG_INFO("DataCenter 模块停止");
 }
 }  // namespace DataCenter
 

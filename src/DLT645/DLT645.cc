@@ -8,6 +8,7 @@
 
 #include "DLT645GrpcService.h"
 #include "DLT645LibInfo.h"
+#include "Logger.h"
 
 namespace DLT645 {
 DLT645::DLT645() :
@@ -17,11 +18,13 @@ DLT645::DLT645() :
 }
 DLT645::~DLT645() {}
 void DLT645::start(std::stop_token stopToken) {
+  LOG_INFO("DLT645 模块启动");
   dlt645Service_->getDLT645(this);
   grpcServerBuilder(dlt645Service_);
   while (!stopToken.stop_requested()) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
+  LOG_INFO("DLT645 模块停止");
 }
 }  // namespace DLT645
 

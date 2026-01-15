@@ -1,12 +1,14 @@
 {
   "dependencies": [
     "boost-asio",
+    "boost-iostreams",
     "boost-json",
     "boost-log",
     "gtest",
     "paho-mqttpp3",
     "protobuf",
     "grpc",
-    "boost-dll"
+    "boost-dll",
+    "zlib"
   ]
 }

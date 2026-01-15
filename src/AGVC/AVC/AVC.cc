@@ -8,6 +8,7 @@
 
 #include "AVCGrpcService.h"
 #include "AVCLibInfo.h"
+#include "Logger.h"
 
 namespace AVC {
 AVC::AVC() :
@@ -17,11 +18,13 @@ AVC::AVC() :
 }
 AVC::~AVC() {}
 void AVC::start(std::stop_token stopToken) {
+  LOG_INFO("AVC 模块启动");
   avcService_->getAVC(this);
   grpcServerBuilder(avcService_);
   while (!stopToken.stop_requested()) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
+  LOG_INFO("AVC 模块停止");
 }
 }  // namespace AVC
 

@@ -171,48 +171,53 @@ std::optional<ModuleManagerProto::ModuleRunningInfo> waitForModule(
 
 bool applyIec104Config(const ConfigPusherProto::Iec104Config &config, IEC104Proto::IEC104Service::StubInterface *stub) {
   if (stub == nullptr) {
-    LOG_ERROR("IEC104 stub is null");
+    LOG_ERROR("IEC104 gRPC stub 为空");
     return false;
   }
 
   bool ok = true;
   for (const auto &task : config.links()) {
     if (!task.has_link() || !task.link().has_config()) {
-      LOG_ERROR("IEC104 link task missing link/config");
+      LOG_ERROR("IEC104 配置任务缺少 link/config");
       ok = false;
       continue;
     }
 
     const auto &linkConfig = task.link().config();
     if (linkConfig.conn_name().empty()) {
-      LOG_ERROR("IEC104 link task missing config.conn_name");
+      LOG_ERROR("IEC104 配置任务缺少 config.conn_name");
       ok = false;
       continue;
     }
 
+    LOG_INFO("开始下发 IEC104 连接配置: conn_name={}", linkConfig.conn_name());
     IEC104Proto::UpsertLinkRequest linkReq = task.link();
     IEC104Proto::LinkInfo linkInfo;
     grpc::ClientContext linkCtx;
     auto status = stub->UpsertLink(&linkCtx, linkReq, &linkInfo);
     if (!status.ok()) {
-      LOG_ERROR("IEC104 UpsertLink failed for {}: {}", linkConfig.conn_name(), status.error_message());
+      LOG_ERROR("IEC104 连接配置失败: conn_name={}, 原因={}", linkConfig.conn_name(), status.error_message());
       ok = false;
       continue;
     }
+    LOG_INFO("IEC104 连接配置成功: conn_name={}, conn_id={}", linkConfig.conn_name(), linkInfo.conn_id());
 
     if (task.has_point_table() && task.point_table().points_size() > 0) {
       IEC104Proto::UpsertPointTableRequest ptReq = task.point_table();
       if (ptReq.conn_name().empty()) {
         ptReq.set_conn_name(linkConfig.conn_name());
       }
+      LOG_INFO("开始下发 IEC104 点表: conn_name={}, 点数={}, replace={}",
+               ptReq.conn_name(), ptReq.points_size(), ptReq.replace());
       grpc::ClientContext ptCtx;
       IEC104Proto::Empty ptResp;
       status = stub->UpsertPointTable(&ptCtx, ptReq, &ptResp);
       if (!status.ok()) {
-        LOG_ERROR("IEC104 UpsertPointTable failed for {}: {}", ptReq.conn_name(), status.error_message());
+        LOG_ERROR("IEC104 点表下发失败: conn_name={}, 原因={}", ptReq.conn_name(), status.error_message());
         ok = false;
         continue;
       }
+      LOG_INFO("IEC104 点表下发成功: conn_name={}, 点数={}", ptReq.conn_name(), ptReq.points_size());
     }
 
     if (task.start()) {
@@ -222,10 +227,11 @@ bool applyIec104Config(const ConfigPusherProto::Iec104Config &config, IEC104Prot
       IEC104Proto::Empty startResp;
       status = stub->StartLink(&startCtx, startReq, &startResp);
       if (!status.ok()) {
-        LOG_ERROR("IEC104 StartLink failed for {}: {}", linkConfig.conn_name(), status.error_message());
+        LOG_ERROR("IEC104 启动连接失败: conn_name={}, 原因={}", linkConfig.conn_name(), status.error_message());
         ok = false;
         continue;
       }
+      LOG_INFO("IEC104 连接启动成功: conn_name={}", linkConfig.conn_name());
     }
   }
 
@@ -242,6 +248,7 @@ ConfigPusher::ConfigPusher() :
 ConfigPusher::~ConfigPusher() {}
 
 void ConfigPusher::start(std::stop_token stopToken) {
+  LOG_INFO("ConfigPusher 模块启动");
   configPusherService_->getConfigPusher(this);
   grpcServerBuilder(configPusherService_);
   applyConfig();
@@ -251,17 +258,19 @@ void ConfigPusher::start(std::stop_token stopToken) {
   std::stop_callback cb(stopToken, [&cv]() { cv.notify_all(); });
   std::unique_lock lock(mu);
   cv.wait(lock, [&stopToken]() { return stopToken.stop_requested(); });
+  LOG_INFO("ConfigPusher 模块停止");
 }
 
 void ConfigPusher::applyConfig() {
   if (!std::filesystem::exists(kConfigPath)) {
-    LOG_INFO("ConfigPusher config not found: {}", kConfigPath);
+    LOG_INFO("未找到 ConfigPusher 配置文件: {}", kConfigPath);
     return;
   }
 
+  LOG_INFO("开始读取 ConfigPusher 配置文件: {}", kConfigPath);
   std::string raw;
   if (!readFile(kConfigPath, &raw)) {
-    LOG_ERROR("ConfigPusher failed to read config: {}", kConfigPath);
+    LOG_ERROR("读取 ConfigPusher 配置文件失败: {}", kConfigPath);
     return;
   }
 
@@ -271,14 +280,15 @@ void ConfigPusher::applyConfig() {
   options.ignore_unknown_fields = false;
   auto parseStatus = google::protobuf::util::JsonStringToMessage(json, &config, options);
   if (!parseStatus.ok()) {
-    LOG_ERROR("ConfigPusher config parse failed: {}", parseStatus.ToString());
+    LOG_ERROR("解析 ConfigPusher 配置失败: {}", parseStatus.ToString());
     return;
   }
 
   if (!config.has_iec104() || config.iec104().links().empty()) {
-    LOG_INFO("ConfigPusher config has no IEC104 links");
+    LOG_INFO("配置中未包含 IEC104 链路");
     return;
   }
+  LOG_INFO("ConfigPusher 配置解析完成，开始准备下发 IEC104 配置");
 
   auto channel = grpc::CreateChannel(kModuleManagerAddress, grpc::InsecureChannelCredentials());
   auto moduleStub = ModuleManagerProto::ModuleManage::NewStub(channel);
@@ -288,18 +298,18 @@ void ConfigPusher::applyConfig() {
   ModuleManagerProto::Empty infoReq;
   auto status = moduleStub->GetModuleInfo(&infoCtx, infoReq, &moduleInfos);
   if (!status.ok()) {
-    LOG_ERROR("ConfigPusher GetModuleInfo failed: {}", status.error_message());
+    LOG_ERROR("获取模块列表失败: {}", status.error_message());
     return;
   }
 
   auto dataCenterInfo = findModuleInfo(moduleInfos, kDataCenterModuleName);
   if (!dataCenterInfo) {
-    LOG_ERROR("ConfigPusher cannot find module: {}", kDataCenterModuleName);
+    LOG_ERROR("未找到模块: {}", kDataCenterModuleName);
     return;
   }
   auto iec104Info = findModuleInfo(moduleInfos, kIec104ModuleName);
   if (!iec104Info) {
-    LOG_ERROR("ConfigPusher cannot find module: {}", kIec104ModuleName);
+    LOG_ERROR("未找到模块: {}", kIec104ModuleName);
     return;
   }
 
@@ -308,49 +318,57 @@ void ConfigPusher::applyConfig() {
   ModuleManagerProto::Empty runningReq;
   status = moduleStub->GetRunningModuleInfo(&runningCtx, runningReq, &running);
   if (!status.ok()) {
-    LOG_ERROR("ConfigPusher GetRunningModuleInfo failed: {}", status.error_message());
+    LOG_ERROR("获取运行中模块信息失败: {}", status.error_message());
     return;
   }
 
   auto runningDataCenter = findRunningInfo(running, kDataCenterModuleName);
   if (!runningDataCenter) {
+    LOG_INFO("DataCenter 未运行，开始启动");
     grpc::ClientContext startCtx;
     ModuleManagerProto::Empty startResp;
     status = moduleStub->StartModule(&startCtx, *dataCenterInfo, &startResp);
     if (!status.ok()) {
-      LOG_ERROR("ConfigPusher StartModule {} failed: {}", kDataCenterModuleName, status.error_message());
+      LOG_ERROR("启动模块 {} 失败: {}", kDataCenterModuleName, status.error_message());
       return;
     }
     runningDataCenter = waitForModule(moduleStub.get(), kDataCenterModuleName, kModuleStartTimeout);
     if (!runningDataCenter) {
-      LOG_ERROR("ConfigPusher wait DataCenter running timeout");
+      LOG_ERROR("等待 DataCenter 启动超时");
       return;
     }
+    LOG_INFO("DataCenter 已启动");
+  } else {
+    LOG_INFO("DataCenter 已在运行");
   }
 
   auto runningIec104 = findRunningInfo(running, kIec104ModuleName);
   if (!runningIec104) {
+    LOG_INFO("IEC104 未运行，开始启动");
     grpc::ClientContext startCtx;
     ModuleManagerProto::Empty startResp;
     status = moduleStub->StartModule(&startCtx, *iec104Info, &startResp);
     if (!status.ok()) {
-      LOG_ERROR("ConfigPusher StartModule {} failed: {}", kIec104ModuleName, status.error_message());
+      LOG_ERROR("启动模块 {} 失败: {}", kIec104ModuleName, status.error_message());
       return;
     }
     runningIec104 = waitForModule(moduleStub.get(), kIec104ModuleName, kModuleStartTimeout);
     if (!runningIec104) {
-      LOG_ERROR("ConfigPusher wait IEC104 running timeout");
+      LOG_ERROR("等待 IEC104 启动超时");
       return;
     }
+    LOG_INFO("IEC104 已启动");
+  } else {
+    LOG_INFO("IEC104 已在运行");
   }
 
   auto iecChannel = grpc::CreateChannel(runningIec104->inner_grpc_server(), grpc::InsecureChannelCredentials());
   auto iecStub = IEC104Proto::IEC104Service::NewStub(iecChannel);
 
   if (!applyIec104Config(config.iec104(), iecStub.get())) {
-    LOG_ERROR("ConfigPusher IEC104 apply finished with errors");
+    LOG_ERROR("IEC104 配置下发存在错误");
   } else {
-    LOG_INFO("ConfigPusher IEC104 apply completed");
+    LOG_INFO("IEC104 配置下发完成");
   }
 }
 }  // namespace ConfigPusher

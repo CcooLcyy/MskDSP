@@ -13,6 +13,19 @@
 - 模块库必须导出 `create()` 工厂函数（签名等价于 `ModuleInterface::ModuleInterface* create()`），供管理器通过 Boost.DLL 获取并实例化模块对象。
 - 模块对象实现 `start(std::stop_token)`；在 `start()` 中通常会创建并注册自己的 gRPC Service，然后调用 `grpcServerBuilder(service)` 启动服务。
 
+## 启动自加载配置
+- 配置文件：`./conf/module_manager.jsonc`（可选；缺失则跳过）。
+- 字段：`auto_start_modules`（字符串数组，模块名需与 `lib<模块名>.so` 对应）。
+- 行为：管理器启动后读取并自动加载列表中的模块；已运行的模块会跳过。
+
+示例：
+```jsonc
+{
+  // ModuleManager 启动时自动加载的模块列表。
+  "auto_start_modules": ["ConfigPusher"]
+}
+```
+
 ## gRPC 管理接口
 协议定义：`protobuf/ModuleManager.proto`，Service：`ModuleManage`。
 

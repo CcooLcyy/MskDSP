@@ -8,6 +8,7 @@
 
 #include "ModbusGrpcService.h"
 #include "modbusLibInfo.h"
+#include "Logger.h"
 
 namespace Modbus {
 Modbus::Modbus() :
@@ -17,11 +18,13 @@ Modbus::Modbus() :
 }
 Modbus::~Modbus() {}
 void Modbus::start(std::stop_token stopToken) {
+  LOG_INFO("Modbus 模块启动");
   modbusService_->getModbus(this);
   grpcServerBuilder(modbusService_);
   while (!stopToken.stop_requested()) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
+  LOG_INFO("Modbus 模块停止");
 }
 }  // namespace Modbus
 
