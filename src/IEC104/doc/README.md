@@ -37,6 +37,18 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
 4. 上位机使用返回的 `conn_id` 调用 DataCenter 配置路由（`UpsertRoutes` 等）
 5. 调用 `StartLink` 启动该连接的 TCP 监听/连接
 
+## 测试
+相关单元测试位于 `test/`：
+
+- `iec104PointTable_test`：覆盖点表更新、双向查询、冲突校验与序列化输出稳定性。
+- `iec104LinkManager_test`：覆盖 LinkManager 与 DataCenter 的交互语义（使用 gMock stub），以及配置校验/删除语义等边界。
+
+运行方式：
+```bash
+ctest --test-dir build -R iec104PointTable_test --output-on-failure
+ctest --test-dir build -R iec104LinkManager_test --output-on-failure
+```
+
 ## 未实现/后续计划
 - 协议类型：目前仅支持遥测 `M_ME_NC_1` 与总召 `C_IC_NA_1`；遥信/遥控/设点、对时 `C_CS_NA_1`、带时标类型等未实现
 - 时标：暂不支持 `CP56Time2a`（后续可扩展到带时标遥测/遥信与对时）

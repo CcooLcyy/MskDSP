@@ -89,6 +89,13 @@ cmake --build build-cov --parallel
 报告输出：`build-cov/coverage/index.html`
 如本机存在多个 GCC 版本，可通过 `-DGCOV_EXECUTABLE=/usr/bin/gcov-<版本>` 指定与编译器匹配的 `gcov`；`gcovr` 路径可用 `-DGCOVR_EXECUTABLE=/path/to/gcovr` 指定。
 
+#### 常见问题
+- 开启 `MSKDSP_BUILD_TESTS` 后 `cmake --build ...` 会自动执行 `ctest` 并刷新覆盖率报告；如只想编译不跑测试/覆盖率，请用 `-DMSKDSP_BUILD_TESTS=OFF`，或仅构建指定目标（例如 `cmake --build build --target MskDSP`）。
+- 若遇到 `GCOV returncode was 3`，通常是 `gcov` 版本与编译器不匹配；用 `-DGCOV_EXECUTABLE=/usr/bin/gcov-<gcc主版本>` 指定即可。
+- 若遇到 `AssertionError: Got function ... on multiple lines`，通常是同一源文件被多个 target 编译（例如库 + 测试）；需要在 gcovr 使用函数合并策略（当前工程已在 coverage 目标中内置）。
+- 若遇到 `Cannot open source file ...` 且路径指向已不存在的源码（例如模块目录改名后），说明 build 目录残留旧对象文件；建议清理 build 目录后重新配置/编译。
+- 若遇到 `ccache ... Permission denied`，可用 `-DMSKDSP_USE_CCACHE=OFF` 关闭，或设置 `CCACHE_DIR` 到可写目录。
+
 ## 构建产物
 - `package/MskDSP`：主程序（Windows 下可能为 `MskDSP.exe`）
 - `package/lib/`：模块共享库

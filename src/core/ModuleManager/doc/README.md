@@ -44,6 +44,22 @@
 - 普通模块对外 gRPC：随机选择 7001–7999（进程内避免冲突）。
 - 模块内部 gRPC：使用 `./socket/<模块名>.sock`（实际监听为绝对路径形式的 unix domain socket）。
 
+## 测试
+本仓库在 `test/` 中提供了针对模块管理器与基础设施的单元测试用例：
+
+- `moduleManager_test`：覆盖模块扫描（`./lib`）、版本解析、load/unload 生命周期、运行时信息查询、启动配置落盘、gRPC 管理服务的委派逻辑。
+- `moduleInterface_test`：覆盖 `ModuleInterface::initLibInfo/grpcServerBuilder/shutdownServers` 等基础设施逻辑，并通过一次真实 RPC 触发 interceptor 路径。
+
+运行方式：
+```bash
+ctest --test-dir build -R moduleManager_test --output-on-failure
+ctest --test-dir build -R moduleInterface_test --output-on-failure
+```
+
+说明：
+- 测试会使用隔离的工作目录（`build/test_env/...`）避免污染 `package/` 运行目录与本地配置。
+- `moduleManager_test` 会构建一个用于测试的“最小假模块”共享库，并放在其隔离工作目录的 `./lib/` 下，以覆盖动态加载路径。
+
 ## 日志（模块标识）
 为便于排查多模块并发运行时的日志来源，日志输出增加了「模块名」标识。
 
@@ -52,3 +68,6 @@
 - gRPC 自动标记：通过 `grpcServerBuilder(...)` 启动的 gRPC Server 会统一注入 server interceptor，在每个 RPC 处理线程中自动设置模块名上下文；RPC 处理函数里直接使用 `LOG_INFO/LOG_ERROR...` 即可。
 - 非 gRPC 线程：模块自行创建的后台线程需要在入口处手动创建 `ModuleManager::LogModuleScope scope(metaData_.name);`，否则该线程的日志模块名会是 `-`。
 - 如模块绕过 `grpcServerBuilder(...)` 自行创建 gRPC Server，需要自行注入拦截器或手动设置 `LogModuleScope`。
+
+## 未完成工作
+- 模块依赖关系：支持模块声明依赖，ModuleManager 按依赖拓扑顺序加载/启动；停止/卸载按逆序处理；依赖缺失/循环依赖需给出清晰错误。

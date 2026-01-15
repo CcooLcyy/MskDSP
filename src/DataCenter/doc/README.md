@@ -169,5 +169,21 @@ DataCenter 会将路由配置落盘到工作目录下的 `./conf/dataCenter/rout
 - 若主/备均不可用：以空路由启动，等待重新下发。
 - 若路由配置可解析但与已加载点表校验冲突：记录日志并不应用该路由配置。
 
+## 测试
+相关单元测试位于 `test/`：
+
+- `dataCenterCore_test`：覆盖连接分配/重命名/删除、点表/路由校验、转发与最新值缓存等核心语义。
+- `dataCenterPointTableStore_test`：覆盖点表配置落盘/读取与损坏回退策略。
+- `dataCenterRouteStore_test`：覆盖路由配置落盘/读取与损坏回退策略。
+- `dataCenterConnectionStore_test`：覆盖连接注册表落盘/读取与损坏回退策略。
+
+运行方式：
+```bash
+ctest --test-dir build -R dataCenterCore_test --output-on-failure
+ctest --test-dir build -R dataCenterPointTableStore_test --output-on-failure
+ctest --test-dir build -R dataCenterRouteStore_test --output-on-failure
+ctest --test-dir build -R dataCenterConnectionStore_test --output-on-failure
+```
+
 ## 其他内容
 运行时工作目录、socket 目录、端口策略与构建产物路径遵循项目通用约定，详见 [README.md](../../../README.md) 与 [src/core/ModuleManager/doc/README.md](../../core/ModuleManager/doc/README.md)。
