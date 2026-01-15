@@ -116,8 +116,7 @@ struct DataCenterGrpcServiceImpl::Impl {
     auto config = core.DumpConnectionsConfig();
     auto status = connectionStore.Save(config);
     if (!status.ok()) {
-      const auto message = status.error_message();
-      LOG_INFO("DataCenter 连接注册表落盘失败: {}", message);
+      LOG_INFO("DataCenter 连接注册表落盘失败: {}", status.error_message());
     }
     return status;
   }
@@ -126,8 +125,7 @@ struct DataCenterGrpcServiceImpl::Impl {
     auto config = core.DumpPointTablesConfig();
     auto status = pointTableStore.Save(config);
     if (!status.ok()) {
-      const auto message = status.error_message();
-      LOG_INFO("DataCenter 点表落盘失败: {}", message);
+      LOG_INFO("DataCenter 点表落盘失败: {}", status.error_message());
     }
     return status;
   }
@@ -136,8 +134,7 @@ struct DataCenterGrpcServiceImpl::Impl {
     auto config = core.DumpRoutesConfig();
     auto status = routeStore.Save(config);
     if (!status.ok()) {
-      const auto message = status.error_message();
-      LOG_INFO("DataCenter 路由落盘失败: {}", message);
+      LOG_INFO("DataCenter 路由落盘失败: {}", status.error_message());
     }
     return status;
   }
@@ -149,13 +146,11 @@ DataCenterGrpcServiceImpl::DataCenterGrpcServiceImpl() :
     DataCenterProto::ConnectionsConfig config;
     auto status = impl_->connectionStore.Load(&config);
     if (!status.ok()) {
-      const auto message = status.error_message();
-      LOG_INFO("DataCenter 连接注册表加载失败: {}", message);
+      LOG_INFO("DataCenter 连接注册表加载失败: {}", status.error_message());
     } else if (config.conns_size() > 0 || config.next_conn_id() != 0) {
       status = impl_->core.ReplaceConnectionsConfig(config);
       if (!status.ok()) {
-        const auto message = status.error_message();
-        LOG_INFO("DataCenter 连接注册表应用失败: {}", message);
+        LOG_INFO("DataCenter 连接注册表应用失败: {}", status.error_message());
       } else {
         const auto count = config.conns_size();
         LOG_INFO("DataCenter 已加载连接注册表: {} 条", count);
@@ -167,13 +162,11 @@ DataCenterGrpcServiceImpl::DataCenterGrpcServiceImpl() :
     DataCenterProto::PointTablesConfig config;
     auto status = impl_->pointTableStore.Load(&config);
     if (!status.ok()) {
-      const auto message = status.error_message();
-      LOG_INFO("DataCenter 点表加载失败: {}", message);
+      LOG_INFO("DataCenter 点表加载失败: {}", status.error_message());
     } else if (config.point_tables_size() > 0) {
       status = impl_->core.ReplacePointTablesConfig(config);
       if (!status.ok()) {
-        const auto message = status.error_message();
-        LOG_INFO("DataCenter 点表应用失败: {}", message);
+        LOG_INFO("DataCenter 点表应用失败: {}", status.error_message());
       } else {
         const auto count = config.point_tables_size();
         LOG_INFO("DataCenter 已加载点表配置: {} 个连接", count);
@@ -185,13 +178,11 @@ DataCenterGrpcServiceImpl::DataCenterGrpcServiceImpl() :
     DataCenterProto::RoutesConfig config;
     auto status = impl_->routeStore.Load(&config);
     if (!status.ok()) {
-      const auto message = status.error_message();
-      LOG_INFO("DataCenter 路由加载失败: {}", message);
+      LOG_INFO("DataCenter 路由加载失败: {}", status.error_message());
     } else if (config.routes_size() > 0) {
       status = impl_->core.ReplaceRoutesConfig(config);
       if (!status.ok()) {
-        const auto message = status.error_message();
-        LOG_INFO("DataCenter 路由应用失败: {}", message);
+        LOG_INFO("DataCenter 路由应用失败: {}", status.error_message());
       } else {
         const auto count = config.routes_size();
         LOG_INFO("DataCenter 已加载路由配置: {} 条", count);
