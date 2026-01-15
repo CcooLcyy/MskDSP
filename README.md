@@ -79,7 +79,7 @@ ctest --test-dir build --output-on-failure
 如未开启测试构建（`MSKDSP_BUILD_TESTS=OFF`），则不会生成/执行任何测试用例。
 
 ### 测试覆盖率
-开启 `MSKDSP_BUILD_TESTS` 后会在构建时自动运行测试并生成覆盖率报告（要求使用 GCC/Clang 编译，并安装 `gcovr`）。默认值：`Debug=ON`，其他构建类型为 `OFF`。
+开启 `MSKDSP_BUILD_TESTS` 后会在构建时自动运行测试并生成覆盖率报告（要求使用 GCC/Clang 编译，并安装 `gcovr`）。默认值：`Debug=ON`，其他构建类型为 `OFF`。报告默认仅统计本项目 `src/` 下的实现文件与模板实现（`.cc/.cpp/.c/.hpp`），不包含纯声明头文件（`.h`）。
 ```bash
 cmake -S . -B build-cov -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake \

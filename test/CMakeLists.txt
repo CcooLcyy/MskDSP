@@ -155,14 +155,14 @@ endif()
 
 set(MSKDSP_COVERAGE_OUTPUT_DIR "${CMAKE_BINARY_DIR}/coverage")
 add_custom_target(coverage ALL
+  COMMAND ${CMAKE_COMMAND} -E rm -rf "${MSKDSP_COVERAGE_OUTPUT_DIR}"
   COMMAND ${CMAKE_COMMAND} -E make_directory "${MSKDSP_COVERAGE_OUTPUT_DIR}"
   COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
   COMMAND "${GCOVR_EXECUTABLE}"
     -r "${CMAKE_SOURCE_DIR}"
     --object-directory "${CMAKE_BINARY_DIR}"
     --gcov-executable "${GCOV_EXECUTABLE}"
-    --exclude ".*(/(3rdlibs|protobuf|test)/).*"
-    --exclude ".*(/vcpkg_installed/).*"
+    --filter "(^|.*/)src/.*[.](cc|cpp|cxx|c|hpp)$"
     --html-details
     --print-summary
     -o "${MSKDSP_COVERAGE_OUTPUT_DIR}/index.html"
