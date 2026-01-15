@@ -5,7 +5,7 @@ DataCenter 是进程内的“数据总线/转发枢纽”，用于在不同协�
 
 ## 能力清单
 - 连接级隔离：通过 `connId` 区分不同连接/通信链路
-- 连接注册中心：按 `(module_name, conn_name)` 分配/查询 `connId`（全局唯一、可持久化）
+- connId 分配器：按 `(module_name, conn_name)` 分配/查询 `connId`（全局唯一、可持久化）
 - 点位对齐：通过 `tag`（逻辑点名，可中文）对齐跨协议的同一业务量
 - 有向路由：按点位维度配置 `src -> dst` 的转发规则，支持一对一与一对多
 - 最新值缓存：支持 `GetLatest` / `Subscribe(snapshot=true)` 获取目的连接内的最新值（best-effort）
@@ -13,13 +13,13 @@ DataCenter 是进程内的“数据总线/转发枢纽”，用于在不同协�
 - 路由配置持久化：将路由配置落盘到 `./conf/dataCenter/routes.pb`，重启后自动恢复（当前实现）
 - 连接注册表持久化：将连接注册表落盘到 `./conf/dataCenter/connections.pb`，重启后自动恢复（当前实现）
 
-不在当前范围内：
+## 暂未实现功能
 - 历史数据存储/查询
 - 聚合/判据/计算点（例如“多个遥信判断一个遥信状态”建议由独立规则/计算模块实现，订阅原始点后发布派生点）
 - 多对一仲裁（多个源同时写入同一目的点时暂不保证行为）
 
 ## 关键概念
-- `connId`：连接的全局唯一 ID（建议使用无符号整型），建议通过 DataCenter 的连接注册中心按 `(module_name, conn_name)` 分配/查询；要求重启后保持不变。
+- `connId`：连接的全局唯一 ID（建议使用无符号整型），建议通过 DataCenter 的 connId 分配器按 `(module_name, conn_name)` 分配/查询；要求重启后保持不变。
 - `tag`：逻辑点名（UTF-8，可使用中文），用于跨协议对齐同一业务量；协议地址（IOA/寄存器等）应由各协议模块自身点表维护。
 - `Endpoint`：`(connId, tag)`，表示某连接中的一个逻辑点。
 - `Route`：有向路由绑定，表示数据从 `src Endpoint` 转发到一个或多个 `dst Endpoint`。
@@ -45,7 +45,7 @@ DataCenter 对外提供一组面向“连接/点表/路由/转发”的 gRPC 接
 
 ### 连接/点表（用于展示与校验，可选）
 - `GetOrCreateConnection(GetOrCreateConnectionRequest) -> ConnectionInfo`
-  - 连接注册中心：按 `(module_name, conn_name)` 分配/查询 `conn_id`（若已存在则返回既有 `conn_id`；否则分配新 ID 并落盘持久化）。
+  - connId 分配器：按 `(module_name, conn_name)` 分配/查询 `conn_id`（若已存在则返回既有 `conn_id`；否则分配新 ID 并落盘持久化）。
 - `RenameConnection(RenameConnectionRequest) -> ConnectionInfo`
   - 重命名连接主键：将 `old_key` 改为 `new_key`，并保持 `conn_id` 不变；若 `new_key` 已存在则返回 `ALREADY_EXISTS`。
 - `DeleteConnection(DeleteConnectionRequest) -> Empty`

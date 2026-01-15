@@ -37,9 +37,6 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
 4. 上位机使用返回的 `conn_id` 调用 DataCenter 配置路由（`UpsertRoutes` 等）
 5. 调用 `StartLink` 启动该连接的 TCP 监听/连接
 
-当前实现说明：
-- 连接配置/点表暂未做落盘持久化；进程重启后上位机需重新下发。
-
 ## 未实现/后续计划
 - 协议类型：目前仅支持遥测 `M_ME_NC_1` 与总召 `C_IC_NA_1`；遥信/遥控/设点、对时 `C_CS_NA_1`、带时标类型等未实现
 - 时标：暂不支持 `CP56Time2a`（后续可扩展到带时标遥测/遥信与对时）
@@ -52,6 +49,7 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
 - 安全：gRPC 与 IEC104 TCP 目前均为明文/无鉴权；TLS、鉴权、白名单等未实现
 - 测试：当前以单元测试覆盖点表与 LinkManager 语义；缺少端到端“主站↔从站”协议互操作测试
 
+## grpc接口
 ### 删除语义（最佳实践）
 上位机删除一条连接时，调用 `DeleteLink(conn_name)`：
 - IEC104 会先停止该连接，再调用 DataCenter `DeleteConnection(module_name="IEC104", conn_name)` 清理 `conn_id` 相关配置/缓存
