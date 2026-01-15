@@ -22,6 +22,9 @@ VSCode CMake Tools（用户确认可用的配置命令）：
 ## 编码风格与命名约定
 格式由 `.clang-format`（Google base）约束：2 空格缩进、无 Tab、不限制行宽、brace 列表更紧凑。使用现代 C++23，并优先采用 RAII；指针/引用对齐遵循 `.clang-format`，当前为贴变量名风格（`Type *ptr` / `Type &ref`）。gRPC/Proto 文件中 Message/Service 使用 PascalCase；生成头文件通过 `dspProto` 目标引入与使用。模块库名称需与 `cmake/LibInfo.cmake` 中的设置保持一致。
 
+- Protobuf 注释规范：`protobuf/*.proto` 中所有 `service` 与每个 `rpc` 声明必须添加 `//` 注释，详细说明该 RPC 的用途/调用场景、关键语义（是否 stream、是否幂等、是否有落盘/启停/清理缓存等副作用）、以及主要错误码与边界条件；上位机对接将以该注释为依据。
+- Protobuf 脚手架默认 `Ping`：新模块脚手架会在 `.proto` 中生成默认的 `Ping(Empty)->Empty` RPC；当该 service 开始实现其他业务 RPC 后，应删除该默认 `Ping` RPC（避免长期保留占位接口）。
+
 ## 改动原则
 在满足需求与修复问题的前提下，改动尽量小且聚焦；避免无关重构、批量格式化或大范围重命名。
 

@@ -12,7 +12,8 @@
 namespace AGC {
 AGC::AGC() :
   ModuleInterface(),
-  agcService_(std::make_shared<AGCGrpcServiceImpl>()) {
+  agcService_(std::make_shared<AGCGrpcServiceImpl>()),
+  groupManager_(AGCLibInfo.LIB_NAME) {
   initLibInfo(AGCLibInfo);
 }
 AGC::~AGC() {}
@@ -22,6 +23,14 @@ void AGC::start(std::stop_token stopToken) {
   while (!stopToken.stop_requested()) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
+}
+
+GroupManager& AGC::groupManager() {
+  return groupManager_;
+}
+
+const GroupManager& AGC::groupManager() const {
+  return groupManager_;
 }
 }  // namespace AGC
 

@@ -4,6 +4,7 @@
 #include <stop_token>
 
 #include "ModuleInterface.h"
+#include "AGCGroupManager.h"
 
 namespace AGC {
 class AGCGrpcServiceImpl;
@@ -14,7 +15,11 @@ public:
 
   void start(std::stop_token stopToken) override;
 
+  GroupManager& groupManager();
+  const GroupManager& groupManager() const;
+
 private:
   std::shared_ptr<AGCGrpcServiceImpl> agcService_;
+  GroupManager groupManager_;
 };
 }  // namespace AGC

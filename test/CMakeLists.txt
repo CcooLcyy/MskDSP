@@ -163,6 +163,17 @@ target_link_libraries(iec104LinkManager_test PRIVATE
 
 add_test(NAME iec104LinkManager_test COMMAND iec104LinkManager_test)
 
+add_executable(agvcStrategy_test
+  agvc_strategy_test.cc
+)
+
+target_link_libraries(agvcStrategy_test PRIVATE
+  GTest::gtest_main
+  agvcCommon
+)
+
+add_test(NAME agvcStrategy_test COMMAND agvcStrategy_test)
+
 set(MSKDSP_TEST_TARGETS
   moduleManager_test
   moduleInterface_test
@@ -172,6 +183,7 @@ set(MSKDSP_TEST_TARGETS
   dataCenterConnectionStore_test
   iec104PointTable_test
   iec104LinkManager_test
+  agvcStrategy_test
 )
 
 # Allow overriding via -DGCOVR_EXECUTABLE=/path/to/gcovr (cache variable).
