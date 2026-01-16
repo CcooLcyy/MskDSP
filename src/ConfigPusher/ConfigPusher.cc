@@ -21,8 +21,10 @@
 #include <utility>
 
 #include "ConfigPusher.pb.h"
+#include "ConfigPusherDataCenter.h"
 #include "ConfigPusherGrpcService.h"
 #include "ConfigPusherLibInfo.h"
+#include "DataCenter.grpc.pb.h"
 #include "IEC104.grpc.pb.h"
 #include "Logger.h"
 #include "ModbusRTU.grpc.pb.h"
@@ -49,6 +51,7 @@ namespace ConfigPusher {
 namespace {
 constexpr const char *kIec104ConfigPath = "./conf/configPusher/iec104.jsonc";
 constexpr const char *kModbusRtuConfigPath = "./conf/configPusher/modbus_rtu.jsonc";
+constexpr const char *kDataCenterConfigPath = "./conf/configPusher/DataCenter.jsonc";
 constexpr const char *kModuleManagerAddress = "127.0.0.1:7000";
 constexpr const char *kDataCenterModuleName = "DataCenter";
 constexpr const char *kIec104ModuleName = "IEC104";
@@ -164,6 +167,31 @@ std::optional<ConfigPusherProto::Config> loadConfigFile(const std::filesystem::p
   auto parseStatus = google::protobuf::util::JsonStringToMessage(json, &config, options);
   if (!parseStatus.ok()) {
     LOG_ERROR("解析 ConfigPusher 配置失败: {}", parseStatus.ToString());
+    return std::nullopt;
+  }
+  return config;
+}
+
+std::optional<ConfigPusherProto::DataCenterConfig> loadDataCenterConfigFile(const std::filesystem::path &path) {
+  if (!std::filesystem::exists(path)) {
+    LOG_INFO("未找到 DataCenter 配置文件: {}", path.string());
+    return std::nullopt;
+  }
+
+  LOG_INFO("开始读取 DataCenter 配置文件: {}", path.string());
+  std::string raw;
+  if (!readFile(path, &raw)) {
+    LOG_ERROR("读取 DataCenter 配置文件失败: {}", path.string());
+    return std::nullopt;
+  }
+
+  auto json = stripJsonComments(raw);
+  ConfigPusherProto::DataCenterConfig config;
+  google::protobuf::util::JsonParseOptions options;
+  options.ignore_unknown_fields = false;
+  auto parseStatus = google::protobuf::util::JsonStringToMessage(json, &config, options);
+  if (!parseStatus.ok()) {
+    LOG_ERROR("解析 DataCenter 配置失败: {}", parseStatus.ToString());
     return std::nullopt;
   }
   return config;
@@ -377,11 +405,16 @@ void ConfigPusher::start(std::stop_token stopToken) {
 void ConfigPusher::applyConfig() {
   auto iec104Config = loadConfigFile(kIec104ConfigPath);
   auto modbusConfig = loadConfigFile(kModbusRtuConfigPath);
+  auto dataCenterConfig = loadDataCenterConfigFile(kDataCenterConfigPath);
 
   const bool hasIec104 = iec104Config && iec104Config->has_iec104() && !iec104Config->iec104().links().empty();
   const bool hasModbus = modbusConfig && modbusConfig->has_modbus_rtu() && !modbusConfig->modbus_rtu().links().empty();
-  if (!hasIec104 && !hasModbus) {
-    LOG_INFO("配置中未包含 IEC104/ModbusRTU 链路");
+  const bool hasDataCenter =
+      dataCenterConfig &&
+      (!dataCenterConfig->point_tables().empty() || (dataCenterConfig->has_routes() && dataCenterConfig->routes().routes_size() > 0));
+  const bool needsDataCenter = hasIec104 || hasModbus || hasDataCenter;
+  if (!hasIec104 && !hasModbus && !hasDataCenter) {
+    LOG_INFO("配置中未包含 IEC104/ModbusRTU/DataCenter 配置");
     return;
   }
   LOG_INFO("ConfigPusher 配置解析完成，开始准备下发配置");
@@ -399,7 +432,7 @@ void ConfigPusher::applyConfig() {
   }
 
   auto dataCenterInfo = findModuleInfo(moduleInfos, kDataCenterModuleName);
-  if (!dataCenterInfo) {
+  if (needsDataCenter && !dataCenterInfo) {
     LOG_ERROR("未找到模块: {}", kDataCenterModuleName);
     return;
   }
@@ -430,7 +463,7 @@ void ConfigPusher::applyConfig() {
   }
 
   auto runningDataCenter = findRunningInfo(running, kDataCenterModuleName);
-  if ((hasIec104 || hasModbus) && !runningDataCenter) {
+  if (needsDataCenter && !runningDataCenter) {
     LOG_INFO("DataCenter 未运行，开始启动");
     grpc::ClientContext startCtx;
     ModuleManagerProto::Empty startResp;
@@ -445,7 +478,7 @@ void ConfigPusher::applyConfig() {
       return;
     }
     LOG_INFO("DataCenter 已启动");
-  } else if (hasIec104 || hasModbus) {
+  } else if (needsDataCenter) {
     LOG_INFO("DataCenter 已在运行");
   }
 
@@ -512,6 +545,16 @@ void ConfigPusher::applyConfig() {
       LOG_ERROR("ModbusRTU 配置下发存在错误");
     } else {
       LOG_INFO("ModbusRTU 配置下发完成");
+    }
+  }
+
+  if (hasDataCenter && runningDataCenter) {
+    auto dataCenterChannel = grpc::CreateChannel(runningDataCenter->inner_grpc_server(), grpc::InsecureChannelCredentials());
+    auto dataCenterStub = DataCenterProto::DataCenterService::NewStub(dataCenterChannel);
+    if (!ApplyDataCenterConfig(*dataCenterConfig, dataCenterStub.get())) {
+      LOG_ERROR("DataCenter 配置下发存在错误");
+    } else {
+      LOG_INFO("DataCenter 配置下发完成");
     }
   }
 }

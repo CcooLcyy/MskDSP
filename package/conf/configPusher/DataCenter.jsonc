@@ -1,0 +1,20 @@
+{
+  // DataCenter push example (requires existing connections)
+  "point_tables": [
+    {
+      "module_name": "IEC104",
+      "conn_name": "line-1",
+      "replace": true,
+      "tags": ["P_CMD_SRC", "P_TOTAL_DST"]
+    }
+  ],
+  "routes": {
+    "replace": true,
+    "routes": [
+      {
+        "src": { "module_name": "IEC104", "conn_name": "line-1", "tag": "P_CMD_SRC" },
+        "dst": { "module_name": "AGC", "conn_name": "g-1", "tag": "P_CMD" }
+      }
+    ]
+  }
+}

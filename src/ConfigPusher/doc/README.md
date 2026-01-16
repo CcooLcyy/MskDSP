@@ -1,13 +1,14 @@
 # ConfigPusher 模块
 
 ## 简介
-ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRTU，并按配置调用对应 gRPC 接口完成连接与点表下发。
+ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRTU，并按配置调用对应 gRPC 接口完成 IEC104/ModbusRTU 连接/点表下发，以及 DataCenter 点表/路由下发。
 
 ## 能力清单
 - 自动通过 ModuleManager 启动 DataCenter 与 IEC104/ModbusRTU
 - 解析 JSONC（支持 `//` 与 `/* */` 注释）
 - 下发 IEC104 配置：UpsertLink / UpsertPointTable / StartLink
 - 下发 ModbusRTU 配置：UpsertLink / UpsertPointTable / StartLink
+- 下发 DataCenter 配置：UpsertPointTable / UpsertRoutes（仅对已存在连接生效）
 - 失败记录日志（当前不做重试）
 
 ## 接口与协议
@@ -26,12 +27,39 @@ ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRT
 
 ## 配置与数据
 - 配置文件：
+  - `./conf/configPusher/DataCenter.jsonc`
   - `./conf/configPusher/iec104.jsonc`
   - `./conf/configPusher/modbus_rtu.jsonc`
 - 使用 Protobuf JSON 映射：枚举需写全名（例如 `ROLE_SERVER`、`TELEMETRY_TYPE_FLOAT`、`FUNCTION_READ_COILS`）
 - `point_table.conn_name` 可省略（默认使用 `link.config.conn_name`）
+- IEC104 可选下发遥测合包参数（`telemetry_batch_window_ms/telemetry_max_asdu_bytes/telemetry_use_standard_limit/telemetry_dedupe`）
+- DataCenter 配置要求连接已存在（由模块或上位机创建）；若 `point_tables/routes` 引用连接不存在，则该次 DataCenter 配置不下发
+- `replace=true` 表示覆盖配置；`replace=false` 表示增量追加
 
-示例：
+DataCenter 示例：
+```jsonc
+{
+  "point_tables": [
+    {
+      "module_name": "IEC104",
+      "conn_name": "line-1",
+      "replace": true,
+      "tags": ["P_CMD_SRC", "P_TOTAL_DST"]
+    }
+  ],
+  "routes": {
+    "replace": true,
+    "routes": [
+      {
+        "src": { "module_name": "IEC104", "conn_name": "line-1", "tag": "P_CMD_SRC" },
+        "dst": { "module_name": "AGC", "conn_name": "g-1", "tag": "P_CMD" }
+      }
+    ]
+  }
+}
+```
+
+IEC104 示例：
 ```jsonc
 {
   "iec104": {
@@ -46,7 +74,11 @@ ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRT
             "remote": { "ip": "", "port": 0 },
             "ca": 1,
             "oa": 1,
-            "apci": { "k": 12, "w": 8, "t0": 30, "t1": 15, "t2": 10, "t3": 20 }
+            "apci": { "k": 12, "w": 8, "t0": 30, "t1": 15, "t2": 10, "t3": 20 },
+            "telemetry_batch_window_ms": 20,
+            "telemetry_max_asdu_bytes": 240,
+            "telemetry_use_standard_limit": false,
+            "telemetry_dedupe": true
           }
         },
         "point_table": {
