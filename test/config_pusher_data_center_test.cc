@@ -5,6 +5,7 @@
 
 #include "ConfigPusherDataCenter.h"
 #include "DataCenter_mock.grpc.pb.h"
+#include "Logger.h"
 #include "support/FakeDataCenter.hpp"
 
 namespace {
@@ -72,7 +73,10 @@ TEST(ConfigPusherDataCenterTest, ApplyPointTablesAndRoutes) {
   EXPECT_CALL(*stub, UpsertRoutes(_, _, _))
       .WillOnce(Invoke([](grpc::ClientContext*, const DataCenterProto::UpsertRoutesRequest& req, DataCenterProto::Empty*) {
         EXPECT_TRUE(req.replace());
-        ASSERT_EQ(req.routes_size(), 1);
+        if (req.routes_size() != 1) {
+          LOG_ERROR("UpsertRoutes expected 1 route, got {}", req.routes_size());
+          return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "unexpected routes_size");
+        }
         const auto& route = req.routes(0);
         EXPECT_EQ(route.src().conn_id(), 10u);
         EXPECT_EQ(route.src().tag(), "P_CMD_SRC");

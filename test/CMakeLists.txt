@@ -280,6 +280,7 @@ add_test(NAME agvcStrategy_test COMMAND agvcStrategy_test)
 add_executable(agcGroupManager_test
   agc_group_manager_test.cc
   ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCGroupManager.cc
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCControl.cc
 )
 
 target_include_directories(agcGroupManager_test PRIVATE

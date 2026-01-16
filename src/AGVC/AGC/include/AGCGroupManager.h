@@ -73,7 +73,6 @@ private:
   grpc::Status validateGroupConfig(const AGCProto::GroupConfig& config) const;
   grpc::Status fillGroupInfoLocked(const GroupRuntime& g, AGCProto::GroupInfo* out) const;
 
-  void stopThreadsLocked(GroupRuntime* g);
   void startThreadsLocked(const std::string& groupName, GroupRuntime* g);
 
   void handleUpdateLocked(GroupRuntime* g, const DataCenterProto::PointUpdate& update);

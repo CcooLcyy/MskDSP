@@ -98,6 +98,8 @@ TEST(AgcControlTest, DeltaBaseLastTargetUsesDesiredTotal) {
 TEST(AgcControlTest, MemberDeltaBaseLastTargetPublishesDelta) {
   auto cfg = MakeBaseConfig();
   cfg.mutable_p_cmd()->set_mode(AGCProto::VALUE_MODE_ABSOLUTE);
+  cfg.mutable_members(0)->set_weight(1);
+  cfg.mutable_members(1)->set_weight(1);
   cfg.mutable_members(0)->mutable_p_set()->set_mode(AGCProto::VALUE_MODE_DELTA);
   cfg.mutable_members(0)->mutable_p_set()->set_delta_base(AGCProto::DELTA_BASE_LAST_TARGET);
   cfg.mutable_members(1)->mutable_p_set()->set_mode(AGCProto::VALUE_MODE_DELTA);

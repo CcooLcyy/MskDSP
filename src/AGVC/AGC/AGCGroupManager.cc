@@ -215,27 +215,10 @@ grpc::Status GroupManager::ListGroups(AGCProto::ListGroupsResponse *out) const {
   return grpc::Status::OK;
 }
 
-void GroupManager::stopThreadsLocked(GroupRuntime *g) {
-  if (g == nullptr) {
-    return;
-  }
-  if (g->dcSubscribeThread.joinable()) {
-    g->dcSubscribeThread.request_stop();
-    g->dcSubscribeThread.join();
-  }
-  g->dcSubscribeContext.reset();
-
-  if (g->controlThread.joinable()) {
-    g->controlThread.request_stop();
-    g->controlThread.join();
-  }
-}
-
 void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime *g) {
   if (g == nullptr) {
     return;
   }
-  stopThreadsLocked(g);
   rebuildTagCache(g);
 
   const auto connId = g->connId;
@@ -318,13 +301,28 @@ grpc::Status GroupManager::StopGroup(const std::string &groupName) {
     return status;
   }
 
-  std::lock_guard<std::mutex> lock(mu_);
-  auto it = groupsByName_.find(groupName);
-  if (it == groupsByName_.end()) {
-    return makeNotFound(groupName);
+  std::jthread dcSubscribeThread;
+  std::jthread controlThread;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end()) {
+      return makeNotFound(groupName);
+    }
+    dcSubscribeThread = std::move(it->second.dcSubscribeThread);
+    controlThread = std::move(it->second.controlThread);
+    it->second.dcSubscribeContext.reset();
+    it->second.state = AGCProto::GROUP_STATE_STOPPED;
   }
-  stopThreadsLocked(&it->second);
-  it->second.state = AGCProto::GROUP_STATE_STOPPED;
+  if (dcSubscribeThread.joinable()) {
+    dcSubscribeThread.request_stop();
+    dcSubscribeThread.join();
+  }
+  if (controlThread.joinable()) {
+    controlThread.request_stop();
+    controlThread.join();
+  }
+  LOG_INFO("AGC 控制组已停止: group_name={}", groupName);
   return grpc::Status::OK;
 }
 
