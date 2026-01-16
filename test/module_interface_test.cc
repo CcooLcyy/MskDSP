@@ -9,6 +9,7 @@
 #include <grpcpp/grpcpp.h>
 
 #include "ModbusRTU.grpc.pb.h"
+#include "Logger.h"
 #include "ModuleInterface.h"
 
 namespace {
@@ -24,9 +25,10 @@ public:
   void ReleasePortForTest(std::string address) { releasePort(std::move(address)); }
 };
 
-class ModbusRTUPingService final : public ModbusRTUProto::ModbusRTUService::Service {
+class ModbusRTUListLinksService final : public ModbusRTUProto::ModbusRTUService::Service {
 public:
-  grpc::Status Ping(grpc::ServerContext *, const ModbusRTUProto::Empty *, ModbusRTUProto::Empty *) override {
+  grpc::Status ListLinks(grpc::ServerContext *, const ModbusRTUProto::Empty *, ModbusRTUProto::ListLinksResponse *) override {
+    LOG_INFO("ModbusRTU ListLinks 测试服务已响应");
     return grpc::Status::OK;
   }
 };
@@ -78,7 +80,7 @@ TEST(ModuleInterfaceTest, InitLibInfoCreatesSocketDirAndRemovesExistingSockFile)
 }
 
 // 验证：grpcServerBuilder 可启动服务并处理一次 RPC；shutdownServers 可正常停止服务线程且可重复调用。
-TEST(ModuleInterfaceTest, GrpcServerBuilderServesPingAndShutdownServersCleansUp) {
+TEST(ModuleInterfaceTest, GrpcServerBuilderServesListLinksAndShutdownServersCleansUp) {
   ResetTestEnv();
 
   TestModule module;
@@ -91,7 +93,7 @@ TEST(ModuleInterfaceTest, GrpcServerBuilderServesPingAndShutdownServersCleansUp)
   };
   module.InitForTest(libInfo);
 
-  auto service = std::make_shared<ModbusRTUPingService>();
+  auto service = std::make_shared<ModbusRTUListLinksService>();
   module.BuildServers(service);
 
   const auto addr = LoopbackAddress(module.metaData().outerGRPCServer);
@@ -103,8 +105,8 @@ TEST(ModuleInterfaceTest, GrpcServerBuilderServesPingAndShutdownServersCleansUp)
   auto stub = ModbusRTUProto::ModbusRTUService::NewStub(channel);
   grpc::ClientContext ctx;
   ModbusRTUProto::Empty req;
-  ModbusRTUProto::Empty resp;
-  const auto status = stub->Ping(&ctx, req, &resp);
+  ModbusRTUProto::ListLinksResponse resp;
+  const auto status = stub->ListLinks(&ctx, req, &resp);
   EXPECT_TRUE(status.ok());
 
   module.Shutdown();

@@ -845,6 +845,10 @@ void ModuleManager::initModuleInfos() {
     if (moduleName.empty()) {
       continue;
     }
+    if (moduleName == "moduleManager") {
+      LOG_INFO("跳过核心模块库扫描: {}", entry.path().string());
+      continue;
+    }
     ++total;
     auto moduleInfo = moduleInfos_.add_module_info();
     moduleInfo->set_module_name(moduleName);

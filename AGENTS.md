@@ -32,6 +32,7 @@ VSCode CMake Tools（用户确认可用的配置命令）：
 - 回复使用中文，必要时可使用英文术语。
 - 修改完代码后，不要自动执行编译/构建/测试动作（如 `cmake --build ...`、`ctest` 等）；因为其他 AGENT 可能同步修改导致构建失败；仅在用户明确要求时才执行。
 - 除非用户允许，否则不要执行任何 `git ...` 命令（包括 `git status/diff/add/restore/commit/reset` 等）；需要 git 操作时要询问并请求用户统一。
+- 如需查找日志，默认在 `package/log` 目录中进行查找。
 - 所有代码改动也要增加日志。
 - 新增的 C++ 模板代码文件使用 `.hpp` 后缀（例如 `Foo.hpp`）。
 - 新增模块请优先使用脚手架 `bash script/new_module.sh <NewModule>` 生成骨架（目录结构/CMake/LibInfo 等），避免从零手工创建或复制粘贴现有模块。
