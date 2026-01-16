@@ -34,9 +34,9 @@ grpc::Status IEC104GrpcServiceImpl::UpsertLink(
   auto status = iec104_->linkManager().UpsertLink(*request, response);
   const auto &config = request->config();
   if (!status.ok()) {
-    LOG_ERROR("IEC104 配置连接失败: conn_name={}, role={}, 原因={}", config.conn_name(), roleToString(config.role()), status.error_message());
+    LOG_ERROR("IEC104 配置连接失败: conn_name={}, 角色={}, 原因={}", config.conn_name(), roleToString(config.role()), status.error_message());
   } else {
-    LOG_INFO("IEC104 已配置连接: conn_name={}, role={}, conn_id={}", config.conn_name(), roleToString(config.role()), response->conn_id());
+    LOG_INFO("IEC104 已配置连接: conn_name={}, 角色={}, conn_id={}", config.conn_name(), roleToString(config.role()), response->conn_id());
   }
   return status;
 }

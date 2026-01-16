@@ -4,7 +4,6 @@
     "links": [
       {
         "link": {
-          "create_only": true,
           "config": {
             "conn_name": "line-1",
             "role": "ROLE_SERVER",
@@ -44,7 +43,6 @@
       // client 示例（仅供参考，取消注释后可用）:
       // {
       //   "link": {
-      //     "create_only": true,
       //     "config": {
       //       "conn_name": "line-2",
       //       "role": "ROLE_CLIENT",

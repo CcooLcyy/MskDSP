@@ -4,7 +4,6 @@
     "links": [
       {
         "link": {
-          "create_only": true,
           "config": {
             "conn_name": "rtu-1",
             "serial": {
