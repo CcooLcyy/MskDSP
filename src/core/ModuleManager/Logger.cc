@@ -22,6 +22,7 @@
 #include <iostream>
 #include <mutex>
 #include <optional>
+#include <unordered_set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -29,7 +30,8 @@
 namespace ModuleManager {
 namespace {
 constexpr std::uintmax_t kRotationSizeBytes = 10 * 1024 * 1024;
-constexpr int kRetentionDays = 30;
+constexpr int kRetentionDays = 60;
+constexpr const char *kDefaultModuleName = "moduleManager";
 
 namespace sink_file = boost::log::sinks::file;
 namespace log_fs = boost::filesystem;
@@ -49,12 +51,39 @@ boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level> &lo
 }
 
 thread_local std::string currentLogModuleName;
+std::filesystem::path logBaseDir{"./log"};
+std::string logExtension{".log"};
+std::mutex sinkMutex;
+std::unordered_set<std::string> moduleSinks;
+
+std::string NormalizeModuleName(std::string_view moduleName) {
+  if (moduleName.empty() || moduleName == "-") {
+    return std::string(kDefaultModuleName);
+  }
+  return std::string(moduleName);
+}
+
+std::string NormalizeLogExtension(std::string_view fileName) {
+  std::filesystem::path name_path(fileName);
+  std::string extension = name_path.extension().string();
+  if (extension.empty()) {
+    return ".log";
+  }
+  return extension;
+}
 
 std::string moduleNameAttributeValue() {
-  if (currentLogModuleName.empty()) {
-    return std::string("-");
-  }
-  return currentLogModuleName;
+  return NormalizeModuleName(currentLogModuleName);
+}
+
+boost::log::formatter BuildLogFormatter() {
+  namespace logging = boost::log;
+  namespace expr = boost::log::expressions;
+  return expr::stream
+      << expr::format_date_time<boost::posix_time::ptime>("TimeStamp", "%Y-%m-%d %H:%M:%S")
+      << " [" << logging::trivial::severity << "] "
+      << " [" << expr::if_(expr::has_attr<std::string>(kLogTagModule))[expr::stream << expr::attr<std::string>(kLogTagModule)].else_[expr::stream << kDefaultModuleName] << "] "
+      << expr::smessage;
 }
 
 std::chrono::sys_days CurrentLocalDay() {
@@ -241,64 +270,103 @@ private:
   std::string prefix_;
   mutable std::mutex mutex_;
 };
+
+void CreateModuleSinkLocked(const std::string &module_name) {
+  namespace logging = boost::log;
+  namespace expr = boost::log::expressions;
+  namespace keywords = boost::log::keywords;
+
+  std::filesystem::path module_dir = logBaseDir / module_name;
+  if (!std::filesystem::exists(module_dir)) {
+    std::filesystem::create_directories(module_dir);
+  }
+  std::string file_name = module_name + logExtension;
+  auto log_info = BuildLogFileInfo(module_dir, file_name);
+  CompressLegacyLogs(module_dir, log_info.prefix, log_info.active_file);
+  CleanupOldLogs(module_dir, log_info.prefix);
+
+  using backend_t = logging::sinks::text_file_backend;
+  using sink_t = logging::sinks::synchronous_sink<backend_t>;
+  auto backend = boost::make_shared<backend_t>(
+      keywords::file_name = log_info.active_pattern.string(),
+      keywords::target_file_name = log_info.rotated_pattern.string(),
+      keywords::open_mode = std::ios_base::app,
+      keywords::rotation_size = kRotationSizeBytes,
+      keywords::time_based_rotation = sink_file::rotation_at_time_point(0, 0, 0),
+      keywords::auto_flush = true);
+  backend->set_file_collector(boost::make_shared<CompressedFileCollector>(module_dir, log_info.prefix));
+  auto sink = boost::make_shared<sink_t>(backend);
+  sink->set_formatter(BuildLogFormatter());
+  sink->set_filter(expr::attr<std::string>(kLogTagModule) == module_name);
+  logging::core::get()->add_sink(sink);
+}
 }  // namespace
 
 std::once_flag Logger::initFlag_;
 
 LogModuleScope::LogModuleScope(std::string moduleName) :
   prevModuleName_(std::exchange(currentLogModuleName, std::move(moduleName))) {
+  Logger::ensureModuleSink(currentLogModuleName);
 }
 
 LogModuleScope::~LogModuleScope() {
   currentLogModuleName = std::move(prevModuleName_);
 }
 
+void Logger::ensureModuleSink(const std::string &moduleName) {
+  init();
+  auto normalized = NormalizeModuleName(moduleName);
+  {
+    std::scoped_lock lock(sinkMutex);
+    if (moduleSinks.contains(normalized)) {
+      return;
+    }
+    CreateModuleSinkLocked(normalized);
+    moduleSinks.insert(normalized);
+  }
+  std::filesystem::path module_dir = logBaseDir / normalized;
+  BOOST_LOG_STREAM_SEV(loggerInstance(), boost::log::trivial::info)
+      << "模块日志输出已启用: module=" << normalized
+      << ", dir=" << module_dir.string()
+      << ", file=" << (module_dir / (normalized + logExtension)).string();
+}
+
 void Logger::init(const std::string &logDir, const std::string &fileName) {
   std::call_once(initFlag_, [&]() {
     namespace logging = boost::log;
-    namespace expr = boost::log::expressions;
     namespace keywords = boost::log::keywords;
 
-    std::filesystem::path dir(logDir);
-    if (!std::filesystem::exists(dir)) {
-      std::filesystem::create_directories(dir);
-    }
-    auto log_info = BuildLogFileInfo(dir, fileName);
-    CompressLegacyLogs(dir, log_info.prefix, log_info.active_file);
-    CleanupOldLogs(dir, log_info.prefix);
+    logBaseDir = logDir.empty() ? std::filesystem::path("./log") : std::filesystem::path(logDir);
+    logExtension = NormalizeLogExtension(fileName);
 
     logging::add_common_attributes();
     logging::core::get()->add_global_attribute(kLogTagModule, logging::attributes::make_function(&moduleNameAttributeValue));
-    auto formatter = expr::stream
-        << expr::format_date_time<boost::posix_time::ptime>("TimeStamp", "%Y-%m-%d %H:%M:%S")
-        << " [" << logging::trivial::severity << "] "
-        << " [" << expr::if_(expr::has_attr<std::string>(kLogTagModule))[expr::stream << expr::attr<std::string>(kLogTagModule)].else_[expr::stream << "-"] << "] "
-        << expr::smessage;
 
-    using backend_t = logging::sinks::text_file_backend;
-    using sink_t = logging::sinks::synchronous_sink<backend_t>;
-    auto backend = boost::make_shared<backend_t>(
-        keywords::file_name = log_info.active_pattern.string(),
-        keywords::target_file_name = log_info.rotated_pattern.string(),
-        keywords::open_mode = std::ios_base::app,
-        keywords::rotation_size = kRotationSizeBytes,
-        keywords::time_based_rotation = sink_file::rotation_at_time_point(0, 0, 0),
-        keywords::auto_flush = true);
-    backend->set_file_collector(boost::make_shared<CompressedFileCollector>(dir, log_info.prefix));
-    auto sink = boost::make_shared<sink_t>(backend);
-    sink->set_formatter(formatter);
-    logging::core::get()->add_sink(sink);
-
-    logging::add_console_log(std::clog, keywords::format = formatter);
+    logging::add_console_log(std::clog, keywords::format = BuildLogFormatter());
     logging::core::get()->set_filter(logging::trivial::severity >= logging::trivial::info);
+
+    {
+      std::scoped_lock lock(sinkMutex);
+      if (!moduleSinks.contains(kDefaultModuleName)) {
+        CreateModuleSinkLocked(kDefaultModuleName);
+        moduleSinks.insert(std::string(kDefaultModuleName));
+      }
+    }
+    std::filesystem::path module_dir = logBaseDir / kDefaultModuleName;
+    BOOST_LOG_STREAM_SEV(loggerInstance(), boost::log::trivial::info)
+        << "模块日志输出已启用: module=" << kDefaultModuleName
+        << ", dir=" << module_dir.string()
+        << ", file=" << (module_dir / (std::string(kDefaultModuleName) + logExtension)).string();
 
 #ifndef NDEBUG
     BOOST_LOG_STREAM_SEV(loggerInstance(), boost::log::trivial::info)
-        << "日志格式: Debug 模式包含文件/行号/函数名";
+        << "日志格式: Debug 模式包含文件/行号";
 #else
     BOOST_LOG_STREAM_SEV(loggerInstance(), boost::log::trivial::info)
-        << "日志格式: 非 Debug 模式省略文件/行号/函数名";
+        << "日志格式: 非 Debug 模式省略文件/行号";
 #endif
+    BOOST_LOG_STREAM_SEV(loggerInstance(), boost::log::trivial::info)
+        << "日志格式: 已禁用函数名输出";
     BOOST_LOG_STREAM_SEV(loggerInstance(), boost::log::trivial::info)
         << "Log collector enabled: gzip compression + retention cleanup";
     BOOST_LOG_STREAM_SEV(loggerInstance(), boost::log::trivial::info)

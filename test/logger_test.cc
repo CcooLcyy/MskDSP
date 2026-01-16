@@ -16,11 +16,16 @@
 namespace {
 namespace fs = std::filesystem;
 
-constexpr char kLogFileName[] = "module_manager.log";
-constexpr char kLogPrefix[] = "module_manager_";
+constexpr char kDefaultModuleName[] = "moduleManager";
+constexpr char kOtherModuleName[] = "loggerTestModule";
+constexpr char kLogFileName[] = "moduleManager.log";
+constexpr char kLogPrefix[] = "moduleManager_";
 
 fs::path LogDir() { return fs::path("log"); }
-fs::path ActiveLogPath() { return LogDir() / kLogFileName; }
+fs::path ModuleLogDir(std::string_view moduleName) { return LogDir() / std::string(moduleName); }
+fs::path ActiveLogPath(std::string_view moduleName = kDefaultModuleName) {
+  return ModuleLogDir(moduleName) / (std::string(moduleName) + ".log");
+}
 
 std::chrono::sys_days LocalToday() {
   std::time_t now = std::time(nullptr);
@@ -45,7 +50,7 @@ std::string DateString(std::chrono::sys_days day) {
 fs::path RotatedLogPathForDate(const std::string &date, int index) {
   std::ostringstream oss;
   oss << kLogPrefix << date << "_12-00-00_" << index << ".log";
-  return LogDir() / oss.str();
+  return ModuleLogDir(kDefaultModuleName) / oss.str();
 }
 
 void WriteTextFile(const fs::path &path, std::string_view content) {
@@ -82,7 +87,7 @@ protected:
     legacy_log_gz_ = legacy_log_;
     legacy_log_gz_ += ".gz";
 
-    old_date_ = DateString(LocalToday() - std::chrono::days(31));
+    old_date_ = DateString(LocalToday() - std::chrono::days(61));
     old_log_ = RotatedLogPathForDate(old_date_, 2);
     WriteTextFile(old_log_, "old-log\n");
     old_log_gz_ = old_log_;
@@ -108,8 +113,27 @@ TEST_F(LoggerTest, CompressesLegacyLogsOnInit) {
   EXPECT_TRUE(fs::exists(legacy_log_gz_));
 }
 
-// 验证：初始化会清理超过 30 天的历史日志。
+// 验证：初始化会清理超过 60 天的历史日志。
 TEST_F(LoggerTest, RemovesLogsOlderThanRetention) {
   EXPECT_FALSE(fs::exists(old_log_));
   EXPECT_FALSE(fs::exists(old_log_gz_));
+}
+
+// 验证：不同模块日志写入各自目录，默认模块日志不包含其他模块内容。
+TEST_F(LoggerTest, WritesLogsToModuleSpecificFile) {
+  auto other_log_path = ActiveLogPath(kOtherModuleName);
+  std::error_code ec;
+  fs::remove_all(other_log_path.parent_path(), ec);
+
+  {
+    ModuleManager::LogModuleScope scope(kOtherModuleName);
+    LOG_INFO("logger_test_other_module");
+  }
+  boost::log::core::get()->flush();
+
+  auto other_content = ReadTextFile(other_log_path);
+  EXPECT_NE(other_content.find("logger_test_other_module"), std::string::npos);
+
+  auto default_content = ReadTextFile(ActiveLogPath());
+  EXPECT_EQ(default_content.find("logger_test_other_module"), std::string::npos);
 }

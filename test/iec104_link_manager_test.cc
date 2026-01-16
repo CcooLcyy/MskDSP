@@ -10,6 +10,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "DataCenter_mock.grpc.pb.h"
 #include "IEC104LinkManager.h"
@@ -56,6 +57,14 @@ IEC104Proto::UpsertLinkRequest MakeServerLinkReq(const char* connName, const cha
   cfg->set_oa(1);
   req.set_create_only(true);
   return req;
+}
+
+IEC104Proto::TelemetryPoint MakePoint(const char* tag, uint32_t ioa) {
+  IEC104Proto::TelemetryPoint p;
+  p.set_tag(tag);
+  p.set_ioa(ioa);
+  p.set_type(IEC104Proto::TELEMETRY_TYPE_FLOAT);
+  return p;
 }
 }  // namespace
 
@@ -226,4 +235,68 @@ TEST(IEC104LinkManagerTest, DeleteLinkReleasesReservedServerPort) {
   auto req2 = MakeServerLinkReq("server-new", "127.0.0.1", port);
   IEC104Proto::LinkInfo info2;
   ASSERT_TRUE(mgr.UpsertLink(req2, &info2).ok());
+}
+
+// 验证：点表增量更新会合并并同步完整 tags 到 DataCenter。
+TEST(IEC104LinkManagerTest, UpsertPointTableMergesAndSendsTags) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeClientLinkReq("conn-pt");
+  IEC104Proto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+
+  IEC104Proto::UpsertPointTableRequest pt1;
+  pt1.set_conn_name("conn-pt");
+  *pt1.add_points() = MakePoint("A", 100);
+  *pt1.add_points() = MakePoint("B", 101);
+  pt1.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(pt1).ok());
+
+  const auto connId = info.conn_id();
+  EXPECT_CALL(*stub, UpsertPointTable(_, _, _))
+      .WillOnce(Invoke([connId](grpc::ClientContext*,
+                                const DataCenterProto::UpsertPointTableRequest& req,
+                                DataCenterProto::Empty*) {
+        EXPECT_EQ(req.conn_id(), connId);
+        EXPECT_TRUE(req.replace());
+        std::vector<std::string> tags(req.tags().begin(), req.tags().end());
+        EXPECT_THAT(tags, ::testing::ElementsAre("A", "B", "C"));
+        return grpc::Status::OK;
+      }));
+
+  IEC104Proto::UpsertPointTableRequest pt2;
+  pt2.set_conn_name("conn-pt");
+  *pt2.add_points() = MakePoint("C", 102);
+  pt2.set_replace(false);
+  ASSERT_TRUE(mgr.UpsertPointTable(pt2).ok());
+
+  IEC104Proto::PointTable out;
+  ASSERT_TRUE(mgr.GetPointTable("conn-pt", &out).ok());
+  ASSERT_EQ(out.points_size(), 3);
+  EXPECT_EQ(out.points(0).tag(), "A");
+  EXPECT_EQ(out.points(1).tag(), "B");
+  EXPECT_EQ(out.points(2).tag(), "C");
+}
+
+// 验证：点表更新时连接不存在会返回 NOT_FOUND。
+TEST(IEC104LinkManagerTest, UpsertPointTableReturnsNotFoundWhenMissing) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+
+  EXPECT_CALL(*stub, UpsertPointTable(_, _, _)).Times(0);
+
+  IEC104Proto::UpsertPointTableRequest req;
+  req.set_conn_name("missing");
+  *req.add_points() = MakePoint("A", 1);
+  req.set_replace(true);
+
+  auto st = mgr.UpsertPointTable(req);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::NOT_FOUND);
 }

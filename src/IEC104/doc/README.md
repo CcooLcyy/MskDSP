@@ -47,11 +47,16 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
 4. 上位机使用返回的 `conn_id` 调用 DataCenter 配置路由（`UpsertRoutes` 等）
 5. 调用 `StartLink` 启动该连接的 TCP 监听/连接
 
+## 日志
+- 日志前缀包含模块名 `[IEC104]`，便于与其他模块混合排查。
+- 报文日志为 INFO 级别，逐帧输出完整 APDU（包含 `conn_name/角色/长度/数据`）。
+- 报文日志输出量大，生产环境需关注日志大小与磁盘占用。
+
 ## 测试
 相关单元测试位于 `test/`：
 
 - `iec104PointTable_test`：覆盖点表更新、双向查询、冲突校验与序列化输出稳定性。
-- `iec104LinkManager_test`：覆盖 LinkManager 与 DataCenter 的交互语义（使用 gMock stub），以及配置校验/删除语义等边界。
+- `iec104LinkManager_test`：覆盖 LinkManager 与 DataCenter 的交互语义（使用 gMock stub），以及配置校验、点表下发合并、删除语义等边界。
 - `iec104TcpSession_test`：覆盖链路层 STARTDT 握手、自动总召与 t2 延迟确认行为。
 
 运行方式：
@@ -69,7 +74,7 @@ ctest --test-dir build -R iec104TcpSession_test --output-on-failure
 - 多主站/多会话：Server 模式当前同一 `conn_name` 只保留一个活动连接；多主站并发、会话级隔离策略未实现
 - 点表扩展：点表已预留 `scale/offset/type`，但当前不生效；后续可扩展工程量换算、更多类型与双向映射校验
 - 配置持久化：连接配置/点表/运行态信息未持久化；后续建议落盘到 `./conf/IEC104/` 并采用 tmp/bak/corrupt 策略
-- 观测性：缺少链路状态统计（收发计数、最近一次总召、重连次数等）与更细粒度日志
+- 观测性：已补充逐帧日志，但仍缺少链路状态统计（收发计数、最近一次总召、重连次数等）与可配置采样/汇总
 - 安全：gRPC 与 IEC104 TCP 目前均为明文/无鉴权；TLS、鉴权、白名单等未实现
 - 测试：当前以单元测试覆盖点表与 LinkManager 语义；缺少端到端“主站↔从站”协议互操作测试
 

@@ -35,7 +35,8 @@ private:
 
 class Logger {
 public:
-  static void init(const std::string &logDir = "./log", const std::string &fileName = "module_manager.log");
+  static void init(const std::string &logDir = "./log", const std::string &fileName = "moduleManager.log");
+  static void ensureModuleSink(const std::string &moduleName);
   static boost::log::sources::severity_logger_mt<boost::log::trivial::severity_level> &get();
 
 private:
@@ -57,8 +58,7 @@ std::string formatLog(std::string_view fmt, Args&&... args) {
 
 #ifndef NDEBUG
 #define LOG_CONTEXT_STREAM                                         \
-  << "[" << __FILE_NAME__ << ": " << __LINE__ << "] "              \
-  << "[" << __FUNCTION__ << "] "
+  << "[" << __FILE_NAME__ << ": " << __LINE__ << "] "
 #else
 #define LOG_CONTEXT_STREAM
 #endif

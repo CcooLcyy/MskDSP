@@ -87,7 +87,7 @@ extern "C" BOOST_SYMBOL_EXPORT bool GetModuleManifestPb(const uint8_t **data, si
 
 - `moduleManager_test`：覆盖模块扫描（`./lib`）、manifest/版本解析、依赖启动与 load/unload 生命周期、运行时信息查询、启动配置落盘、gRPC 管理服务的委派逻辑。
 - `moduleInterface_test`：覆盖 `ModuleInterface::initLibInfo/grpcServerBuilder/shutdownServers` 等基础设施逻辑，并通过一次真实 RPC 触发 interceptor 路径。
-- `logger_test`：覆盖日志追加写入、历史日志压缩与 30 天保留策略。
+- `logger_test`：覆盖模块日志分目录、追加写入、历史日志压缩与 60 天保留策略。
 
 运行方式：
 ```bash
@@ -103,14 +103,14 @@ ctest --test-dir build -R logger_test --output-on-failure
 ## 日志（模块标识）
 为便于排查多模块并发运行时的日志来源，日志输出增加了「模块名」标识。
 
-- 日志格式增加 `[<模块名>]` 字段；当无法确定模块上下文时显示 `-`。
+- 日志格式增加 `[<模块名>]` 字段；当无法确定模块上下文时归入 `moduleManager`。
 - 模块名来源为 `ModuleInterface::initLibInfo(...)` 设置的 `LIB_NAME`（对应 `metaData_.name`），模块应在 `grpcServerBuilder(...)` 前完成初始化。
 - gRPC 自动标记：通过 `grpcServerBuilder(...)` 启动的 gRPC Server 会统一注入 server interceptor，在每个 RPC 处理线程中自动设置模块名上下文；RPC 处理函数里直接使用 `LOG_INFO/LOG_ERROR...` 即可。
-- 非 gRPC 线程：模块自行创建的后台线程需要在入口处手动创建 `ModuleManager::LogModuleScope scope(metaData_.name);`，否则该线程的日志模块名会是 `-`。
+- 非 gRPC 线程：模块自行创建的后台线程需要在入口处手动创建 `ModuleManager::LogModuleScope scope(metaData_.name);`，否则该线程日志会归入 `moduleManager`。
 - 如模块绕过 `grpcServerBuilder(...)` 自行创建 gRPC Server，需要自行注入拦截器或手动设置 `LogModuleScope`。
 
 ## 日志（轮转与保留）
-- 日志文件：`./log/module_manager.log`（追加写入，重启不会清空）
-- 每日 00:00 轮转；轮转后的文件名形如 `module_manager_YYYY-MM-DD_HH-MM-SS_N.log.gz`
-- 历史日志自动压缩为 `.gz`，默认保留最近 30 天
+- 日志文件：`./log/<模块名>/<模块名>.log`（追加写入，重启不会清空）
+- 每日 00:00 轮转；轮转后的文件名形如 `./log/<模块名>/<模块名>_YYYY-MM-DD_HH-MM-SS_N.log.gz`
+- 历史日志自动压缩为 `.gz`，默认保留最近 60 天
 - 需要调整策略时修改 `src/core/ModuleManager/Logger.cc`（`kRotationSizeBytes` / `kRetentionDays`）
