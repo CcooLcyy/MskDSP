@@ -335,17 +335,23 @@ bool loadModuleManifest(const std::filesystem::path &libPath, ModuleManagerProto
   if (manifest == nullptr) {
     return false;
   }
+  LOG_INFO("读取模块 manifest 开始: {}", libPath.string());
   try {
     boost::dll::shared_library lib;
+    LOG_INFO("加载模块库: {}", libPath.string());
     lib.load(libPath.string(), boost::dll::load_mode::rtld_lazy);
+    LOG_INFO("模块库加载完成: {}", libPath.filename().string());
+    LOG_INFO("检查 manifest 符号: {}", libPath.filename().string());
     if (!lib.has("GetModuleManifestPb")) {
       if (error != nullptr) {
         *error = "manifest symbol GetModuleManifestPb not found";
       }
       return false;
     }
-    using ManifestFn = bool (*)(const uint8_t **, size_t *);
-    auto fn = lib.get<ManifestFn>("GetModuleManifestPb");
+    using ManifestFn = bool(const uint8_t **, size_t *);
+    auto &fn = lib.get<ManifestFn>("GetModuleManifestPb");
+    LOG_INFO("manifest 符号解析成功: {}", libPath.filename().string());
+    LOG_INFO("调用 manifest 函数: {}", libPath.filename().string());
     const uint8_t *data = nullptr;
     size_t size = 0;
     if (!fn(&data, &size)) {
@@ -360,17 +366,20 @@ bool loadModuleManifest(const std::filesystem::path &libPath, ModuleManagerProto
       }
       return false;
     }
+    LOG_INFO("解析 manifest 数据: {} bytes ({})", size, libPath.filename().string());
     if (!manifest->ParseFromArray(data, static_cast<int>(size))) {
       if (error != nullptr) {
         *error = "manifest parse failed";
       }
       return false;
     }
+    LOG_INFO("读取模块 manifest 成功: {}", libPath.filename().string());
     return true;
   } catch (const std::exception &ex) {
     if (error != nullptr) {
       *error = ex.what();
     }
+    LOG_ERROR("读取模块 manifest 异常: {} ({})", libPath.string(), ex.what());
     return false;
   }
 }
@@ -840,6 +849,7 @@ void ModuleManager::initModuleInfos() {
     auto moduleInfo = moduleInfos_.add_module_info();
     moduleInfo->set_module_name(moduleName);
     moduleInfo->set_lib_name(fileName);
+    LOG_INFO("开始读取模块信息: {}", entry.path().string());
 
     ModuleManagerProto::ModuleManifest manifest;
     std::string error;
@@ -856,6 +866,7 @@ void ModuleManager::initModuleInfos() {
       for (const auto &dependency : manifest.dependencies()) {
         moduleInfo->add_dependencies()->CopyFrom(dependency);
       }
+      LOG_INFO("模块 {} manifest 读取完成: deps {}", moduleName, manifest.dependencies_size());
       ++available;
       auto fileVersion = parseVersion(fileName);
       if (!fileVersion.version().empty() && fileVersion.version() != manifest.version().version()) {

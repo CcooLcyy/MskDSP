@@ -16,9 +16,23 @@
 
 ## 模块依赖与 Manifest
 - manifest 字段：`module_name`、`version`、`dependencies`（依赖模块名 + 版本约束）。
-- 版本约束表达式支持 `= >= > <= <`，可用空格分隔多个条件（示例：`=0.0.1`、`>=1.2.0 <2.0.0`）。
+- 版本约束表达式支持 `= >= > <= <`，可用空格分隔多个条件（示例：`=0.0.1`、`>=1.2.0 <2.0.0`）；`==` 不支持，解析失败将标记为 `manifest_error`。
 - `GetModuleInfo` 返回的 `manifest_error` 非空时表示模块不可用，`StartModule` 将直接失败并输出日志。
 - `StartModule` 会自动按依赖拓扑顺序启动依赖模块；`StopModule` 会级联停止依赖它的上游模块。
+- ModuleManager 启动时扫描 `./lib` 并构建依赖图；依赖缺失/循环/版本不满足会在日志中给出清晰错误。
+
+Manifest 导出示例（无副作用，返回 protobuf 序列化数据）：
+```cpp
+extern "C" BOOST_SYMBOL_EXPORT bool GetModuleManifestPb(const uint8_t **data, size_t *size) {
+  if (data == nullptr || size == nullptr) {
+    return false;
+  }
+  const auto &serialized = GetSerializedManifest();
+  *data = reinterpret_cast<const uint8_t *>(serialized.data());
+  *size = serialized.size();
+  return true;
+}
+```
 
 ## 启动自加载配置
 - 配置文件：`./conf/module_manager.jsonc`（可选；缺失则跳过）。
@@ -39,8 +53,8 @@
 协议定义：`protobuf/ModuleManager.proto`，Service：`ModuleManage`。
 
 - `GetModuleInfo`：返回从 `./lib` 扫描到的模块列表（建议以该结果作为 `StartModule/StopModule` 的入参，避免库名/模块名不匹配），并携带依赖信息与 `manifest_error`。
-- `StartModule`：加载共享库、调用 `create()` 创建实例，并在独立线程中运行模块的 `start()`；自动按依赖拓扑顺序启动依赖模块。
-- `StopModule`：请求停止模块、关闭 gRPC Server、回收线程并卸载共享库；级联停止依赖它的上游模块。
+- `StartModule`：加载共享库、调用 `create()` 创建实例，并在独立线程中运行模块的 `start()`；自动按依赖拓扑顺序启动依赖模块；依赖缺失/循环/版本不满足返回错误。
+- `StopModule`：请求停止模块、关闭 gRPC Server、回收线程并卸载共享库；级联停止依赖它的上游模块；级联失败返回错误。
 - `GetRunningModuleInfo`：返回已启动模块的运行时信息（版本、inner/outer gRPC 地址等）。
 - `SaveModuleStartConfig`：保存模块启动配置到 `./conf/modConf.bin`（当前实现仅保存，未看到启动时自动读取逻辑）。
 
@@ -53,7 +67,7 @@
 - `outer_grpc_server`（TCP）：用于上位机调用；普通模块端口为随机 7001–7999，重启后可能变化。
 
 ### 推荐调用流程
-1. `GetModuleInfo`：发现可用模块（从 `./lib` 扫描）。
+1. `GetModuleInfo`：发现可用模块（从 `./lib` 扫描），过滤 `manifest_error` 非空的模块。
 2. `StartModule`：启动所需模块（会自动拉起依赖模块，例如 `DataCenter`）。
 3. `GetRunningModuleInfo`：获取已启动模块的 `outer_grpc_server`，上位机据此建立到各模块的 gRPC 连接并进行后续配置/运行期调用。
 

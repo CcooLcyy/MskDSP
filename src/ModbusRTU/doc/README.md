@@ -1,10 +1,13 @@
 # ModbusRTU 模块
 
 ## 简介
-TODO：一句话说明模块职责/边界。
+ModbusRTU 主站模块：基于串口轮询从站点表，将读到的数据发布到 DataCenter；控制面通过 gRPC 由上位机/ConfigPusher 下发配置。
 
 ## 能力清单
-- TODO
+- 主站读线圈（0x01）与保持寄存器（0x03）
+- 支持同一串口多个从站（串口参数需一致）
+- 点表管理、启停轮询
+- 轮询数据发布到 DataCenter（bool/uint16）
 
 ## 接口与协议
 - Protobuf：`protobuf/ModbusRTU.proto`
@@ -16,7 +19,24 @@ TODO：一句话说明模块职责/边界。
 - 运行时可通过管理器 `GetRunningModuleInfo` 查询实际地址
 
 ## 配置与数据
-- TODO：运行时配置项、文件位置、持久化数据目录等
+- 配置入口：ConfigPusher `./conf/configPusher/modbus_rtu.jsonc`
+- 关键配置：serial.device/baud_rate/data_bits/parity/stop_bits/read_timeout_ms、slave_id、poll_interval_ms、address_base
+- 点表字段：tag/function/address/type，scale/offset 预留但当前不生效
+
+## 地址与点表说明
+- `address_base=ADDRESS_BASE_ZERO`：点表地址按协议偏移填写（例如保持寄存器 0 对应 40001）。
+- `address_base=ADDRESS_BASE_ONE`：点表地址按人类编号填写，模块会在轮询时自动减 1（地址需 >=1）。
+- `function/type` 约束：READ_COILS 仅支持 BOOL；READ_HOLDING_REGISTERS 仅支持 UINT16。
+
+## 上位机对接建议
+- 配置流程：`UpsertLink(create_only=true)` → `UpsertPointTable` → `StartLink`。
+- 同串口多从站：不同 `conn_name` + 不同 `slave_id`，其余串口参数必须一致。
+- 读出数据将发布到 DataCenter，点值类型分别映射为 bool/int64（uint16）。
+
+## 常见错误码
+- `INVALID_ARGUMENT`：参数缺失、address_base 与点表地址不匹配、点表类型不合法。
+- `ALREADY_EXISTS`：`conn_name` 已存在或点表冲突映射。
+- `FAILED_PRECONDITION`：链路状态不允许操作、串口参数冲突。
 
 ## 构建产物
 - 共享库：`package/lib/libModbusRTU.so.<version>`（版本见 `src/ModbusRTU/include/ModbusRTULibInfo.h`）

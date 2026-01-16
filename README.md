@@ -6,6 +6,7 @@ MskDSP 是一个基于 C++23 的模块化系统：核心由 `ModuleManager` 管�
 ## 模块机制概览
 - 模块以共享库形式接入：构建产物输出到 `package/lib/`，运行时由模块管理器从工作目录的 `./lib` 扫描发现并动态加载。
 - 加载约定：模块库需要导出 `create()` 工厂函数，返回 `ModuleInterface::ModuleInterface*`（示例：`src/DataCenter/DataCenter.cc`、`src/IEC104/IEC104.cc`）。
+- 依赖约定：模块需导出 `GetModuleManifestPb`，返回 `ModuleManagerProto::ModuleManifest`（模块名/版本/依赖）；ModuleManager 启动时构建依赖图，`StartModule` 会自动拉起依赖。
 - 服务约定：每个模块基于 `ModuleInterface` 同时启动两套 gRPC Server：内部 `unix socket`（`./socket/<模块名>.sock`）+ 对外 `0.0.0.0:<端口>`（默认范围 7001–7999）。
 - 管理端口：模块管理器对外 gRPC 固定监听 `0.0.0.0:7000`。
 
@@ -33,12 +34,20 @@ bash script/new_module.sh <NewModule>
    - 在构造函数中调用 `initLibInfo(<LibInfo变量>)` 初始化模块元信息（库名/版本/端口等）。
    - 在 `start()` 中创建并注册 gRPC Service，然后调用 `grpcServerBuilder(service)` 启动服务。
 3. 导出工厂函数：提供 `extern "C" BOOST_SYMBOL_EXPORT ModuleInterface::ModuleInterface* create()` 供管理器动态加载。
-4. 配置 CMake（参考 `src/DataCenter/CMakeLists.txt`）：
+4. 导出 manifest：提供 `extern "C" BOOST_SYMBOL_EXPORT bool GetModuleManifestPb(const uint8_t **data, size_t *size)`，填充模块名/版本/依赖与版本约束（示例见 `src/Modbus/Modbus.cc`）。
+5. 配置 CMake（参考 `src/DataCenter/CMakeLists.txt`）：
    - 在 `src/<NewModule>/cmake/LibInfo.cmake` 中设置 `LIB_NAME` 与版本号。
    - `configure_file(${CMAKE_SOURCE_DIR}/cmake/LibInfo.h.in ...)` 生成 `<LIB_NAME>LibInfo.h` 供 `initLibInfo()` 使用。
    - `add_library(${LIB_NAME} SHARED ...)` 并链接 `moduleManager`，设置 `VERSION/SOVERSION` 以生成形如 `lib<name>.so.<version>` 的文件名。
    - 在 `src/CMakeLists.txt` 中 `add_subdirectory(<NewModule>)` 参与构建。
-5. 构建后，将生成的 `.so` 放在运行时工作目录的 `./lib`（默认即 `package/lib/`），通过 gRPC 调用 `StartModule` 启动模块。
+6. 构建后，将生成的 `.so` 放在运行时工作目录的 `./lib`（默认即 `package/lib/`），通过 gRPC 调用 `StartModule` 启动模块。
+
+## 模块依赖与上位机使用
+ModuleManager 使用模块 manifest 构建依赖图，并自动处理依赖启动/级联停止。上位机侧建议遵循以下流程：
+- 先调用 `GetModuleInfo`，过滤 `manifest_error` 非空的模块（表示不可用或依赖配置错误）。
+- 用户点击启动 A 模块时，直接调用 `StartModule(A)`；管理器会按拓扑顺序自动拉起依赖。
+- 若 `StartModule` 返回错误，展示返回的错误信息（依赖缺失/循环/版本不满足等）。
+- 获取运行时地址时使用 `GetRunningModuleInfo`，如连接失败应重新刷新地址。
 
 ## 需求（持续更新）
 该部分用于沉淀/迭代项目需求（你可以在此持续补充）。

@@ -10,10 +10,12 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
 - 连接名：`conn_name` 由上位机指定（模块内唯一，用于人类识别/配置归属）
 - `conn_id` 分配：IEC104 在配置连接时通过 DataCenter `GetOrCreateConnection` 取/建，并回传给上位机
 - 点表下发：上位机通过 IEC104 gRPC 下发 `tag <-> IOA` 映射（先支持 float 遥测）
+- 链路层：支持 `k/w` 窗口与 `t0/t1/t2/t3` 超时（通过 `LinkConfig.apci` 配置）
 - 与 DataCenter 联动：
   - Client 收到遥测后 `Publish(conn_id, tag, value)` 到 DataCenter
   - Server 订阅 DataCenter `Subscribe(conn_id)`，将点值转为 IEC104 遥测自发上送
   - Server 支持总召 `C_IC_NA_1`：通过 DataCenter `GetLatest(conn_id)` 拼装快照应答
+  - Client 在 STARTDT 成功后自动发起总召 `C_IC_NA_1(QOI=20)`
 
 ## 接口与协议
 - Protobuf：`protobuf/IEC104.proto`
@@ -30,6 +32,14 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
 - `conn_name`：上位机指定的“代称”，可为任意字符串；要求在 IEC104 模块内唯一
 - `conn_id`：DataCenter 分配的连接 ID（稳定且可持久化），上位机后续用它在 DataCenter 配路由/订阅
 
+### 链路层参数（APCI）
+- `k/w`：I 帧发送/接收窗口
+- `t0`：等待 STARTDT 建链超时（秒）
+- `t1`：I 帧确认等待超时（秒）
+- `t2`：延迟确认超时（秒，触发 S 帧）
+- `t3`：空闲保活超时（秒，触发 TESTFR）
+- 参数由上位机在 `LinkConfig.apci` 下发，默认值：`k=12, w=8, t0=30, t1=15, t2=10, t3=20`
+
 ### 上位机推荐流程
 1. 通过 ModuleManager 启动 `DataCenter` 与 `IEC104`，并用 `GetRunningModuleInfo` 获取 IEC104 的 `outer_grpc_server`
 2. 连接 IEC104 gRPC，调用 `UpsertLink(create_only=true)` 配置连接并获取 `conn_id`（ROLE_SERVER 会在配置阶段检查 `local.ip/local.port`：本模块内冲突返回 `ALREADY_EXISTS`；端口被系统占用返回 `FAILED_PRECONDITION`）
@@ -42,17 +52,19 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
 
 - `iec104PointTable_test`：覆盖点表更新、双向查询、冲突校验与序列化输出稳定性。
 - `iec104LinkManager_test`：覆盖 LinkManager 与 DataCenter 的交互语义（使用 gMock stub），以及配置校验/删除语义等边界。
+- `iec104TcpSession_test`：覆盖链路层 STARTDT 握手、自动总召与 t2 延迟确认行为。
 
 运行方式：
 ```bash
 ctest --test-dir build -R iec104PointTable_test --output-on-failure
 ctest --test-dir build -R iec104LinkManager_test --output-on-failure
+ctest --test-dir build -R iec104TcpSession_test --output-on-failure
 ```
 
 ## 未实现/后续计划
 - 协议类型：目前仅支持遥测 `M_ME_NC_1` 与总召 `C_IC_NA_1`；遥信/遥控/设点、对时 `C_CS_NA_1`、带时标类型等未实现
 - 时标：暂不支持 `CP56Time2a`（后续可扩展到带时标遥测/遥信与对时）
-- 链路层完善：当前仅实现简化的 I/S/U 帧处理；`k/w` 窗口、未确认队列、`t0/t1/t2` 超时与重传策略未实现（现仅使用 `t3` 做心跳）
+- 链路层完善：已支持 `k/w` 与 `t0–t3`；未实现 I 帧重传策略与更细粒度链路统计
 - 报文打包：当前遥测按“单点一帧”发送，未做批量打包/VSQ 序列优化
 - 多主站/多会话：Server 模式当前同一 `conn_name` 只保留一个活动连接；多主站并发、会话级隔离策略未实现
 - 点表扩展：点表已预留 `scale/offset/type`，但当前不生效；后续可扩展工程量换算、更多类型与双向映射校验

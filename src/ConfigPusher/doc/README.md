@@ -1,12 +1,13 @@
 # ConfigPusher 模块
 
 ## 简介
-ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104，并按配置调用 IEC104 gRPC 接口完成连接与点表下发。
+ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRTU，并按配置调用对应 gRPC 接口完成连接与点表下发。
 
 ## 能力清单
-- 自动通过 ModuleManager 启动 DataCenter 与 IEC104
+- 自动通过 ModuleManager 启动 DataCenter 与 IEC104/ModbusRTU
 - 解析 JSONC（支持 `//` 与 `/* */` 注释）
 - 下发 IEC104 配置：UpsertLink / UpsertPointTable / StartLink
+- 下发 ModbusRTU 配置：UpsertLink / UpsertPointTable / StartLink
 - 失败记录日志（当前不做重试）
 
 ## 接口与协议
@@ -24,8 +25,10 @@ ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104，并按
 - 建议：自启动列表仅填写 `ConfigPusher`，其余模块由 ConfigPusher 按配置按需启动。
 
 ## 配置与数据
-- 配置文件：`./conf/configPusher/iec104.jsonc`
-- 使用 Protobuf JSON 映射：枚举需写全名（例如 `ROLE_SERVER`、`TELEMETRY_TYPE_FLOAT`）
+- 配置文件：
+  - `./conf/configPusher/iec104.jsonc`
+  - `./conf/configPusher/modbus_rtu.jsonc`
+- 使用 Protobuf JSON 映射：枚举需写全名（例如 `ROLE_SERVER`、`TELEMETRY_TYPE_FLOAT`、`FUNCTION_READ_COILS`）
 - `point_table.conn_name` 可省略（默认使用 `link.config.conn_name`）
 
 示例：
@@ -58,6 +61,7 @@ ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104，并按
   }
 }
 ```
+ModbusRTU 示例见 `./conf/configPusher/modbus_rtu.jsonc`。
 
 ## 构建产物
 - 共享库：`package/lib/libConfigPusher.so.<version>`（版本见 `src/ConfigPusher/cmake/LibInfo.cmake`）

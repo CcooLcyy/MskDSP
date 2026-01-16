@@ -183,6 +183,22 @@ target_link_libraries(iec104PointTable_test PRIVATE
 
 add_test(NAME iec104PointTable_test COMMAND iec104PointTable_test)
 
+add_executable(modbusRtuPointTable_test
+  modbus_rtu_point_table_test.cc
+  ${CMAKE_SOURCE_DIR}/src/ModbusRTU/ModbusRTUPointTable.cc
+)
+
+target_include_directories(modbusRtuPointTable_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/ModbusRTU/include
+)
+
+target_link_libraries(modbusRtuPointTable_test PRIVATE
+  GTest::gtest_main
+  dspProto
+)
+
+add_test(NAME modbusRtuPointTable_test COMMAND modbusRtuPointTable_test)
+
 add_executable(iec104LinkManager_test
   iec104_link_manager_test.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104DataCenterClient.cc
@@ -195,6 +211,7 @@ add_executable(iec104LinkManager_test
 
 target_include_directories(iec104LinkManager_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/IEC104/include
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
 )
 
 target_link_libraries(iec104LinkManager_test PRIVATE
@@ -202,9 +219,52 @@ target_link_libraries(iec104LinkManager_test PRIVATE
   GTest::gmock
   dspProto
   Boost::asio
+  moduleManager
 )
 
 add_test(NAME iec104LinkManager_test COMMAND iec104LinkManager_test)
+
+add_executable(modbusRtuLinkManager_test
+  modbus_rtu_link_manager_test.cc
+  ${CMAKE_SOURCE_DIR}/src/ModbusRTU/ModbusRTUDataCenterClient.cc
+  ${CMAKE_SOURCE_DIR}/src/ModbusRTU/ModbusRTULinkManager.cc
+  ${CMAKE_SOURCE_DIR}/src/ModbusRTU/ModbusRTUPointTable.cc
+  ${CMAKE_SOURCE_DIR}/src/ModbusRTU/ModbusRTUSerialBus.cc
+)
+
+target_include_directories(modbusRtuLinkManager_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/ModbusRTU/include
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+)
+
+target_link_libraries(modbusRtuLinkManager_test PRIVATE
+  GTest::gtest_main
+  GTest::gmock
+  dspProto
+  Boost::asio
+  moduleManager
+)
+
+add_test(NAME modbusRtuLinkManager_test COMMAND modbusRtuLinkManager_test)
+
+add_executable(iec104TcpSession_test
+  iec104_tcp_session_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104TcpSession.cc
+)
+
+target_include_directories(iec104TcpSession_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC104/include
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+)
+
+target_link_libraries(iec104TcpSession_test PRIVATE
+  GTest::gtest_main
+  Boost::asio
+  dspProto
+  moduleManager
+)
+
+add_test(NAME iec104TcpSession_test COMMAND iec104TcpSession_test)
 
 add_executable(agvcStrategy_test
   agvc_strategy_test.cc
@@ -244,7 +304,10 @@ set(MSKDSP_TEST_TARGETS
   dataCenterConnectionStore_test
   dataCenterGrpcService_test
   iec104PointTable_test
+  modbusRtuPointTable_test
   iec104LinkManager_test
+  modbusRtuLinkManager_test
+  iec104TcpSession_test
   agvcStrategy_test
   agcGroupManager_test
 )

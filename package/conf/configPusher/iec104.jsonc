@@ -18,6 +18,7 @@
             },
             "ca": 1,
             "oa": 1,
+            // APCI 参数可由上位机/configPusher 配置（单位秒）；CLIENT 在 STARTDT 成功后自动总召（QOI=20）
             "apci": {
               "k": 12,
               "w": 8,
@@ -40,6 +41,23 @@
         },
         "start": true
       }
+      // client 示例（仅供参考，取消注释后可用）:
+      // {
+      //   "link": {
+      //     "create_only": true,
+      //     "config": {
+      //       "conn_name": "line-2",
+      //       "role": "ROLE_CLIENT",
+      //       "local": { "ip": "", "port": 0 },
+      //       "remote": { "ip": "127.0.0.1", "port": 2404 },
+      //       "ca": 1,
+      //       "oa": 1,
+      //       "apci": { "k": 12, "w": 8, "t0": 30, "t1": 15, "t2": 10, "t3": 20 }
+      //     }
+      //   },
+      //   "point_table": { "replace": true, "points": [{ "tag": "Ua", "ioa": 100, "type": "TELEMETRY_TYPE_FLOAT" }] },
+      //   "start": true
+      // }
     ]
   }
 }

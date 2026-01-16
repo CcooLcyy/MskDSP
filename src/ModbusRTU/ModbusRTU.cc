@@ -2,8 +2,10 @@
 
 #include <boost/dll.hpp>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <stop_token>
 #include <thread>
 
@@ -36,7 +38,8 @@ const std::string &GetSerializedManifest() {
 namespace ModbusRTU {
 ModbusRTU::ModbusRTU() :
   ModuleInterface(),
-  modbusRTUService_(std::make_shared<ModbusRTUGrpcServiceImpl>()) {
+  modbusRTUService_(std::make_shared<ModbusRTUGrpcServiceImpl>()),
+  linkManager_(ModbusRTULibInfo.LIB_NAME) {
   initLibInfo(ModbusRTULibInfo);
 }
 ModbusRTU::~ModbusRTU() {}
@@ -46,10 +49,21 @@ void ModbusRTU::start(std::stop_token stopToken) {
   LOG_INFO("ModbusRTU 服务实例绑定完成");
   grpcServerBuilder(modbusRTUService_);
   LOG_INFO("ModbusRTU gRPC 服务已启动");
-  while (!stopToken.stop_requested()) {
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-  }
+
+  std::mutex mu;
+  std::condition_variable_any cv;
+  std::stop_callback cb(stopToken, [&cv]() { cv.notify_all(); });
+  std::unique_lock lock(mu);
+  cv.wait(lock, [&stopToken]() { return stopToken.stop_requested(); });
   LOG_INFO("ModbusRTU 模块停止");
+}
+
+LinkManager& ModbusRTU::linkManager() {
+  return linkManager_;
+}
+
+const LinkManager& ModbusRTU::linkManager() const {
+  return linkManager_;
 }
 }  // namespace ModbusRTU
 

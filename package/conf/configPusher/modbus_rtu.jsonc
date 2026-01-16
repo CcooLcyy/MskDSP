@@ -1,0 +1,44 @@
+{
+  // ModbusRTU 配置下发示例
+  "modbus_rtu": {
+    "links": [
+      {
+        "link": {
+          "create_only": true,
+          "config": {
+            "conn_name": "rtu-1",
+            "serial": {
+              "device": "/dev/ttyUSB0",
+              "baud_rate": 9600,
+              "data_bits": 8,
+              "parity": "PARITY_NONE",
+              "stop_bits": "STOP_BITS_ONE",
+              "read_timeout_ms": 1000
+            },
+            "slave_id": 1,
+            "poll_interval_ms": 1000,
+            "address_base": "ADDRESS_BASE_ZERO"
+          }
+        },
+        "point_table": {
+          "replace": true,
+          "points": [
+            {
+              "tag": "coil_1",
+              "function": "FUNCTION_READ_COILS",
+              "address": 0,
+              "type": "DATA_TYPE_BOOL"
+            },
+            {
+              "tag": "reg_1",
+              "function": "FUNCTION_READ_HOLDING_REGISTERS",
+              "address": 0,
+              "type": "DATA_TYPE_UINT16"
+            }
+          ]
+        },
+        "start": true
+      }
+    ]
+  }
+}

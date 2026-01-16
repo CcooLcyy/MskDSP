@@ -85,17 +85,26 @@ private:
   boost::asio::io_context& io_;
   boost::asio::ip::tcp::socket socket_;
   boost::asio::streambuf buffer_;
+  boost::asio::steady_timer t0Timer_;
+  boost::asio::steady_timer t1Timer_;
+  boost::asio::steady_timer t2Timer_;
   boost::asio::steady_timer t3Timer_;
 
   IEC104Proto::LinkConfig config_;
   bool isClient_;
   Apci apci_;
   uint16_t sendSeq_ = 0;
+  uint16_t sendAckedSeq_ = 0;
   uint16_t recvSeqExpected_ = 0;
+  size_t sendUnacked_ = 0;
+  size_t recvSinceLastAck_ = 0;
   bool dataTransferActive_ = false;
   bool closing_ = false;
+  bool ackPending_ = false;
+  bool autoInterrogationSent_ = false;
 
   std::deque<std::vector<uint8_t>> writeQueue_;
+  std::deque<std::vector<uint8_t>> pendingAsdu_;
   bool writing_ = false;
 
   MeasuredValueCallback onMeasuredValue_;
@@ -112,6 +121,8 @@ private:
   void handleMeasuredValue(const std::vector<uint8_t>& asdu);
   void handleInterrogation(const std::vector<uint8_t>& asdu);
 
+  void enqueueAsdu(std::vector<uint8_t> asdu);
+  void trySendPending();
   void sendIFrame(const std::vector<uint8_t>& asdu);
   void sendSFrame();
   void sendUFrame(UFrameType type);
@@ -122,7 +133,24 @@ private:
   std::vector<uint8_t> buildInterrogationAsdu(uint8_t cause, uint8_t qoi) const;
 
   static FrameType frameType(const std::vector<uint8_t>& apdu);
+  static uint16_t seqDistance(uint16_t from, uint16_t to);
   static Apci parseApci(const IEC104Proto::APCIParameters& in);
+
+  void handleAck(uint16_t remoteAckSeq);
+  void setDataTransferActive(bool active, const char* reason);
+  void sendAutoInterrogation(uint8_t qoi);
+
+  void startT0();
+  void stopT0();
+  void onT0Timeout(const boost::system::error_code& ec);
+
+  void startT1();
+  void stopT1();
+  void onT1Timeout(const boost::system::error_code& ec);
+
+  void startT2();
+  void stopT2();
+  void onT2Timeout(const boost::system::error_code& ec);
 
   void restartT3();
   void onT3Timeout(const boost::system::error_code& ec);

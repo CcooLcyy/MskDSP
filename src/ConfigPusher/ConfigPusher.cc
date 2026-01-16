@@ -24,6 +24,7 @@
 #include "ConfigPusherGrpcService.h"
 #include "ConfigPusherLibInfo.h"
 #include "IEC104.grpc.pb.h"
+#include "ModbusRTU.grpc.pb.h"
 #include "Logger.h"
 #include "ModuleManager.pb.h"
 #include "ModuleManager.grpc.pb.h"
@@ -46,10 +47,12 @@ const std::string &GetSerializedManifest() {
 
 namespace ConfigPusher {
 namespace {
-constexpr const char *kConfigPath = "./conf/configPusher/iec104.jsonc";
+constexpr const char *kIec104ConfigPath = "./conf/configPusher/iec104.jsonc";
+constexpr const char *kModbusRtuConfigPath = "./conf/configPusher/modbus_rtu.jsonc";
 constexpr const char *kModuleManagerAddress = "127.0.0.1:7000";
 constexpr const char *kDataCenterModuleName = "DataCenter";
 constexpr const char *kIec104ModuleName = "IEC104";
+constexpr const char *kModbusRtuModuleName = "ModbusRTU";
 constexpr auto kModulePollInterval = std::chrono::milliseconds(200);
 constexpr auto kModuleStartTimeout = std::chrono::seconds(5);
 
@@ -139,6 +142,31 @@ bool readFile(const std::filesystem::path &path, std::string *out) {
   oss << ifs.rdbuf();
   *out = oss.str();
   return true;
+}
+
+std::optional<ConfigPusherProto::Config> loadConfigFile(const std::filesystem::path &path) {
+  if (!std::filesystem::exists(path)) {
+    LOG_INFO("未找到 ConfigPusher 配置文件: {}", path.string());
+    return std::nullopt;
+  }
+
+  LOG_INFO("开始读取 ConfigPusher 配置文件: {}", path.string());
+  std::string raw;
+  if (!readFile(path, &raw)) {
+    LOG_ERROR("读取 ConfigPusher 配置文件失败: {}", path.string());
+    return std::nullopt;
+  }
+
+  auto json = stripJsonComments(raw);
+  ConfigPusherProto::Config config;
+  google::protobuf::util::JsonParseOptions options;
+  options.ignore_unknown_fields = false;
+  auto parseStatus = google::protobuf::util::JsonStringToMessage(json, &config, options);
+  if (!parseStatus.ok()) {
+    LOG_ERROR("解析 ConfigPusher 配置失败: {}", parseStatus.ToString());
+    return std::nullopt;
+  }
+  return config;
 }
 
 std::optional<ModuleManagerProto::ModuleInfo> findModuleInfo(
@@ -255,6 +283,75 @@ bool applyIec104Config(const ConfigPusherProto::Iec104Config &config, IEC104Prot
 
   return ok;
 }
+
+bool applyModbusRtuConfig(const ConfigPusherProto::ModbusRtuConfig &config, ModbusRTUProto::ModbusRTUService::StubInterface *stub) {
+  if (stub == nullptr) {
+    LOG_ERROR("ModbusRTU gRPC stub 为空");
+    return false;
+  }
+
+  bool ok = true;
+  for (const auto &task : config.links()) {
+    if (!task.has_link() || !task.link().has_config()) {
+      LOG_ERROR("ModbusRTU 配置任务缺少 link/config");
+      ok = false;
+      continue;
+    }
+
+    const auto &linkConfig = task.link().config();
+    if (linkConfig.conn_name().empty()) {
+      LOG_ERROR("ModbusRTU 配置任务缺少 config.conn_name");
+      ok = false;
+      continue;
+    }
+
+    LOG_INFO("开始下发 ModbusRTU 连接配置: conn_name={}", linkConfig.conn_name());
+    ModbusRTUProto::UpsertLinkRequest linkReq = task.link();
+    ModbusRTUProto::LinkInfo linkInfo;
+    grpc::ClientContext linkCtx;
+    auto status = stub->UpsertLink(&linkCtx, linkReq, &linkInfo);
+    if (!status.ok()) {
+      LOG_ERROR("ModbusRTU 连接配置失败: conn_name={}, 原因={}", linkConfig.conn_name(), status.error_message());
+      ok = false;
+      continue;
+    }
+    LOG_INFO("ModbusRTU 连接配置成功: conn_name={}, conn_id={}", linkConfig.conn_name(), linkInfo.conn_id());
+
+    if (task.has_point_table() && task.point_table().points_size() > 0) {
+      ModbusRTUProto::UpsertPointTableRequest ptReq = task.point_table();
+      if (ptReq.conn_name().empty()) {
+        ptReq.set_conn_name(linkConfig.conn_name());
+      }
+      LOG_INFO("开始下发 ModbusRTU 点表: conn_name={}, 点数={}, replace={}",
+               ptReq.conn_name(), ptReq.points_size(), ptReq.replace());
+      grpc::ClientContext ptCtx;
+      ModbusRTUProto::Empty ptResp;
+      status = stub->UpsertPointTable(&ptCtx, ptReq, &ptResp);
+      if (!status.ok()) {
+        LOG_ERROR("ModbusRTU 点表下发失败: conn_name={}, 原因={}", ptReq.conn_name(), status.error_message());
+        ok = false;
+        continue;
+      }
+      LOG_INFO("ModbusRTU 点表下发成功: conn_name={}, 点数={}", ptReq.conn_name(), ptReq.points_size());
+    }
+
+    if (task.start()) {
+      ModbusRTUProto::StartLinkRequest startReq;
+      startReq.set_conn_name(linkConfig.conn_name());
+      grpc::ClientContext startCtx;
+      ModbusRTUProto::Empty startResp;
+      status = stub->StartLink(&startCtx, startReq, &startResp);
+      if (!status.ok()) {
+        LOG_ERROR("ModbusRTU 启动连接失败: conn_name={}, 原因={}", linkConfig.conn_name(), status.error_message());
+        ok = false;
+        continue;
+      }
+      LOG_INFO("ModbusRTU 连接启动成功: conn_name={}", linkConfig.conn_name());
+    }
+  }
+
+  return ok;
+}
 }  // namespace
 
 ConfigPusher::ConfigPusher() :
@@ -280,33 +377,16 @@ void ConfigPusher::start(std::stop_token stopToken) {
 }
 
 void ConfigPusher::applyConfig() {
-  if (!std::filesystem::exists(kConfigPath)) {
-    LOG_INFO("未找到 ConfigPusher 配置文件: {}", kConfigPath);
-    return;
-  }
+  auto iec104Config = loadConfigFile(kIec104ConfigPath);
+  auto modbusConfig = loadConfigFile(kModbusRtuConfigPath);
 
-  LOG_INFO("开始读取 ConfigPusher 配置文件: {}", kConfigPath);
-  std::string raw;
-  if (!readFile(kConfigPath, &raw)) {
-    LOG_ERROR("读取 ConfigPusher 配置文件失败: {}", kConfigPath);
+  const bool hasIec104 = iec104Config && iec104Config->has_iec104() && !iec104Config->iec104().links().empty();
+  const bool hasModbus = modbusConfig && modbusConfig->has_modbus_rtu() && !modbusConfig->modbus_rtu().links().empty();
+  if (!hasIec104 && !hasModbus) {
+    LOG_INFO("配置中未包含 IEC104/ModbusRTU 链路");
     return;
   }
-
-  auto json = stripJsonComments(raw);
-  ConfigPusherProto::Config config;
-  google::protobuf::util::JsonParseOptions options;
-  options.ignore_unknown_fields = false;
-  auto parseStatus = google::protobuf::util::JsonStringToMessage(json, &config, options);
-  if (!parseStatus.ok()) {
-    LOG_ERROR("解析 ConfigPusher 配置失败: {}", parseStatus.ToString());
-    return;
-  }
-
-  if (!config.has_iec104() || config.iec104().links().empty()) {
-    LOG_INFO("配置中未包含 IEC104 链路");
-    return;
-  }
-  LOG_INFO("ConfigPusher 配置解析完成，开始准备下发 IEC104 配置");
+  LOG_INFO("ConfigPusher 配置解析完成，开始准备下发配置");
 
   auto channel = grpc::CreateChannel(kModuleManagerAddress, grpc::InsecureChannelCredentials());
   auto moduleStub = ModuleManagerProto::ModuleManage::NewStub(channel);
@@ -325,10 +405,21 @@ void ConfigPusher::applyConfig() {
     LOG_ERROR("未找到模块: {}", kDataCenterModuleName);
     return;
   }
-  auto iec104Info = findModuleInfo(moduleInfos, kIec104ModuleName);
-  if (!iec104Info) {
-    LOG_ERROR("未找到模块: {}", kIec104ModuleName);
-    return;
+  std::optional<ModuleManagerProto::ModuleInfo> iec104Info;
+  if (hasIec104) {
+    iec104Info = findModuleInfo(moduleInfos, kIec104ModuleName);
+    if (!iec104Info) {
+      LOG_ERROR("未找到模块: {}", kIec104ModuleName);
+      return;
+    }
+  }
+  std::optional<ModuleManagerProto::ModuleInfo> modbusInfo;
+  if (hasModbus) {
+    modbusInfo = findModuleInfo(moduleInfos, kModbusRtuModuleName);
+    if (!modbusInfo) {
+      LOG_ERROR("未找到模块: {}", kModbusRtuModuleName);
+      return;
+    }
   }
 
   ModuleManagerProto::ModuleRunningInfos running;
@@ -341,7 +432,7 @@ void ConfigPusher::applyConfig() {
   }
 
   auto runningDataCenter = findRunningInfo(running, kDataCenterModuleName);
-  if (!runningDataCenter) {
+  if ((hasIec104 || hasModbus) && !runningDataCenter) {
     LOG_INFO("DataCenter 未运行，开始启动");
     grpc::ClientContext startCtx;
     ModuleManagerProto::Empty startResp;
@@ -356,37 +447,74 @@ void ConfigPusher::applyConfig() {
       return;
     }
     LOG_INFO("DataCenter 已启动");
-  } else {
+  } else if (hasIec104 || hasModbus) {
     LOG_INFO("DataCenter 已在运行");
   }
 
-  auto runningIec104 = findRunningInfo(running, kIec104ModuleName);
-  if (!runningIec104) {
-    LOG_INFO("IEC104 未运行，开始启动");
-    grpc::ClientContext startCtx;
-    ModuleManagerProto::Empty startResp;
-    status = moduleStub->StartModule(&startCtx, *iec104Info, &startResp);
-    if (!status.ok()) {
-      LOG_ERROR("启动模块 {} 失败: {}", kIec104ModuleName, status.error_message());
-      return;
-    }
-    runningIec104 = waitForModule(moduleStub.get(), kIec104ModuleName, kModuleStartTimeout);
+  std::optional<ModuleManagerProto::ModuleRunningInfo> runningIec104;
+  if (hasIec104) {
+    runningIec104 = findRunningInfo(running, kIec104ModuleName);
     if (!runningIec104) {
-      LOG_ERROR("等待 IEC104 启动超时");
-      return;
+      LOG_INFO("IEC104 未运行，开始启动");
+      grpc::ClientContext startCtx;
+      ModuleManagerProto::Empty startResp;
+      status = moduleStub->StartModule(&startCtx, *iec104Info, &startResp);
+      if (!status.ok()) {
+        LOG_ERROR("启动模块 {} 失败: {}", kIec104ModuleName, status.error_message());
+        return;
+      }
+      runningIec104 = waitForModule(moduleStub.get(), kIec104ModuleName, kModuleStartTimeout);
+      if (!runningIec104) {
+        LOG_ERROR("等待 IEC104 启动超时");
+        return;
+      }
+      LOG_INFO("IEC104 已启动");
+    } else {
+      LOG_INFO("IEC104 已在运行");
     }
-    LOG_INFO("IEC104 已启动");
-  } else {
-    LOG_INFO("IEC104 已在运行");
   }
 
-  auto iecChannel = grpc::CreateChannel(runningIec104->inner_grpc_server(), grpc::InsecureChannelCredentials());
-  auto iecStub = IEC104Proto::IEC104Service::NewStub(iecChannel);
+  std::optional<ModuleManagerProto::ModuleRunningInfo> runningModbus;
+  if (hasModbus) {
+    runningModbus = findRunningInfo(running, kModbusRtuModuleName);
+    if (!runningModbus) {
+      LOG_INFO("ModbusRTU 未运行，开始启动");
+      grpc::ClientContext startCtx;
+      ModuleManagerProto::Empty startResp;
+      status = moduleStub->StartModule(&startCtx, *modbusInfo, &startResp);
+      if (!status.ok()) {
+        LOG_ERROR("启动模块 {} 失败: {}", kModbusRtuModuleName, status.error_message());
+        return;
+      }
+      runningModbus = waitForModule(moduleStub.get(), kModbusRtuModuleName, kModuleStartTimeout);
+      if (!runningModbus) {
+        LOG_ERROR("等待 ModbusRTU 启动超时");
+        return;
+      }
+      LOG_INFO("ModbusRTU 已启动");
+    } else {
+      LOG_INFO("ModbusRTU 已在运行");
+    }
+  }
 
-  if (!applyIec104Config(config.iec104(), iecStub.get())) {
-    LOG_ERROR("IEC104 配置下发存在错误");
-  } else {
-    LOG_INFO("IEC104 配置下发完成");
+  if (hasIec104 && runningIec104) {
+    auto iecChannel = grpc::CreateChannel(runningIec104->inner_grpc_server(), grpc::InsecureChannelCredentials());
+    auto iecStub = IEC104Proto::IEC104Service::NewStub(iecChannel);
+    if (!applyIec104Config(iec104Config->iec104(), iecStub.get())) {
+      LOG_ERROR("IEC104 配置下发存在错误");
+    } else {
+      LOG_INFO("IEC104 配置下发完成");
+    }
+  }
+
+  if (hasModbus && runningModbus) {
+    auto modbusChannel = grpc::CreateChannel(runningModbus->inner_grpc_server(), grpc::InsecureChannelCredentials());
+    auto modbusStub = ModbusRTUProto::ModbusRTUService::NewStub(modbusChannel);
+    if (!applyModbusRtuConfig(modbusConfig->modbus_rtu(), modbusStub.get())) {
+      LOG_ERROR("ModbusRTU 配置下发存在错误");
+    } else {
+      LOG_INFO("ModbusRTU 配置下发完成");
+    }
   }
 }
 }  // namespace ConfigPusher
