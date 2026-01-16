@@ -22,4 +22,4 @@ package/conf/dataCenter/*.pb*
 IEC104/*
 
 .ccache
-mskdsp.tar
+images/*
