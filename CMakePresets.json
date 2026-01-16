@@ -1,24 +1,40 @@
 {
-  "version": 6,
-  "configurePresets": [
-    {
-      "name": "arm64",
-      "displayName": "arm64-relwithdebinfo (Ninja + vcpkg)",
-      "description": "Cross-compile for Linux aarch64 using vcpkg chainload toolchain.",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build-arm64",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
-        "VCPKG_TARGET_TRIPLET": "arm64-linux",
-        "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchains/aarch64-linux-gnu.cmake"
-      }
-    }
-  ],
-  "buildPresets": [
-    {
-      "name": "arm64",
-      "configurePreset": "arm64"
-    }
-  ]
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "arm64",
+            "displayName": "arm64-relwithdebinfo (Ninja + vcpkg)",
+            "description": "Cross-compile for Linux aarch64 using vcpkg chainload toolchain.",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build-arm64",
+            "environment": {
+                "VCPKG_MAX_CONCURRENCY": "6"
+            },
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+                "MSKDSP_STRIP_DEBUG": "ON",
+                "VCPKG_TARGET_TRIPLET": "arm64-linux"
+            }
+        },
+        {
+            "name": "x64",
+            "displayName": "GCC 14.2.0 x86_64-linux-gnu",
+            "description": "正在使用编译器: C = /usr/bin/gcc-14, CXX = /usr/bin/g++-14",
+            "binaryDir": "${sourceDir}/build",
+            "generator": "Ninja",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "/usr/bin/gcc-14",
+                "CMAKE_CXX_COMPILER": "/usr/bin/g++-14",
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "arm64",
+            "configurePreset": "arm64"
+        }
+    ]
 }

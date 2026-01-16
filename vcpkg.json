@@ -7,7 +7,12 @@
     "gtest",
     "paho-mqttpp3",
     "protobuf",
-    "grpc",
+    {
+      "name": "grpc",
+      "features": [
+        "codegen"
+      ]
+    },
     "boost-dll",
     "zlib"
   ]

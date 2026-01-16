@@ -83,6 +83,21 @@ cd package
 ./MskDSP
 ```
 
+## Docker 打包与运行
+本项目提供根目录 `Dockerfile`，用于将 `package/` 下的运行产物打包成运行镜像（仅拷贝 `MskDSP`、`lib/` 与 `conf/`，同目录的 `*_test` 不会进入镜像）。
+
+1) 先构建生成 `package/` 产物（交叉编译或本机编译均可）。
+2) 构建镜像（arm64）：
+```bash
+docker build --platform=linux/arm64 -t mskdsp:arm64 .
+```
+3) 运行（使用 host 网络，不需要端口映射）：
+```bash
+docker run --network host --rm mskdsp:arm64
+```
+
+注意：`Dockerfile` 基于 `localhost/arm64v8/ubuntu`，确保该基础镜像已存在或按需调整镜像名。
+
 ### 启动自加载配置
 可选配置文件：`./conf/module_manager.jsonc`（JSONC，支持注释），用于控制 ModuleManager 启动时自动加载的模块列表。
 - 字段：`auto_start_modules`（字符串数组，模块名应与 `lib<模块名>.so.<version>` 匹配）
