@@ -14,6 +14,7 @@
 
 #include "IEC104TcpSession.h"
 #include "Logger.h"
+#include "IEC104LibInfo.h"
 
 namespace IEC104 {
 namespace asio = boost::asio;
@@ -84,7 +85,7 @@ grpc::Status TcpLink::Start() {
     return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "link already running");
   }
 
-  LOG_INFO("IEC104 link start: conn_name={}, role={}",
+  LOG_INFO("IEC104 链路启动: conn_name={}, 角色={}",
            config_.conn_name(),
            config_.role() == IEC104Proto::ROLE_CLIENT ? "CLIENT" : "SERVER");
 
@@ -104,29 +105,29 @@ grpc::Status TcpLink::Start() {
     boost::system::error_code ec;
     acceptor_->open(endpoint.protocol(), ec);
     if (ec) {
-      LOG_ERROR("IEC104 acceptor open failed: conn_name={}, error={}", config_.conn_name(), ec.message());
+      LOG_ERROR("IEC104 监听器打开失败: conn_name={}, error={}", config_.conn_name(), ec.message());
       acceptor_.reset();
       return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("acceptor open failed: {}", ec.message()));
     }
     acceptor_->set_option(tcp::acceptor::reuse_address(true), ec);
     if (ec) {
-      LOG_ERROR("IEC104 acceptor set_option failed: conn_name={}, error={}", config_.conn_name(), ec.message());
+      LOG_ERROR("IEC104 监听器设置参数失败: conn_name={}, error={}", config_.conn_name(), ec.message());
       acceptor_.reset();
       return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("acceptor set_option failed: {}", ec.message()));
     }
     acceptor_->bind(endpoint, ec);
     if (ec) {
-      LOG_ERROR("IEC104 acceptor bind failed: conn_name={}, error={}", config_.conn_name(), ec.message());
+      LOG_ERROR("IEC104 监听器绑定失败: conn_name={}, error={}", config_.conn_name(), ec.message());
       acceptor_.reset();
       return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("acceptor bind failed: {}", ec.message()));
     }
     acceptor_->listen(tcp::acceptor::max_listen_connections, ec);
     if (ec) {
-      LOG_ERROR("IEC104 acceptor listen failed: conn_name={}, error={}", config_.conn_name(), ec.message());
+      LOG_ERROR("IEC104 监听器监听失败: conn_name={}, error={}", config_.conn_name(), ec.message());
       acceptor_.reset();
       return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("acceptor listen failed: {}", ec.message()));
     }
-    LOG_INFO("IEC104 listening: conn_name={}, local={}:{}", config_.conn_name(), endpoint.address().to_string(), endpoint.port());
+    LOG_INFO("IEC104 开始监听: conn_name={}, local={}:{}", config_.conn_name(), endpoint.address().to_string(), endpoint.port());
   }
 
   thread_ = std::jthread([this](std::stop_token st) { run(st); });
@@ -137,7 +138,7 @@ void TcpLink::Stop() {
   if (!thread_.joinable()) {
     return;
   }
-  LOG_INFO("IEC104 link stop: conn_name={}", config_.conn_name());
+  LOG_INFO("IEC104 链路停止: conn_name={}", config_.conn_name());
   thread_.request_stop();
   thread_.join();
 
@@ -178,6 +179,7 @@ void TcpLink::SetInterrogationSnapshotProvider(SnapshotProvider provider) {
 }
 
 void TcpLink::run(std::stop_token st) {
+  ModuleManager::LogModuleScope moduleScope(IEC104LibInfo.LIB_NAME);
   boost::asio::executor_work_guard<boost::asio::io_context::executor_type> guard(io_.get_executor());
   std::stop_callback cb(st, [this]() {
     boost::system::error_code ec;
@@ -210,7 +212,7 @@ void TcpLink::startAccept() {
   acceptor_->async_accept([this](const boost::system::error_code& ec, tcp::socket socket) {
     if (ec) {
       if (ec != boost::asio::error::operation_aborted) {
-        LOG_WARNING("IEC104 accept failed: conn_name={}, error={}", config_.conn_name(), ec.message());
+        LOG_WARNING("IEC104 接收连接失败: conn_name={}, error={}", config_.conn_name(), ec.message());
         startAccept();
       }
       return;
@@ -219,11 +221,11 @@ void TcpLink::startAccept() {
     boost::system::error_code remoteEc;
     auto remote = socket.remote_endpoint(remoteEc);
     if (remoteEc) {
-      LOG_INFO("IEC104 accepted connection: conn_name={}, remote=unknown, error={}",
+      LOG_INFO("IEC104 已接受连接: conn_name={}, 远端未知, error={}",
                config_.conn_name(),
                remoteEc.message());
     } else {
-      LOG_INFO("IEC104 accepted connection: conn_name={}, remote={}:{}",
+      LOG_INFO("IEC104 已接受连接: conn_name={}, 远端={}:{}",
                config_.conn_name(),
                remote.address().to_string(),
                remote.port());
@@ -257,7 +259,7 @@ void TcpLink::startConnect() {
 
   resolver_->async_resolve(host, port, [this](const boost::system::error_code& ec, tcp::resolver::results_type results) {
     if (ec) {
-      LOG_WARNING("IEC104 resolve failed: conn_name={}, remote={}:{}, error={}",
+      LOG_WARNING("IEC104 解析远端地址失败: conn_name={}, remote={}:{}, error={}",
                   config_.conn_name(),
                   config_.remote().ip(),
                   config_.remote().port(),
@@ -268,7 +270,7 @@ void TcpLink::startConnect() {
     auto sock = std::make_shared<tcp::socket>(io_);
     asio::async_connect(*sock, results, [this, sock](const boost::system::error_code& ec, const tcp::endpoint&) {
       if (ec) {
-        LOG_WARNING("IEC104 connect failed: conn_name={}, remote={}:{}, error={}",
+        LOG_WARNING("IEC104 连接远端失败: conn_name={}, remote={}:{}, error={}",
                     config_.conn_name(),
                     config_.remote().ip(),
                     config_.remote().port(),
@@ -282,12 +284,12 @@ void TcpLink::startConnect() {
       auto local = sock->local_endpoint(localEc);
       auto remote = sock->remote_endpoint(remoteEc);
       if (localEc || remoteEc) {
-        LOG_INFO("IEC104 connected: conn_name={}, local=unknown, remote=unknown, local_error={}, remote_error={}",
+        LOG_INFO("IEC104 连接已建立: conn_name={}, 本地未知, 远端未知, 本地错误={}, 远端错误={}",
                  config_.conn_name(),
                  localEc.message(),
                  remoteEc.message());
       } else {
-        LOG_INFO("IEC104 connected: conn_name={}, local={}:{}, remote={}:{}",
+        LOG_INFO("IEC104 连接已建立: conn_name={}, 本地={}:{}, 远端={}:{}",
                  config_.conn_name(),
                  local.address().to_string(),
                  local.port(),
@@ -321,7 +323,7 @@ void TcpLink::scheduleReconnect(std::chrono::milliseconds delay) {
     reconnectTimer_.emplace(io_);
   }
   reconnectTimer_->expires_after(delay);
-  LOG_DEBUG("IEC104 schedule reconnect: conn_name={}, delay_ms={}", config_.conn_name(), delay.count());
+  LOG_DEBUG("IEC104 计划重连: conn_name={}, delay_ms={}", config_.conn_name(), delay.count());
   reconnectTimer_->async_wait([this](const boost::system::error_code& ec) {
     if (ec) {
       return;

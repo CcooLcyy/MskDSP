@@ -6,6 +6,9 @@
 #include <utility>
 #include <vector>
 
+#include "Logger.h"
+#include "IEC104LibInfo.h"
+
 namespace IEC104 {
 namespace {
 constexpr uint8_t kIec104QualityGood = 0x00;
@@ -64,6 +67,7 @@ void LinkManager::stopDataCenterSubscribeLocked(LinkRuntime* link) {
     return;
   }
   if (link->dcSubscribeThread.joinable()) {
+    LOG_INFO("IEC104 停止 DataCenter 订阅: conn_name={}", link->config.conn_name());
     link->dcSubscribeThread.request_stop();
     link->dcSubscribeThread.join();
   }
@@ -89,14 +93,18 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, Li
   auto* transport = link->transport.get();
   auto connId = link->connId;
 
+  LOG_INFO("IEC104 启动 DataCenter 订阅: conn_name={}, conn_id={}, tags={}", connName, connId, tags.size());
+
   link->dcSubscribeContext = std::make_shared<grpc::ClientContext>();
   auto ctx = link->dcSubscribeContext;
 
   link->dcSubscribeThread = std::jthread([this, connName, ctx, connId, tags, ioaByTag, transport](std::stop_token st) {
+    ModuleManager::LogModuleScope moduleScope(IEC104LibInfo.LIB_NAME);
     std::stop_callback cb(st, [&ctx]() { ctx->TryCancel(); });
 
     auto reader = dataCenter_.Subscribe(ctx.get(), connId, tags, false);
     if (!reader) {
+      LOG_ERROR("IEC104 创建 DataCenter 订阅失败: conn_name={}, conn_id={}, tags={}", connName, connId, tags.size());
       return;
     }
 
@@ -116,6 +124,10 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, Li
 
     auto finishStatus = reader->Finish();
     if (!finishStatus.ok() && !st.stop_requested()) {
+      LOG_WARNING("IEC104 DataCenter 订阅异常结束: conn_name={}, conn_id={}, error={}",
+                  connName,
+                  connId,
+                  finishStatus.error_message());
       std::lock_guard<std::mutex> lock(mu_);
       auto it = linksByName_.find(connName);
       if (it != linksByName_.end()) {
@@ -145,6 +157,7 @@ grpc::Status LinkManager::handleClientMeasuredValue(const std::string& connName,
   auto quality = toDataCenterQuality(mv.quality);
   auto st = dataCenter_.PublishDouble(connId, tag, mv.value, quality, 0);
   if (!st.ok()) {
+    LOG_WARNING("IEC104 发布点位失败: conn_name={}, tag={}, error={}", connName, tag, st.error_message());
     std::lock_guard<std::mutex> lock(mu_);
     auto it = linksByName_.find(connName);
     if (it != linksByName_.end()) {
@@ -178,6 +191,7 @@ std::vector<MeasuredValue> LinkManager::buildInterrogationSnapshot(const std::st
   DataCenterProto::GetLatestResponse resp;
   auto status = dataCenter_.GetLatest(connId, tags, &resp);
   if (!status.ok()) {
+    LOG_WARNING("IEC104 查询快照失败: conn_name={}, error={}", connName, status.error_message());
     std::lock_guard<std::mutex> lock(mu_);
     auto it = linksByName_.find(connName);
     if (it != linksByName_.end()) {
@@ -207,4 +221,3 @@ std::vector<MeasuredValue> LinkManager::buildInterrogationSnapshot(const std::st
 }
 
 }  // namespace IEC104
-

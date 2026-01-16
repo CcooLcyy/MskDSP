@@ -24,10 +24,10 @@
 #include "ConfigPusherGrpcService.h"
 #include "ConfigPusherLibInfo.h"
 #include "IEC104.grpc.pb.h"
-#include "ModbusRTU.grpc.pb.h"
 #include "Logger.h"
-#include "ModuleManager.pb.h"
+#include "ModbusRTU.grpc.pb.h"
 #include "ModuleManager.grpc.pb.h"
+#include "ModuleManager.pb.h"
 
 namespace {
 const std::string &GetSerializedManifest() {
@@ -253,8 +253,7 @@ bool applyIec104Config(const ConfigPusherProto::Iec104Config &config, IEC104Prot
       if (ptReq.conn_name().empty()) {
         ptReq.set_conn_name(linkConfig.conn_name());
       }
-      LOG_INFO("开始下发 IEC104 点表: conn_name={}, 点数={}, replace={}",
-               ptReq.conn_name(), ptReq.points_size(), ptReq.replace());
+      LOG_INFO("开始下发 IEC104 点表: conn_name={}, 点数={}, replace={}", ptReq.conn_name(), ptReq.points_size(), ptReq.replace());
       grpc::ClientContext ptCtx;
       IEC104Proto::Empty ptResp;
       status = stub->UpsertPointTable(&ptCtx, ptReq, &ptResp);
@@ -322,8 +321,7 @@ bool applyModbusRtuConfig(const ConfigPusherProto::ModbusRtuConfig &config, Modb
       if (ptReq.conn_name().empty()) {
         ptReq.set_conn_name(linkConfig.conn_name());
       }
-      LOG_INFO("开始下发 ModbusRTU 点表: conn_name={}, 点数={}, replace={}",
-               ptReq.conn_name(), ptReq.points_size(), ptReq.replace());
+      LOG_INFO("开始下发 ModbusRTU 点表: conn_name={}, 点数={}, replace={}", ptReq.conn_name(), ptReq.points_size(), ptReq.replace());
       grpc::ClientContext ptCtx;
       ModbusRTUProto::Empty ptResp;
       status = stub->UpsertPointTable(&ptCtx, ptReq, &ptResp);
