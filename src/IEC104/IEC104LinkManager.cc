@@ -15,6 +15,9 @@ namespace {
 grpc::Status makeNotFound(const std::string &connName) {
   return grpc::Status(grpc::StatusCode::NOT_FOUND, std::format("link not found: {}", connName));
 }
+
+constexpr uint32_t kMaxAsduBytes = 249;
+constexpr uint32_t kMinMeasuredValueAsduBytes = 14;
 }  // namespace
 
 LinkManager::LinkManager(std::string moduleName) :
@@ -58,6 +61,14 @@ grpc::Status LinkManager::validateLinkConfig(const IEC104Proto::LinkConfig &conf
   }
   if (config.oa() > 255) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "oa must be <= 255");
+  }
+  if (config.telemetry_max_asdu_bytes() > 0) {
+    if (config.telemetry_max_asdu_bytes() > kMaxAsduBytes) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "telemetry_max_asdu_bytes must be <= 249");
+    }
+    if (config.telemetry_max_asdu_bytes() < kMinMeasuredValueAsduBytes) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "telemetry_max_asdu_bytes must be >= 14");
+    }
   }
   return grpc::Status::OK;
 }

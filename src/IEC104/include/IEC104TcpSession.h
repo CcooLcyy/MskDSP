@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -8,6 +9,7 @@
 #include <mutex>
 #include <optional>
 #include <type_traits>
+#include <unordered_map>
 #include <vector>
 
 #include <boost/asio/io_context.hpp>
@@ -15,6 +17,7 @@
 #include <boost/asio/read_until.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/streambuf.hpp>
+#include <boost/system/error_code.hpp>
 
 #include "IEC104TcpLink.h"
 
@@ -89,6 +92,7 @@ private:
   boost::asio::steady_timer t1Timer_;
   boost::asio::steady_timer t2Timer_;
   boost::asio::steady_timer t3Timer_;
+  boost::asio::steady_timer telemetryFlushTimer_;
 
   IEC104Proto::LinkConfig config_;
   bool isClient_;
@@ -111,6 +115,18 @@ private:
   SnapshotProvider interrogationSnapshotProvider_;
   std::function<void()> onClosed_;
 
+  struct PendingMeasuredValue {
+    MeasuredValue value;
+    uint8_t cause = 0;
+  };
+
+  std::unordered_map<uint32_t, PendingMeasuredValue> telemetryPendingByIoa_;
+  std::vector<PendingMeasuredValue> telemetryPending_;
+  std::chrono::milliseconds telemetryBatchWindow_{0};
+  uint32_t telemetryMaxAsduBytes_ = 0;
+  bool telemetryDedupe_ = true;
+  bool telemetryFlushScheduled_ = false;
+
   void handleRead();
   void handleFrame(const std::vector<uint8_t>& apdu);
   void handleIFrame(const std::vector<uint8_t>& apdu);
@@ -122,6 +138,12 @@ private:
   void handleInterrogation(const std::vector<uint8_t>& asdu);
 
   void enqueueAsdu(std::vector<uint8_t> asdu);
+  void enqueueMeasuredValue(uint32_t ioa, double value, uint8_t quality, uint8_t cause);
+  void scheduleTelemetryFlush();
+  void flushTelemetry(const boost::system::error_code& ec);
+  void drainTelemetryQueue();
+  void clearTelemetryQueue();
+  void enqueueMeasuredValuesBatch(std::vector<MeasuredValue> values, uint8_t cause);
   void trySendPending();
   void sendIFrame(const std::vector<uint8_t>& asdu);
   void sendSFrame();
@@ -130,6 +152,14 @@ private:
   void doWrite();
 
   std::vector<uint8_t> buildMeasuredValueAsdu(uint32_t ioa, double value, uint8_t quality, uint8_t cause) const;
+  std::vector<uint8_t> buildMeasuredValueAsduSq0(const std::vector<MeasuredValue>& values,
+                                                  size_t start,
+                                                  size_t count,
+                                                  uint8_t cause) const;
+  std::vector<uint8_t> buildMeasuredValueAsduSq1(const std::vector<MeasuredValue>& values,
+                                                  size_t start,
+                                                  size_t count,
+                                                  uint8_t cause) const;
   std::vector<uint8_t> buildInterrogationAsdu(uint8_t cause, uint8_t qoi) const;
 
   static FrameType frameType(const std::vector<uint8_t>& apdu);
@@ -139,6 +169,7 @@ private:
   void handleAck(uint16_t remoteAckSeq);
   void setDataTransferActive(bool active, const char* reason);
   void sendAutoInterrogation(uint8_t qoi);
+  void initTelemetryBatchSettings();
 
   void startT0();
   void stopT0();

@@ -1,17 +1,19 @@
 #include "AGCGroupManager.h"
 
+#include <grpcpp/client_context.h>
+
 #include <chrono>
 #include <cmath>
 #include <format>
-#include <numeric>
 #include <thread>
 #include <utility>
 
-#include <grpcpp/client_context.h>
+#include "AGCControl.h"
+#include "Logger.h"
 
 namespace AGC {
 namespace {
-grpc::Status makeNotFound(const std::string& groupName) {
+grpc::Status makeNotFound(const std::string &groupName) {
   return grpc::Status(grpc::StatusCode::NOT_FOUND, std::format("group not found: {}", groupName));
 }
 
@@ -21,19 +23,6 @@ grpc::Status makeInvalid(std::string message) {
 
 grpc::Status makePreconditionFailed(std::string message) {
   return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::move(message));
-}
-
-double clampAbs(double v, double maxAbs) {
-  if (maxAbs <= 0.0) {
-    return v;
-  }
-  if (v > maxAbs) {
-    return maxAbs;
-  }
-  if (v < -maxAbs) {
-    return -maxAbs;
-  }
-  return v;
 }
 }  // namespace
 
@@ -48,14 +37,14 @@ void GroupManager::setDataCenterStub(std::shared_ptr<DataCenterProto::DataCenter
   dataCenter_.setStub(std::move(stub));
 }
 
-grpc::Status GroupManager::validateGroupName(const std::string& groupName) const {
+grpc::Status GroupManager::validateGroupName(const std::string &groupName) const {
   if (groupName.empty()) {
     return makeInvalid("group_name is required");
   }
   return grpc::Status::OK;
 }
 
-grpc::Status GroupManager::validateGroupConfig(const AGCProto::GroupConfig& config) const {
+grpc::Status GroupManager::validateGroupConfig(const AGCProto::GroupConfig &config) const {
   auto st = validateGroupName(config.group_name());
   if (!st.ok()) {
     return st;
@@ -72,7 +61,7 @@ grpc::Status GroupManager::validateGroupConfig(const AGCProto::GroupConfig& conf
 
   std::unordered_set<std::string> memberNames;
   memberNames.reserve(static_cast<size_t>(config.members_size()));
-  for (const auto& m : config.members()) {
+  for (const auto &m : config.members()) {
     if (m.member_name().empty()) {
       return makeInvalid("members.member_name is required");
     }
@@ -91,7 +80,7 @@ grpc::Status GroupManager::validateGroupConfig(const AGCProto::GroupConfig& conf
   return grpc::Status::OK;
 }
 
-grpc::Status GroupManager::fillGroupInfoLocked(const GroupRuntime& g, AGCProto::GroupInfo* out) const {
+grpc::Status GroupManager::fillGroupInfoLocked(const GroupRuntime &g, AGCProto::GroupInfo *out) const {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
   }
@@ -103,7 +92,7 @@ grpc::Status GroupManager::fillGroupInfoLocked(const GroupRuntime& g, AGCProto::
   return grpc::Status::OK;
 }
 
-grpc::Status GroupManager::UpsertGroup(const AGCProto::UpsertGroupRequest& request, AGCProto::GroupInfo* out) {
+grpc::Status GroupManager::UpsertGroup(const AGCProto::UpsertGroupRequest &request, AGCProto::GroupInfo *out) {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
   }
@@ -154,7 +143,7 @@ grpc::Status GroupManager::UpsertGroup(const AGCProto::UpsertGroupRequest& reque
       }
 
       auto [pos, inserted] = groupsByName_.try_emplace(groupName);
-      auto& g = pos->second;
+      auto &g = pos->second;
       g.config = request.config();
       g.connId = connInfo.conn_id();
       g.state = AGCProto::GROUP_STATE_STOPPED;
@@ -178,7 +167,7 @@ grpc::Status GroupManager::UpsertGroup(const AGCProto::UpsertGroupRequest& reque
     if (connId != 0) {
       std::vector<std::string> tagList;
       tagList.reserve(tags.size());
-      for (const auto& t : tags) {
+      for (const auto &t : tags) {
         tagList.emplace_back(t);
       }
       status = dataCenter_.UpsertPointTable(connId, tagList, true);
@@ -196,7 +185,7 @@ grpc::Status GroupManager::UpsertGroup(const AGCProto::UpsertGroupRequest& reque
   return grpc::Status::OK;
 }
 
-grpc::Status GroupManager::GetGroup(const std::string& groupName, AGCProto::GroupInfo* out) const {
+grpc::Status GroupManager::GetGroup(const std::string &groupName, AGCProto::GroupInfo *out) const {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
   }
@@ -213,20 +202,20 @@ grpc::Status GroupManager::GetGroup(const std::string& groupName, AGCProto::Grou
   return fillGroupInfoLocked(it->second, out);
 }
 
-grpc::Status GroupManager::ListGroups(AGCProto::ListGroupsResponse* out) const {
+grpc::Status GroupManager::ListGroups(AGCProto::ListGroupsResponse *out) const {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
   }
   std::lock_guard<std::mutex> lock(mu_);
   out->Clear();
-  for (const auto& [_, g] : groupsByName_) {
-    auto* elem = out->add_groups();
+  for (const auto &[_, g] : groupsByName_) {
+    auto *elem = out->add_groups();
     fillGroupInfoLocked(g, elem);
   }
   return grpc::Status::OK;
 }
 
-void GroupManager::stopThreadsLocked(GroupRuntime* g) {
+void GroupManager::stopThreadsLocked(GroupRuntime *g) {
   if (g == nullptr) {
     return;
   }
@@ -242,7 +231,7 @@ void GroupManager::stopThreadsLocked(GroupRuntime* g) {
   }
 }
 
-void GroupManager::startThreadsLocked(const std::string& groupName, GroupRuntime* g) {
+void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime *g) {
   if (g == nullptr) {
     return;
   }
@@ -300,7 +289,7 @@ void GroupManager::startThreadsLocked(const std::string& groupName, GroupRuntime
   });
 }
 
-grpc::Status GroupManager::StartGroup(const std::string& groupName) {
+grpc::Status GroupManager::StartGroup(const std::string &groupName) {
   auto status = validateGroupName(groupName);
   if (!status.ok()) {
     return status;
@@ -323,7 +312,7 @@ grpc::Status GroupManager::StartGroup(const std::string& groupName) {
   return grpc::Status::OK;
 }
 
-grpc::Status GroupManager::StopGroup(const std::string& groupName) {
+grpc::Status GroupManager::StopGroup(const std::string &groupName) {
   auto status = validateGroupName(groupName);
   if (!status.ok()) {
     return status;
@@ -339,7 +328,7 @@ grpc::Status GroupManager::StopGroup(const std::string& groupName) {
   return grpc::Status::OK;
 }
 
-grpc::Status GroupManager::DeleteGroup(const std::string& groupName) {
+grpc::Status GroupManager::DeleteGroup(const std::string &groupName) {
   auto status = validateGroupName(groupName);
   if (!status.ok()) {
     return status;
@@ -366,7 +355,7 @@ grpc::Status GroupManager::DeleteGroup(const std::string& groupName) {
   return grpc::Status::OK;
 }
 
-bool GroupManager::pointValueToDouble(const DataCenterProto::PointValue& v, double* out) {
+bool GroupManager::pointValueToDouble(const DataCenterProto::PointValue &v, double *out) {
   if (out == nullptr) {
     return false;
   }
@@ -385,31 +374,7 @@ bool GroupManager::pointValueToDouble(const DataCenterProto::PointValue& v, doub
   }
 }
 
-double GroupManager::effectiveScale(const AGCProto::SignalSpec& s) {
-  return (s.scale() == 0.0) ? 1.0 : s.scale();
-}
-
-double GroupManager::toPhysicalAbs(const AGCProto::SignalSpec& s, double raw) {
-  const auto scale = effectiveScale(s);
-  return raw * scale + s.offset();
-}
-
-double GroupManager::toPhysicalDelta(const AGCProto::SignalSpec& s, double rawDelta) {
-  const auto scale = effectiveScale(s);
-  return rawDelta * scale;
-}
-
-double GroupManager::toRawAbs(const AGCProto::SignalSpec& s, double physical) {
-  const auto scale = effectiveScale(s);
-  return (physical - s.offset()) / scale;
-}
-
-double GroupManager::toRawDelta(const AGCProto::SignalSpec& s, double physicalDelta) {
-  const auto scale = effectiveScale(s);
-  return physicalDelta / scale;
-}
-
-std::unordered_set<std::string> GroupManager::collectAllTags(const AGCProto::GroupConfig& config) {
+std::unordered_set<std::string> GroupManager::collectAllTags(const AGCProto::GroupConfig &config) {
   std::unordered_set<std::string> tags;
   if (config.has_p_cmd() && config.p_cmd().has_signal() && !config.p_cmd().signal().tag().empty()) {
     tags.emplace(config.p_cmd().signal().tag());
@@ -420,7 +385,7 @@ std::unordered_set<std::string> GroupManager::collectAllTags(const AGCProto::Gro
   }
 
   if (config.has_outputs()) {
-    const auto& o = config.outputs();
+    const auto &o = config.outputs();
     if (o.has_p_total_meas() && !o.p_total_meas().tag().empty()) {
       tags.emplace(o.p_total_meas().tag());
     }
@@ -432,7 +397,7 @@ std::unordered_set<std::string> GroupManager::collectAllTags(const AGCProto::Gro
     }
   }
 
-  for (const auto& m : config.members()) {
+  for (const auto &m : config.members()) {
     if (m.has_p_meas() && !m.p_meas().tag().empty()) {
       tags.emplace(m.p_meas().tag());
     }
@@ -447,7 +412,7 @@ std::unordered_set<std::string> GroupManager::collectAllTags(const AGCProto::Gro
   return tags;
 }
 
-void GroupManager::rebuildTagCache(GroupRuntime* g) {
+void GroupManager::rebuildTagCache(GroupRuntime *g) {
   if (g == nullptr) {
     return;
   }
@@ -474,7 +439,7 @@ void GroupManager::rebuildTagCache(GroupRuntime* g) {
   }
 
   for (int i = 0; i < g->config.members_size(); ++i) {
-    const auto& m = g->config.members(i);
+    const auto &m = g->config.members(i);
     if (m.has_p_meas() && !m.p_meas().tag().empty()) {
       g->memberIndexByMeasTag.emplace(m.p_meas().tag(), static_cast<size_t>(i));
       g->subscribeTags.emplace_back(m.p_meas().tag());
@@ -485,16 +450,16 @@ void GroupManager::rebuildTagCache(GroupRuntime* g) {
     }
   }
 
-  for (const auto& t : g->baseTags) {
+  for (const auto &t : g->baseTags) {
     g->subscribeTags.emplace_back(t);
   }
 }
 
-void GroupManager::handleUpdateLocked(GroupRuntime* g, const DataCenterProto::PointUpdate& update) {
+void GroupManager::handleUpdateLocked(GroupRuntime *g, const DataCenterProto::PointUpdate &update) {
   if (g == nullptr) {
     return;
   }
-  const auto& tag = update.dst_tag();
+  const auto &tag = update.dst_tag();
   double raw = 0.0;
   if (!pointValueToDouble(update.value(), &raw)) {
     return;
@@ -522,20 +487,10 @@ void GroupManager::handleUpdateLocked(GroupRuntime* g, const DataCenterProto::Po
   }
 }
 
-void GroupManager::controlTick(const std::string& groupName) {
+void GroupManager::controlTick(const std::string &groupName) {
   AGCProto::GroupConfig config;
   uint32_t connId = 0;
-  bool hasCmdRaw = false;
-  double cmdRaw = 0.0;
-  std::unordered_map<std::string, double> baseRawByTag;
-  std::vector<bool> hasMemberMeasRaw;
-  std::vector<double> memberMeasRaw;
-  std::vector<bool> hasLastMemberTargetKw;
-  std::vector<double> lastMemberTargetKw;
-  bool hasLastDesiredTotalKw = false;
-  double lastDesiredTotalKw = 0.0;
-  bool hasLastTotalTargetKw = false;
-  double lastTotalTargetKw = 0.0;
+  ControlInput input;
 
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -549,227 +504,99 @@ void GroupManager::controlTick(const std::string& groupName) {
 
     config = it->second.config;
     connId = it->second.connId;
-    hasCmdRaw = it->second.hasCmdRaw;
-    cmdRaw = it->second.cmdRaw;
-    baseRawByTag = it->second.baseRawByTag;
-    hasMemberMeasRaw = it->second.hasMemberMeasRaw;
-    memberMeasRaw = it->second.memberMeasRaw;
-    hasLastMemberTargetKw = it->second.hasLastMemberTargetKw;
-    lastMemberTargetKw = it->second.lastMemberTargetKw;
-    hasLastDesiredTotalKw = it->second.hasLastDesiredTotalKw;
-    lastDesiredTotalKw = it->second.lastDesiredTotalKw;
-    hasLastTotalTargetKw = it->second.hasLastTotalTargetKw;
-    lastTotalTargetKw = it->second.lastTotalTargetKw;
+    input.hasCmdRaw = it->second.hasCmdRaw;
+    input.cmdRaw = it->second.cmdRaw;
+    input.baseRawByTag = it->second.baseRawByTag;
+    input.hasMemberMeasRaw = it->second.hasMemberMeasRaw;
+    input.memberMeasRaw = it->second.memberMeasRaw;
+    input.hasLastMemberTargetKw = it->second.hasLastMemberTargetKw;
+    input.lastMemberTargetKw = it->second.lastMemberTargetKw;
+    input.hasLastDesiredTotalKw = it->second.hasLastDesiredTotalKw;
+    input.lastDesiredTotalKw = it->second.lastDesiredTotalKw;
+    input.hasLastTotalTargetKw = it->second.hasLastTotalTargetKw;
+    input.lastTotalTargetKw = it->second.lastTotalTargetKw;
   }
 
-  if (connId == 0 || !hasCmdRaw || !config.has_p_cmd() || !config.p_cmd().has_signal()) {
+  if (connId == 0) {
     return;
   }
 
-  const auto memberCount = static_cast<size_t>(config.members_size());
-  if (memberCount == 0) {
+  const auto outputOpt = ComputeControlOutput(config, input, weightedStrategy_);
+  if (!outputOpt) {
     return;
   }
+  const auto &output = *outputOpt;
 
-  // Convert member measurements to kW.
-  std::vector<double> measKw(memberCount, 0.0);
-  for (size_t i = 0; i < memberCount && i < memberMeasRaw.size() && i < hasMemberMeasRaw.size(); ++i) {
-    if (!hasMemberMeasRaw[i]) {
-      continue;
-    }
-    measKw[i] = toPhysicalAbs(config.members(static_cast<int>(i)).p_meas(), memberMeasRaw[i]);
-  }
-
-  const auto totalMeasKw = std::accumulate(measKw.begin(), measKw.end(), 0.0);
-
-  // Desired total setpoint (kW) from command.
-  const auto& cmdSpec = config.p_cmd();
-  double cmdKw = 0.0;
-  if (cmdSpec.mode() == AGCProto::VALUE_MODE_DELTA) {
-    cmdKw = toPhysicalDelta(cmdSpec.signal(), cmdRaw);
-  } else {
-    cmdKw = toPhysicalAbs(cmdSpec.signal(), cmdRaw);
-  }
-
-  double desiredTotalKw = cmdKw;
-  if (cmdSpec.mode() == AGCProto::VALUE_MODE_DELTA) {
-    double baseKw = totalMeasKw;
-    switch (cmdSpec.delta_base()) {
-    case AGCProto::DELTA_BASE_LAST_TARGET:
-      if (hasLastDesiredTotalKw) {
-        baseKw = lastDesiredTotalKw;
-      }
-      break;
-    case AGCProto::DELTA_BASE_BASE_TAG: {
-      auto it = baseRawByTag.find(cmdSpec.base_tag());
-      if (it != baseRawByTag.end()) {
-        baseKw = toPhysicalAbs(cmdSpec.signal(), it->second);
-      }
-      break;
-    }
-    case AGCProto::DELTA_BASE_CURRENT_MEAS:
-    case AGCProto::DELTA_BASE_UNSPECIFIED:
-    default:
-      break;
-    }
-    desiredTotalKw = baseKw + cmdKw;
-  }
-
-  // Publish derived outputs (best-effort).
   const auto quality = DataCenterProto::QUALITY_GOOD;
   if (config.has_outputs()) {
-    const auto& o = config.outputs();
-    if (o.has_p_total_meas() && !o.p_total_meas().tag().empty()) {
-      const auto raw = toRawAbs(o.p_total_meas(), totalMeasKw);
-      (void)dataCenter_.PublishDouble(connId, o.p_total_meas().tag(), raw, quality, 0);
+    const auto &o = config.outputs();
+    if (output.publishTotalMeas) {
+      (void)dataCenter_.PublishDouble(connId, o.p_total_meas().tag(), output.totalMeasRaw, quality, 0);
     }
-  }
-
-  // Compute total target with multi-step adjustment.
-  const auto kp = (config.has_loop() && config.loop().kp() != 0.0) ? config.loop().kp() : 1.0;
-  const auto maxStepKw = config.has_loop() ? config.loop().max_step_kw() : 0.0;
-  const auto deadbandKw = config.has_loop() ? config.loop().deadband_kw() : 0.0;
-
-  const auto errorKw = desiredTotalKw - totalMeasKw;
-  double stepKw = 0.0;
-  if (!(deadbandKw > 0.0 && std::fabs(errorKw) <= deadbandKw)) {
-    stepKw = clampAbs(kp * errorKw, maxStepKw);
-  }
-
-  double currentTargetKw = hasLastTotalTargetKw ? lastTotalTargetKw : totalMeasKw;
-  double nextTargetKw = currentTargetKw + stepKw;
-  if (stepKw > 0.0) {
-    nextTargetKw = std::min(nextTargetKw, desiredTotalKw);
-  }
-  if (stepKw < 0.0) {
-    nextTargetKw = std::max(nextTargetKw, desiredTotalKw);
-  }
-
-  double passiveKw = 0.0;
-  for (size_t i = 0; i < memberCount; ++i) {
-    if (!config.members(static_cast<int>(i)).controllable()) {
-      passiveKw += measKw[i];
+    if (output.publishTotalTarget) {
+      (void)dataCenter_.PublishDouble(connId, o.p_total_target().tag(), output.totalTargetRaw, quality, 0);
     }
-  }
-
-  // Allocate to controllable members.
-  std::vector<size_t> controllableIdx;
-  controllableIdx.reserve(memberCount);
-  std::vector<AGVC::AllocationMember> allocMembers;
-  allocMembers.reserve(memberCount);
-  for (size_t i = 0; i < memberCount; ++i) {
-    const auto& m = config.members(static_cast<int>(i));
-    if (!m.controllable()) {
-      continue;
-    }
-    controllableIdx.emplace_back(i);
-
-    AGVC::AllocationMember a;
-    a.weight = m.weight() > 0.0 ? m.weight() : (m.capacity_kw() > 0.0 ? m.capacity_kw() : 1.0);
-    a.min = m.min_kw();
-    a.max = m.max_kw();
-    if (a.max == 0.0 && m.capacity_kw() > 0.0) {
-      a.max = m.capacity_kw();
-    }
-    allocMembers.emplace_back(a);
-  }
-
-  const auto targetControllableKw = nextTargetKw - passiveKw;
-  const auto alloc = weightedStrategy_.Allocate(targetControllableKw, allocMembers);
-
-  // Member targets in kW (for controllable members only).
-  std::vector<double> memberTargetKw(memberCount, 0.0);
-  for (size_t k = 0; k < controllableIdx.size() && k < alloc.values.size(); ++k) {
-    memberTargetKw[controllableIdx[k]] = alloc.values[k];
-  }
-
-  double actualTargetKw = passiveKw;
-  for (size_t i = 0; i < memberCount; ++i) {
-    if (config.members(static_cast<int>(i)).controllable()) {
-      actualTargetKw += memberTargetKw[i];
-    }
-  }
-
-  if (config.has_outputs()) {
-    const auto& o = config.outputs();
-    if (o.has_p_total_target() && !o.p_total_target().tag().empty()) {
-      const auto raw = toRawAbs(o.p_total_target(), actualTargetKw);
-      (void)dataCenter_.PublishDouble(connId, o.p_total_target().tag(), raw, quality, 0);
-    }
-    if (o.has_p_total_error() && !o.p_total_error().tag().empty()) {
-      const auto raw = toRawAbs(o.p_total_error(), desiredTotalKw - totalMeasKw);
-      (void)dataCenter_.PublishDouble(connId, o.p_total_error().tag(), raw, quality, 0);
+    if (output.publishTotalError) {
+      (void)dataCenter_.PublishDouble(connId, o.p_total_error().tag(), output.totalErrorRaw, quality, 0);
     }
   }
 
   // Publish member setpoints.
-  for (size_t i = 0; i < memberCount; ++i) {
-    const auto& m = config.members(static_cast<int>(i));
-    if (!m.controllable()) {
+  const auto memberCount = static_cast<size_t>(config.members_size());
+  for (size_t i = 0; i < memberCount && i < output.memberPublish.size() && i < output.memberPublishRaw.size(); ++i) {
+    if (!output.memberPublish[i]) {
       continue;
     }
+    const auto &m = config.members(static_cast<int>(i));
     if (!m.has_p_set() || !m.p_set().has_signal() || m.p_set().signal().tag().empty()) {
       continue;
     }
-
-    const auto& outSpec = m.p_set();
-    double publishRaw = 0.0;
-    if (outSpec.mode() == AGCProto::VALUE_MODE_DELTA) {
-      double baseKw = 0.0;
-      switch (outSpec.delta_base()) {
-      case AGCProto::DELTA_BASE_LAST_TARGET:
-        if (i < lastMemberTargetKw.size() && i < hasLastMemberTargetKw.size() && hasLastMemberTargetKw[i]) {
-          baseKw = lastMemberTargetKw[i];
-        }
-        break;
-      case AGCProto::DELTA_BASE_CURRENT_MEAS:
-        baseKw = measKw[i];
-        break;
-      case AGCProto::DELTA_BASE_BASE_TAG: {
-        auto it = baseRawByTag.find(outSpec.base_tag());
-        if (it != baseRawByTag.end()) {
-          baseKw = toPhysicalAbs(outSpec.signal(), it->second);
-        } else {
-          baseKw = measKw[i];
-        }
-        break;
-      }
-      case AGCProto::DELTA_BASE_UNSPECIFIED:
-      default:
-        baseKw = measKw[i];
-        break;
-      }
-      publishRaw = toRawDelta(outSpec.signal(), memberTargetKw[i] - baseKw);
-    } else {
-      publishRaw = toRawAbs(outSpec.signal(), memberTargetKw[i]);
-    }
-
-    (void)dataCenter_.PublishDouble(connId, outSpec.signal().tag(), publishRaw, quality, 0);
+    (void)dataCenter_.PublishDouble(connId, m.p_set().signal().tag(), output.memberPublishRaw[i], quality, 0);
   }
 
   // Update state (best-effort) after publishing.
+  bool shouldLogUnallocated = false;
+  const auto unallocatedKw = output.unallocatedKw;
+  const auto targetControllableKw = output.targetControllableKw;
+  const auto passiveKw = output.passiveKw;
+  const auto desiredTotalKw = output.desiredTotalKw;
+  const auto actualTargetKw = output.actualTargetKw;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = groupsByName_.find(groupName);
     if (it == groupsByName_.end()) {
       return;
     }
-    it->second.hasLastDesiredTotalKw = true;
-    it->second.lastDesiredTotalKw = desiredTotalKw;
-    it->second.hasLastTotalTargetKw = true;
-    it->second.lastTotalTargetKw = actualTargetKw;
 
-    const auto count = static_cast<size_t>(it->second.config.members_size());
-    if (it->second.hasLastMemberTargetKw.size() != count) {
-      it->second.hasLastMemberTargetKw.assign(count, false);
-      it->second.lastMemberTargetKw.assign(count, 0.0);
-    }
-    for (size_t i = 0; i < count; ++i) {
-      if (it->second.config.members(static_cast<int>(i)).controllable()) {
-        it->second.hasLastMemberTargetKw[i] = true;
-        it->second.lastMemberTargetKw[i] = memberTargetKw[i];
+    it->second.hasLastDesiredTotalKw = output.hasLastDesiredTotalKw;
+    it->second.lastDesiredTotalKw = output.nextLastDesiredTotalKw;
+    it->second.hasLastTotalTargetKw = output.hasLastTotalTargetKw;
+    it->second.lastTotalTargetKw = output.nextLastTotalTargetKw;
+    it->second.hasLastMemberTargetKw = output.hasLastMemberTargetKw;
+    it->second.lastMemberTargetKw = output.nextLastMemberTargetKw;
+
+    constexpr double kEps = 1e-6;
+    if (std::fabs(unallocatedKw) > kEps) {
+      if (!it->second.hasLastUnallocatedKw || std::fabs(unallocatedKw - it->second.lastUnallocatedKw) > kEps) {
+        shouldLogUnallocated = true;
+        it->second.hasLastUnallocatedKw = true;
+        it->second.lastUnallocatedKw = unallocatedKw;
       }
+    } else {
+      it->second.hasLastUnallocatedKw = false;
+      it->second.lastUnallocatedKw = 0.0;
     }
+  }
+
+  if (shouldLogUnallocated) {
+    LOG_WARNING(
+        "AGC 分配受限: group_name={}, unallocated_kw={}, target_controllable_kw={}, passive_kw={}, desired_total_kw={}, actual_target_kw={}",
+        groupName,
+        unallocatedKw,
+        targetControllableKw,
+        passiveKw,
+        desiredTotalKw,
+        actualTargetKw);
   }
 }
 

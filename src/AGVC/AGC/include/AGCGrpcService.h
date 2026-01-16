@@ -12,7 +12,6 @@ namespace AGC {
 class AGCGrpcServiceImpl : public AGCProto::AGCService::Service {
 public:
   void getAGC(AGC* module);
-  grpc::Status Ping(grpc::ServerContext* context, const AGCProto::Empty*, AGCProto::Empty*) override;
 
   grpc::Status UpsertGroup(grpc::ServerContext* context, const AGCProto::UpsertGroupRequest* request, AGCProto::GroupInfo* response) override;
   grpc::Status GetGroup(grpc::ServerContext* context, const AGCProto::GetGroupRequest* request, AGCProto::GroupInfo* response) override;

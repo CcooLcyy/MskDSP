@@ -23,6 +23,8 @@ struct DataCenterGrpcServiceImpl::Impl {
     uint64_t id{};
     uint32_t connId{};
     std::unordered_set<std::string> tagsFilter;
+    uint64_t dropped{0};
+    std::chrono::steady_clock::time_point lastDropLog{};
 
     std::mutex mu;
     std::condition_variable cv;
@@ -37,6 +39,7 @@ struct DataCenterGrpcServiceImpl::Impl {
 
   static constexpr size_t kMaxQueueSize = 10000;
   static constexpr auto kSubscriberWaitTimeout = std::chrono::milliseconds(200);
+  static constexpr auto kDropLogInterval = std::chrono::seconds(5);
 
   std::mutex mu;
   DataCenterCore core;
@@ -68,15 +71,38 @@ struct DataCenterGrpcServiceImpl::Impl {
   }
 
   static void enqueue(const std::shared_ptr<Subscriber>& sub, const DataCenterProto::PointUpdate& update) {
+    bool shouldLogDrop = false;
+    uint64_t droppedTotal = 0;
+    uint32_t connId = 0;
+    size_t queueSize = 0;
+    const auto now = std::chrono::steady_clock::now();
     {
       std::lock_guard<std::mutex> lock(sub->mu);
       if (sub->closed) {
         return;
       }
+      size_t droppedNow = 0;
       while (sub->queue.size() >= kMaxQueueSize) {
         sub->queue.pop_front();
+        ++droppedNow;
+      }
+      if (droppedNow > 0) {
+        sub->dropped += droppedNow;
+        if (now - sub->lastDropLog >= kDropLogInterval) {
+          sub->lastDropLog = now;
+          shouldLogDrop = true;
+          droppedTotal = sub->dropped;
+          connId = sub->connId;
+        }
       }
       sub->queue.emplace_back(update);
+      if (shouldLogDrop) {
+        queueSize = sub->queue.size();
+      }
+    }
+    if (shouldLogDrop) {
+      LOG_WARNING("DataCenter 订阅队列丢弃消息: conn_id={}, dropped_total={}, queue_size={}",
+                  connId, droppedTotal, queueSize);
     }
     sub->cv.notify_one();
   }
@@ -427,12 +453,14 @@ grpc::Status DataCenterGrpcServiceImpl::Publish(grpc::ServerContext*, const Data
 
   std::vector<DataCenterProto::PointUpdate> updates;
   std::vector<Impl::Delivery> deliveries;
+  size_t updateCount = 0;
   {
     std::lock_guard<std::mutex> lock(impl_->mu);
     auto status = impl_->core.Publish(*request, &updates);
     if (!status.ok()) {
       return status;
     }
+    updateCount = updates.size();
     deliveries.reserve(updates.size());
     for (const auto& update : updates) {
       auto subs = impl_->matchSubscribersLocked(update.dst_conn_id(), update.dst_tag());
@@ -448,6 +476,8 @@ grpc::Status DataCenterGrpcServiceImpl::Publish(grpc::ServerContext*, const Data
       Impl::enqueue(sub, *delivery.update);
     }
   }
+  LOG_DEBUG("DataCenter Publish: conn_id={}, tag={}, updates={}, deliveries={}",
+            request->conn_id(), request->tag(), updateCount, deliveries.size());
   return grpc::Status::OK;
 }
 
@@ -459,12 +489,14 @@ grpc::Status DataCenterGrpcServiceImpl::BatchPublish(grpc::ServerContext*, const
 
   std::vector<DataCenterProto::PointUpdate> updates;
   std::vector<Impl::Delivery> deliveries;
+  size_t updateCount = 0;
   {
     std::lock_guard<std::mutex> lock(impl_->mu);
     auto status = impl_->core.BatchPublish(*request, &updates);
     if (!status.ok()) {
       return status;
     }
+    updateCount = updates.size();
     deliveries.reserve(updates.size());
     for (const auto& update : updates) {
       auto subs = impl_->matchSubscribersLocked(update.dst_conn_id(), update.dst_tag());
@@ -480,6 +512,8 @@ grpc::Status DataCenterGrpcServiceImpl::BatchPublish(grpc::ServerContext*, const
       Impl::enqueue(sub, *delivery.update);
     }
   }
+  LOG_DEBUG("DataCenter BatchPublish: points={}, updates={}, deliveries={}",
+            request->points_size(), updateCount, deliveries.size());
   return grpc::Status::OK;
 }
 
@@ -512,6 +546,8 @@ grpc::Status DataCenterGrpcServiceImpl::Subscribe(grpc::ServerContext* context, 
   }
 
   std::vector<DataCenterProto::PointUpdate> snapshot;
+  const auto tagsCount = request->tags_size();
+  const auto snapshotEnabled = request->snapshot();
   {
     std::lock_guard<std::mutex> lock(impl_->mu);
     subscriber->id = ++impl_->nextSubscriberId;
@@ -533,6 +569,8 @@ grpc::Status DataCenterGrpcServiceImpl::Subscribe(grpc::ServerContext* context, 
             impl_->subscribersByConn.erase(it);
           }
         }
+        LOG_ERROR("DataCenter Subscribe 获取快照失败: conn_id={}, subscriber_id={}, 原因={}",
+                  subscriber->connId, subscriber->id, status.error_message());
         return status;
       }
       snapshot.reserve(static_cast<size_t>(latestResp.updates_size()));
@@ -541,6 +579,8 @@ grpc::Status DataCenterGrpcServiceImpl::Subscribe(grpc::ServerContext* context, 
       }
     }
   }
+  LOG_INFO("DataCenter Subscribe 开始: conn_id={}, tags={}, snapshot={}, subscriber_id={}",
+           subscriber->connId, tagsCount, snapshotEnabled, subscriber->id);
 
   auto markClosed = [&subscriber]() {
     {
@@ -580,6 +620,13 @@ grpc::Status DataCenterGrpcServiceImpl::Subscribe(grpc::ServerContext* context, 
 
   markClosed();
   impl_->removeSubscriber(subscriber->connId, subscriber->id);
+  uint64_t dropped = 0;
+  {
+    std::lock_guard<std::mutex> lock(subscriber->mu);
+    dropped = subscriber->dropped;
+  }
+  LOG_INFO("DataCenter Subscribe 结束: conn_id={}, subscriber_id={}, dropped={}",
+           subscriber->connId, subscriber->id, dropped);
   return grpc::Status::OK;
 }
 }  // namespace DataCenter

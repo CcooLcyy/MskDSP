@@ -39,7 +39,7 @@ AGC 不直接对接 IEC104/ModbusRTU；上下游均通过 DataCenter 的有向�
 `ValueSpec` 用于描述一个点的 `tag/unit/scale/offset` 与值语义：
 - `mode=ABSOLUTE`：该点表示“绝对目标值”（例如 kW）
 - `mode=DELTA`：该点表示“增量值”，其基准由 `delta_base` 决定：
-  - `LAST_TARGET`：相对“上一轮输出目标值”（AGC 内部记忆）
+  - `LAST_TARGET`：相对“上一轮期望总目标值”（AGC 内部记忆）
   - `CURRENT_MEAS`：相对“当前量测值”（来自成员量测点）
   - `BASE_TAG`：相对 `base_tag` 对应点值（同一 `conn_id` 内，通过 DataCenter 路由输入）
 
@@ -50,6 +50,11 @@ AGC 不直接对接 IEC104/ModbusRTU；上下游均通过 DataCenter 的有向�
 - 每周期计算 `error = desired_total - total_meas`
 - `step = clamp(kp * error, -max_step_kw, +max_step_kw)`，并应用 `deadband_kw`
 - 目标总值按 `step` 逐步逼近 `desired_total`，然后再拆分到各成员
+> 说明：若未配置 `period_ms`，默认 200ms。
+
+#### 计算示例
+- total_meas=30, desired_total=60, kp=1, max_step=0 → target=60 → 按权重 1:2 分配为 [20, 40]
+- deadband=10 且 |error|<=10 → step=0 → target=last_total_target（若有）或 total_meas
 
 ### 不可控成员建议
 对不可控成员（`controllable=false`）：
@@ -71,6 +76,13 @@ AGC 不直接对接 IEC104/ModbusRTU；上下游均通过 DataCenter 的有向�
 
 ### 配置持久化（当前实现）
 当前版本的 `GroupConfig`/运行态不落盘：进程重启后需要上位机重新下发 `UpsertGroup` 并重建 DataCenter 路由。
+
+### 当前限制/注意事项
+- `StrategyConfig` 目前仅实现加权分配（WeightedStrategy），其他策略为预留。
+- `DELTA_BASE_LAST_TARGET` 的基准为“上一轮期望总目标值”（`desired_total`）。
+- 当成员约束导致目标无法完全分配时，会记录 `unallocated` 并输出告警日志。
+- DataCenter 订阅流异常中断时仅记录 `last_error`，需上位机或外部机制触发重试。
+- 可在 `package/log` 查看关键告警（如 `AGC 分配受限`）。
 
 ## 构建产物
 - 共享库：`package/lib/libAGC.so.<version>`（版本见 `src/AGVC/AGC/cmake/LibInfo.cmake`）

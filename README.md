@@ -135,7 +135,7 @@ cmake --build build-cov --parallel
 - 若遇到 `GCOV returncode was 3`，通常是 `gcov` 版本与编译器不匹配；用 `-DGCOV_EXECUTABLE=/usr/bin/gcov-<gcc主版本>` 指定即可。
 - 若遇到 `AssertionError: Got function ... on multiple lines`，通常是同一源文件被多个 target 编译（例如库 + 测试）；需要在 gcovr 使用函数合并策略（当前工程已在 coverage 目标中内置）。
 - 若遇到 `Cannot open source file ...` 且路径指向已不存在的源码（例如模块目录改名后），说明 build 目录残留旧对象文件；建议清理 build 目录后重新配置/编译。
-- 若遇到 `ccache ... Permission denied`，可用 `-DMSKDSP_USE_CCACHE=OFF` 关闭，或设置 `CCACHE_DIR` 到可写目录。
+- 若遇到 `ccache ... Permission denied`，可设置 `CCACHE_DIR` 到可写目录，或在 CMakePresets 中移除/置空 `CMAKE_*_COMPILER_LAUNCHER`。
 
 ## 构建产物
 - `package/MskDSP`：主程序（Windows 下可能为 `MskDSP.exe`）

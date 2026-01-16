@@ -115,6 +115,21 @@ public:
     return grpc::Status::OK;
   }
 
+  grpc::Status UpsertRoutes(const DataCenterProto::UpsertRoutesRequest& request) const {
+    for (const auto& route : request.routes()) {
+      if (!route.has_src() || !route.has_dst()) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "route src/dst is required");
+      }
+      if (route.src().conn_id() == 0 || route.dst().conn_id() == 0) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id is required");
+      }
+      if (route.src().tag().empty() || route.dst().tag().empty()) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tag is required");
+      }
+    }
+    return grpc::Status::OK;
+  }
+
 private:
   mutable std::mutex mu_;
   uint32_t nextConnId_ = 1;
@@ -151,6 +166,11 @@ inline std::shared_ptr<DataCenterProto::MockDataCenterServiceStub> MakeStub(Fake
           }
         }
         return grpc::Status::OK;
+      }));
+
+  ON_CALL(*stub, UpsertRoutes(::testing::_, ::testing::_, ::testing::_))
+      .WillByDefault(::testing::Invoke([state](grpc::ClientContext*, const DataCenterProto::UpsertRoutesRequest& req, DataCenterProto::Empty*) {
+        return state->UpsertRoutes(req);
       }));
 
   return stub;

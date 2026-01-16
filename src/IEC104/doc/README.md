@@ -16,6 +16,7 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
   - Server 订阅 DataCenter `Subscribe(conn_id)`，将点值转为 IEC104 遥测自发上送
   - Server 支持总召 `C_IC_NA_1`：通过 DataCenter `GetLatest(conn_id)` 拼装快照应答
   - Client 在 STARTDT 成功后自动发起总召 `C_IC_NA_1(QOI=20)`
+- 遥测合包：自发遥测支持窗口合包与 IOA 顺序打包，连续 IOA 使用 SQ=1 压缩；总召快照按帧大小批量打包
 
 ## 接口与协议
 - Protobuf：`protobuf/IEC104.proto`
@@ -39,6 +40,13 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
 - `t2`：延迟确认超时（秒，触发 S 帧）
 - `t3`：空闲保活超时（秒，触发 TESTFR）
 - 参数由上位机在 `LinkConfig.apci` 下发，默认值：`k=12, w=8, t0=30, t1=15, t2=10, t3=20`
+
+### 遥测合包参数
+- `telemetry_batch_window_ms`：自发遥测合包窗口（毫秒）；0 表示使用默认值（20ms）。
+- `telemetry_max_asdu_bytes`：遥测 ASDU 单帧最大字节数（<=249）；0 表示默认值（249）。
+- `telemetry_use_standard_limit`：true 时强制使用标准上限 249 字节，忽略 `telemetry_max_asdu_bytes`。
+- `telemetry_dedupe`：自发遥测合包去重（按 IOA 保留最新值），默认开启。
+- 合包策略：按 IOA 顺序组织报文；连续 IOA 使用 SQ=1 压缩，不连续则 SQ=0 带 IOA。
 
 ### 上位机推荐流程
 1. 通过 ModuleManager 启动 `DataCenter` 与 `IEC104`，并用 `GetRunningModuleInfo` 获取 IEC104 的 `outer_grpc_server`
@@ -77,6 +85,7 @@ ctest --test-dir build -R iec104TcpSession_test --output-on-failure
 - 观测性：已补充逐帧日志，但仍缺少链路状态统计（收发计数、最近一次总召、重连次数等）与可配置采样/汇总
 - 安全：gRPC 与 IEC104 TCP 目前均为明文/无鉴权；TLS、鉴权、白名单等未实现
 - 测试：当前以单元测试覆盖点表与 LinkManager 语义；缺少端到端“主站↔从站”协议互操作测试
+- SOE/COS：遥信变位/事件相关语义与时序处理尚未实现；后续需独立队列与不去重策略
 
 ## grpc接口
 ### 删除语义（最佳实践）

@@ -29,6 +29,28 @@ constexpr uint8_t kQoiStation = 20;
 
 constexpr char kHexDigits[] = "0123456789ABCDEF";
 
+constexpr uint32_t kMaxAsduBytes = 249;
+constexpr uint32_t kMeasuredValueAsduHeaderSize = 6;
+constexpr uint32_t kMeasuredValueSq0ObjectSize = 8;
+constexpr uint32_t kMeasuredValueSq1BaseSize = 3;
+constexpr uint32_t kMeasuredValueSq1ObjectSize = 5;
+constexpr uint32_t kMinMeasuredValueAsduBytes = kMeasuredValueAsduHeaderSize + kMeasuredValueSq0ObjectSize;
+constexpr uint32_t kDefaultTelemetryBatchWindowMs = 20;
+
+size_t maxSq0Objects(uint32_t maxAsduBytes) {
+  if (maxAsduBytes <= kMeasuredValueAsduHeaderSize) {
+    return 0;
+  }
+  return (maxAsduBytes - kMeasuredValueAsduHeaderSize) / kMeasuredValueSq0ObjectSize;
+}
+
+size_t maxSq1Objects(uint32_t maxAsduBytes) {
+  if (maxAsduBytes <= kMeasuredValueAsduHeaderSize + kMeasuredValueSq1BaseSize) {
+    return 0;
+  }
+  return (maxAsduBytes - kMeasuredValueAsduHeaderSize - kMeasuredValueSq1BaseSize) / kMeasuredValueSq1ObjectSize;
+}
+
 inline uint16_t parseSeq(const std::vector<uint8_t> &apdu, size_t offset) {
   return static_cast<uint16_t>((static_cast<uint16_t>(apdu.at(offset + 1)) << 7) | (apdu.at(offset) >> 1));
 }
@@ -68,15 +90,19 @@ TcpSession::TcpSession(boost::asio::io_context &io, IEC104Proto::LinkConfig conf
   t1Timer_(io),
   t2Timer_(io),
   t3Timer_(io),
+  telemetryFlushTimer_(io),
   config_(std::move(config)),
   isClient_(isClient),
-  apci_(parseApci(config_.apci())) {}
+  apci_(parseApci(config_.apci())) {
+  initTelemetryBatchSettings();
+}
 
 TcpSession::~TcpSession() {
   t0Timer_.cancel();
   t1Timer_.cancel();
   t2Timer_.cancel();
   t3Timer_.cancel();
+  telemetryFlushTimer_.cancel();
   boost::system::error_code ec;
   socket_.close(ec);
 }
@@ -97,6 +123,11 @@ void TcpSession::Start(boost::asio::ip::tcp::socket socket) {
   writing_ = false;
 
   LOG_INFO("IEC104 会话启动: conn_name={}, 角色={}, k={}, w={}, t0={}, t1={}, t2={}, t3={}", config_.conn_name(), isClient_ ? "CLIENT" : "SERVER", apci_.k, apci_.w, apci_.t0, apci_.t1, apci_.t2, apci_.t3);
+  LOG_INFO("IEC104 遥测合包参数: conn_name={}, window_ms={}, max_asdu_bytes={}, dedupe={}",
+           config_.conn_name(),
+           telemetryBatchWindow_.count(),
+           telemetryMaxAsduBytes_,
+           telemetryDedupe_);
   startT0();
   restartT3();
   handleRead();
@@ -118,6 +149,7 @@ void TcpSession::Stop() {
     self->t1Timer_.cancel();
     self->t2Timer_.cancel();
     self->t3Timer_.cancel();
+    self->telemetryFlushTimer_.cancel();
     boost::system::error_code ec;
     self->socket_.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
     self->socket_.close(ec);
@@ -127,6 +159,9 @@ void TcpSession::Stop() {
     self->recvSinceLastAck_ = 0;
     self->writeQueue_.clear();
     self->pendingAsdu_.clear();
+    self->telemetryPendingByIoa_.clear();
+    self->telemetryPending_.clear();
+    self->telemetryFlushScheduled_ = false;
     self->writing_ = false;
     if (onClosed) {
       onClosed();
@@ -151,9 +186,166 @@ void TcpSession::SendMeasuredValue(uint32_t ioa, double value, uint8_t quality, 
     if (self->closing_) {
       return;
     }
-    auto asdu = self->buildMeasuredValueAsdu(ioa, value, quality, cause);
-    self->enqueueAsdu(std::move(asdu));
+    self->enqueueMeasuredValue(ioa, value, quality, cause);
   });
+}
+
+void TcpSession::initTelemetryBatchSettings() {
+  const auto windowMs = config_.telemetry_batch_window_ms();
+  telemetryBatchWindow_ = std::chrono::milliseconds(windowMs == 0 ? kDefaultTelemetryBatchWindowMs : windowMs);
+
+  uint32_t maxBytes = config_.telemetry_max_asdu_bytes();
+  if (config_.telemetry_use_standard_limit() || maxBytes == 0) {
+    maxBytes = kMaxAsduBytes;
+  }
+  maxBytes = std::min(maxBytes, kMaxAsduBytes);
+  if (maxBytes < kMinMeasuredValueAsduBytes) {
+    maxBytes = kMinMeasuredValueAsduBytes;
+  }
+  telemetryMaxAsduBytes_ = maxBytes;
+
+  telemetryDedupe_ = config_.has_telemetry_dedupe() ? config_.telemetry_dedupe() : true;
+}
+
+void TcpSession::enqueueMeasuredValue(uint32_t ioa, double value, uint8_t quality, uint8_t cause) {
+  PendingMeasuredValue entry;
+  entry.value.ioa = ioa;
+  entry.value.value = value;
+  entry.value.quality = quality;
+  entry.cause = cause;
+
+  if (telemetryDedupe_) {
+    telemetryPendingByIoa_[ioa] = entry;
+  } else {
+    telemetryPending_.push_back(entry);
+  }
+  scheduleTelemetryFlush();
+}
+
+void TcpSession::scheduleTelemetryFlush() {
+  if (telemetryBatchWindow_.count() <= 0) {
+    drainTelemetryQueue();
+    return;
+  }
+  if (telemetryFlushScheduled_) {
+    return;
+  }
+  telemetryFlushScheduled_ = true;
+  telemetryFlushTimer_.expires_after(telemetryBatchWindow_);
+  auto self = shared_from_this();
+  telemetryFlushTimer_.async_wait([self](const boost::system::error_code& ec) { self->flushTelemetry(ec); });
+}
+
+void TcpSession::flushTelemetry(const boost::system::error_code& ec) {
+  if (ec) {
+    return;
+  }
+  telemetryFlushScheduled_ = false;
+  drainTelemetryQueue();
+}
+
+void TcpSession::drainTelemetryQueue() {
+  if (closing_) {
+    clearTelemetryQueue();
+    return;
+  }
+
+  std::vector<PendingMeasuredValue> pending;
+  if (telemetryDedupe_) {
+    pending.reserve(telemetryPendingByIoa_.size());
+    for (auto &pair : telemetryPendingByIoa_) {
+      pending.push_back(pair.second);
+    }
+    telemetryPendingByIoa_.clear();
+  } else {
+    pending.swap(telemetryPending_);
+  }
+
+  if (pending.empty()) {
+    return;
+  }
+
+  LOG_DEBUG("IEC104 遥测合包 flush: conn_name={}, pending={}, dedupe={}, window_ms={}, max_asdu_bytes={}",
+            config_.conn_name(),
+            pending.size(),
+            telemetryDedupe_,
+            telemetryBatchWindow_.count(),
+            telemetryMaxAsduBytes_);
+
+  std::unordered_map<uint8_t, std::vector<MeasuredValue>> byCause;
+  byCause.reserve(pending.size());
+  for (const auto &entry : pending) {
+    byCause[entry.cause].push_back(entry.value);
+  }
+
+  for (auto &pair : byCause) {
+    enqueueMeasuredValuesBatch(std::move(pair.second), pair.first);
+  }
+}
+
+void TcpSession::clearTelemetryQueue() {
+  telemetryPendingByIoa_.clear();
+  telemetryPending_.clear();
+  telemetryFlushScheduled_ = false;
+  telemetryFlushTimer_.cancel();
+}
+
+void TcpSession::enqueueMeasuredValuesBatch(std::vector<MeasuredValue> values, uint8_t cause) {
+  if (values.empty()) {
+    return;
+  }
+
+  std::stable_sort(values.begin(), values.end(), [](const MeasuredValue &a, const MeasuredValue &b) {
+    return a.ioa < b.ioa;
+  });
+
+  auto maxSq0 = maxSq0Objects(telemetryMaxAsduBytes_);
+  auto maxSq1 = maxSq1Objects(telemetryMaxAsduBytes_);
+  if (maxSq0 == 0) {
+    maxSq0 = 1;
+  }
+  if (maxSq1 == 0) {
+    maxSq1 = 1;
+  }
+
+  std::vector<MeasuredValue> sq0Buffer;
+  sq0Buffer.reserve(std::min(values.size(), maxSq0));
+
+  auto flushSq0 = [this, &sq0Buffer, maxSq0, cause]() {
+    size_t offset = 0;
+    while (offset < sq0Buffer.size()) {
+      const size_t count = std::min(maxSq0, sq0Buffer.size() - offset);
+      enqueueAsdu(buildMeasuredValueAsduSq0(sq0Buffer, offset, count, cause));
+      offset += count;
+    }
+    sq0Buffer.clear();
+  };
+
+  size_t i = 0;
+  while (i < values.size()) {
+    size_t j = i + 1;
+    while (j < values.size() && values[j].ioa == values[j - 1].ioa + 1) {
+      ++j;
+    }
+    const size_t runLen = j - i;
+    if (runLen >= 2) {
+      flushSq0();
+      size_t offset = 0;
+      while (offset < runLen) {
+        const size_t count = std::min(maxSq1, runLen - offset);
+        enqueueAsdu(buildMeasuredValueAsduSq1(values, i + offset, count, cause));
+        offset += count;
+      }
+    } else {
+      sq0Buffer.push_back(values[i]);
+      if (sq0Buffer.size() >= maxSq0) {
+        flushSq0();
+      }
+    }
+    i = j;
+  }
+
+  flushSq0();
 }
 
 void TcpSession::handleRead() {
@@ -404,11 +596,8 @@ void TcpSession::handleInterrogation(const std::vector<uint8_t> &asdu) {
   }
 
   LOG_DEBUG("IEC104 总召快照: conn_name={}, count={}", config_.conn_name(), snapshot.size());
-  for (const auto &mv : snapshot) {
-    if (closing_ || !dataTransferActive_) {
-      break;
-    }
-    enqueueAsdu(buildMeasuredValueAsdu(mv.ioa, mv.value, mv.quality, kCotInterrogatedByStation));
+  if (!snapshot.empty() && !closing_ && dataTransferActive_) {
+    enqueueMeasuredValuesBatch(std::move(snapshot), kCotInterrogatedByStation);
   }
 
   enqueueAsdu(buildInterrogationAsdu(kCotActivationTermination, qoi));
@@ -576,6 +765,75 @@ std::vector<uint8_t> TcpSession::buildMeasuredValueAsdu(uint32_t ioa, double val
   return asdu;
 }
 
+std::vector<uint8_t> TcpSession::buildMeasuredValueAsduSq0(const std::vector<MeasuredValue>& values,
+                                                           size_t start,
+                                                           size_t count,
+                                                           uint8_t cause) const {
+  std::vector<uint8_t> asdu;
+  if (count == 0) {
+    return asdu;
+  }
+  asdu.reserve(kMeasuredValueAsduHeaderSize + kMeasuredValueSq0ObjectSize * count);
+  asdu.emplace_back(kTypeIdMeasuredValueShort);
+  asdu.emplace_back(static_cast<uint8_t>(count & 0x7F));
+  asdu.emplace_back(cause & 0x3F);
+  asdu.emplace_back(static_cast<uint8_t>(config_.oa() & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>(config_.ca() & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>((config_.ca() >> 8) & 0xFF));
+
+  for (size_t i = 0; i < count; ++i) {
+    const auto& mv = values[start + i];
+    asdu.emplace_back(static_cast<uint8_t>(mv.ioa & 0xFF));
+    asdu.emplace_back(static_cast<uint8_t>((mv.ioa >> 8) & 0xFF));
+    asdu.emplace_back(static_cast<uint8_t>((mv.ioa >> 16) & 0xFF));
+
+    float f = toFloat(mv.value);
+    uint32_t bits = 0;
+    std::memcpy(&bits, &f, sizeof(f));
+    asdu.emplace_back(static_cast<uint8_t>(bits & 0xFF));
+    asdu.emplace_back(static_cast<uint8_t>((bits >> 8) & 0xFF));
+    asdu.emplace_back(static_cast<uint8_t>((bits >> 16) & 0xFF));
+    asdu.emplace_back(static_cast<uint8_t>((bits >> 24) & 0xFF));
+    asdu.emplace_back(mv.quality);
+  }
+  return asdu;
+}
+
+std::vector<uint8_t> TcpSession::buildMeasuredValueAsduSq1(const std::vector<MeasuredValue>& values,
+                                                           size_t start,
+                                                           size_t count,
+                                                           uint8_t cause) const {
+  std::vector<uint8_t> asdu;
+  if (count == 0) {
+    return asdu;
+  }
+  asdu.reserve(kMeasuredValueAsduHeaderSize + kMeasuredValueSq1BaseSize + kMeasuredValueSq1ObjectSize * count);
+  asdu.emplace_back(kTypeIdMeasuredValueShort);
+  asdu.emplace_back(static_cast<uint8_t>(0x80 | (count & 0x7F)));
+  asdu.emplace_back(cause & 0x3F);
+  asdu.emplace_back(static_cast<uint8_t>(config_.oa() & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>(config_.ca() & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>((config_.ca() >> 8) & 0xFF));
+
+  const auto baseIoa = values[start].ioa;
+  asdu.emplace_back(static_cast<uint8_t>(baseIoa & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>((baseIoa >> 8) & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>((baseIoa >> 16) & 0xFF));
+
+  for (size_t i = 0; i < count; ++i) {
+    const auto& mv = values[start + i];
+    float f = toFloat(mv.value);
+    uint32_t bits = 0;
+    std::memcpy(&bits, &f, sizeof(f));
+    asdu.emplace_back(static_cast<uint8_t>(bits & 0xFF));
+    asdu.emplace_back(static_cast<uint8_t>((bits >> 8) & 0xFF));
+    asdu.emplace_back(static_cast<uint8_t>((bits >> 16) & 0xFF));
+    asdu.emplace_back(static_cast<uint8_t>((bits >> 24) & 0xFF));
+    asdu.emplace_back(mv.quality);
+  }
+  return asdu;
+}
+
 std::vector<uint8_t> TcpSession::buildInterrogationAsdu(uint8_t cause, uint8_t qoi) const {
   std::vector<uint8_t> asdu;
   asdu.reserve(6 + 3 + 1);
@@ -648,6 +906,7 @@ void TcpSession::setDataTransferActive(bool active, const char *reason) {
   sendUnacked_ = 0;
   sendAckedSeq_ = sendSeq_;
   pendingAsdu_.clear();
+  clearTelemetryQueue();
 }
 
 void TcpSession::sendAutoInterrogation(uint8_t qoi) {

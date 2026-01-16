@@ -164,3 +164,125 @@ TEST(AgcGroupManagerTest, UpsertGroupRegistersBaseTagToDataCenterPointTable) {
   AGCProto::GroupInfo info;
   ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
 }
+
+// 验证：缺少命令 tag 会返回 INVALID_ARGUMENT。
+TEST(AgcGroupManagerTest, UpsertGroupRejectsMissingCommandTag) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  auto req = MakeGroupReq("g-missing-cmd");
+  req.mutable_config()->mutable_p_cmd()->mutable_signal()->set_tag("");
+
+  AGCProto::GroupInfo info;
+  auto st = mgr.UpsertGroup(req, &info);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+// 验证：重复的 member_name 会返回 INVALID_ARGUMENT。
+TEST(AgcGroupManagerTest, UpsertGroupRejectsDuplicateMemberName) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  auto req = MakeGroupReq("g-dup-member");
+  req.mutable_config()->mutable_members(1)->set_member_name("inv-1");
+
+  AGCProto::GroupInfo info;
+  auto st = mgr.UpsertGroup(req, &info);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+// 验证：缺少成员量测点 tag 会返回 INVALID_ARGUMENT。
+TEST(AgcGroupManagerTest, UpsertGroupRejectsMissingMemberMeasTag) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  auto req = MakeGroupReq("g-missing-meas");
+  req.mutable_config()->mutable_members(0)->mutable_p_meas()->set_tag("");
+
+  AGCProto::GroupInfo info;
+  auto st = mgr.UpsertGroup(req, &info);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+// 验证：可控成员缺少设定点时返回 INVALID_ARGUMENT。
+TEST(AgcGroupManagerTest, UpsertGroupRejectsMissingMemberSetpointForControllable) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  auto req = MakeGroupReq("g-missing-set");
+  req.mutable_config()->mutable_members(0)->clear_p_set();
+
+  AGCProto::GroupInfo info;
+  auto st = mgr.UpsertGroup(req, &info);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+// 验证：StopGroup 在 STOPPED 状态下幂等返回 OK。
+TEST(AgcGroupManagerTest, StopGroupIsIdempotentWhenStopped) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  auto req = MakeGroupReq("g-stop-idem");
+
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+  ASSERT_TRUE(mgr.StopGroup("g-stop-idem").ok());
+  ASSERT_TRUE(mgr.StopGroup("g-stop-idem").ok());
+
+  AGCProto::GroupInfo got;
+  ASSERT_TRUE(mgr.GetGroup("g-stop-idem", &got).ok());
+  EXPECT_EQ(got.state(), AGCProto::GROUP_STATE_STOPPED);
+}
+
+// 验证：控制组运行中不允许更新配置。
+TEST(AgcGroupManagerTest, UpsertGroupRejectsWhenRunning) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  auto req = MakeGroupReq("g-running");
+
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+  ASSERT_TRUE(mgr.StartGroup("g-running").ok());
+
+  auto updateReq = MakeGroupReq("g-running");
+  updateReq.set_create_only(false);
+  updateReq.mutable_config()->mutable_members(0)->set_weight(10);
+
+  AGCProto::GroupInfo updated;
+  auto st = mgr.UpsertGroup(updateReq, &updated);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+
+  ASSERT_TRUE(mgr.StopGroup("g-running").ok());
+}
+
+// 验证：PENDING_DELETE 状态下不允许启动控制组。
+TEST(AgcGroupManagerTest, StartGroupRejectsWhenPendingDelete) {
+  FakeDataCenterState state;
+  state.FailDeleteForConnName("g-pending");
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  auto req = MakeGroupReq("g-pending");
+
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+  auto del = mgr.DeleteGroup("g-pending");
+  EXPECT_EQ(del.error_code(), grpc::StatusCode::INTERNAL);
+
+  auto st = mgr.StartGroup("g-pending");
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+}

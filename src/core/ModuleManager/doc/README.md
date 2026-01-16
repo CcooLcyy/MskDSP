@@ -57,6 +57,7 @@ extern "C" BOOST_SYMBOL_EXPORT bool GetModuleManifestPb(const uint8_t **data, si
 - `StopModule`：请求停止模块、关闭 gRPC Server、回收线程并卸载共享库；级联停止依赖它的上游模块；级联失败返回错误。
 - `GetRunningModuleInfo`：返回已启动模块的运行时信息（版本、inner/outer gRPC 地址等）。
 - `SaveModuleStartConfig`：保存模块启动配置到 `./conf/modConf.bin`（当前实现仅保存，未看到启动时自动读取逻辑）。
+- `UploadModule`/`DeleteModule`：上传/删除模块当前未实现（no-op），优先级较低，后续再补齐。
 
 ## 上位机对接建议
 本项目有配套上位机/配置工具，建议按以下方式对接模块生命周期与地址发现。

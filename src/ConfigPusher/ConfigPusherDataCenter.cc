@@ -57,11 +57,11 @@ bool ResolveConnId(const std::unordered_map<ConnKey, uint32_t, ConnKeyHash> &con
 bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
                            DataCenterProto::DataCenterService::StubInterface *stub) {
   if (stub == nullptr) {
-    LOG_ERROR("DataCenter gRPC stub is null");
+    LOG_ERROR("DataCenter gRPC stub 为空");
     return false;
   }
   if (!HasDataCenterConfig(config)) {
-    LOG_INFO("DataCenter config is empty, skipping push");
+    LOG_INFO("DataCenter 配置为空，跳过下发");
     return true;
   }
 
@@ -70,7 +70,7 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
   DataCenterProto::Empty listReq;
   auto status = stub->ListConnections(&listCtx, listReq, &connections);
   if (!status.ok()) {
-    LOG_ERROR("Failed to list DataCenter connections: {}", status.error_message());
+    LOG_ERROR("获取 DataCenter 连接列表失败: {}", status.error_message());
     return false;
   }
 
@@ -96,19 +96,19 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
 
   for (const auto &table : config.point_tables()) {
     if (!ValidateConnKey(table.module_name(), table.conn_name())) {
-      LOG_ERROR("DataCenter point table missing module_name/conn_name");
+      LOG_ERROR("DataCenter 点表配置缺少 module_name/conn_name");
       ok = false;
       continue;
     }
     if (table.tags().empty()) {
-      LOG_ERROR("DataCenter point table missing tags: module_name={}, conn_name={}", table.module_name(), table.conn_name());
+      LOG_ERROR("DataCenter 点表配置缺少 tags: module_name={}, conn_name={}", table.module_name(), table.conn_name());
       ok = false;
       continue;
     }
 
     uint32_t connId = 0;
     if (!ResolveConnId(connIds, table.module_name(), table.conn_name(), &connId)) {
-      LOG_ERROR("DataCenter connection not found: module_name={}, conn_name={}", table.module_name(), table.conn_name());
+      LOG_ERROR("DataCenter 未找到连接: module_name={}, conn_name={}", table.module_name(), table.conn_name());
       ok = false;
       continue;
     }
@@ -118,7 +118,7 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
     tags.reserve(static_cast<size_t>(table.tags_size()));
     for (const auto &tag : table.tags()) {
       if (tag.empty()) {
-        LOG_ERROR("DataCenter point table has empty tag: module_name={}, conn_name={}", table.module_name(), table.conn_name());
+        LOG_ERROR("DataCenter 点表配置包含空 tag: module_name={}, conn_name={}", table.module_name(), table.conn_name());
         tagsOk = false;
         continue;
       }
@@ -143,19 +143,19 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
     routes.reserve(static_cast<size_t>(config.routes().routes_size()));
     for (const auto &route : config.routes().routes()) {
       if (!route.has_src() || !route.has_dst()) {
-        LOG_ERROR("DataCenter route missing src/dst");
+        LOG_ERROR("DataCenter 路由配置缺少 src/dst");
         ok = false;
         continue;
       }
       const auto &src = route.src();
       const auto &dst = route.dst();
       if (!ValidateConnKey(src.module_name(), src.conn_name()) || !ValidateConnKey(dst.module_name(), dst.conn_name())) {
-        LOG_ERROR("DataCenter route missing module_name/conn_name");
+        LOG_ERROR("DataCenter 路由配置缺少 module_name/conn_name");
         ok = false;
         continue;
       }
       if (src.tag().empty() || dst.tag().empty()) {
-        LOG_ERROR("DataCenter route missing tag: src={}:{}, dst={}:{}",
+        LOG_ERROR("DataCenter 路由配置缺少 tag: src={}:{}, dst={}:{}",
                   src.module_name(),
                   src.conn_name(),
                   dst.module_name(),
@@ -167,14 +167,14 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
       uint32_t srcConnId = 0;
       uint32_t dstConnId = 0;
       if (!ResolveConnId(connIds, src.module_name(), src.conn_name(), &srcConnId)) {
-        LOG_ERROR("DataCenter route src connection not found: module_name={}, conn_name={}",
+        LOG_ERROR("DataCenter 未找到路由源连接: module_name={}, conn_name={}",
                   src.module_name(),
                   src.conn_name());
         ok = false;
         continue;
       }
       if (!ResolveConnId(connIds, dst.module_name(), dst.conn_name(), &dstConnId)) {
-        LOG_ERROR("DataCenter route dst connection not found: module_name={}, conn_name={}",
+        LOG_ERROR("DataCenter 未找到路由目的连接: module_name={}, conn_name={}",
                   dst.module_name(),
                   dst.conn_name());
         ok = false;
@@ -191,7 +191,7 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
   }
 
   if (!ok) {
-    LOG_ERROR("DataCenter config validation failed; aborting push");
+    LOG_ERROR("DataCenter 配置校验失败，终止下发");
     return false;
   }
 
@@ -203,7 +203,7 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
       req.add_tags(tag);
     }
 
-    LOG_INFO("Pushing DataCenter point table: module_name={}, conn_name={}, tags={}, replace={}",
+    LOG_INFO("开始下发 DataCenter 点表: module_name={}, conn_name={}, tags={}, replace={}",
              table.moduleName,
              table.connName,
              req.tags_size(),
@@ -212,13 +212,13 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
     DataCenterProto::Empty resp;
     status = stub->UpsertPointTable(&ctx, req, &resp);
     if (!status.ok()) {
-      LOG_ERROR("DataCenter point table push failed: module_name={}, conn_name={}, reason={}",
+      LOG_ERROR("DataCenter 点表下发失败: module_name={}, conn_name={}, 原因={}",
                 table.moduleName,
                 table.connName,
                 status.error_message());
       return false;
     }
-    LOG_INFO("DataCenter point table pushed: module_name={}, conn_name={}, tags={}",
+    LOG_INFO("DataCenter 点表下发成功: module_name={}, conn_name={}, tags={}",
              table.moduleName,
              table.connName,
              req.tags_size());
@@ -231,15 +231,15 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
       *req.add_routes() = route;
     }
 
-    LOG_INFO("Pushing DataCenter routes: routes={}, replace={}", req.routes_size(), req.replace());
+    LOG_INFO("开始下发 DataCenter 路由: routes={}, replace={}", req.routes_size(), req.replace());
     grpc::ClientContext ctx;
     DataCenterProto::Empty resp;
     status = stub->UpsertRoutes(&ctx, req, &resp);
     if (!status.ok()) {
-      LOG_ERROR("DataCenter routes push failed: {}", status.error_message());
+      LOG_ERROR("DataCenter 路由下发失败: {}", status.error_message());
       return false;
     }
-    LOG_INFO("DataCenter routes pushed: routes={}", req.routes_size());
+    LOG_INFO("DataCenter 路由下发成功: routes={}", req.routes_size());
   }
 
   return true;

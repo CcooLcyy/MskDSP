@@ -1,5 +1,5 @@
 {
-  // DataCenter push example (requires existing connections)
+  // DataCenter 配置下发示例（仅对已存在连接生效）
   "point_tables": [
     {
       "module_name": "IEC104",

@@ -64,6 +64,9 @@ private:
 
     std::vector<bool> hasLastMemberTargetKw;
     std::vector<double> lastMemberTargetKw;
+
+    bool hasLastUnallocatedKw{false};
+    double lastUnallocatedKw{0.0};
   };
 
   grpc::Status validateGroupName(const std::string& groupName) const;
@@ -77,12 +80,6 @@ private:
   void controlTick(const std::string& groupName);
 
   static bool pointValueToDouble(const DataCenterProto::PointValue& v, double* out);
-
-  static double effectiveScale(const AGCProto::SignalSpec& s);
-  static double toPhysicalAbs(const AGCProto::SignalSpec& s, double raw);
-  static double toPhysicalDelta(const AGCProto::SignalSpec& s, double rawDelta);
-  static double toRawAbs(const AGCProto::SignalSpec& s, double physical);
-  static double toRawDelta(const AGCProto::SignalSpec& s, double physicalDelta);
 
   static std::unordered_set<std::string> collectAllTags(const AGCProto::GroupConfig& config);
   static void rebuildTagCache(GroupRuntime* g);

@@ -284,15 +284,51 @@ add_executable(agcGroupManager_test
 
 target_include_directories(agcGroupManager_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/include
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
 )
 
 target_link_libraries(agcGroupManager_test PRIVATE
   GTest::gtest_main
   GTest::gmock
   agvcCommon
+  moduleManager
 )
 
 add_test(NAME agcGroupManager_test COMMAND agcGroupManager_test)
+
+add_executable(agcControl_test
+  agc_control_test.cc
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCControl.cc
+)
+
+target_include_directories(agcControl_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/include
+)
+
+target_link_libraries(agcControl_test PRIVATE
+  GTest::gtest_main
+  agvcCommon
+)
+
+add_test(NAME agcControl_test COMMAND agcControl_test)
+
+add_executable(configPusherDataCenter_test
+  config_pusher_data_center_test.cc
+  ${CMAKE_SOURCE_DIR}/src/ConfigPusher/ConfigPusherDataCenter.cc
+)
+
+target_include_directories(configPusherDataCenter_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/ConfigPusher/include
+)
+
+target_link_libraries(configPusherDataCenter_test PRIVATE
+  GTest::gtest_main
+  GTest::gmock
+  dspProto
+  moduleManager
+)
+
+add_test(NAME configPusherDataCenter_test COMMAND configPusherDataCenter_test)
 
 set(MSKDSP_TEST_TARGETS
   moduleManager_test
@@ -310,6 +346,8 @@ set(MSKDSP_TEST_TARGETS
   iec104TcpSession_test
   agvcStrategy_test
   agcGroupManager_test
+  agcControl_test
+  configPusherDataCenter_test
 )
 
 # Allow overriding via -DGCOVR_EXECUTABLE=/path/to/gcovr (cache variable).
