@@ -16,6 +16,14 @@ namespace ModbusRTU {
 
 class SerialBus {
 public:
+  struct RtuRequest {
+    uint8_t slaveId = 0;
+    uint8_t function = 0;
+    uint16_t address = 0;
+    uint16_t quantity = 0;
+    std::vector<uint8_t> frame;
+  };
+
   explicit SerialBus(ModbusRTUProto::SerialConfig config);
 
   grpc::Status Open();
@@ -23,6 +31,12 @@ public:
 
   grpc::Status ReadCoil(uint8_t slaveId, uint16_t address, bool* out);
   grpc::Status ReadHoldingRegister(uint8_t slaveId, uint16_t address, uint16_t* out);
+
+  grpc::Status ReadRequest(RtuRequest* out);
+  grpc::Status WriteFrame(const std::vector<uint8_t>& frame);
+
+  static uint16_t computeCrc(const uint8_t* data, size_t len);
+  static void appendCrc(std::vector<uint8_t>* frame);
 
   const ModbusRTUProto::SerialConfig& config() const;
 
@@ -35,9 +49,6 @@ private:
       uint8_t expectedFunction,
       uint16_t quantity,
       std::vector<uint8_t>* outData);
-
-  static uint16_t computeCrc(const uint8_t* data, size_t len);
-  static void appendCrc(std::vector<uint8_t>* frame);
 
   ModbusRTUProto::SerialConfig config_;
   boost::asio::io_context io_;

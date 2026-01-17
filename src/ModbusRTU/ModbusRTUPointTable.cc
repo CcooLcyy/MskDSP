@@ -36,6 +36,18 @@ grpc::Status PointTable::validatePoint(const ModbusRTUProto::Point& point) const
   if (point.type() == ModbusRTUProto::DATA_TYPE_UNSPECIFIED) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "data type is required");
   }
+  if (point.default_value_case() == ModbusRTUProto::Point::kDefaultBool &&
+      point.type() != ModbusRTUProto::DATA_TYPE_BOOL) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "default_bool requires BOOL type");
+  }
+  if (point.default_value_case() == ModbusRTUProto::Point::kDefaultUint16 &&
+      point.type() != ModbusRTUProto::DATA_TYPE_UINT16) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "default_uint16 requires UINT16 type");
+  }
+  if (point.default_value_case() == ModbusRTUProto::Point::kDefaultUint16 &&
+      point.default_uint16() > 0xFFFFu) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "default_uint16 must be <= 65535");
+  }
   if (point.address() > 65535) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "address must be <= 65535");
   }
@@ -61,6 +73,16 @@ grpc::Status PointTable::insertOrUpdatePoint(const ModbusRTUProto::Point& point)
     p.type = point.type();
     p.scale = point.scale();
     p.offset = point.offset();
+    if (point.default_value_case() == ModbusRTUProto::Point::kDefaultBool) {
+      p.defaultBool = point.default_bool();
+      p.defaultUInt16.reset();
+    } else if (point.default_value_case() == ModbusRTUProto::Point::kDefaultUint16) {
+      p.defaultUInt16 = static_cast<uint16_t>(point.default_uint16());
+      p.defaultBool.reset();
+    } else {
+      p.defaultBool.reset();
+      p.defaultUInt16.reset();
+    }
     byTag_.emplace(p.tag, p);
     tagByKey_.emplace(key, p.tag);
     return grpc::Status::OK;
@@ -82,6 +104,16 @@ grpc::Status PointTable::insertOrUpdatePoint(const ModbusRTUProto::Point& point)
   p.type = point.type();
   p.scale = point.scale();
   p.offset = point.offset();
+  if (point.default_value_case() == ModbusRTUProto::Point::kDefaultBool) {
+    p.defaultBool = point.default_bool();
+    p.defaultUInt16.reset();
+  } else if (point.default_value_case() == ModbusRTUProto::Point::kDefaultUint16) {
+    p.defaultUInt16 = static_cast<uint16_t>(point.default_uint16());
+    p.defaultBool.reset();
+  } else {
+    p.defaultBool.reset();
+    p.defaultUInt16.reset();
+  }
   byTag_[p.tag] = p;
   tagByKey_[key] = p.tag;
   return grpc::Status::OK;
@@ -93,6 +125,19 @@ std::optional<PointTable::Point> PointTable::FindByTag(const std::string& tag) c
     return std::nullopt;
   }
   return it->second;
+}
+
+std::optional<PointTable::Point> PointTable::FindByAddress(ModbusRTUProto::FunctionCode function, uint32_t address) const {
+  PointKey key{function, address};
+  auto it = tagByKey_.find(key);
+  if (it == tagByKey_.end()) {
+    return std::nullopt;
+  }
+  auto tagIt = byTag_.find(it->second);
+  if (tagIt == byTag_.end()) {
+    return std::nullopt;
+  }
+  return tagIt->second;
 }
 
 std::vector<PointTable::Point> PointTable::Points() const {
@@ -132,6 +177,11 @@ void PointTable::ToProto(const std::string& connName, ModbusRTUProto::PointTable
     dst->set_type(point.type);
     dst->set_scale(point.scale);
     dst->set_offset(point.offset);
+    if (point.defaultBool.has_value()) {
+      dst->set_default_bool(point.defaultBool.value());
+    } else if (point.defaultUInt16.has_value()) {
+      dst->set_default_uint16(point.defaultUInt16.value());
+    }
   }
 }
 

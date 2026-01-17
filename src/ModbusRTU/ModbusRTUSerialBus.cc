@@ -1,5 +1,6 @@
 #include "ModbusRTUSerialBus.h"
 
+#include <array>
 #include <chrono>
 #include <format>
 #include <vector>
@@ -15,6 +16,8 @@ namespace ModbusRTU {
 namespace {
 constexpr uint8_t kFunctionReadCoils = 0x01;
 constexpr uint8_t kFunctionReadHoldingRegisters = 0x03;
+constexpr uint8_t kFunctionWriteMultipleCoils = 0x0F;
+constexpr uint8_t kFunctionWriteMultipleRegisters = 0x10;
 }  // namespace
 
 SerialBus::SerialBus(ModbusRTUProto::SerialConfig config) :
@@ -117,6 +120,87 @@ grpc::Status SerialBus::ReadHoldingRegister(uint8_t slaveId, uint16_t address, u
   }
   *out = static_cast<uint16_t>((static_cast<uint16_t>(data[0]) << 8) | data[1]);
   return grpc::Status::OK;
+}
+
+grpc::Status SerialBus::ReadRequest(RtuRequest* out) {
+  if (out == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+  }
+
+  std::lock_guard<std::mutex> lock(mu_);
+  auto status = ensureOpenLocked();
+  if (!status.ok()) {
+    return status;
+  }
+
+  const auto timeout = std::chrono::milliseconds(config_.read_timeout_ms());
+  std::array<uint8_t, 2> header{};
+  status = readExactLocked(header.data(), header.size(), timeout);
+  if (!status.ok()) {
+    return status;
+  }
+
+  std::array<uint8_t, 4> body{};
+  status = readExactLocked(body.data(), body.size(), timeout);
+  if (!status.ok()) {
+    return status;
+  }
+
+  std::vector<uint8_t> frame;
+  frame.reserve(8);
+  frame.insert(frame.end(), header.begin(), header.end());
+  frame.insert(frame.end(), body.begin(), body.end());
+
+  const uint8_t function = header[1];
+  if (function == kFunctionWriteMultipleCoils || function == kFunctionWriteMultipleRegisters) {
+    uint8_t byteCount = 0;
+    status = readExactLocked(&byteCount, 1, timeout);
+    if (!status.ok()) {
+      return status;
+    }
+    frame.push_back(byteCount);
+    std::vector<uint8_t> tail(static_cast<size_t>(byteCount) + 2, 0);
+    status = readExactLocked(tail.data(), tail.size(), timeout);
+    if (!status.ok()) {
+      return status;
+    }
+    frame.insert(frame.end(), tail.begin(), tail.end());
+  } else {
+    std::array<uint8_t, 2> crcBytes{};
+    status = readExactLocked(crcBytes.data(), crcBytes.size(), timeout);
+    if (!status.ok()) {
+      return status;
+    }
+    frame.insert(frame.end(), crcBytes.begin(), crcBytes.end());
+  }
+
+  if (frame.size() < 4) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "request frame too short");
+  }
+  const uint16_t expectCrc = computeCrc(frame.data(), frame.size() - 2);
+  const uint16_t gotCrc = static_cast<uint16_t>(frame[frame.size() - 2]) |
+      (static_cast<uint16_t>(frame[frame.size() - 1]) << 8);
+  if (expectCrc != gotCrc) {
+    LOG_WARNING("ModbusRTU 请求 CRC 校验失败: device={}, function={}",
+                config_.device(), static_cast<unsigned int>(function));
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "request crc mismatch");
+  }
+
+  out->slaveId = header[0];
+  out->function = function;
+  out->address = static_cast<uint16_t>((static_cast<uint16_t>(body[0]) << 8) | body[1]);
+  out->quantity = static_cast<uint16_t>((static_cast<uint16_t>(body[2]) << 8) | body[3]);
+  out->frame = std::move(frame);
+  return grpc::Status::OK;
+}
+
+grpc::Status SerialBus::WriteFrame(const std::vector<uint8_t>& frame) {
+  std::lock_guard<std::mutex> lock(mu_);
+  auto status = ensureOpenLocked();
+  if (!status.ok()) {
+    return status;
+  }
+  return writeRequestLocked(frame);
 }
 
 grpc::Status SerialBus::ensureOpenLocked() {

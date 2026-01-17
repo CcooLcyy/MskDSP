@@ -16,7 +16,8 @@
             },
             "slave_id": 1,
             "poll_interval_ms": 1000,
-            "address_base": "ADDRESS_BASE_ZERO"
+            "address_base": "ADDRESS_BASE_ZERO",
+            "mode": "LINK_MODE_MASTER" // 从站模式使用 LINK_MODE_SLAVE
           }
         },
         "point_table": {
@@ -26,7 +27,8 @@
               "tag": "coil_1",
               "function": "FUNCTION_READ_COILS",
               "address": 0,
-              "type": "DATA_TYPE_BOOL"
+              "type": "DATA_TYPE_BOOL",
+              "default_bool": false // 从站模式下的默认值
             },
             {
               "tag": "reg_1",

@@ -21,11 +21,14 @@ public:
     ModbusRTUProto::DataType type = ModbusRTUProto::DATA_TYPE_UNSPECIFIED;
     double scale = 1.0;
     double offset = 0.0;
+    std::optional<bool> defaultBool;
+    std::optional<uint16_t> defaultUInt16;
   };
 
   grpc::Status Upsert(const google::protobuf::RepeatedPtrField<ModbusRTUProto::Point>& points, bool replace);
 
   std::optional<Point> FindByTag(const std::string& tag) const;
+  std::optional<Point> FindByAddress(ModbusRTUProto::FunctionCode function, uint32_t address) const;
   std::vector<Point> Points() const;
   std::vector<std::string> Tags() const;
   void ToProto(const std::string& connName, ModbusRTUProto::PointTable* out) const;

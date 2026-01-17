@@ -2,8 +2,10 @@
 
 #include <chrono>
 #include <format>
+#include <optional>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -15,6 +17,12 @@ constexpr uint32_t kDefaultBaudRate = 9600;
 constexpr uint32_t kDefaultDataBits = 8;
 constexpr uint32_t kDefaultReadTimeoutMs = 1000;
 constexpr uint32_t kDefaultPollIntervalMs = 1000;
+constexpr uint16_t kMaxReadCoilsQuantity = 2000;
+constexpr uint8_t kFunctionReadCoils = 0x01;
+constexpr uint8_t kExceptionIllegalFunction = 0x01;
+constexpr uint8_t kExceptionIllegalDataAddress = 0x02;
+constexpr uint8_t kExceptionIllegalDataValue = 0x03;
+constexpr uint8_t kExceptionSlaveDeviceFailure = 0x04;
 
 grpc::Status makeNotFound(const std::string& connName) {
   return grpc::Status(grpc::StatusCode::NOT_FOUND, std::format("link not found: {}", connName));
@@ -86,6 +94,9 @@ grpc::Status LinkManager::normalizeLinkConfig(const ModbusRTUProto::LinkConfig& 
   if (out->address_base() == ModbusRTUProto::ADDRESS_BASE_UNSPECIFIED) {
     out->set_address_base(ModbusRTUProto::ADDRESS_BASE_ZERO);
   }
+  if (out->mode() == ModbusRTUProto::LINK_MODE_UNSPECIFIED) {
+    out->set_mode(ModbusRTUProto::LINK_MODE_MASTER);
+  }
 
   if (serial->data_bits() < 5 || serial->data_bits() > 8) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "serial.data_bits must be in [5,8]");
@@ -108,6 +119,10 @@ grpc::Status LinkManager::normalizeLinkConfig(const ModbusRTUProto::LinkConfig& 
   if (out->address_base() != ModbusRTUProto::ADDRESS_BASE_ZERO &&
       out->address_base() != ModbusRTUProto::ADDRESS_BASE_ONE) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "address_base is invalid");
+  }
+  if (out->mode() != ModbusRTUProto::LINK_MODE_MASTER &&
+      out->mode() != ModbusRTUProto::LINK_MODE_SLAVE) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "link mode is invalid");
   }
   if (out->slave_id() == 0 || out->slave_id() > 247) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "slave_id must be in [1,247]");
@@ -138,13 +153,20 @@ grpc::Status LinkManager::fillLinkInfoLocked(const LinkRuntime& link, ModbusRTUP
   return grpc::Status::OK;
 }
 
-grpc::Status LinkManager::ensureSerialCompatibleLocked(const SerialKey& key, const std::string& connName) const {
+grpc::Status LinkManager::ensureSerialCompatibleLocked(
+    const SerialKey& key, const std::string& connName, ModbusRTUProto::LinkMode mode) const {
   for (const auto& [name, link] : linksByName_) {
     if (name == connName) {
       continue;
     }
-    if (link.serialKey.device == key.device && !(link.serialKey == key)) {
+    if (link.serialKey.device != key.device) {
+      continue;
+    }
+    if (!(link.serialKey == key)) {
       return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "serial config conflicts with existing link");
+    }
+    if (link.config.mode() != mode) {
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "serial link mode conflicts with existing link");
     }
   }
   return grpc::Status::OK;
@@ -180,6 +202,276 @@ std::shared_ptr<SerialBus> LinkManager::releaseBusLocked(const SerialKey& key) {
   return nullptr;
 }
 
+grpc::Status LinkManager::startSlaveLink(const std::string& connName,
+                                         const ModbusRTUProto::LinkConfig& config,
+                                         const PointTable& pointTable,
+                                         uint32_t connId,
+                                         const SerialKey& serialKey,
+                                         std::shared_ptr<SerialBus> bus) {
+  std::lock_guard<std::mutex> lock(mu_);
+  auto it = linksByName_.find(connName);
+  if (it == linksByName_.end()) {
+    return makeNotFound(connName);
+  }
+  if (it->second.state == ModbusRTUProto::LINK_STATE_PENDING_DELETE) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "link is pending delete");
+  }
+  if (it->second.state == ModbusRTUProto::LINK_STATE_RUNNING) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "link already running");
+  }
+
+  auto& slaveBus = slaveBuses_[serialKey];
+  if (!slaveBus.bus) {
+    slaveBus.bus = bus;
+  }
+  const auto slaveId = static_cast<uint8_t>(config.slave_id());
+  if (slaveBus.linksBySlaveId.contains(slaveId)) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "slave_id already running on this serial");
+  }
+  auto snapshot = std::make_shared<SlaveLinkSnapshot>();
+  snapshot->connName = connName;
+  snapshot->config = config;
+  snapshot->connId = connId;
+  snapshot->pointTable = pointTable;
+  slaveBus.linksBySlaveId.emplace(slaveId, std::move(snapshot));
+
+  if (!slaveBus.worker.joinable()) {
+    slaveBus.worker = std::jthread([this, serialKey, bus](std::stop_token stopToken) {
+      slaveLoop(serialKey, bus, stopToken);
+    });
+  }
+
+  it->second.bus = bus;
+  it->second.state = ModbusRTUProto::LINK_STATE_RUNNING;
+  it->second.lastError.clear();
+  return grpc::Status::OK;
+}
+
+grpc::Status LinkManager::stopSlaveLink(const std::string& connName,
+                                        const ModbusRTUProto::LinkConfig& config,
+                                        const SerialKey& serialKey,
+                                        std::shared_ptr<SerialBus> bus) {
+  std::jthread worker;
+  std::shared_ptr<SerialBus> releasedBus;
+  bool shouldStopWorker = false;
+  bool removed = false;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = slaveBuses_.find(serialKey);
+    if (it != slaveBuses_.end()) {
+      const auto slaveId = static_cast<uint8_t>(config.slave_id());
+      removed = (it->second.linksBySlaveId.erase(slaveId) > 0);
+      if (it->second.linksBySlaveId.empty()) {
+        worker = std::move(it->second.worker);
+        slaveBuses_.erase(it);
+        shouldStopWorker = true;
+      }
+    }
+    if (bus) {
+      releasedBus = releaseBusLocked(serialKey);
+    }
+  }
+
+  if (!removed) {
+    LOG_DEBUG("ModbusRTU 从站响应未找到: conn_name={}", connName);
+  }
+  if (shouldStopWorker && worker.joinable()) {
+    worker.request_stop();
+    worker.join();
+  }
+
+  if (releasedBus) {
+    releasedBus->Close();
+  }
+
+  return grpc::Status::OK;
+}
+
+void LinkManager::slaveLoop(SerialKey serialKey, std::shared_ptr<SerialBus> bus, std::stop_token stopToken) {
+  LOG_INFO("ModbusRTU 从站监听启动: device={}", serialKey.device);
+  while (!stopToken.stop_requested()) {
+    SerialBus::RtuRequest request;
+    auto status = bus->ReadRequest(&request);
+    if (!status.ok()) {
+      if (status.error_code() != grpc::StatusCode::DEADLINE_EXCEEDED) {
+        LOG_WARNING("ModbusRTU 从站读取请求失败: device={}, 原因={}", serialKey.device, status.error_message());
+      }
+      continue;
+    }
+
+    if (stopToken.stop_requested()) {
+      break;
+    }
+
+    if (request.slaveId == 0) {
+      LOG_DEBUG("ModbusRTU 从站忽略广播请求: device={}", serialKey.device);
+      continue;
+    }
+
+    std::shared_ptr<SlaveLinkSnapshot> link;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto busIt = slaveBuses_.find(serialKey);
+      if (busIt == slaveBuses_.end()) {
+        continue;
+      }
+      auto it = busIt->second.linksBySlaveId.find(request.slaveId);
+      if (it == busIt->second.linksBySlaveId.end()) {
+        LOG_DEBUG("ModbusRTU 未匹配到从站地址: device={}, slave_id={}", serialKey.device, request.slaveId);
+        continue;
+      }
+      link = it->second;
+    }
+
+    auto sendException = [&](uint8_t exceptionCode, const char* reason) {
+      std::vector<uint8_t> resp;
+      resp.reserve(5);
+      resp.push_back(request.slaveId);
+      resp.push_back(static_cast<uint8_t>(request.function | 0x80));
+      resp.push_back(exceptionCode);
+      SerialBus::appendCrc(&resp);
+      auto sendStatus = bus->WriteFrame(resp);
+      if (!sendStatus.ok()) {
+        LOG_ERROR("ModbusRTU 从站异常响应发送失败: conn_name={}, 原因={}", link->connName, sendStatus.error_message());
+        updateLastError(link->connName, sendStatus.error_message());
+      } else {
+        LOG_WARNING("ModbusRTU 从站返回异常: conn_name={}, function=0x{:02X}, code=0x{:02X}, reason={}",
+                    link->connName,
+                    static_cast<unsigned int>(request.function),
+                    static_cast<unsigned int>(exceptionCode),
+                    reason);
+        updateLastError(link->connName, reason);
+      }
+    };
+
+    if (request.function != kFunctionReadCoils) {
+      sendException(kExceptionIllegalFunction, "unsupported function");
+      continue;
+    }
+    if (request.quantity == 0 || request.quantity > kMaxReadCoilsQuantity) {
+      sendException(kExceptionIllegalDataValue, "invalid coil quantity");
+      continue;
+    }
+    if (static_cast<uint32_t>(request.address) + request.quantity - 1 > 0xFFFF) {
+      sendException(kExceptionIllegalDataAddress, "coil address out of range");
+      continue;
+    }
+
+    struct CoilSlot {
+      bool hasPoint = false;
+      std::string tag;
+      std::optional<bool> defaultValue;
+    };
+    std::vector<CoilSlot> slots;
+    slots.resize(request.quantity);
+    std::vector<std::string> tags;
+    tags.reserve(request.quantity);
+
+    bool addressOverflow = false;
+    for (uint16_t i = 0; i < request.quantity; ++i) {
+      uint32_t reqAddr = static_cast<uint32_t>(request.address) + i;
+      uint32_t lookupAddr = reqAddr;
+      if (link->config.address_base() == ModbusRTUProto::ADDRESS_BASE_ONE) {
+        if (reqAddr == 0xFFFF) {
+          addressOverflow = true;
+          break;
+        }
+        lookupAddr = reqAddr + 1;
+      }
+      auto point = link->pointTable.FindByAddress(ModbusRTUProto::FUNCTION_READ_COILS, lookupAddr);
+      if (!point.has_value()) {
+        continue;
+      }
+      slots[i].hasPoint = true;
+      slots[i].tag = point->tag;
+      slots[i].defaultValue = point->defaultBool;
+      tags.push_back(point->tag);
+    }
+
+    if (addressOverflow) {
+      sendException(kExceptionIllegalDataAddress, "coil address overflow");
+      continue;
+    }
+
+    std::unordered_map<std::string, std::optional<bool>> valuesByTag;
+    bool dcOk = true;
+    if (!tags.empty()) {
+      DataCenterProto::GetLatestResponse resp;
+      auto dcStatus = dataCenter_.GetLatest(link->connId, tags, &resp);
+      if (!dcStatus.ok()) {
+        dcOk = false;
+        LOG_WARNING("ModbusRTU 从站获取 DataCenter 最新值失败: conn_name={}, 原因={}",
+                    link->connName, dcStatus.error_message());
+        updateLastError(link->connName, dcStatus.error_message());
+      } else {
+        for (const auto& update : resp.updates()) {
+          if (update.value().kind_case() == DataCenterProto::PointValue::kBoolValue) {
+            valuesByTag[update.dst_tag()] = update.value().bool_value();
+          } else {
+            valuesByTag[update.dst_tag()] = std::nullopt;
+            LOG_WARNING("ModbusRTU 从站点值类型不匹配: conn_name={}, tag={}",
+                        link->connName, update.dst_tag());
+          }
+        }
+      }
+    }
+
+    const size_t byteCount = (static_cast<size_t>(request.quantity) + 7) / 8;
+    std::vector<uint8_t> coilBytes(byteCount, 0);
+    bool missingValue = false;
+
+    for (uint16_t i = 0; i < request.quantity; ++i) {
+      bool value = false;
+      if (!slots[i].hasPoint) {
+        value = false;
+      } else if (dcOk) {
+        auto it = valuesByTag.find(slots[i].tag);
+        if (it != valuesByTag.end() && it->second.has_value()) {
+          value = it->second.value();
+        } else if (slots[i].defaultValue.has_value()) {
+          value = slots[i].defaultValue.value();
+        } else {
+          missingValue = true;
+        }
+      } else {
+        if (slots[i].defaultValue.has_value()) {
+          value = slots[i].defaultValue.value();
+        } else {
+          missingValue = true;
+        }
+      }
+
+      if (missingValue) {
+        break;
+      }
+      if (value) {
+        coilBytes[static_cast<size_t>(i / 8)] |= static_cast<uint8_t>(1u << (i % 8));
+      }
+    }
+
+    if (missingValue) {
+      sendException(kExceptionSlaveDeviceFailure, "missing coil value");
+      continue;
+    }
+
+    std::vector<uint8_t> response;
+    response.reserve(3 + coilBytes.size() + 2);
+    response.push_back(request.slaveId);
+    response.push_back(kFunctionReadCoils);
+    response.push_back(static_cast<uint8_t>(coilBytes.size()));
+    response.insert(response.end(), coilBytes.begin(), coilBytes.end());
+    SerialBus::appendCrc(&response);
+
+    auto sendStatus = bus->WriteFrame(response);
+    if (!sendStatus.ok()) {
+      LOG_ERROR("ModbusRTU 从站响应发送失败: conn_name={}, 原因={}", link->connName, sendStatus.error_message());
+      updateLastError(link->connName, sendStatus.error_message());
+    }
+  }
+
+  LOG_INFO("ModbusRTU 从站监听结束: device={}", serialKey.device);
+}
+
 grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& request, ModbusRTUProto::LinkInfo* out) {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
@@ -206,7 +498,7 @@ grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& re
       if (it->second.state == ModbusRTUProto::LINK_STATE_PENDING_DELETE) {
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "link is pending delete");
       }
-      status = ensureSerialCompatibleLocked(serialKey, connName);
+      status = ensureSerialCompatibleLocked(serialKey, connName, normalized.mode());
       if (!status.ok()) {
         return status;
       }
@@ -220,7 +512,7 @@ grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& re
     if (pendingCreateByName_.contains(connName)) {
       return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name already exists");
     }
-    status = ensureSerialCompatibleLocked(serialKey, connName);
+    status = ensureSerialCompatibleLocked(serialKey, connName, normalized.mode());
     if (!status.ok()) {
       return status;
     }
@@ -361,6 +653,22 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
     return status;
   }
 
+  if (config.mode() == ModbusRTUProto::LINK_MODE_SLAVE) {
+    status = startSlaveLink(connName, config, pointTable, connId, serialKey, bus);
+    if (!status.ok()) {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto released = releaseBusLocked(serialKey);
+      if (released) {
+        released->Close();
+      }
+      updateLastError(connName, status.error_message());
+      return status;
+    }
+    LOG_INFO("ModbusRTU 已启动从站响应: conn_name={}, slave_id={}, device={}",
+             connName, config.slave_id(), config.serial().device());
+    return grpc::Status::OK;
+  }
+
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = linksByName_.find(connName);
@@ -402,6 +710,8 @@ grpc::Status LinkManager::StopLink(const std::string& connName) {
   SerialKey serialKey;
   std::shared_ptr<SerialBus> bus;
   bool pendingDelete = false;
+  ModbusRTUProto::LinkConfig config;
+  ModbusRTUProto::LinkMode mode = ModbusRTUProto::LINK_MODE_UNSPECIFIED;
 
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -411,10 +721,18 @@ grpc::Status LinkManager::StopLink(const std::string& connName) {
     }
     pendingDelete = (it->second.state == ModbusRTUProto::LINK_STATE_PENDING_DELETE);
     pollThread = std::move(it->second.pollThread);
+    config = it->second.config;
+    mode = it->second.config.mode();
     serialKey = it->second.serialKey;
     bus = it->second.bus;
     it->second.bus.reset();
     it->second.state = pendingDelete ? ModbusRTUProto::LINK_STATE_PENDING_DELETE : ModbusRTUProto::LINK_STATE_STOPPED;
+  }
+
+  if (mode == ModbusRTUProto::LINK_MODE_SLAVE) {
+    stopSlaveLink(connName, config, serialKey, bus);
+    LOG_INFO("ModbusRTU 已停止从站响应: conn_name={}", connName);
+    return grpc::Status::OK;
   }
 
   if (pollThread.joinable()) {

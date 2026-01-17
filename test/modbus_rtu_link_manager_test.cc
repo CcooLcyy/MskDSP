@@ -149,3 +149,37 @@ TEST(ModbusRtuLinkManagerTest, StartLinkRejectsZeroAddressWhenBaseOne) {
   ASSERT_TRUE(mgr.GetLink("conn-addr", &got).ok());
   EXPECT_EQ(got.state(), ModbusRTUProto::LINK_STATE_STOPPED);
 }
+
+// 验证：未设置 mode 时默认归一化为 MASTER。
+TEST(ModbusRtuLinkManagerTest, UpsertLinkDefaultsToMasterMode) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("ModbusRTU");
+  mgr.setDataCenterStub(stub);
+  auto req = MakeLinkReq("conn-default-mode", "/dev/ttyUSB0", 9600, 1);
+
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+  EXPECT_EQ(info.config().mode(), ModbusRTUProto::LINK_MODE_MASTER);
+}
+
+// 验证：同一串口不允许 MASTER/SLAVE 混用。
+TEST(ModbusRtuLinkManagerTest, UpsertLinkRejectsMixedModesOnSameSerial) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("ModbusRTU");
+  mgr.setDataCenterStub(stub);
+
+  auto req1 = MakeLinkReq("conn-master", "/dev/ttyUSB0", 9600, 1);
+  req1.mutable_config()->set_mode(ModbusRTUProto::LINK_MODE_MASTER);
+  ModbusRTUProto::LinkInfo info1;
+  ASSERT_TRUE(mgr.UpsertLink(req1, &info1).ok());
+
+  auto req2 = MakeLinkReq("conn-slave", "/dev/ttyUSB0", 9600, 2);
+  req2.mutable_config()->set_mode(ModbusRTUProto::LINK_MODE_SLAVE);
+  ModbusRTUProto::LinkInfo info2;
+  auto st = mgr.UpsertLink(req2, &info2);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+}

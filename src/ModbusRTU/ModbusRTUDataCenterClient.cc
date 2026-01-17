@@ -114,6 +114,32 @@ grpc::Status DataCenterClient::UpsertPointTable(uint32_t connId, const std::vect
   return stub->UpsertPointTable(&ctx, req, &resp);
 }
 
+grpc::Status DataCenterClient::GetLatest(
+    uint32_t connId, const std::vector<std::string>& tags, DataCenterProto::GetLatestResponse* out) {
+  if (out == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+  }
+  if (connId == 0) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id is required");
+  }
+  for (const auto& tag : tags) {
+    if (tag.empty()) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tags contains empty string");
+    }
+  }
+  auto stub = getStub();
+
+  DataCenterProto::GetLatestRequest req;
+  req.set_conn_id(connId);
+  for (const auto& tag : tags) {
+    req.add_tags(tag);
+  }
+
+  grpc::ClientContext ctx;
+  out->Clear();
+  return stub->GetLatest(&ctx, req, out);
+}
+
 grpc::Status DataCenterClient::PublishBool(
     uint32_t connId, const std::string& tag, bool value, DataCenterProto::Quality quality, int64_t tsMs) {
   if (connId == 0) {
