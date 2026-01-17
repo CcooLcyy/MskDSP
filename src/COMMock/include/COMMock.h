@@ -6,6 +6,7 @@
 #include <mutex>
 #include <stop_token>
 #include <string>
+#include <sys/types.h>
 #include <vector>
 
 #include "ModuleInterface.h"
@@ -28,21 +29,24 @@ private:
   struct PortConfig {
     std::string name;
     std::string dev_path;
+    std::string peer_name;
+    size_t index = 0;
   };
 
-  struct PortHandle {
-    PortConfig config;
-    int master_fd = -1;
-    int slave_fd = -1;
-    std::string slave_path;
-    bool symlink_created = false;
+  struct PortPair {
+    PortConfig left;
+    PortConfig right;
+    pid_t pid = -1;
   };
 
-  bool createPort(const PortConfig &config, size_t index, PortHandle *handle);
-  void cleanupPorts(std::vector<PortHandle> *ports);
+  bool prepareDevPath(const PortConfig &config);
+  bool startSocatPair(const PortConfig &left, const PortConfig &right, PortPair *pair);
+  void cleanupPairs(std::vector<PortPair> *pairs);
+  void cleanupDevPath(const PortConfig &config);
+  void stopSocat(const PortPair &pair);
 
-  std::mutex ports_mutex_;
-  std::vector<PortHandle> ports_;
+  std::mutex pairs_mutex_;
+  std::vector<PortPair> pairs_;
   std::shared_ptr<COMMockGrpcServiceImpl> comMockService_;
 };
 }  // namespace COMMock

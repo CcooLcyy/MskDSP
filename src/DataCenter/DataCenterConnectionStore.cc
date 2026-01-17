@@ -30,23 +30,23 @@ grpc::Status validateConnectionsConfig(const DataCenterProto::ConnectionsConfig&
 
   for (const auto& conn : config.conns()) {
     if (conn.conn_id() == 0) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conns contains conn_id=0");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conns 包含 conn_id=0");
     }
     if (conn.module_name().empty()) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conns contains empty module_name");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conns 包含空 module_name");
     }
     if (conn.conn_name().empty()) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conns contains empty conn_name");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conns 包含空 conn_name");
     }
 
     auto [_, idInserted] = ids.emplace(conn.conn_id());
     if (!idInserted) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conns contains duplicate conn_id");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conns 包含重复的 conn_id");
     }
 
     auto [__, keyInserted] = keys.emplace(conn.module_name(), conn.conn_name());
     if (!keyInserted) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conns contains duplicate (module_name, conn_name)");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conns 包含重复的 (module_name, conn_name)");
     }
   }
 

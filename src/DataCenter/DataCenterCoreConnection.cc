@@ -7,7 +7,7 @@
 namespace DataCenter {
 grpc::Status DataCenterCore::GetConnectionByKey(const DataCenterProto::ConnectionKey &key, DataCenterProto::ConnectionInfo *out) const {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   auto status = validateConnKey(key);
   if (!status.ok()) {
@@ -17,11 +17,11 @@ grpc::Status DataCenterCore::GetConnectionByKey(const DataCenterProto::Connectio
   ConnKey lookup{key.module_name(), key.conn_name()};
   auto it = connIdsByKey_.find(lookup);
   if (it == connIdsByKey_.end()) {
-    return grpc::Status(grpc::StatusCode::NOT_FOUND, "connection not found");
+    return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接未找到");
   }
   auto connIt = connections_.find(it->second);
   if (connIt == connections_.end()) {
-    return grpc::Status(grpc::StatusCode::NOT_FOUND, "connection not found");
+    return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接未找到");
   }
   *out = connIt->second;
   return grpc::Status::OK;
@@ -34,22 +34,22 @@ grpc::Status DataCenterCore::ReplaceConnectionsConfig(const DataCenterProto::Con
   uint32_t maxId = 0;
   for (const auto &conn : config.conns()) {
     if (conn.conn_id() == 0) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conns contains conn_id=0");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conns 包含 conn_id=0");
     }
     if (conn.module_name().empty()) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conns contains empty module_name");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conns 包含空 module_name");
     }
     if (conn.conn_name().empty()) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conns contains empty conn_name");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conns 包含空 conn_name");
     }
 
     if (!nextConnections.emplace(conn.conn_id(), conn).second) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conns contains duplicate conn_id");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conns 包含重复的 conn_id");
     }
 
     ConnKey key{conn.module_name(), conn.conn_name()};
     if (!nextByKey.emplace(std::move(key), conn.conn_id()).second) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conns contains duplicate (module_name, conn_name)");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conns 包含重复的 (module_name, conn_name)");
     }
 
     maxId = std::max(maxId, conn.conn_id());
@@ -97,7 +97,7 @@ DataCenterProto::ConnectionsConfig DataCenterCore::DumpConnectionsConfig() const
 
 grpc::Status DataCenterCore::GetOrCreateConnection(const DataCenterProto::GetOrCreateConnectionRequest &request, DataCenterProto::ConnectionInfo *out) {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   auto status = validateConnKey(request.key());
   if (!status.ok()) {
@@ -115,13 +115,13 @@ grpc::Status DataCenterCore::GetOrCreateConnection(const DataCenterProto::GetOrC
   }
 
   if (nextConnId_ == 0) {
-    return grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, "conn_id exhausted");
+    return grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, "conn_id 已耗尽");
   }
 
   uint32_t connId = nextConnId_;
   while (connections_.contains(connId)) {
     if (connId == std::numeric_limits<uint32_t>::max()) {
-      return grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, "conn_id exhausted");
+      return grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, "conn_id 已耗尽");
     }
     ++connId;
   }
@@ -140,7 +140,7 @@ grpc::Status DataCenterCore::GetOrCreateConnection(const DataCenterProto::GetOrC
 
 grpc::Status DataCenterCore::RenameConnection(const DataCenterProto::RenameConnectionRequest &request, DataCenterProto::ConnectionInfo *out) {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   auto status = validateConnKey(request.old_key());
   if (!status.ok()) {
@@ -154,7 +154,7 @@ grpc::Status DataCenterCore::RenameConnection(const DataCenterProto::RenameConne
   ConnKey oldKey{request.old_key().module_name(), request.old_key().conn_name()};
   auto it = connIdsByKey_.find(oldKey);
   if (it == connIdsByKey_.end()) {
-    return grpc::Status(grpc::StatusCode::NOT_FOUND, "connection not found");
+    return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接未找到");
   }
   const uint32_t connId = it->second;
 
@@ -162,7 +162,7 @@ grpc::Status DataCenterCore::RenameConnection(const DataCenterProto::RenameConne
   if (oldKey == newKey) {
     auto connIt = connections_.find(connId);
     if (connIt == connections_.end()) {
-      return grpc::Status(grpc::StatusCode::NOT_FOUND, "connection not found");
+      return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接未找到");
     }
     *out = connIt->second;
     return grpc::Status::OK;
@@ -170,7 +170,7 @@ grpc::Status DataCenterCore::RenameConnection(const DataCenterProto::RenameConne
 
   auto newIt = connIdsByKey_.find(newKey);
   if (newIt != connIdsByKey_.end() && newIt->second != connId) {
-    return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "connection already exists");
+    return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "连接已存在");
   }
 
   connIdsByKey_.erase(it);
@@ -178,7 +178,7 @@ grpc::Status DataCenterCore::RenameConnection(const DataCenterProto::RenameConne
 
   auto connIt = connections_.find(connId);
   if (connIt == connections_.end()) {
-    return grpc::Status(grpc::StatusCode::NOT_FOUND, "connection not found");
+    return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接未找到");
   }
   connIt->second.set_module_name(request.new_key().module_name());
   connIt->second.set_conn_name(request.new_key().conn_name());
@@ -195,7 +195,7 @@ grpc::Status DataCenterCore::DeleteConnection(const DataCenterProto::DeleteConne
   ConnKey key{request.key().module_name(), request.key().conn_name()};
   auto it = connIdsByKey_.find(key);
   if (it == connIdsByKey_.end()) {
-    return grpc::Status(grpc::StatusCode::NOT_FOUND, "connection not found");
+    return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接未找到");
   }
   const uint32_t connId = it->second;
 
@@ -240,24 +240,24 @@ grpc::Status DataCenterCore::DeleteConnection(const DataCenterProto::DeleteConne
 grpc::Status DataCenterCore::UpsertConnection(const DataCenterProto::UpsertConnectionRequest &request) {
   const auto &conn = request.conn();
   if (conn.conn_id() == 0) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id 不能为空");
   }
   if (conn.module_name().empty()) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "module_name is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "module_name 不能为空");
   }
   if (conn.conn_name().empty()) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_name is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_name 不能为空");
   }
 
   auto existing = connections_.find(conn.conn_id());
   if (existing == connections_.end()) {
-    return grpc::Status(grpc::StatusCode::NOT_FOUND, "conn_id not allocated");
+    return grpc::Status(grpc::StatusCode::NOT_FOUND, "conn_id 未分配");
   }
 
   ConnKey nextKey{conn.module_name(), conn.conn_name()};
   auto nextIt = connIdsByKey_.find(nextKey);
   if (nextIt != connIdsByKey_.end() && nextIt->second != conn.conn_id()) {
-    return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "connection already exists");
+    return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "连接已存在");
   }
 
   const auto &cur = existing->second;

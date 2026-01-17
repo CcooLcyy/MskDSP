@@ -574,16 +574,6 @@ void ConfigPusher::applyConfig() {
     }
   }
 
-  if (hasModbus && runningModbus) {
-    auto modbusChannel = grpc::CreateChannel(runningModbus->inner_grpc_server(), grpc::InsecureChannelCredentials());
-    auto modbusStub = ModbusRTUProto::ModbusRTUService::NewStub(modbusChannel);
-    if (!applyModbusRtuConfig(modbusConfig->modbus_rtu(), modbusStub.get())) {
-      LOG_ERROR("ModbusRTU 配置下发存在错误");
-    } else {
-      LOG_INFO("ModbusRTU 配置下发完成");
-    }
-  }
-
   if (hasComMock && runningComMock) {
     auto comMockChannel = grpc::CreateChannel(runningComMock->inner_grpc_server(), grpc::InsecureChannelCredentials());
     auto comMockStub = COMMockProto::COMMockService::NewStub(comMockChannel);
@@ -591,6 +581,16 @@ void ConfigPusher::applyConfig() {
       LOG_ERROR("COMMock 配置下发存在错误");
     } else {
       LOG_INFO("COMMock 配置下发完成");
+    }
+  }
+
+  if (hasModbus && runningModbus) {
+    auto modbusChannel = grpc::CreateChannel(runningModbus->inner_grpc_server(), grpc::InsecureChannelCredentials());
+    auto modbusStub = ModbusRTUProto::ModbusRTUService::NewStub(modbusChannel);
+    if (!applyModbusRtuConfig(modbusConfig->modbus_rtu(), modbusStub.get())) {
+      LOG_ERROR("ModbusRTU 配置下发存在错误");
+    } else {
+      LOG_INFO("ModbusRTU 配置下发完成");
     }
   }
 

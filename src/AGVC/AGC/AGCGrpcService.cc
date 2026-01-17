@@ -14,11 +14,11 @@ grpc::Status AGCGrpcServiceImpl::UpsertGroup(
     grpc::ServerContext*, const AGCProto::UpsertGroupRequest* request, AGCProto::GroupInfo* response) {
   if (module_ == nullptr) {
     LOG_ERROR("AGC 服务未就绪");
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "module not ready");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
   }
   if (request == nullptr || response == nullptr) {
     LOG_ERROR("AGC UpsertGroup 请求为空");
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request/response is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
   }
   auto status = module_->groupManager().UpsertGroup(*request, response);
   if (!status.ok()) {
@@ -33,11 +33,11 @@ grpc::Status AGCGrpcServiceImpl::GetGroup(
     grpc::ServerContext*, const AGCProto::GetGroupRequest* request, AGCProto::GroupInfo* response) {
   if (module_ == nullptr) {
     LOG_ERROR("AGC 服务未就绪");
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "module not ready");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
   }
   if (request == nullptr || response == nullptr) {
     LOG_ERROR("AGC GetGroup 请求为空");
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request/response is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
   }
   auto status = module_->groupManager().GetGroup(request->group_name(), response);
   if (!status.ok()) {
@@ -50,11 +50,11 @@ grpc::Status AGCGrpcServiceImpl::ListGroups(
     grpc::ServerContext*, const AGCProto::Empty*, AGCProto::ListGroupsResponse* response) {
   if (module_ == nullptr) {
     LOG_ERROR("AGC 服务未就绪");
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "module not ready");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
   }
   if (response == nullptr) {
     LOG_ERROR("AGC ListGroups 响应为空");
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "response is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
   }
   auto status = module_->groupManager().ListGroups(response);
   if (!status.ok()) {
@@ -66,11 +66,11 @@ grpc::Status AGCGrpcServiceImpl::ListGroups(
 grpc::Status AGCGrpcServiceImpl::DeleteGroup(grpc::ServerContext*, const AGCProto::DeleteGroupRequest* request, AGCProto::Empty*) {
   if (module_ == nullptr) {
     LOG_ERROR("AGC 服务未就绪");
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "module not ready");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
   }
   if (request == nullptr) {
     LOG_ERROR("AGC DeleteGroup 请求为空");
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求为空");
   }
   auto status = module_->groupManager().DeleteGroup(request->group_name());
   if (!status.ok()) {
@@ -84,11 +84,11 @@ grpc::Status AGCGrpcServiceImpl::DeleteGroup(grpc::ServerContext*, const AGCProt
 grpc::Status AGCGrpcServiceImpl::StartGroup(grpc::ServerContext*, const AGCProto::StartGroupRequest* request, AGCProto::Empty*) {
   if (module_ == nullptr) {
     LOG_ERROR("AGC 服务未就绪");
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "module not ready");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
   }
   if (request == nullptr) {
     LOG_ERROR("AGC StartGroup 请求为空");
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求为空");
   }
   auto status = module_->groupManager().StartGroup(request->group_name());
   if (!status.ok()) {
@@ -102,11 +102,11 @@ grpc::Status AGCGrpcServiceImpl::StartGroup(grpc::ServerContext*, const AGCProto
 grpc::Status AGCGrpcServiceImpl::StopGroup(grpc::ServerContext*, const AGCProto::StopGroupRequest* request, AGCProto::Empty*) {
   if (module_ == nullptr) {
     LOG_ERROR("AGC 服务未就绪");
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "module not ready");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
   }
   if (request == nullptr) {
     LOG_ERROR("AGC StopGroup 请求为空");
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求为空");
   }
   auto status = module_->groupManager().StopGroup(request->group_name());
   if (!status.ok()) {

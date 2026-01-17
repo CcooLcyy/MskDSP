@@ -14,7 +14,7 @@
 namespace AGC {
 namespace {
 grpc::Status makeNotFound(const std::string &groupName) {
-  return grpc::Status(grpc::StatusCode::NOT_FOUND, std::format("group not found: {}", groupName));
+  return grpc::Status(grpc::StatusCode::NOT_FOUND, std::format("未找到控制组: {}", groupName));
 }
 
 grpc::Status makeInvalid(std::string message) {
@@ -39,7 +39,7 @@ void GroupManager::setDataCenterStub(std::shared_ptr<DataCenterProto::DataCenter
 
 grpc::Status GroupManager::validateGroupName(const std::string &groupName) const {
   if (groupName.empty()) {
-    return makeInvalid("group_name is required");
+    return makeInvalid("group_name 不能为空");
   }
   return grpc::Status::OK;
 }
@@ -50,30 +50,30 @@ grpc::Status GroupManager::validateGroupConfig(const AGCProto::GroupConfig &conf
     return st;
   }
   if (!config.has_p_cmd() || !config.p_cmd().has_signal()) {
-    return makeInvalid("p_cmd.signal is required");
+    return makeInvalid("p_cmd.signal 不能为空");
   }
   if (config.p_cmd().signal().tag().empty()) {
-    return makeInvalid("p_cmd.signal.tag is required");
+    return makeInvalid("p_cmd.signal.tag 不能为空");
   }
   if (config.members_size() <= 0) {
-    return makeInvalid("members is required");
+    return makeInvalid("members 不能为空");
   }
 
   std::unordered_set<std::string> memberNames;
   memberNames.reserve(static_cast<size_t>(config.members_size()));
   for (const auto &m : config.members()) {
     if (m.member_name().empty()) {
-      return makeInvalid("members.member_name is required");
+      return makeInvalid("members.member_name 不能为空");
     }
     if (!memberNames.emplace(m.member_name()).second) {
-      return makeInvalid(std::format("duplicate member_name: {}", m.member_name()));
+      return makeInvalid(std::format("member_name 重复: {}", m.member_name()));
     }
     if (!m.has_p_meas() || m.p_meas().tag().empty()) {
-      return makeInvalid(std::format("members[{}].p_meas.tag is required", m.member_name()));
+      return makeInvalid(std::format("members[{}].p_meas.tag 不能为空", m.member_name()));
     }
     if (m.controllable()) {
       if (!m.has_p_set() || !m.p_set().has_signal() || m.p_set().signal().tag().empty()) {
-        return makeInvalid(std::format("members[{}].p_set.signal.tag is required for controllable member", m.member_name()));
+        return makeInvalid(std::format("members[{}].p_set.signal.tag 不能为空（可控成员）", m.member_name()));
       }
     }
   }
@@ -82,7 +82,7 @@ grpc::Status GroupManager::validateGroupConfig(const AGCProto::GroupConfig &conf
 
 grpc::Status GroupManager::fillGroupInfoLocked(const GroupRuntime &g, AGCProto::GroupInfo *out) const {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   out->Clear();
   *out->mutable_config() = g.config;
@@ -94,7 +94,7 @@ grpc::Status GroupManager::fillGroupInfoLocked(const GroupRuntime &g, AGCProto::
 
 grpc::Status GroupManager::UpsertGroup(const AGCProto::UpsertGroupRequest &request, AGCProto::GroupInfo *out) {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   auto status = validateGroupConfig(request.config());
   if (!status.ok()) {
@@ -107,13 +107,13 @@ grpc::Status GroupManager::UpsertGroup(const AGCProto::UpsertGroupRequest &reque
     auto it = groupsByName_.find(groupName);
     if (it != groupsByName_.end()) {
       if (request.create_only()) {
-        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "group_name already exists");
+        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "group_name 已存在");
       }
       if (it->second.state == AGCProto::GROUP_STATE_RUNNING) {
-        return makePreconditionFailed("stop group before updating config");
+        return makePreconditionFailed("更新配置前请先停止控制组");
       }
       if (it->second.state == AGCProto::GROUP_STATE_PENDING_DELETE) {
-        return makePreconditionFailed("group is pending delete");
+        return makePreconditionFailed("控制组处于待删除状态");
       }
 
       it->second.config = request.config();
@@ -121,7 +121,7 @@ grpc::Status GroupManager::UpsertGroup(const AGCProto::UpsertGroupRequest &reque
       it->second.lastError.clear();
       fillGroupInfoLocked(it->second, out);
     } else {
-      // create-only should fail if conn_name already exists in DataCenter.
+      // create_only 在 DataCenter 已存在同名连接时应失败。
       if (request.create_only()) {
         bool exists = false;
         status = dataCenter_.ConnectionExists(groupName, &exists);
@@ -129,7 +129,7 @@ grpc::Status GroupManager::UpsertGroup(const AGCProto::UpsertGroupRequest &reque
           return status;
         }
         if (exists) {
-          return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "group_name already exists");
+          return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "group_name 已存在");
         }
       }
 
@@ -139,7 +139,7 @@ grpc::Status GroupManager::UpsertGroup(const AGCProto::UpsertGroupRequest &reque
         return status;
       }
       if (connInfo.conn_id() == 0) {
-        return grpc::Status(grpc::StatusCode::INTERNAL, "DataCenter returned conn_id=0");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "DataCenter 返回 conn_id=0");
       }
 
       auto [pos, inserted] = groupsByName_.try_emplace(groupName);
@@ -153,7 +153,7 @@ grpc::Status GroupManager::UpsertGroup(const AGCProto::UpsertGroupRequest &reque
     }
   }
 
-  // Best-effort: register tags into DataCenter point table (no rollback).
+  // 尽力而为：将 tags 注册到 DataCenter 点表（不回滚）。
   const auto tags = collectAllTags(request.config());
   if (!tags.empty()) {
     uint32_t connId = 0;
@@ -187,7 +187,7 @@ grpc::Status GroupManager::UpsertGroup(const AGCProto::UpsertGroupRequest &reque
 
 grpc::Status GroupManager::GetGroup(const std::string &groupName, AGCProto::GroupInfo *out) const {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   auto status = validateGroupName(groupName);
   if (!status.ok()) {
@@ -204,7 +204,7 @@ grpc::Status GroupManager::GetGroup(const std::string &groupName, AGCProto::Grou
 
 grpc::Status GroupManager::ListGroups(AGCProto::ListGroupsResponse *out) const {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   std::lock_guard<std::mutex> lock(mu_);
   out->Clear();
@@ -258,7 +258,7 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
     }
   });
 
-  // Cache the control period while the group is running.
+  // 控制组运行期间缓存控制周期。
   uint32_t periodMs = g->config.has_loop() ? g->config.loop().period_ms() : 0;
   if (periodMs == 0) {
     periodMs = 200;
@@ -284,10 +284,10 @@ grpc::Status GroupManager::StartGroup(const std::string &groupName) {
     return makeNotFound(groupName);
   }
   if (it->second.state == AGCProto::GROUP_STATE_PENDING_DELETE) {
-    return makePreconditionFailed("group is pending delete");
+    return makePreconditionFailed("控制组处于待删除状态");
   }
   if (it->second.state == AGCProto::GROUP_STATE_RUNNING) {
-    return makePreconditionFailed("group already running");
+    return makePreconditionFailed("控制组已在运行");
   }
   startThreadsLocked(groupName, &it->second);
   it->second.state = AGCProto::GROUP_STATE_RUNNING;
@@ -539,7 +539,7 @@ void GroupManager::controlTick(const std::string &groupName) {
     }
   }
 
-  // Publish member setpoints.
+  // 下发成员设定值。
   const auto memberCount = static_cast<size_t>(config.members_size());
   for (size_t i = 0; i < memberCount && i < output.memberPublish.size() && i < output.memberPublishRaw.size(); ++i) {
     if (!output.memberPublish[i]) {
@@ -552,7 +552,7 @@ void GroupManager::controlTick(const std::string &groupName) {
     (void)dataCenter_.PublishDouble(connId, m.p_set().signal().tag(), output.memberPublishRaw[i], quality, 0);
   }
 
-  // Update state (best-effort) after publishing.
+  // 下发后更新状态（尽力而为）。
   bool shouldLogUnallocated = false;
   const auto unallocatedKw = output.unallocatedKw;
   const auto targetControllableKw = output.targetControllableKw;

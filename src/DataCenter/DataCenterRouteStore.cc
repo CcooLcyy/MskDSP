@@ -7,16 +7,16 @@ namespace {
 grpc::Status validateRoutesConfig(const DataCenterProto::RoutesConfig& config) {
   for (const auto& route : config.routes()) {
     if (route.src().conn_id() == 0) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "routes contains src conn_id=0");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "routes 包含 src conn_id=0");
     }
     if (route.src().tag().empty()) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "routes contains empty src tag");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "routes 包含空 src tag");
     }
     if (route.dst().conn_id() == 0) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "routes contains dst conn_id=0");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "routes 包含 dst conn_id=0");
     }
     if (route.dst().tag().empty()) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "routes contains empty dst tag");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "routes 包含空 dst tag");
     }
   }
   return grpc::Status::OK;

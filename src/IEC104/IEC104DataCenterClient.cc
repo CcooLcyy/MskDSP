@@ -31,11 +31,11 @@ void DataCenterClient::setServerAddress(std::string address) {
 
 grpc::Status DataCenterClient::ConnectionExists(const std::string& connName, bool* outExists) {
   if (outExists == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "outExists is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "outExists 为空");
   }
   *outExists = false;
   if (connName.empty()) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_name is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_name 不能为空");
   }
   auto stub = getStub();
 
@@ -58,10 +58,10 @@ grpc::Status DataCenterClient::ConnectionExists(const std::string& connName, boo
 
 grpc::Status DataCenterClient::GetOrCreateConnection(const std::string& connName, DataCenterProto::ConnectionInfo* out) {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   if (connName.empty()) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_name is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_name 不能为空");
   }
   auto stub = getStub();
 
@@ -77,7 +77,7 @@ grpc::Status DataCenterClient::GetOrCreateConnection(const std::string& connName
 
 grpc::Status DataCenterClient::DeleteConnection(const std::string& connName) {
   if (connName.empty()) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_name is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_name 不能为空");
   }
   auto stub = getStub();
 
@@ -93,11 +93,11 @@ grpc::Status DataCenterClient::DeleteConnection(const std::string& connName) {
 
 grpc::Status DataCenterClient::UpsertPointTable(uint32_t connId, const std::vector<std::string>& tags, bool replace) {
   if (connId == 0) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id 不能为空");
   }
   for (const auto& tag : tags) {
     if (tag.empty()) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tags contains empty string");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tags 包含空字符串");
     }
   }
   auto stub = getStub();
@@ -117,10 +117,10 @@ grpc::Status DataCenterClient::UpsertPointTable(uint32_t connId, const std::vect
 grpc::Status DataCenterClient::PublishDouble(
     uint32_t connId, const std::string& tag, double value, DataCenterProto::Quality quality, int64_t tsMs) {
   if (connId == 0) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id 不能为空");
   }
   if (tag.empty()) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tag is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tag 不能为空");
   }
   auto stub = getStub();
 
@@ -141,14 +141,14 @@ grpc::Status DataCenterClient::PublishDouble(
 grpc::Status DataCenterClient::GetLatest(
     uint32_t connId, const std::vector<std::string>& tags, DataCenterProto::GetLatestResponse* out) {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   if (connId == 0) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id 不能为空");
   }
   for (const auto& tag : tags) {
     if (tag.empty()) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tags contains empty string");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tags 包含空字符串");
     }
   }
   auto stub = getStub();

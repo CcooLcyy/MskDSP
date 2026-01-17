@@ -165,7 +165,7 @@ bool parseVersionParts(const std::string &version, std::vector<int> *parts, std:
   parts->clear();
   if (version.empty()) {
     if (error != nullptr) {
-      *error = "version is empty";
+      *error = "版本为空";
     }
     return false;
   }
@@ -176,14 +176,14 @@ bool parseVersionParts(const std::string &version, std::vector<int> *parts, std:
     auto segment = version.substr(start, end == std::string::npos ? std::string::npos : end - start);
     if (segment.empty()) {
       if (error != nullptr) {
-        *error = "version segment is empty";
+        *error = "版本段为空";
       }
       return false;
     }
     for (const auto ch : segment) {
       if (!std::isdigit(static_cast<unsigned char>(ch))) {
         if (error != nullptr) {
-          *error = "version segment is not numeric";
+          *error = "版本段不是数字";
         }
         return false;
       }
@@ -229,15 +229,15 @@ bool parseVersionRange(const std::string &expr, std::vector<VersionConstraint> *
     if (token == "<" || token == "<=" || token == ">" || token == ">=" || token == "=") {
       op = token;
       if (!(iss >> version)) {
-        if (error != nullptr) {
-          *error = "missing version after operator";
-        }
-        return false;
+      if (error != nullptr) {
+        *error = "操作符后缺少版本号";
+      }
+      return false;
       }
     } else {
       if (token.rfind("==", 0) == 0) {
         if (error != nullptr) {
-          *error = "operator '==' is not supported";
+          *error = "不支持操作符 '=='";
         }
         return false;
       }
@@ -254,7 +254,7 @@ bool parseVersionRange(const std::string &expr, std::vector<VersionConstraint> *
     }
     if (version.empty()) {
       if (error != nullptr) {
-        *error = "missing version in constraint";
+        *error = "约束中缺少版本号";
       }
       return false;
     }
@@ -281,7 +281,7 @@ bool parseVersionRange(const std::string &expr, std::vector<VersionConstraint> *
       opValue = VersionConstraint::Op::kGte;
     } else {
       if (error != nullptr) {
-        *error = "unknown operator";
+        *error = "未知操作符";
       }
       return false;
     }
@@ -290,7 +290,7 @@ bool parseVersionRange(const std::string &expr, std::vector<VersionConstraint> *
 
   if (constraints->empty()) {
     if (error != nullptr) {
-      *error = "empty version constraint";
+      *error = "版本约束为空";
     }
     return false;
   }
@@ -344,7 +344,7 @@ bool loadModuleManifest(const std::filesystem::path &libPath, ModuleManagerProto
     LOG_INFO("检查 manifest 符号: {}", libPath.filename().string());
     if (!lib.has("GetModuleManifestPb")) {
       if (error != nullptr) {
-        *error = "manifest symbol GetModuleManifestPb not found";
+        *error = "未找到 manifest 符号 GetModuleManifestPb";
       }
       return false;
     }
@@ -356,20 +356,20 @@ bool loadModuleManifest(const std::filesystem::path &libPath, ModuleManagerProto
     size_t size = 0;
     if (!fn(&data, &size)) {
       if (error != nullptr) {
-        *error = "manifest function returned false";
+        *error = "manifest 函数返回 false";
       }
       return false;
     }
     if (data == nullptr || size == 0) {
       if (error != nullptr) {
-        *error = "manifest returned empty payload";
+        *error = "manifest 返回空数据";
       }
       return false;
     }
     LOG_INFO("解析 manifest 数据: {} bytes ({})", size, libPath.filename().string());
     if (!manifest->ParseFromArray(data, static_cast<int>(size))) {
       if (error != nullptr) {
-        *error = "manifest parse failed";
+        *error = "manifest 解析失败";
       }
       return false;
     }
@@ -387,19 +387,19 @@ bool loadModuleManifest(const std::filesystem::path &libPath, ModuleManagerProto
 bool validateManifest(const ModuleManagerProto::ModuleManifest &manifest, const std::string &expectedName, std::string *error) {
   if (manifest.module_name().empty()) {
     if (error != nullptr) {
-      *error = "manifest module_name is empty";
+      *error = "manifest 的 module_name 为空";
     }
     return false;
   }
   if (manifest.module_name() != expectedName) {
     if (error != nullptr) {
-      *error = "manifest module_name mismatch: expected " + expectedName + " got " + manifest.module_name();
+      *error = "manifest 的 module_name 不匹配: 期望 " + expectedName + " 实际 " + manifest.module_name();
     }
     return false;
   }
   if (manifest.version().version().empty()) {
     if (error != nullptr) {
-      *error = "manifest version is empty";
+      *error = "manifest 版本为空";
     }
     return false;
   }
@@ -407,14 +407,14 @@ bool validateManifest(const ModuleManagerProto::ModuleManifest &manifest, const 
   std::vector<int> versionParts;
   if (!parseVersionParts(manifest.version().version(), &versionParts, &parseError)) {
     if (error != nullptr) {
-      *error = "manifest version invalid: " + parseError;
+      *error = "manifest 版本非法: " + parseError;
     }
     return false;
   }
   for (const auto &dependency : manifest.dependencies()) {
     if (dependency.module_name().empty()) {
       if (error != nullptr) {
-        *error = "dependency module_name is empty";
+        *error = "依赖模块 module_name 为空";
       }
       return false;
     }
@@ -422,7 +422,7 @@ bool validateManifest(const ModuleManagerProto::ModuleManifest &manifest, const 
       std::vector<VersionConstraint> constraints;
       if (!parseVersionRange(dependency.version_range(), &constraints, &parseError)) {
         if (error != nullptr) {
-          *error = "dependency " + dependency.module_name() + " version_range invalid: " + parseError;
+          *error = "依赖模块 " + dependency.module_name() + " 的 version_range 非法: " + parseError;
         }
         return false;
       }
@@ -461,13 +461,13 @@ void ModuleManager::ensureModuleInfos() {
 void ModuleManager::autoStartModulesFromConfig() {
   const std::filesystem::path configPath(kAutoStartConfigPath);
   if (!std::filesystem::exists(configPath)) {
-    LOG_INFO("Auto-start config not found: {}", configPath.string());
+    LOG_INFO("未找到自动启动配置文件: {}", configPath.string());
     return;
   }
 
   std::string raw;
   if (!readFile(configPath, &raw)) {
-    LOG_ERROR("Auto-start config read failed: {}", configPath.string());
+    LOG_ERROR("读取自动启动配置失败: {}", configPath.string());
     return;
   }
 
@@ -477,23 +477,23 @@ void ModuleManager::autoStartModulesFromConfig() {
   options.ignore_unknown_fields = true;
   auto status = google::protobuf::util::JsonStringToMessage(json, &config, options);
   if (!status.ok()) {
-    LOG_ERROR("Auto-start config parse failed: {}", status.ToString());
+    LOG_ERROR("解析自动启动配置失败: {}", status.ToString());
     return;
   }
 
   auto fieldIt = config.fields().find("auto_start_modules");
   if (fieldIt == config.fields().end()) {
-    LOG_INFO("Auto-start config has no auto_start_modules");
+    LOG_INFO("自动启动配置未包含 auto_start_modules");
     return;
   }
   if (fieldIt->second.kind_case() != google::protobuf::Value::kListValue) {
-    LOG_ERROR("Auto-start config auto_start_modules should be array");
+    LOG_ERROR("自动启动配置的 auto_start_modules 必须为数组");
     return;
   }
 
   const auto &list = fieldIt->second.list_value();
   if (list.values().empty()) {
-    LOG_INFO("Auto-start config auto_start_modules is empty");
+    LOG_INFO("自动启动配置的 auto_start_modules 为空");
     return;
   }
 
@@ -501,24 +501,24 @@ void ModuleManager::autoStartModulesFromConfig() {
   int started = 0;
   for (const auto &value : list.values()) {
     if (value.kind_case() != google::protobuf::Value::kStringValue) {
-      LOG_WARNING("Auto-start module entry is not string");
+      LOG_WARNING("自动启动模块条目不是字符串");
       continue;
     }
     const auto &moduleName = value.string_value();
     if (moduleName.empty()) {
-      LOG_WARNING("Auto-start module entry is empty");
+      LOG_WARNING("自动启动模块条目为空");
       continue;
     }
-    LOG_INFO("Auto-start module: {}", moduleName);
+    LOG_INFO("自动启动模块: {}", moduleName);
     auto result = startModuleByName(moduleName);
     if (!result.ok()) {
-      LOG_ERROR("Auto-start module {} failed: {}", moduleName, result.message);
+      LOG_ERROR("自动启动模块 {} 失败: {}", moduleName, result.message);
       continue;
     }
     ++started;
   }
 
-  LOG_INFO("Auto-start completed, started {}", started);
+  LOG_INFO("自动启动完成，已启动 {} 个模块", started);
 }
 ModuleOpResult ModuleManager::loadModule(ModuleManagerProto::ModuleInfo moduleInfo) {
   ensureModuleInfos();
@@ -544,7 +544,7 @@ ModuleManagerProto::ModuleInfos &ModuleManager::getModuleInfos() {
 }
 ModuleOpResult ModuleManager::resolveModuleName(const ModuleManagerProto::ModuleInfo &moduleInfo, std::string *moduleName) {
   if (moduleName == nullptr) {
-    return {ModuleOpError::kInternal, "moduleName output is null"};
+    return {ModuleOpError::kInternal, "moduleName 输出参数为空"};
   }
   if (!moduleInfo.module_name().empty()) {
     *moduleName = moduleInfo.module_name();
@@ -553,27 +553,27 @@ ModuleOpResult ModuleManager::resolveModuleName(const ModuleManagerProto::Module
   }
   if (moduleName->empty()) {
     if (moduleInfo.lib_name().empty()) {
-      return {ModuleOpError::kInvalidArgument, "module_name or lib_name is required"};
+      return {ModuleOpError::kInvalidArgument, "module_name 或 lib_name 不能为空"};
     }
-    return {ModuleOpError::kInvalidArgument, "lib_name is invalid"};
+    return {ModuleOpError::kInvalidArgument, "lib_name 非法"};
   }
 
   auto infoIt = moduleInfoByName_.find(*moduleName);
   if (infoIt == moduleInfoByName_.end()) {
-    return {ModuleOpError::kNotFound, "module not found: " + *moduleName};
+    return {ModuleOpError::kNotFound, "未找到模块: " + *moduleName};
   }
   if (!moduleInfo.lib_name().empty() && moduleInfo.lib_name() != infoIt->second.lib_name()) {
-    return {ModuleOpError::kInvalidArgument, "lib_name mismatch for module: " + *moduleName};
+    return {ModuleOpError::kInvalidArgument, "模块 lib_name 不匹配: " + *moduleName};
   }
   return {ModuleOpError::kOk, {}};
 }
 ModuleOpResult ModuleManager::startModuleByName(const std::string &moduleName) {
   auto infoIt = moduleInfoByName_.find(moduleName);
   if (infoIt == moduleInfoByName_.end()) {
-    return {ModuleOpError::kNotFound, "module not found: " + moduleName};
+    return {ModuleOpError::kNotFound, "未找到模块: " + moduleName};
   }
   if (!infoIt->second.manifest_error().empty()) {
-    return {ModuleOpError::kFailedPrecondition, "module manifest_error: " + infoIt->second.manifest_error()};
+    return {ModuleOpError::kFailedPrecondition, "模块 manifest_error: " + infoIt->second.manifest_error()};
   }
   if (isModuleRunning(moduleName)) {
     LOG_INFO("模块已在运行，跳过启动: {}", moduleName);
@@ -604,7 +604,7 @@ ModuleOpResult ModuleManager::startModuleByName(const std::string &moduleName) {
           LOG_INFO("回滚停止模块: {}", *it);
         }
       }
-      return {ModuleOpError::kInternal, std::string("start module failed: ") + ex.what()};
+      return {ModuleOpError::kInternal, std::string("启动模块失败: ") + ex.what()};
     }
     started.push_back(name);
     LOG_INFO("模块启动完成: {}", name);
@@ -614,7 +614,7 @@ ModuleOpResult ModuleManager::startModuleByName(const std::string &moduleName) {
 ModuleOpResult ModuleManager::stopModuleByName(const std::string &moduleName) {
   auto infoIt = moduleInfoByName_.find(moduleName);
   if (infoIt == moduleInfoByName_.end()) {
-    return {ModuleOpError::kNotFound, "module not found: " + moduleName};
+    return {ModuleOpError::kNotFound, "未找到模块: " + moduleName};
   }
 
   std::vector<std::string> order;
@@ -632,7 +632,7 @@ ModuleOpResult ModuleManager::stopModuleByName(const std::string &moduleName) {
     }
     if (!stopRunningModuleByName(name)) {
       LOG_ERROR("停止模块失败: {}", name);
-      return {ModuleOpError::kInternal, "stop module failed: " + name};
+      return {ModuleOpError::kInternal, "停止模块失败: " + name};
     }
     LOG_INFO("模块停止完成: {}", name);
   }
@@ -640,7 +640,7 @@ ModuleOpResult ModuleManager::stopModuleByName(const std::string &moduleName) {
 }
 ModuleOpResult ModuleManager::resolveStartOrder(const std::string &moduleName, std::vector<std::string> *order) {
   if (order == nullptr) {
-    return {ModuleOpError::kInternal, "order output is null"};
+    return {ModuleOpError::kInternal, "order 输出参数为空"};
   }
   order->clear();
 
@@ -732,7 +732,7 @@ ModuleOpResult ModuleManager::resolveStartOrder(const std::string &moduleName, s
 }
 ModuleOpResult ModuleManager::resolveStopOrder(const std::string &moduleName, std::vector<std::string> *order) {
   if (order == nullptr) {
-    return {ModuleOpError::kInternal, "order output is null"};
+    return {ModuleOpError::kInternal, "order 输出参数为空"};
   }
   order->clear();
 
@@ -889,7 +889,7 @@ void ModuleManager::initModuleInfos() {
       reverseDependencies_[dependency.module_name()].push_back(info.module_name());
     }
   }
-  LOG_INFO("模块清单扫描完成: total {}, available {}, invalid {}", total, available, invalid);
+  LOG_INFO("模块清单扫描完成: 总数 {}, 可用 {}, 无效 {}", total, available, invalid);
 }
 ModuleManagerProto::ModuleVersion ModuleManager::parseVersion(std::string libName) {
   ModuleManagerProto::ModuleVersion version;

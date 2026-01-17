@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 
 #include <string>
+#include <unordered_set>
 
 #include "DataCenter_mock.grpc.pb.h"
 #include "ModbusRTULinkManager.h"
@@ -11,6 +12,7 @@ namespace {
 using ModbusRTU::LinkManager;
 
 using ::testing::_;
+using ::testing::Return;
 
 ModbusRTUProto::UpsertLinkRequest MakeLinkReq(const char* connName, const char* device, uint32_t baud, uint32_t slaveId) {
   ModbusRTUProto::UpsertLinkRequest req;
@@ -26,6 +28,25 @@ ModbusRTUProto::UpsertLinkRequest MakeLinkReq(const char* connName, const char* 
   cfg->set_slave_id(slaveId);
   req.set_create_only(true);
   return req;
+}
+
+ModbusRTUProto::UpsertLinkRequest MakeMinimalLinkReq(const char* connName, const char* device, uint32_t slaveId) {
+  ModbusRTUProto::UpsertLinkRequest req;
+  auto* cfg = req.mutable_config();
+  cfg->set_conn_name(connName);
+  auto* serial = cfg->mutable_serial();
+  serial->set_device(device);
+  cfg->set_slave_id(slaveId);
+  return req;
+}
+
+ModbusRTUProto::Point MakeCoilPoint(const char* tag, uint32_t address) {
+  ModbusRTUProto::Point p;
+  p.set_tag(tag);
+  p.set_function(ModbusRTUProto::FUNCTION_READ_COILS);
+  p.set_address(address);
+  p.set_type(ModbusRTUProto::DATA_TYPE_BOOL);
+  return p;
 }
 }  // namespace
 
@@ -182,4 +203,157 @@ TEST(ModbusRtuLinkManagerTest, UpsertLinkRejectsMixedModesOnSameSerial) {
   ModbusRTUProto::LinkInfo info2;
   auto st = mgr.UpsertLink(req2, &info2);
   EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+}
+
+// 验证：UpsertLink 会补齐默认串口与轮询参数。
+TEST(ModbusRtuLinkManagerTest, UpsertLinkNormalizesDefaults) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("ModbusRTU");
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeMinimalLinkReq("conn-defaults", "/dev/ttyUSB0", 1);
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+
+  const auto& cfg = info.config();
+  const auto& serial = cfg.serial();
+  EXPECT_EQ(serial.baud_rate(), 9600u);
+  EXPECT_EQ(serial.data_bits(), 8u);
+  EXPECT_EQ(serial.parity(), ModbusRTUProto::PARITY_NONE);
+  EXPECT_EQ(serial.stop_bits(), ModbusRTUProto::STOP_BITS_ONE);
+  EXPECT_EQ(serial.read_timeout_ms(), 1000u);
+  EXPECT_EQ(cfg.poll_interval_ms(), 1000u);
+  EXPECT_EQ(cfg.address_base(), ModbusRTUProto::ADDRESS_BASE_ZERO);
+  EXPECT_EQ(cfg.mode(), ModbusRTUProto::LINK_MODE_MASTER);
+}
+
+// 验证：串口 data_bits 越界时 UpsertLink 拒绝。
+TEST(ModbusRtuLinkManagerTest, UpsertLinkRejectsInvalidDataBits) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("ModbusRTU");
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeMinimalLinkReq("conn-bad-bits", "/dev/ttyUSB0", 1);
+  req.mutable_config()->mutable_serial()->set_data_bits(4);
+  ModbusRTUProto::LinkInfo info;
+  auto st = mgr.UpsertLink(req, &info);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+// 验证：slave_id 超出范围时 UpsertLink 拒绝。
+TEST(ModbusRtuLinkManagerTest, UpsertLinkRejectsInvalidSlaveId) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("ModbusRTU");
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeMinimalLinkReq("conn-bad-id", "/dev/ttyUSB0", 0);
+  ModbusRTUProto::LinkInfo info;
+  auto st = mgr.UpsertLink(req, &info);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+// 验证：create_only=false 时可更新已有链接配置。
+TEST(ModbusRtuLinkManagerTest, UpsertLinkUpdatesExistingConfig) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("ModbusRTU");
+  mgr.setDataCenterStub(stub);
+
+  auto req1 = MakeMinimalLinkReq("conn-update", "/dev/ttyUSB0", 1);
+  ModbusRTUProto::LinkInfo info1;
+  ASSERT_TRUE(mgr.UpsertLink(req1, &info1).ok());
+
+  auto req2 = MakeMinimalLinkReq("conn-update", "/dev/ttyUSB0", 1);
+  req2.mutable_config()->set_poll_interval_ms(2000);
+  ModbusRTUProto::LinkInfo info2;
+  ASSERT_TRUE(mgr.UpsertLink(req2, &info2).ok());
+  EXPECT_EQ(info2.conn_id(), info1.conn_id());
+  EXPECT_EQ(info2.config().poll_interval_ms(), 2000u);
+}
+
+// 验证：GetLink 与 ListLinks 能正确返回已配置的连接。
+TEST(ModbusRtuLinkManagerTest, GetLinkAndListLinksReturnConfiguredLinks) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("ModbusRTU");
+  mgr.setDataCenterStub(stub);
+
+  ModbusRTUProto::LinkInfo info1;
+  ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("conn-a", "/dev/ttyUSB0", 1), &info1).ok());
+  ModbusRTUProto::LinkInfo info2;
+  ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("conn-b", "/dev/ttyUSB1", 2), &info2).ok());
+
+  ModbusRTUProto::LinkInfo got;
+  ASSERT_TRUE(mgr.GetLink("conn-a", &got).ok());
+  EXPECT_EQ(got.config().conn_name(), "conn-a");
+
+  ModbusRTUProto::ListLinksResponse resp;
+  ASSERT_TRUE(mgr.ListLinks(&resp).ok());
+  EXPECT_EQ(resp.links_size(), 2);
+  std::unordered_set<std::string> names;
+  for (const auto& link : resp.links()) {
+    names.insert(link.config().conn_name());
+  }
+  EXPECT_TRUE(names.contains("conn-a"));
+  EXPECT_TRUE(names.contains("conn-b"));
+}
+
+// 验证：pending delete 状态会阻止 StartLink 与 UpsertPointTable。
+TEST(ModbusRtuLinkManagerTest, PendingDeleteBlocksStartAndPointTableUpdate) {
+  FakeDataCenterState state;
+  state.FailDeleteForConnName("conn-pending");
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("ModbusRTU");
+  mgr.setDataCenterStub(stub);
+
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("conn-pending", "/dev/ttyUSB0", 1), &info).ok());
+
+  auto del = mgr.DeleteLink("conn-pending");
+  EXPECT_EQ(del.error_code(), grpc::StatusCode::INTERNAL);
+
+  ModbusRTUProto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-pending");
+  *ptReq.add_points() = MakeCoilPoint("coil-1", 1);
+  ptReq.set_replace(true);
+  auto upsert = mgr.UpsertPointTable(ptReq);
+  EXPECT_EQ(upsert.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+
+  auto start = mgr.StartLink("conn-pending");
+  EXPECT_EQ(start.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+}
+
+// 验证：DataCenter 更新失败时点表不落地到本地。
+TEST(ModbusRtuLinkManagerTest, UpsertPointTableKeepsLocalOnDataCenterFailure) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  EXPECT_CALL(*stub, UpsertPointTable(_, _, _))
+      .WillOnce(Return(grpc::Status(grpc::StatusCode::INTERNAL, "dc failure")));
+
+  LinkManager mgr("ModbusRTU");
+  mgr.setDataCenterStub(stub);
+
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("conn-pt", "/dev/ttyUSB0", 1), &info).ok());
+
+  ModbusRTUProto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-pt");
+  *ptReq.add_points() = MakeCoilPoint("coil-1", 1);
+  ptReq.set_replace(true);
+  auto st = mgr.UpsertPointTable(ptReq);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INTERNAL);
+
+  ModbusRTUProto::PointTable out;
+  ASSERT_TRUE(mgr.GetPointTable("conn-pt", &out).ok());
+  EXPECT_EQ(out.points_size(), 0);
 }

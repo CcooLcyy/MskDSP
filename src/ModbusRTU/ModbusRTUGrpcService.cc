@@ -13,11 +13,11 @@ grpc::Status ModbusRTUGrpcServiceImpl::UpsertLink(
     grpc::ServerContext*, const ModbusRTUProto::UpsertLinkRequest* request, ModbusRTUProto::LinkInfo* response) {
   if (module_ == nullptr) {
     LOG_ERROR("ModbusRTU 服务未就绪");
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "module not ready");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
   }
   if (request == nullptr || response == nullptr) {
     LOG_ERROR("ModbusRTU UpsertLink 请求为空");
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request/response is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
   }
   auto status = module_->linkManager().UpsertLink(*request, response);
   if (!status.ok()) {
@@ -32,11 +32,11 @@ grpc::Status ModbusRTUGrpcServiceImpl::GetLink(
     grpc::ServerContext*, const ModbusRTUProto::GetLinkRequest* request, ModbusRTUProto::LinkInfo* response) {
   if (module_ == nullptr) {
     LOG_ERROR("ModbusRTU 服务未就绪");
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "module not ready");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
   }
   if (request == nullptr || response == nullptr) {
     LOG_ERROR("ModbusRTU GetLink 请求为空");
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request/response is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
   }
   auto status = module_->linkManager().GetLink(request->conn_name(), response);
   if (!status.ok()) {
@@ -49,11 +49,11 @@ grpc::Status ModbusRTUGrpcServiceImpl::ListLinks(
     grpc::ServerContext*, const ModbusRTUProto::Empty*, ModbusRTUProto::ListLinksResponse* response) {
   if (module_ == nullptr) {
     LOG_ERROR("ModbusRTU 服务未就绪");
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "module not ready");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
   }
   if (response == nullptr) {
     LOG_ERROR("ModbusRTU ListLinks 响应为空");
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "response is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
   }
   auto status = module_->linkManager().ListLinks(response);
   if (!status.ok()) {
@@ -66,11 +66,11 @@ grpc::Status ModbusRTUGrpcServiceImpl::DeleteLink(
     grpc::ServerContext*, const ModbusRTUProto::DeleteLinkRequest* request, ModbusRTUProto::Empty*) {
   if (module_ == nullptr) {
     LOG_ERROR("ModbusRTU 服务未就绪");
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "module not ready");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
   }
   if (request == nullptr) {
     LOG_ERROR("ModbusRTU DeleteLink 请求为空");
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求为空");
   }
   auto status = module_->linkManager().DeleteLink(request->conn_name());
   if (!status.ok()) {
@@ -85,11 +85,11 @@ grpc::Status ModbusRTUGrpcServiceImpl::StartLink(
     grpc::ServerContext*, const ModbusRTUProto::StartLinkRequest* request, ModbusRTUProto::Empty*) {
   if (module_ == nullptr) {
     LOG_ERROR("ModbusRTU 服务未就绪");
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "module not ready");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
   }
   if (request == nullptr) {
     LOG_ERROR("ModbusRTU StartLink 请求为空");
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求为空");
   }
   auto status = module_->linkManager().StartLink(request->conn_name());
   if (!status.ok()) {
@@ -104,11 +104,11 @@ grpc::Status ModbusRTUGrpcServiceImpl::StopLink(
     grpc::ServerContext*, const ModbusRTUProto::StopLinkRequest* request, ModbusRTUProto::Empty*) {
   if (module_ == nullptr) {
     LOG_ERROR("ModbusRTU 服务未就绪");
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "module not ready");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
   }
   if (request == nullptr) {
     LOG_ERROR("ModbusRTU StopLink 请求为空");
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求为空");
   }
   auto status = module_->linkManager().StopLink(request->conn_name());
   if (!status.ok()) {
@@ -123,11 +123,11 @@ grpc::Status ModbusRTUGrpcServiceImpl::UpsertPointTable(
     grpc::ServerContext*, const ModbusRTUProto::UpsertPointTableRequest* request, ModbusRTUProto::Empty*) {
   if (module_ == nullptr) {
     LOG_ERROR("ModbusRTU 服务未就绪");
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "module not ready");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
   }
   if (request == nullptr) {
     LOG_ERROR("ModbusRTU UpsertPointTable 请求为空");
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求为空");
   }
   auto status = module_->linkManager().UpsertPointTable(*request);
   if (!status.ok()) {
@@ -144,11 +144,11 @@ grpc::Status ModbusRTUGrpcServiceImpl::GetPointTable(
     grpc::ServerContext*, const ModbusRTUProto::GetPointTableRequest* request, ModbusRTUProto::PointTable* response) {
   if (module_ == nullptr) {
     LOG_ERROR("ModbusRTU 服务未就绪");
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "module not ready");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
   }
   if (request == nullptr || response == nullptr) {
     LOG_ERROR("ModbusRTU GetPointTable 请求为空");
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request/response is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
   }
   auto status = module_->linkManager().GetPointTable(request->conn_name(), response);
   if (!status.ok()) {

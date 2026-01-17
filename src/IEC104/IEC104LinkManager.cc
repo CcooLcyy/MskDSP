@@ -13,7 +13,7 @@
 namespace IEC104 {
 namespace {
 grpc::Status makeNotFound(const std::string &connName) {
-  return grpc::Status(grpc::StatusCode::NOT_FOUND, std::format("link not found: {}", connName));
+  return grpc::Status(grpc::StatusCode::NOT_FOUND, std::format("未找到链路: {}", connName));
 }
 
 constexpr uint32_t kMaxAsduBytes = 249;
@@ -33,7 +33,7 @@ void LinkManager::setDataCenterStub(std::shared_ptr<DataCenterProto::DataCenterS
 
 grpc::Status LinkManager::validateConnName(const std::string &connName) {
   if (connName.empty()) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_name is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_name 不能为空");
   }
   return grpc::Status::OK;
 }
@@ -44,30 +44,30 @@ grpc::Status LinkManager::validateLinkConfig(const IEC104Proto::LinkConfig &conf
     return s;
   }
   if (config.role() != IEC104Proto::ROLE_SERVER && config.role() != IEC104Proto::ROLE_CLIENT) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "role is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "role 不能为空");
   }
   if (config.role() == IEC104Proto::ROLE_SERVER) {
     if (config.local().port() == 0) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "local.port is required for server role");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "server 角色下 local.port 不能为空");
     }
   }
   if (config.role() == IEC104Proto::ROLE_CLIENT) {
     if (config.remote().ip().empty() || config.remote().port() == 0) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "remote.ip/port is required for client role");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "client 角色下 remote.ip/port 不能为空");
     }
   }
   if (config.ca() > 65535) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "ca must be <= 65535");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "ca 必须 <= 65535");
   }
   if (config.oa() > 255) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "oa must be <= 255");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "oa 必须 <= 255");
   }
   if (config.telemetry_max_asdu_bytes() > 0) {
     if (config.telemetry_max_asdu_bytes() > kMaxAsduBytes) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "telemetry_max_asdu_bytes must be <= 249");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "telemetry_max_asdu_bytes 必须 <= 249");
     }
     if (config.telemetry_max_asdu_bytes() < kMinMeasuredValueAsduBytes) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "telemetry_max_asdu_bytes must be >= 14");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "telemetry_max_asdu_bytes 必须 >= 14");
     }
   }
   return grpc::Status::OK;
@@ -94,13 +94,13 @@ std::string LinkManager::listenEndpointToString(const ListenEndpoint &ep) {
 
 grpc::Status LinkManager::makeListenEndpoint(const IEC104Proto::Endpoint &local, ListenEndpoint *out) {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   if (local.port() == 0) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "local.port is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "local.port 不能为空");
   }
   if (local.port() > 65535) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "local.port must be <= 65535");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "local.port 必须 <= 65535");
   }
 
   out->port = local.port();
@@ -114,7 +114,7 @@ grpc::Status LinkManager::makeListenEndpoint(const IEC104Proto::Endpoint &local,
   boost::system::error_code ec;
   auto addr = boost::asio::ip::make_address(ip, ec);
   if (ec) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::format("invalid local.ip: {}", ip));
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::format("local.ip 非法: {}", ip));
   }
 
   out->any = false;
@@ -136,26 +136,26 @@ grpc::Status LinkManager::checkSystemListenAvailable(const ListenEndpoint &ep) {
   } else {
     auto addr = asio::ip::make_address(ep.ip, ec);
     if (ec) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::format("invalid local.ip: {}", ep.ip));
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::format("local.ip 非法: {}", ep.ip));
     }
     endpoint = tcp::endpoint(addr, static_cast<uint16_t>(ep.port));
   }
 
   acceptor.open(endpoint.protocol(), ec);
   if (ec) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("acceptor open failed: {}", ec.message()));
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("acceptor 打开失败: {}", ec.message()));
   }
   acceptor.set_option(tcp::acceptor::reuse_address(true), ec);
   if (ec) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("acceptor set_option failed: {}", ec.message()));
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("acceptor 设置参数失败: {}", ec.message()));
   }
   acceptor.bind(endpoint, ec);
   if (ec) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("acceptor bind failed: {}", ec.message()));
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("acceptor 绑定失败: {}", ec.message()));
   }
   acceptor.listen(tcp::acceptor::max_listen_connections, ec);
   if (ec) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("acceptor listen failed: {}", ec.message()));
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("acceptor 监听失败: {}", ec.message()));
   }
 
   return grpc::Status::OK;
@@ -163,7 +163,7 @@ grpc::Status LinkManager::checkSystemListenAvailable(const ListenEndpoint &ep) {
 
 grpc::Status LinkManager::fillLinkInfoLocked(const LinkRuntime &link, IEC104Proto::LinkInfo *out) const {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   out->Clear();
   *out->mutable_config() = link.config;
@@ -175,7 +175,7 @@ grpc::Status LinkManager::fillLinkInfoLocked(const LinkRuntime &link, IEC104Prot
 
 grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &request, IEC104Proto::LinkInfo *out) {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   auto status = validateLinkConfig(request.config());
   if (!status.ok()) {
@@ -196,13 +196,13 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
     auto it = linksByName_.find(connName);
     if (it != linksByName_.end()) {
       if (request.create_only()) {
-        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name already exists");
+        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name 已存在");
       }
       if (it->second.state == IEC104Proto::LINK_STATE_RUNNING) {
-        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "stop link before updating config");
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "更新配置前请先停止链路");
       }
       if (it->second.state == IEC104Proto::LINK_STATE_PENDING_DELETE) {
-        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "link is pending delete");
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路处于待删除状态");
       }
 
       const bool wasServer = (it->second.config.role() == IEC104Proto::ROLE_SERVER);
@@ -225,7 +225,7 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
             if (listenEndpointsConflict(otherListen, desiredListen)) {
               return grpc::Status(
                   grpc::StatusCode::ALREADY_EXISTS,
-                  std::format("listen endpoint {} conflicts with {} ({})",
+                  std::format("监听端点 {} 与 {} 冲突 ({})",
                               listenEndpointToString(desiredListen),
                               otherName,
                               listenEndpointToString(otherListen)));
@@ -248,7 +248,7 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
     }
 
     if (pendingCreateByName_.contains(connName) || reservedServerListenByName_.contains(connName)) {
-      return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name already exists");
+      return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name 已存在");
     }
 
     if (isServer) {
@@ -256,7 +256,7 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
         if (listenEndpointsConflict(otherListen, desiredListen)) {
           return grpc::Status(
               grpc::StatusCode::ALREADY_EXISTS,
-              std::format("listen endpoint {} conflicts with {} ({})",
+              std::format("监听端点 {} 与 {} 冲突 ({})",
                           listenEndpointToString(desiredListen),
                           otherName,
                           listenEndpointToString(otherListen)));
@@ -266,7 +266,7 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
       if (!status.ok()) {
         return status;
       }
-      // Reserve early to avoid races while we call DataCenter.
+      // 提前预留，避免调用 DataCenter 时发生竞态。
       reservedServerListenByName_[connName] = desiredListen;
     }
     pendingCreateByName_.emplace(connName);
@@ -289,7 +289,7 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
     }
     if (exists) {
       rollbackPendingCreate();
-      return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name already exists");
+      return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name 已存在");
     }
   }
 
@@ -301,31 +301,31 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
   }
   if (connInfo.conn_id() == 0) {
     rollbackPendingCreate();
-    return grpc::Status(grpc::StatusCode::INTERNAL, "DataCenter returned conn_id=0");
+    return grpc::Status(grpc::StatusCode::INTERNAL, "DataCenter 返回 conn_id=0");
   }
 
   std::lock_guard<std::mutex> lock(mu_);
   pendingCreateByName_.erase(connName);
   auto [it, inserted] = linksByName_.try_emplace(connName);
   if (!inserted) {
-    // Another UpsertLink raced this one and already created the link.
+    // 另一个 UpsertLink 与此请求并发并已创建链路。
     if (request.create_only()) {
       if (isServer && it->second.config.role() != IEC104Proto::ROLE_SERVER) {
         reservedServerListenByName_.erase(connName);
       }
-      return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name already exists");
+      return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name 已存在");
     }
     if (it->second.state == IEC104Proto::LINK_STATE_RUNNING) {
       if (isServer && it->second.config.role() != IEC104Proto::ROLE_SERVER) {
         reservedServerListenByName_.erase(connName);
       }
-      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "stop link before updating config");
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "更新配置前请先停止链路");
     }
     if (it->second.state == IEC104Proto::LINK_STATE_PENDING_DELETE) {
       if (isServer && it->second.config.role() != IEC104Proto::ROLE_SERVER) {
         reservedServerListenByName_.erase(connName);
       }
-      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "link is pending delete");
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路处于待删除状态");
     }
 
     it->second.config = request.config();
@@ -347,7 +347,7 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
 
 grpc::Status LinkManager::GetLink(const std::string &connName, IEC104Proto::LinkInfo *out) const {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   auto status = validateConnName(connName);
   if (!status.ok()) {
@@ -364,7 +364,7 @@ grpc::Status LinkManager::GetLink(const std::string &connName, IEC104Proto::Link
 
 grpc::Status LinkManager::ListLinks(IEC104Proto::ListLinksResponse *out) const {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   std::lock_guard<std::mutex> lock(mu_);
   out->Clear();
@@ -402,10 +402,10 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
   }
   auto &link = it->second;
   if (link.state == IEC104Proto::LINK_STATE_PENDING_DELETE) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "link is pending delete");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路处于待删除状态");
   }
   if (link.state == IEC104Proto::LINK_STATE_RUNNING) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "link already running");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路已在运行");
   }
 
   link.transport = std::make_unique<TcpLink>(link.config);
@@ -495,10 +495,10 @@ grpc::Status LinkManager::UpsertPointTable(const IEC104Proto::UpsertPointTableRe
       return makeNotFound(request.conn_name());
     }
     if (it->second.state == IEC104Proto::LINK_STATE_RUNNING) {
-      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "stop link before updating point table");
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "更新点表前请先停止链路");
     }
     if (it->second.state == IEC104Proto::LINK_STATE_PENDING_DELETE) {
-      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "link is pending delete");
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路处于待删除状态");
     }
     connId = it->second.connId;
     current = it->second.pointTable;
@@ -527,7 +527,7 @@ grpc::Status LinkManager::UpsertPointTable(const IEC104Proto::UpsertPointTableRe
 
 grpc::Status LinkManager::GetPointTable(const std::string &connName, IEC104Proto::PointTable *out) const {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   auto status = validateConnName(connName);
   if (!status.ok()) {

@@ -18,7 +18,7 @@ AllocationOutput WeightedStrategy::Allocate(double total, const std::vector<Allo
     return out;
   }
 
-  // Start from min constraints.
+  // 从最小约束开始。
   double sumMin = 0.0;
   for (size_t i = 0; i < members.size(); ++i) {
     const auto& m = members[i];
@@ -30,7 +30,7 @@ AllocationOutput WeightedStrategy::Allocate(double total, const std::vector<Allo
 
   double remaining = total - sumMin;
   if (remaining <= kEps) {
-    // total below sum(min): cannot go lower than mins.
+    // 总量小于最小值之和：不能再低于最小值。
     out.unallocated = remaining;
     return out;
   }
@@ -61,8 +61,8 @@ AllocationOutput WeightedStrategy::Allocate(double total, const std::vector<Allo
     std::vector<size_t> nextActive;
     nextActive.reserve(active.size());
 
-    // Distribute remaining proportionally; if any member saturates at max,
-    // remove it and re-distribute the leftover in next round.
+    // 按权重分配剩余量；若有成员达到最大值，
+    // 剔除该成员并在下一轮重新分配剩余量。
     for (auto idx : active) {
       const auto& m = members[idx];
       const auto hi = std::max(m.min, m.max);

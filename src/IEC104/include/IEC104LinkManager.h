@@ -38,9 +38,9 @@ public:
 
 private:
   struct ListenEndpoint {
-    // Normalized listen address for ROLE_SERVER.
-    // - any=true means bind to 0.0.0.0:<port> (local.ip empty or "0.0.0.0").
-    // - any=false means bind to <ip>:<port> (ip is canonical string form).
+    // ROLE_SERVER 的规范化监听地址。
+    // - any=true 表示绑定到 0.0.0.0:<port>（local.ip 为空或为 "0.0.0.0"）。
+    // - any=false 表示绑定到 <ip>:<port>（ip 为规范字符串）。
     bool any = false;
     std::string ip;
     uint32_t port = 0;
@@ -79,9 +79,9 @@ private:
 
   mutable std::mutex mu_;
   std::unordered_map<std::string, LinkRuntime> linksByName_;
-  // Tracks ports reserved by ROLE_SERVER link configs (including in-flight UpsertLink creates).
+  // 记录 ROLE_SERVER 链路配置预留的端口（含进行中的 UpsertLink 创建）。
   std::unordered_map<std::string, ListenEndpoint> reservedServerListenByName_;
-  // Blocks concurrent creation of the same conn_name while we call DataCenter.
+  // 在调用 DataCenter 期间阻止同一 conn_name 的并发创建。
   std::unordered_set<std::string> pendingCreateByName_;
   DataCenterClient dataCenter_;
 };

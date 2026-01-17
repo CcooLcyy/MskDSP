@@ -50,7 +50,7 @@ void SerialBus::Close() {
 
 grpc::Status SerialBus::ReadCoil(uint8_t slaveId, uint16_t address, bool* out) {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   std::lock_guard<std::mutex> lock(mu_);
   auto status = ensureOpenLocked();
@@ -79,7 +79,7 @@ grpc::Status SerialBus::ReadCoil(uint8_t slaveId, uint16_t address, bool* out) {
     return status;
   }
   if (data.empty()) {
-    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "empty coil response");
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "线圈响应为空");
   }
   *out = ((data[0] & 0x01) != 0);
   return grpc::Status::OK;
@@ -87,7 +87,7 @@ grpc::Status SerialBus::ReadCoil(uint8_t slaveId, uint16_t address, bool* out) {
 
 grpc::Status SerialBus::ReadHoldingRegister(uint8_t slaveId, uint16_t address, uint16_t* out) {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   std::lock_guard<std::mutex> lock(mu_);
   auto status = ensureOpenLocked();
@@ -116,7 +116,7 @@ grpc::Status SerialBus::ReadHoldingRegister(uint8_t slaveId, uint16_t address, u
     return status;
   }
   if (data.size() != 2) {
-    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "unexpected holding register response length");
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "保持寄存器响应长度异常");
   }
   *out = static_cast<uint16_t>((static_cast<uint16_t>(data[0]) << 8) | data[1]);
   return grpc::Status::OK;
@@ -124,7 +124,7 @@ grpc::Status SerialBus::ReadHoldingRegister(uint8_t slaveId, uint16_t address, u
 
 grpc::Status SerialBus::ReadRequest(RtuRequest* out) {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
 
   std::lock_guard<std::mutex> lock(mu_);
@@ -175,15 +175,15 @@ grpc::Status SerialBus::ReadRequest(RtuRequest* out) {
   }
 
   if (frame.size() < 4) {
-    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "request frame too short");
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "请求帧过短");
   }
   const uint16_t expectCrc = computeCrc(frame.data(), frame.size() - 2);
   const uint16_t gotCrc = static_cast<uint16_t>(frame[frame.size() - 2]) |
       (static_cast<uint16_t>(frame[frame.size() - 1]) << 8);
   if (expectCrc != gotCrc) {
-    LOG_WARNING("ModbusRTU 请求 CRC 校验失败: device={}, function={}",
+    LOG_WARNING("ModbusRTU 请求 CRC 校验失败: device={}, 功能码={}",
                 config_.device(), static_cast<unsigned int>(function));
-    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "request crc mismatch");
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "请求 CRC 不匹配");
   }
 
   out->slaveId = header[0];
@@ -208,14 +208,14 @@ grpc::Status SerialBus::ensureOpenLocked() {
     return grpc::Status::OK;
   }
   if (config_.device().empty()) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "serial device is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "serial.device 不能为空");
   }
 
   boost::system::error_code ec;
   port_.open(config_.device(), ec);
   if (ec) {
     LOG_ERROR("ModbusRTU 串口打开失败: device={}, 原因={}", config_.device(), ec.message());
-    return grpc::Status(grpc::StatusCode::UNAVAILABLE, std::format("open serial failed: {}", ec.message()));
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, std::format("打开串口失败: {}", ec.message()));
   }
 
   auto closeOnError = [this]() {
@@ -226,12 +226,12 @@ grpc::Status SerialBus::ensureOpenLocked() {
   port_.set_option(boost::asio::serial_port_base::baud_rate(config_.baud_rate()), ec);
   if (ec) {
     closeOnError();
-    return grpc::Status(grpc::StatusCode::UNAVAILABLE, std::format("set baud_rate failed: {}", ec.message()));
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, std::format("设置 baud_rate 失败: {}", ec.message()));
   }
   port_.set_option(boost::asio::serial_port_base::character_size(config_.data_bits()), ec);
   if (ec) {
     closeOnError();
-    return grpc::Status(grpc::StatusCode::UNAVAILABLE, std::format("set data_bits failed: {}", ec.message()));
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, std::format("设置 data_bits 失败: {}", ec.message()));
   }
 
   boost::asio::serial_port_base::parity::type parity = boost::asio::serial_port_base::parity::none;
@@ -243,7 +243,7 @@ grpc::Status SerialBus::ensureOpenLocked() {
   port_.set_option(boost::asio::serial_port_base::parity(parity), ec);
   if (ec) {
     closeOnError();
-    return grpc::Status(grpc::StatusCode::UNAVAILABLE, std::format("set parity failed: {}", ec.message()));
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, std::format("设置 parity 失败: {}", ec.message()));
   }
 
   boost::asio::serial_port_base::stop_bits::type stopBits = boost::asio::serial_port_base::stop_bits::one;
@@ -253,13 +253,13 @@ grpc::Status SerialBus::ensureOpenLocked() {
   port_.set_option(boost::asio::serial_port_base::stop_bits(stopBits), ec);
   if (ec) {
     closeOnError();
-    return grpc::Status(grpc::StatusCode::UNAVAILABLE, std::format("set stop_bits failed: {}", ec.message()));
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, std::format("设置 stop_bits 失败: {}", ec.message()));
   }
 
   port_.set_option(boost::asio::serial_port_base::flow_control(boost::asio::serial_port_base::flow_control::none), ec);
   if (ec) {
     closeOnError();
-    return grpc::Status(grpc::StatusCode::UNAVAILABLE, std::format("set flow_control failed: {}", ec.message()));
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, std::format("设置 flow_control 失败: {}", ec.message()));
   }
 
   opened_ = true;
@@ -276,7 +276,7 @@ grpc::Status SerialBus::writeRequestLocked(const std::vector<uint8_t>& frame) {
   boost::system::error_code ec;
   boost::asio::write(port_, boost::asio::buffer(frame), ec);
   if (ec) {
-    return grpc::Status(grpc::StatusCode::UNAVAILABLE, std::format("serial write failed: {}", ec.message()));
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, std::format("串口写入失败: {}", ec.message()));
   }
   return grpc::Status::OK;
 }
@@ -309,13 +309,13 @@ grpc::Status SerialBus::readExactLocked(uint8_t* data, size_t len, std::chrono::
   io_.run();
 
   if (timedOut) {
-    return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "serial read timeout");
+    return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "串口读取超时");
   }
   if (readEc) {
-    return grpc::Status(grpc::StatusCode::UNAVAILABLE, std::format("serial read failed: {}", readEc.message()));
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, std::format("串口读取失败: {}", readEc.message()));
   }
   if (bytesRead != len) {
-    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "serial read incomplete");
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "串口读取不完整");
   }
   return grpc::Status::OK;
 }
@@ -326,10 +326,10 @@ grpc::Status SerialBus::readResponseLocked(
     uint16_t quantity,
     std::vector<uint8_t>* outData) {
   if (outData == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "outData is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "outData 为空");
   }
   if (quantity == 0) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "quantity is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "quantity 不能为空");
   }
 
   const auto timeout = std::chrono::milliseconds(config_.read_timeout_ms());
@@ -340,7 +340,7 @@ grpc::Status SerialBus::readResponseLocked(
   }
 
   if (header[0] != expectedSlaveId) {
-    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "response slave_id mismatch");
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应 slave_id 不匹配");
   }
 
   const uint8_t function = header[1];
@@ -353,13 +353,13 @@ grpc::Status SerialBus::readResponseLocked(
     const uint16_t crc = computeCrc(header.data(), header.size());
     const uint16_t respCrc = static_cast<uint16_t>(tail[0]) | (static_cast<uint16_t>(tail[1]) << 8);
     if (crc != respCrc) {
-      return grpc::Status(grpc::StatusCode::UNAVAILABLE, "exception response crc mismatch");
+      return grpc::Status(grpc::StatusCode::UNAVAILABLE, "异常响应 CRC 不匹配");
     }
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("modbus exception: {}", header[2]));
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("Modbus 异常: {}", header[2]));
   }
 
   if (function != expectedFunction) {
-    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "response function mismatch");
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应功能码不匹配");
   }
 
   const uint8_t byteCount = header[2];
@@ -379,10 +379,10 @@ grpc::Status SerialBus::readResponseLocked(
   const uint16_t crc = computeCrc(full.data(), full.size());
   const uint16_t respCrc = static_cast<uint16_t>(body[byteCount]) | (static_cast<uint16_t>(body[byteCount + 1]) << 8);
   if (crc != respCrc) {
-    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "response crc mismatch");
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应 CRC 不匹配");
   }
   if (byteCount != expectedByteCount) {
-    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "response byte_count mismatch");
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应字节数不匹配");
   }
 
   outData->assign(body.begin(), body.begin() + byteCount);

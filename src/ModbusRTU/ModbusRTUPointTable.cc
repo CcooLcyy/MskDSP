@@ -28,34 +28,34 @@ grpc::Status PointTable::Upsert(const google::protobuf::RepeatedPtrField<ModbusR
 
 grpc::Status PointTable::validatePoint(const ModbusRTUProto::Point& point) const {
   if (point.tag().empty()) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tag is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tag 不能为空");
   }
   if (point.function() == ModbusRTUProto::FUNCTION_UNSPECIFIED) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "function is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "function 不能为空");
   }
   if (point.type() == ModbusRTUProto::DATA_TYPE_UNSPECIFIED) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "data type is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "type 不能为空");
   }
   if (point.default_value_case() == ModbusRTUProto::Point::kDefaultBool &&
       point.type() != ModbusRTUProto::DATA_TYPE_BOOL) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "default_bool requires BOOL type");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "default_bool 需要 BOOL 类型");
   }
   if (point.default_value_case() == ModbusRTUProto::Point::kDefaultUint16 &&
       point.type() != ModbusRTUProto::DATA_TYPE_UINT16) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "default_uint16 requires UINT16 type");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "default_uint16 需要 UINT16 类型");
   }
   if (point.default_value_case() == ModbusRTUProto::Point::kDefaultUint16 &&
       point.default_uint16() > 0xFFFFu) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "default_uint16 must be <= 65535");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "default_uint16 必须 <= 65535");
   }
   if (point.address() > 65535) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "address must be <= 65535");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "address 必须 <= 65535");
   }
   if (point.function() == ModbusRTUProto::FUNCTION_READ_COILS && point.type() != ModbusRTUProto::DATA_TYPE_BOOL) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "coil point requires BOOL type");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "线圈点位需要 BOOL 类型");
   }
   if (point.function() == ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS && point.type() != ModbusRTUProto::DATA_TYPE_UINT16) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "holding register point requires UINT16 type");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "保持寄存器点位需要 UINT16 类型");
   }
   return grpc::Status::OK;
 }
@@ -90,11 +90,11 @@ grpc::Status PointTable::insertOrUpdatePoint(const ModbusRTUProto::Point& point)
 
   if (existingTag != byTag_.end()) {
     if (existingTag->second.function != point.function() || existingTag->second.address != point.address()) {
-      return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "tag is already mapped to a different address");
+      return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "tag 已映射到其他地址");
     }
   }
   if (existingKey != tagByKey_.end() && existingKey->second != point.tag()) {
-    return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "address is already mapped to a different tag");
+    return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "地址已映射到其他 tag");
   }
 
   Point p;

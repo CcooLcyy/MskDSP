@@ -13,8 +13,8 @@ struct AllocationMember {
 
 struct AllocationOutput {
   std::vector<double> values;
-  // Remaining amount that could not be allocated due to constraints.
-  // >0: hit max constraints; <0: hit min constraints.
+  // 因约束无法分配的剩余量。
+  // >0 表示触达最大约束；<0 表示触达最小约束。
   double unallocated{0.0};
 };
 
@@ -30,4 +30,3 @@ public:
 };
 
 }  // namespace AGVC
-

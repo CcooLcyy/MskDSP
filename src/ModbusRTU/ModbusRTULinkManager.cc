@@ -25,7 +25,7 @@ constexpr uint8_t kExceptionIllegalDataValue = 0x03;
 constexpr uint8_t kExceptionSlaveDeviceFailure = 0x04;
 
 grpc::Status makeNotFound(const std::string& connName) {
-  return grpc::Status(grpc::StatusCode::NOT_FOUND, std::format("link not found: {}", connName));
+  return grpc::Status(grpc::StatusCode::NOT_FOUND, std::format("未找到链路: {}", connName));
 }
 }  // namespace
 
@@ -53,25 +53,25 @@ size_t LinkManager::SerialKeyHash::operator()(const SerialKey& key) const {
 
 grpc::Status LinkManager::validateConnName(const std::string& connName) {
   if (connName.empty()) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_name is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_name 不能为空");
   }
   return grpc::Status::OK;
 }
 
 grpc::Status LinkManager::normalizeLinkConfig(const ModbusRTUProto::LinkConfig& config, ModbusRTUProto::LinkConfig* out) {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   if (config.conn_name().empty()) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_name is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_name 不能为空");
   }
   if (!config.has_serial()) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "serial config is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "serial 配置不能为空");
   }
   *out = config;
   auto* serial = out->mutable_serial();
   if (serial->device().empty()) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "serial.device is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "serial.device 不能为空");
   }
   if (serial->baud_rate() == 0) {
     serial->set_baud_rate(kDefaultBaudRate);
@@ -99,33 +99,33 @@ grpc::Status LinkManager::normalizeLinkConfig(const ModbusRTUProto::LinkConfig& 
   }
 
   if (serial->data_bits() < 5 || serial->data_bits() > 8) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "serial.data_bits must be in [5,8]");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "serial.data_bits 必须在 [5,8] 范围内");
   }
   if (serial->parity() != ModbusRTUProto::PARITY_NONE &&
       serial->parity() != ModbusRTUProto::PARITY_ODD &&
       serial->parity() != ModbusRTUProto::PARITY_EVEN) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "serial.parity is invalid");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "serial.parity 非法");
   }
   if (serial->stop_bits() != ModbusRTUProto::STOP_BITS_ONE &&
       serial->stop_bits() != ModbusRTUProto::STOP_BITS_TWO) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "serial.stop_bits is invalid");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "serial.stop_bits 非法");
   }
   if (serial->read_timeout_ms() == 0) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "serial.read_timeout_ms is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "serial.read_timeout_ms 不能为空");
   }
   if (out->poll_interval_ms() == 0) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "poll_interval_ms is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "poll_interval_ms 不能为空");
   }
   if (out->address_base() != ModbusRTUProto::ADDRESS_BASE_ZERO &&
       out->address_base() != ModbusRTUProto::ADDRESS_BASE_ONE) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "address_base is invalid");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "address_base 非法");
   }
   if (out->mode() != ModbusRTUProto::LINK_MODE_MASTER &&
       out->mode() != ModbusRTUProto::LINK_MODE_SLAVE) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "link mode is invalid");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "link mode 非法");
   }
   if (out->slave_id() == 0 || out->slave_id() > 247) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "slave_id must be in [1,247]");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "slave_id 必须在 [1,247] 范围内");
   }
   return grpc::Status::OK;
 }
@@ -143,7 +143,7 @@ LinkManager::SerialKey LinkManager::makeSerialKey(const ModbusRTUProto::SerialCo
 
 grpc::Status LinkManager::fillLinkInfoLocked(const LinkRuntime& link, ModbusRTUProto::LinkInfo* out) const {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   out->Clear();
   *out->mutable_config() = link.config;
@@ -163,10 +163,10 @@ grpc::Status LinkManager::ensureSerialCompatibleLocked(
       continue;
     }
     if (!(link.serialKey == key)) {
-      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "serial config conflicts with existing link");
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "串口配置与现有链路冲突");
     }
     if (link.config.mode() != mode) {
-      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "serial link mode conflicts with existing link");
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "串口链路模式与现有链路冲突");
     }
   }
   return grpc::Status::OK;
@@ -214,10 +214,10 @@ grpc::Status LinkManager::startSlaveLink(const std::string& connName,
     return makeNotFound(connName);
   }
   if (it->second.state == ModbusRTUProto::LINK_STATE_PENDING_DELETE) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "link is pending delete");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路处于待删除状态");
   }
   if (it->second.state == ModbusRTUProto::LINK_STATE_RUNNING) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "link already running");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路已在运行");
   }
 
   auto& slaveBus = slaveBuses_[serialKey];
@@ -226,7 +226,7 @@ grpc::Status LinkManager::startSlaveLink(const std::string& connName,
   }
   const auto slaveId = static_cast<uint8_t>(config.slave_id());
   if (slaveBus.linksBySlaveId.contains(slaveId)) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "slave_id already running on this serial");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "该串口上的 slave_id 已在运行");
   }
   auto snapshot = std::make_shared<SlaveLinkSnapshot>();
   snapshot->connName = connName;
@@ -335,7 +335,7 @@ void LinkManager::slaveLoop(SerialKey serialKey, std::shared_ptr<SerialBus> bus,
         LOG_ERROR("ModbusRTU 从站异常响应发送失败: conn_name={}, 原因={}", link->connName, sendStatus.error_message());
         updateLastError(link->connName, sendStatus.error_message());
       } else {
-        LOG_WARNING("ModbusRTU 从站返回异常: conn_name={}, function=0x{:02X}, code=0x{:02X}, reason={}",
+        LOG_WARNING("ModbusRTU 从站返回异常: conn_name={}, 功能码=0x{:02X}, 异常码=0x{:02X}, 原因={}",
                     link->connName,
                     static_cast<unsigned int>(request.function),
                     static_cast<unsigned int>(exceptionCode),
@@ -344,16 +344,16 @@ void LinkManager::slaveLoop(SerialKey serialKey, std::shared_ptr<SerialBus> bus,
       }
     };
 
-    if (request.function != kFunctionReadCoils) {
-      sendException(kExceptionIllegalFunction, "unsupported function");
+  if (request.function != kFunctionReadCoils) {
+      sendException(kExceptionIllegalFunction, "不支持的功能码");
       continue;
     }
     if (request.quantity == 0 || request.quantity > kMaxReadCoilsQuantity) {
-      sendException(kExceptionIllegalDataValue, "invalid coil quantity");
+      sendException(kExceptionIllegalDataValue, "线圈数量非法");
       continue;
     }
     if (static_cast<uint32_t>(request.address) + request.quantity - 1 > 0xFFFF) {
-      sendException(kExceptionIllegalDataAddress, "coil address out of range");
+      sendException(kExceptionIllegalDataAddress, "线圈地址超出范围");
       continue;
     }
 
@@ -389,7 +389,7 @@ void LinkManager::slaveLoop(SerialKey serialKey, std::shared_ptr<SerialBus> bus,
     }
 
     if (addressOverflow) {
-      sendException(kExceptionIllegalDataAddress, "coil address overflow");
+      sendException(kExceptionIllegalDataAddress, "线圈地址溢出");
       continue;
     }
 
@@ -450,7 +450,7 @@ void LinkManager::slaveLoop(SerialKey serialKey, std::shared_ptr<SerialBus> bus,
     }
 
     if (missingValue) {
-      sendException(kExceptionSlaveDeviceFailure, "missing coil value");
+      sendException(kExceptionSlaveDeviceFailure, "线圈值缺失");
       continue;
     }
 
@@ -474,7 +474,7 @@ void LinkManager::slaveLoop(SerialKey serialKey, std::shared_ptr<SerialBus> bus,
 
 grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& request, ModbusRTUProto::LinkInfo* out) {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   ModbusRTUProto::LinkConfig normalized;
   auto status = normalizeLinkConfig(request.config(), &normalized);
@@ -490,13 +490,13 @@ grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& re
     auto it = linksByName_.find(connName);
     if (it != linksByName_.end()) {
       if (request.create_only()) {
-        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name already exists");
+        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name 已存在");
       }
       if (it->second.state == ModbusRTUProto::LINK_STATE_RUNNING) {
-        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "stop link before updating config");
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "更新配置前请先停止链路");
       }
       if (it->second.state == ModbusRTUProto::LINK_STATE_PENDING_DELETE) {
-        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "link is pending delete");
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路处于待删除状态");
       }
       status = ensureSerialCompatibleLocked(serialKey, connName, normalized.mode());
       if (!status.ok()) {
@@ -510,7 +510,7 @@ grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& re
     }
 
     if (pendingCreateByName_.contains(connName)) {
-      return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name already exists");
+      return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name 已存在");
     }
     status = ensureSerialCompatibleLocked(serialKey, connName, normalized.mode());
     if (!status.ok()) {
@@ -535,7 +535,7 @@ grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& re
     if (exists) {
       rollbackPendingCreate();
       LOG_WARNING("ModbusRTU 创建连接失败: conn_name={} 已存在于 DataCenter", connName);
-      return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name already exists");
+      return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name 已存在");
     }
   }
 
@@ -549,7 +549,7 @@ grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& re
   if (connInfo.conn_id() == 0) {
     rollbackPendingCreate();
     LOG_ERROR("ModbusRTU 获取到的 DataCenter conn_id 无效: conn_name={}", connName);
-    return grpc::Status(grpc::StatusCode::INTERNAL, "DataCenter returned conn_id=0");
+    return grpc::Status(grpc::StatusCode::INTERNAL, "DataCenter 返回 conn_id=0");
   }
 
   {
@@ -563,7 +563,7 @@ grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& re
     link.lastError.clear();
     auto [it, inserted] = linksByName_.emplace(connName, std::move(link));
     if (!inserted) {
-      return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name already exists");
+      return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name 已存在");
     }
     return fillLinkInfoLocked(it->second, out);
   }
@@ -571,7 +571,7 @@ grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& re
 
 grpc::Status LinkManager::GetLink(const std::string& connName, ModbusRTUProto::LinkInfo* out) const {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   auto status = validateConnName(connName);
   if (!status.ok()) {
@@ -588,7 +588,7 @@ grpc::Status LinkManager::GetLink(const std::string& connName, ModbusRTUProto::L
 
 grpc::Status LinkManager::ListLinks(ModbusRTUProto::ListLinksResponse* out) const {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   std::lock_guard<std::mutex> lock(mu_);
   out->Clear();
@@ -619,10 +619,10 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
     }
     auto& link = it->second;
     if (link.state == ModbusRTUProto::LINK_STATE_PENDING_DELETE) {
-      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "link is pending delete");
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路处于待删除状态");
     }
     if (link.state == ModbusRTUProto::LINK_STATE_RUNNING) {
-      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "link already running");
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路已在运行");
     }
     config = link.config;
     pointTable = link.pointTable;
@@ -633,7 +633,7 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
   if (config.address_base() == ModbusRTUProto::ADDRESS_BASE_ONE) {
     for (const auto& point : pointTable.Points()) {
       if (point.address == 0) {
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "address_base=ONE requires address >= 1");
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "address_base=ONE 要求 address >= 1");
       }
     }
   }
@@ -701,7 +701,7 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
       if (released) {
         released->Close();
       }
-      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "link is pending delete");
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路处于待删除状态");
     }
     link.bus = bus;
     link.state = ModbusRTUProto::LINK_STATE_RUNNING;
@@ -812,10 +812,10 @@ grpc::Status LinkManager::UpsertPointTable(const ModbusRTUProto::UpsertPointTabl
       return makeNotFound(request.conn_name());
     }
     if (it->second.state == ModbusRTUProto::LINK_STATE_RUNNING) {
-      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "stop link before updating point table");
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "更新点表前请先停止链路");
     }
     if (it->second.state == ModbusRTUProto::LINK_STATE_PENDING_DELETE) {
-      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "link is pending delete");
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路处于待删除状态");
     }
     connId = it->second.connId;
     current = it->second.pointTable;
@@ -844,7 +844,7 @@ grpc::Status LinkManager::UpsertPointTable(const ModbusRTUProto::UpsertPointTabl
 
 grpc::Status LinkManager::GetPointTable(const std::string& connName, ModbusRTUProto::PointTable* out) const {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   auto status = validateConnName(connName);
   if (!status.ok()) {
@@ -879,7 +879,7 @@ void LinkManager::pollLoop(std::string connName,
       uint32_t address = point.address;
       if (config.address_base() == ModbusRTUProto::ADDRESS_BASE_ONE) {
         if (address == 0) {
-          updateLastError(connName, "address_base=ONE but address is 0");
+          updateLastError(connName, "address_base=ONE 但 address 为 0");
           LOG_WARNING("ModbusRTU 点表地址非法: conn_name={}, tag={}, address=0", connName, point.tag);
           continue;
         }
@@ -908,7 +908,7 @@ void LinkManager::pollLoop(std::string connName,
           }
         }
       } else {
-        status = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "unsupported function");
+        status = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "不支持的功能码");
       }
 
       if (!status.ok()) {

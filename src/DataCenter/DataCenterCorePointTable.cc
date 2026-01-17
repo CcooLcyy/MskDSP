@@ -7,11 +7,11 @@
 namespace DataCenter {
 grpc::Status DataCenterCore::UpsertPointTable(const DataCenterProto::UpsertPointTableRequest &request) {
   if (request.conn_id() == 0) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id 不能为空");
   }
   for (const auto &tag : request.tags()) {
     if (tag.empty()) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tags contains empty string");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tags 包含空字符串");
     }
   }
 
@@ -27,14 +27,14 @@ grpc::Status DataCenterCore::UpsertPointTable(const DataCenterProto::UpsertPoint
 
 grpc::Status DataCenterCore::GetPointTable(uint32_t connId, DataCenterProto::PointTable *out) const {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   if (connId == 0) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id 不能为空");
   }
   auto it = pointTables_.find(connId);
   if (it == pointTables_.end()) {
-    return grpc::Status(grpc::StatusCode::NOT_FOUND, "point table not found");
+    return grpc::Status(grpc::StatusCode::NOT_FOUND, "点表未找到");
   }
 
   out->Clear();
@@ -51,12 +51,12 @@ grpc::Status DataCenterCore::ReplacePointTablesConfig(const DataCenterProto::Poi
   std::unordered_map<uint32_t, std::unordered_set<std::string>> next;
   for (const auto &table : config.point_tables()) {
     if (table.conn_id() == 0) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "point_tables contains conn_id=0");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "point_tables 包含 conn_id=0");
     }
     auto &set = next[table.conn_id()];
     for (const auto &tag : table.tags()) {
       if (tag.empty()) {
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "point_tables contains empty tag");
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "point_tables 包含空 tag");
       }
       set.emplace(tag);
     }
@@ -90,4 +90,3 @@ DataCenterProto::PointTablesConfig DataCenterCore::DumpPointTablesConfig() const
   return config;
 }
 }  // namespace DataCenter
-

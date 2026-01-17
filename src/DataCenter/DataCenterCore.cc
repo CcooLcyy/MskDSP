@@ -34,20 +34,20 @@ size_t DataCenterCore::EndpointKeyHash::operator()(const EndpointKey &key) const
 
 grpc::Status DataCenterCore::validateConnKey(const DataCenterProto::ConnectionKey &key) {
   if (key.module_name().empty()) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "module_name is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "module_name 不能为空");
   }
   if (key.conn_name().empty()) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_name is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_name 不能为空");
   }
   return grpc::Status::OK;
 }
 
 grpc::Status DataCenterCore::validateEndpoint(uint32_t connId, const std::string &tag) {
   if (connId == 0) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id 不能为空");
   }
   if (tag.empty()) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tag is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tag 不能为空");
   }
   return grpc::Status::OK;
 }
@@ -58,9 +58,8 @@ grpc::Status DataCenterCore::validateEndpointAgainstPointTable(uint32_t connId, 
     return grpc::Status::OK;
   }
   if (!it->second.contains(tag)) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tag not found in point table");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "点表中未找到 tag");
   }
   return grpc::Status::OK;
 }
 }  // namespace DataCenter
-

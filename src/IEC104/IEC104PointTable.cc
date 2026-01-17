@@ -28,13 +28,13 @@ grpc::Status PointTable::Upsert(const google::protobuf::RepeatedPtrField<IEC104P
 
 grpc::Status PointTable::validatePoint(const IEC104Proto::TelemetryPoint& point) const {
   if (point.tag().empty()) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tag is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tag 不能为空");
   }
   if (point.ioa() == 0) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "ioa is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "ioa 不能为空");
   }
   if (point.type() == IEC104Proto::TELEMETRY_TYPE_UNSPECIFIED) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "telemetry type is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "telemetry_type 不能为空");
   }
   return grpc::Status::OK;
 }
@@ -56,10 +56,10 @@ grpc::Status PointTable::insertOrUpdatePoint(const IEC104Proto::TelemetryPoint& 
   }
 
   if (existingTag != byTag_.end() && existingTag->second.ioa != point.ioa()) {
-    return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "tag is already mapped to a different ioa");
+    return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "tag 已映射到其他 ioa");
   }
   if (existingIoa != tagByIoa_.end() && existingIoa->second != point.tag()) {
-    return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "ioa is already mapped to a different tag");
+    return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "ioa 已映射到其他 tag");
   }
 
   Point p;
@@ -118,4 +118,3 @@ void PointTable::ToProto(const std::string& connName, IEC104Proto::PointTable* o
 }
 
 }  // namespace IEC104
-

@@ -44,7 +44,7 @@ private:
     std::jthread dcSubscribeThread;
     std::jthread controlThread;
 
-    // Cached tags derived from config (used by the subscribe thread).
+    // 由配置派生的缓存 tags（供订阅线程使用）。
     std::string cmdTag;
     std::unordered_map<std::string, size_t> memberIndexByMeasTag;
     std::unordered_set<std::string> baseTags;

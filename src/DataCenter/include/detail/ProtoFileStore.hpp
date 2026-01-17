@@ -29,12 +29,12 @@ public:
     std::error_code ec;
     std::filesystem::create_directories(path_.parent_path(), ec);
     if (ec) {
-      return grpc::Status(grpc::StatusCode::INTERNAL, "failed to create config directory");
+      return grpc::Status(grpc::StatusCode::INTERNAL, "创建配置目录失败");
     }
 
     std::string data;
     if (!config.SerializeToString(&data)) {
-      return grpc::Status(grpc::StatusCode::INTERNAL, "failed to serialize protobuf");
+      return grpc::Status(grpc::StatusCode::INTERNAL, "序列化 protobuf 失败");
     }
 
     const auto tmp = tmpPath();
@@ -77,7 +77,7 @@ public:
 
   grpc::Status Load(ProtoT* out) const {
     if (out == nullptr) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
     }
 
     std::error_code ec;
@@ -117,22 +117,22 @@ public:
 private:
   grpc::Status validate(const ProtoT& config) const {
     if (validate_ == nullptr) {
-      return grpc::Status(grpc::StatusCode::INTERNAL, "validate is null");
+      return grpc::Status(grpc::StatusCode::INTERNAL, "validate 为空");
     }
     return validate_(config);
   }
 
   static grpc::Status readFileToString(const std::filesystem::path& path, std::string* out) {
     if (out == nullptr) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
     }
     std::ifstream ifs(path, std::ios::binary);
     if (!ifs.is_open()) {
-      return grpc::Status(grpc::StatusCode::NOT_FOUND, "failed to open file");
+      return grpc::Status(grpc::StatusCode::NOT_FOUND, "打开文件失败");
     }
     std::string data((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
     if (!ifs.good() && !ifs.eof()) {
-      return grpc::Status(grpc::StatusCode::INTERNAL, "failed to read file");
+      return grpc::Status(grpc::StatusCode::INTERNAL, "读取文件失败");
     }
     *out = std::move(data);
     return grpc::Status::OK;
@@ -141,22 +141,22 @@ private:
   static grpc::Status writeStringToFile(const std::filesystem::path& path, const std::string& data) {
     std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
     if (!ofs.is_open()) {
-      return grpc::Status(grpc::StatusCode::INTERNAL, "failed to open file for write");
+      return grpc::Status(grpc::StatusCode::INTERNAL, "打开文件用于写入失败");
     }
     ofs.write(data.data(), static_cast<std::streamsize>(data.size()));
     if (!ofs.good()) {
-      return grpc::Status(grpc::StatusCode::INTERNAL, "failed to write file");
+      return grpc::Status(grpc::StatusCode::INTERNAL, "写入文件失败");
     }
     ofs.flush();
     if (!ofs.good()) {
-      return grpc::Status(grpc::StatusCode::INTERNAL, "failed to flush file");
+      return grpc::Status(grpc::StatusCode::INTERNAL, "刷新文件失败");
     }
     return grpc::Status::OK;
   }
 
   grpc::Status parseAndValidate(const std::filesystem::path& path, ProtoT* out) const {
     if (out == nullptr) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
     }
     std::string data;
     auto status = readFileToString(path, &data);
@@ -165,7 +165,7 @@ private:
     }
     ProtoT cfg;
     if (!cfg.ParseFromString(data)) {
-      return grpc::Status(grpc::StatusCode::INTERNAL, "failed to parse protobuf");
+      return grpc::Status(grpc::StatusCode::INTERNAL, "解析 protobuf 失败");
     }
     status = validate(cfg);
     if (!status.ok()) {
@@ -196,7 +196,7 @@ private:
       }
     }
 
-    return grpc::Status(grpc::StatusCode::INTERNAL, "failed to rename file");
+    return grpc::Status(grpc::StatusCode::INTERNAL, "重命名文件失败");
   }
 
   static grpc::Status isolateCorruptFile(const std::filesystem::path& path) {
@@ -215,4 +215,3 @@ private:
   ValidateFn validate_{nullptr};
 };
 }  // namespace DataCenter::detail
-

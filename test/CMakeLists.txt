@@ -250,7 +250,9 @@ target_link_libraries(iec104LinkManager_test PRIVATE
 add_test(NAME iec104LinkManager_test COMMAND iec104LinkManager_test)
 
 add_executable(modbusRtuLinkManager_test
+  modbus_rtu_data_center_client_test.cc
   modbus_rtu_link_manager_test.cc
+  modbus_rtu_serial_bus_test.cc
   ${CMAKE_SOURCE_DIR}/src/ModbusRTU/ModbusRTUDataCenterClient.cc
   ${CMAKE_SOURCE_DIR}/src/ModbusRTU/ModbusRTULinkManager.cc
   ${CMAKE_SOURCE_DIR}/src/ModbusRTU/ModbusRTUPointTable.cc
@@ -413,7 +415,7 @@ if(NOT EXISTS "${GCOV_EXECUTABLE}")
 endif()
 
 set(MSKDSP_COVERAGE_OUTPUT_DIR "${CMAKE_BINARY_DIR}/coverage")
-  add_custom_target(coverage ALL
+  add_custom_target(coverage
     COMMAND ${CMAKE_COMMAND} -E rm -rf "${MSKDSP_COVERAGE_OUTPUT_DIR}"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${MSKDSP_COVERAGE_OUTPUT_DIR}"
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure

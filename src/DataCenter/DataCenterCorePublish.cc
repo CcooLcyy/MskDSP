@@ -13,14 +13,14 @@ int64_t DataCenterCore::nowMs() {
 
 grpc::Status DataCenterCore::Publish(const DataCenterProto::PublishRequest &request, std::vector<DataCenterProto::PointUpdate> *outUpdates) {
   if (outUpdates == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "outUpdates is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "outUpdates 为空");
   }
   auto status = validateEndpoint(request.conn_id(), request.tag());
   if (!status.ok()) {
     return status;
   }
   if (request.value().kind_case() == DataCenterProto::PointValue::KIND_NOT_SET) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "value is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "value 不能为空");
   }
 
   int64_t tsMs = request.ts_ms();
@@ -54,7 +54,7 @@ grpc::Status DataCenterCore::Publish(const DataCenterProto::PublishRequest &requ
 
 grpc::Status DataCenterCore::BatchPublish(const DataCenterProto::BatchPublishRequest &request, std::vector<DataCenterProto::PointUpdate> *outUpdates) {
   if (outUpdates == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "outUpdates is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "outUpdates 为空");
   }
   outUpdates->clear();
 
@@ -64,7 +64,7 @@ grpc::Status DataCenterCore::BatchPublish(const DataCenterProto::BatchPublishReq
       return status;
     }
     if (point.value().kind_case() == DataCenterProto::PointValue::KIND_NOT_SET) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "value is required");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "value 不能为空");
     }
   }
 
@@ -113,14 +113,14 @@ grpc::Status DataCenterCore::BatchPublish(const DataCenterProto::BatchPublishReq
 
 grpc::Status DataCenterCore::GetLatest(const DataCenterProto::GetLatestRequest &request, DataCenterProto::GetLatestResponse *out) const {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   if (request.conn_id() == 0) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id 不能为空");
   }
   for (const auto &tag : request.tags()) {
     if (tag.empty()) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tags contains empty string");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tags 包含空字符串");
     }
   }
 
@@ -152,4 +152,3 @@ grpc::Status DataCenterCore::GetLatest(const DataCenterProto::GetLatestRequest &
   return grpc::Status::OK;
 }
 }  // namespace DataCenter
-

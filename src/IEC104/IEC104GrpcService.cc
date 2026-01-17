@@ -8,11 +8,11 @@ namespace {
 const char* roleToString(IEC104Proto::Role role) {
   switch (role) {
     case IEC104Proto::ROLE_SERVER:
-      return "ROLE_SERVER";
+      return "服务端";
     case IEC104Proto::ROLE_CLIENT:
-      return "ROLE_CLIENT";
+      return "客户端";
     default:
-      return "ROLE_UNSPECIFIED";
+      return "未指定";
   }
 }
 }  // namespace
@@ -25,11 +25,11 @@ grpc::Status IEC104GrpcServiceImpl::UpsertLink(
     grpc::ServerContext *, const IEC104Proto::UpsertLinkRequest *request, IEC104Proto::LinkInfo *response) {
   if (iec104_ == nullptr) {
     LOG_ERROR("IEC104 服务未就绪");
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "module not ready");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
   }
   if (request == nullptr || response == nullptr) {
     LOG_ERROR("IEC104 更新连接请求为空");
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request/response is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
   }
   auto status = iec104_->linkManager().UpsertLink(*request, response);
   const auto &config = request->config();
@@ -45,11 +45,11 @@ grpc::Status IEC104GrpcServiceImpl::GetLink(
     grpc::ServerContext *, const IEC104Proto::GetLinkRequest *request, IEC104Proto::LinkInfo *response) {
   if (iec104_ == nullptr) {
     LOG_ERROR("IEC104 服务未就绪");
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "module not ready");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
   }
   if (request == nullptr || response == nullptr) {
     LOG_ERROR("IEC104 查询连接请求为空");
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request/response is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
   }
   auto status = iec104_->linkManager().GetLink(request->conn_name(), response);
   if (!status.ok()) {
@@ -61,11 +61,11 @@ grpc::Status IEC104GrpcServiceImpl::GetLink(
 grpc::Status IEC104GrpcServiceImpl::ListLinks(grpc::ServerContext *, const IEC104Proto::Empty *, IEC104Proto::ListLinksResponse *response) {
   if (iec104_ == nullptr) {
     LOG_ERROR("IEC104 服务未就绪");
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "module not ready");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
   }
   if (response == nullptr) {
     LOG_ERROR("IEC104 连接列表响应为空");
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "response is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
   }
   auto status = iec104_->linkManager().ListLinks(response);
   if (!status.ok()) {
@@ -77,11 +77,11 @@ grpc::Status IEC104GrpcServiceImpl::ListLinks(grpc::ServerContext *, const IEC10
 grpc::Status IEC104GrpcServiceImpl::DeleteLink(grpc::ServerContext *, const IEC104Proto::DeleteLinkRequest *request, IEC104Proto::Empty *) {
   if (iec104_ == nullptr) {
     LOG_ERROR("IEC104 服务未就绪");
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "module not ready");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
   }
   if (request == nullptr) {
     LOG_ERROR("IEC104 删除连接请求为空");
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求为空");
   }
   auto status = iec104_->linkManager().DeleteLink(request->conn_name());
   if (!status.ok()) {
@@ -95,11 +95,11 @@ grpc::Status IEC104GrpcServiceImpl::DeleteLink(grpc::ServerContext *, const IEC1
 grpc::Status IEC104GrpcServiceImpl::StartLink(grpc::ServerContext *, const IEC104Proto::StartLinkRequest *request, IEC104Proto::Empty *) {
   if (iec104_ == nullptr) {
     LOG_ERROR("IEC104 服务未就绪");
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "module not ready");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
   }
   if (request == nullptr) {
     LOG_ERROR("IEC104 启动连接请求为空");
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求为空");
   }
   auto status = iec104_->linkManager().StartLink(request->conn_name());
   if (!status.ok()) {
@@ -113,11 +113,11 @@ grpc::Status IEC104GrpcServiceImpl::StartLink(grpc::ServerContext *, const IEC10
 grpc::Status IEC104GrpcServiceImpl::StopLink(grpc::ServerContext *, const IEC104Proto::StopLinkRequest *request, IEC104Proto::Empty *) {
   if (iec104_ == nullptr) {
     LOG_ERROR("IEC104 服务未就绪");
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "module not ready");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
   }
   if (request == nullptr) {
     LOG_ERROR("IEC104 停止连接请求为空");
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求为空");
   }
   auto status = iec104_->linkManager().StopLink(request->conn_name());
   if (!status.ok()) {
@@ -132,11 +132,11 @@ grpc::Status IEC104GrpcServiceImpl::UpsertPointTable(
     grpc::ServerContext *, const IEC104Proto::UpsertPointTableRequest *request, IEC104Proto::Empty *) {
   if (iec104_ == nullptr) {
     LOG_ERROR("IEC104 服务未就绪");
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "module not ready");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
   }
   if (request == nullptr) {
     LOG_ERROR("IEC104 点表更新请求为空");
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求为空");
   }
   auto status = iec104_->linkManager().UpsertPointTable(*request);
   if (!status.ok()) {
@@ -153,11 +153,11 @@ grpc::Status IEC104GrpcServiceImpl::GetPointTable(
     grpc::ServerContext *, const IEC104Proto::GetPointTableRequest *request, IEC104Proto::PointTable *response) {
   if (iec104_ == nullptr) {
     LOG_ERROR("IEC104 服务未就绪");
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "module not ready");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
   }
   if (request == nullptr || response == nullptr) {
     LOG_ERROR("IEC104 点表查询请求为空");
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "request/response is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
   }
   auto status = iec104_->linkManager().GetPointTable(request->conn_name(), response);
   if (!status.ok()) {

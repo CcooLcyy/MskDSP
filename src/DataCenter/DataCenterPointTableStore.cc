@@ -7,11 +7,11 @@ namespace {
 grpc::Status validatePointTablesConfig(const DataCenterProto::PointTablesConfig& config) {
   for (const auto& table : config.point_tables()) {
     if (table.conn_id() == 0) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "point_tables contains conn_id=0");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "point_tables 包含 conn_id=0");
     }
     for (const auto& tag : table.tags()) {
       if (tag.empty()) {
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "point_tables contains empty tag");
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "point_tables 包含空 tag");
       }
     }
   }

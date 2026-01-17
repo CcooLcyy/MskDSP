@@ -58,7 +58,7 @@ bool pointValueToDouble(const DataCenterProto::PointValue& v, double* out) {
 }
 
 grpc::Status makeNotFound(const std::string& connName) {
-  return grpc::Status(grpc::StatusCode::NOT_FOUND, std::format("link not found: {}", connName));
+  return grpc::Status(grpc::StatusCode::NOT_FOUND, std::format("未找到链路: {}", connName));
 }
 }  // namespace
 
@@ -124,7 +124,7 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, Li
 
     auto finishStatus = reader->Finish();
     if (!finishStatus.ok() && !st.stop_requested()) {
-      LOG_WARNING("IEC104 DataCenter 订阅异常结束: conn_name={}, conn_id={}, error={}",
+      LOG_WARNING("IEC104 DataCenter 订阅异常结束: conn_name={}, conn_id={}, 错误={}",
                   connName,
                   connId,
                   finishStatus.error_message());
@@ -157,7 +157,7 @@ grpc::Status LinkManager::handleClientMeasuredValue(const std::string& connName,
   auto quality = toDataCenterQuality(mv.quality);
   auto st = dataCenter_.PublishDouble(connId, tag, mv.value, quality, 0);
   if (!st.ok()) {
-    LOG_WARNING("IEC104 发布点位失败: conn_name={}, tag={}, error={}", connName, tag, st.error_message());
+    LOG_WARNING("IEC104 发布点位失败: conn_name={}, tag={}, 错误={}", connName, tag, st.error_message());
     std::lock_guard<std::mutex> lock(mu_);
     auto it = linksByName_.find(connName);
     if (it != linksByName_.end()) {
@@ -191,7 +191,7 @@ std::vector<MeasuredValue> LinkManager::buildInterrogationSnapshot(const std::st
   DataCenterProto::GetLatestResponse resp;
   auto status = dataCenter_.GetLatest(connId, tags, &resp);
   if (!status.ok()) {
-    LOG_WARNING("IEC104 查询快照失败: conn_name={}, error={}", connName, status.error_message());
+    LOG_WARNING("IEC104 查询快照失败: conn_name={}, 错误={}", connName, status.error_message());
     std::lock_guard<std::mutex> lock(mu_);
     auto it = linksByName_.find(connName);
     if (it != linksByName_.end()) {

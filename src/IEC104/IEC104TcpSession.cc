@@ -122,8 +122,8 @@ void TcpSession::Start(boost::asio::ip::tcp::socket socket) {
   writeQueue_.clear();
   writing_ = false;
 
-  LOG_INFO("IEC104 会话启动: conn_name={}, 角色={}, k={}, w={}, t0={}, t1={}, t2={}, t3={}", config_.conn_name(), isClient_ ? "CLIENT" : "SERVER", apci_.k, apci_.w, apci_.t0, apci_.t1, apci_.t2, apci_.t3);
-  LOG_INFO("IEC104 遥测合包参数: conn_name={}, window_ms={}, max_asdu_bytes={}, dedupe={}",
+  LOG_INFO("IEC104 会话启动: conn_name={}, 角色={}, k={}, w={}, t0={}, t1={}, t2={}, t3={}", config_.conn_name(), isClient_ ? "客户端" : "服务端", apci_.k, apci_.w, apci_.t0, apci_.t1, apci_.t2, apci_.t3);
+  LOG_INFO("IEC104 遥测合包参数: conn_name={}, window_ms={}, max_asdu_bytes={}, 去重={}",
            config_.conn_name(),
            telemetryBatchWindow_.count(),
            telemetryMaxAsduBytes_,
@@ -142,7 +142,7 @@ void TcpSession::Stop() {
     return;
   }
   closing_ = true;
-  LOG_INFO("IEC104 会话停止: conn_name={}, 角色={}", config_.conn_name(), isClient_ ? "CLIENT" : "SERVER");
+  LOG_INFO("IEC104 会话停止: conn_name={}, 角色={}", config_.conn_name(), isClient_ ? "客户端" : "服务端");
   auto onClosed = onClosed_;
   boost::asio::post(io_, [self = shared_from_this(), onClosed = std::move(onClosed)]() mutable {
     self->t0Timer_.cancel();
@@ -265,7 +265,7 @@ void TcpSession::drainTelemetryQueue() {
     return;
   }
 
-  LOG_DEBUG("IEC104 遥测合包 flush: conn_name={}, pending={}, dedupe={}, window_ms={}, max_asdu_bytes={}",
+  LOG_DEBUG("IEC104 遥测合包刷新: conn_name={}, 待处理={}, 去重={}, window_ms={}, max_asdu_bytes={}",
             config_.conn_name(),
             pending.size(),
             telemetryDedupe_,
@@ -353,7 +353,7 @@ void TcpSession::handleRead() {
   boost::asio::async_read_until(
       socket_, buffer_, MatchIEC104{}, [self](const boost::system::error_code &ec, std::size_t length) {
         if (ec) {
-          LOG_WARNING("IEC104 读取失败: conn_name={}, error={}", self->config_.conn_name(), ec.message());
+          LOG_WARNING("IEC104 读取失败: conn_name={}, 错误={}", self->config_.conn_name(), ec.message());
           self->Stop();
           return;
         }
@@ -363,7 +363,7 @@ void TcpSession::handleRead() {
         std::vector<uint8_t> apdu(length);
         is.read(reinterpret_cast<char *>(apdu.data()), static_cast<std::streamsize>(length));
 
-        LOG_INFO("IEC104 报文接收: conn_name={}, 角色={}, 长度={}, 数据={}", self->config_.conn_name(), self->isClient_ ? "CLIENT" : "SERVER", apdu.size(), bytesToHex(apdu));
+        LOG_INFO("IEC104 报文接收: conn_name={}, 角色={}, 长度={}, 数据={}", self->config_.conn_name(), self->isClient_ ? "客户端" : "服务端", apdu.size(), bytesToHex(apdu));
         self->handleFrame(apdu);
         self->handleRead();
       });
@@ -385,11 +385,11 @@ TcpSession::FrameType TcpSession::frameType(const std::vector<uint8_t> &apdu) {
 
 void TcpSession::handleFrame(const std::vector<uint8_t> &apdu) {
   if (apdu.size() < 6) {
-    LOG_DEBUG("IEC104 丢弃过短报文: conn_name={}, size={}", config_.conn_name(), apdu.size());
+    LOG_DEBUG("IEC104 丢弃过短报文: conn_name={}, 长度={}", config_.conn_name(), apdu.size());
     return;
   }
   if (apdu[0] != kApduStart) {
-    LOG_DEBUG("IEC104 丢弃非法起始字节: conn_name={}, value=0x{:02X}", config_.conn_name(), apdu[0]);
+    LOG_DEBUG("IEC104 丢弃非法起始字节: conn_name={}, 值=0x{:02X}", config_.conn_name(), apdu[0]);
     return;
   }
 
@@ -408,7 +408,7 @@ void TcpSession::handleFrame(const std::vector<uint8_t> &apdu) {
 
 void TcpSession::handleIFrame(const std::vector<uint8_t> &apdu) {
   if (apdu.size() < 6 + 6) {
-    LOG_DEBUG("IEC104 丢弃过短 I 帧: conn_name={}, size={}", config_.conn_name(), apdu.size());
+    LOG_DEBUG("IEC104 丢弃过短 I 帧: conn_name={}, 长度={}", config_.conn_name(), apdu.size());
     return;
   }
   auto remoteSendSeq = parseSeq(apdu, 2);
@@ -427,7 +427,7 @@ void TcpSession::handleIFrame(const std::vector<uint8_t> &apdu) {
   }
 
   if (remoteSendSeq != recvSeqExpected_) {
-    LOG_ERROR("IEC104 发送序号异常: conn_name={}, expect={}, got={}", config_.conn_name(), recvSeqExpected_, remoteSendSeq);
+    LOG_ERROR("IEC104 发送序号异常: conn_name={}, 期望={}, 实际={}", config_.conn_name(), recvSeqExpected_, remoteSendSeq);
     Stop();
     return;
   }
@@ -445,7 +445,7 @@ void TcpSession::handleIFrame(const std::vector<uint8_t> &apdu) {
 
 void TcpSession::handleSFrame(const std::vector<uint8_t> &apdu) {
   if (apdu.size() < 6) {
-    LOG_DEBUG("IEC104 丢弃过短 S 帧: conn_name={}, size={}", config_.conn_name(), apdu.size());
+    LOG_DEBUG("IEC104 丢弃过短 S 帧: conn_name={}, 长度={}", config_.conn_name(), apdu.size());
     return;
   }
   auto remoteAckSeq = parseSeq(apdu, 4);
@@ -459,7 +459,7 @@ void TcpSession::handleSFrame(const std::vector<uint8_t> &apdu) {
 
 void TcpSession::handleUFrame(const std::vector<uint8_t> &apdu) {
   if (apdu.size() < 6) {
-    LOG_DEBUG("IEC104 丢弃过短 U 帧: conn_name={}, size={}", config_.conn_name(), apdu.size());
+    LOG_DEBUG("IEC104 丢弃过短 U 帧: conn_name={}, 长度={}", config_.conn_name(), apdu.size());
     return;
   }
   auto type = static_cast<UFrameType>(apdu[2]);
@@ -595,7 +595,7 @@ void TcpSession::handleInterrogation(const std::vector<uint8_t> &asdu) {
     snapshot = interrogationSnapshotProvider_();
   }
 
-  LOG_DEBUG("IEC104 总召快照: conn_name={}, count={}", config_.conn_name(), snapshot.size());
+  LOG_DEBUG("IEC104 总召快照: conn_name={}, 数量={}", config_.conn_name(), snapshot.size());
   if (!snapshot.empty() && !closing_ && dataTransferActive_) {
     enqueueMeasuredValuesBatch(std::move(snapshot), kCotInterrogatedByStation);
   }
@@ -608,7 +608,7 @@ void TcpSession::enqueueAsdu(std::vector<uint8_t> asdu) {
     return;
   }
   pendingAsdu_.emplace_back(std::move(asdu));
-  LOG_DEBUG("IEC104 ASDU 入队: conn_name={}, pending={}, active={}", config_.conn_name(), pendingAsdu_.size(), dataTransferActive_);
+  LOG_DEBUG("IEC104 ASDU 入队: conn_name={}, 待处理={}, 激活={}", config_.conn_name(), pendingAsdu_.size(), dataTransferActive_);
   trySendPending();
 }
 
@@ -633,7 +633,7 @@ void TcpSession::sendIFrame(const std::vector<uint8_t> &asdu) {
     return;
   }
   if (sendUnacked_ >= apci_.k) {
-    LOG_DEBUG("IEC104 发送窗口已满，ASDU 入队: conn_name={}, k={}, unacked={}", config_.conn_name(), apci_.k, sendUnacked_);
+    LOG_DEBUG("IEC104 发送窗口已满，ASDU 入队: conn_name={}, k={}, 未确认={}", config_.conn_name(), apci_.k, sendUnacked_);
     pendingAsdu_.emplace_front(asdu);
     return;
   }
@@ -645,8 +645,8 @@ void TcpSession::sendIFrame(const std::vector<uint8_t> &asdu) {
   writeSeq(&apdu, 2, sendSeq_);
   writeSeq(&apdu, 4, recvSeqExpected_);
   apdu.insert(apdu.end(), asdu.begin(), asdu.end());
-  LOG_DEBUG("IEC104 发送 I 帧: conn_name={}, ns={}, nr={}, unacked={}", config_.conn_name(), sendSeq_, recvSeqExpected_, sendUnacked_ + 1);
-  LOG_INFO("IEC104 报文发送: conn_name={}, 角色={}, 长度={}, 数据={}", config_.conn_name(), isClient_ ? "CLIENT" : "SERVER", apdu.size(), bytesToHex(apdu));
+  LOG_DEBUG("IEC104 发送 I 帧: conn_name={}, ns={}, nr={}, 未确认={}", config_.conn_name(), sendSeq_, recvSeqExpected_, sendUnacked_ + 1);
+  LOG_INFO("IEC104 报文发送: conn_name={}, 角色={}, 长度={}, 数据={}", config_.conn_name(), isClient_ ? "客户端" : "服务端", apdu.size(), bytesToHex(apdu));
   sendSeq_ = static_cast<uint16_t>((sendSeq_ + 1) % 32768);
   sendUnacked_++;
   if (ackPending_) {
@@ -669,7 +669,7 @@ void TcpSession::sendSFrame() {
   apdu[3] = 0x00;
   writeSeq(&apdu, 4, recvSeqExpected_);
   LOG_DEBUG("IEC104 发送 S 帧: conn_name={}, nr={}", config_.conn_name(), recvSeqExpected_);
-  LOG_INFO("IEC104 报文发送: conn_name={}, 角色={}, 长度={}, 数据={}", config_.conn_name(), isClient_ ? "CLIENT" : "SERVER", apdu.size(), bytesToHex(apdu));
+  LOG_INFO("IEC104 报文发送: conn_name={}, 角色={}, 长度={}, 数据={}", config_.conn_name(), isClient_ ? "客户端" : "服务端", apdu.size(), bytesToHex(apdu));
   ackPending_ = false;
   recvSinceLastAck_ = 0;
   stopT2();
@@ -705,8 +705,8 @@ void TcpSession::sendUFrame(UFrameType type) {
     typeName = "TESTFR_CON";
     break;
   }
-  LOG_DEBUG("IEC104 发送 U 帧: conn_name={}, type={}", config_.conn_name(), typeName);
-  LOG_INFO("IEC104 报文发送: conn_name={}, 角色={}, 长度={}, 数据={}", config_.conn_name(), isClient_ ? "CLIENT" : "SERVER", apdu.size(), bytesToHex(apdu));
+  LOG_DEBUG("IEC104 发送 U 帧: conn_name={}, 类型={}", config_.conn_name(), typeName);
+  LOG_INFO("IEC104 报文发送: conn_name={}, 角色={}, 长度={}, 数据={}", config_.conn_name(), isClient_ ? "客户端" : "服务端", apdu.size(), bytesToHex(apdu));
   enqueueWrite(std::move(apdu));
 }
 
@@ -715,7 +715,7 @@ void TcpSession::enqueueWrite(std::vector<uint8_t> frame) {
     return;
   }
   writeQueue_.emplace_back(std::move(frame));
-  LOG_DEBUG("IEC104 写入队列: conn_name={}, queued={}", config_.conn_name(), writeQueue_.size());
+  LOG_DEBUG("IEC104 写入队列: conn_name={}, 队列数={}", config_.conn_name(), writeQueue_.size());
   if (!writing_) {
     doWrite();
   }
@@ -731,7 +731,7 @@ void TcpSession::doWrite() {
       socket_, boost::asio::buffer(writeQueue_.front()), [self](const boost::system::error_code &ec, std::size_t) {
         self->writing_ = false;
         if (ec) {
-          LOG_WARNING("IEC104 写入失败: conn_name={}, error={}", self->config_.conn_name(), ec.message());
+          LOG_WARNING("IEC104 写入失败: conn_name={}, 错误={}", self->config_.conn_name(), ec.message());
           self->Stop();
           return;
         }
@@ -858,7 +858,7 @@ uint16_t TcpSession::seqDistance(uint16_t from, uint16_t to) {
 void TcpSession::handleAck(uint16_t remoteAckSeq) {
   if (sendUnacked_ == 0) {
     if (remoteAckSeq != sendAckedSeq_) {
-      LOG_ERROR("IEC104 无效确认: conn_name={}, ack={}, expected={}", config_.conn_name(), remoteAckSeq, sendAckedSeq_);
+      LOG_ERROR("IEC104 无效确认: conn_name={}, 确认号={}, 期望={}", config_.conn_name(), remoteAckSeq, sendAckedSeq_);
       Stop();
     }
     return;
@@ -868,13 +868,13 @@ void TcpSession::handleAck(uint16_t remoteAckSeq) {
     return;
   }
   if (diff > sendUnacked_) {
-    LOG_ERROR("IEC104 确认序号越界: conn_name={}, ack={}, oldest={}, unacked={}", config_.conn_name(), remoteAckSeq, sendAckedSeq_, sendUnacked_);
+    LOG_ERROR("IEC104 确认序号越界: conn_name={}, 确认号={}, 最旧={}, 未确认={}", config_.conn_name(), remoteAckSeq, sendAckedSeq_, sendUnacked_);
     Stop();
     return;
   }
   sendAckedSeq_ = remoteAckSeq;
   sendUnacked_ -= diff;
-  LOG_DEBUG("IEC104 确认更新: conn_name={}, acked={}, remaining={}", config_.conn_name(), diff, sendUnacked_);
+  LOG_DEBUG("IEC104 确认更新: conn_name={}, 已确认={}, 剩余={}", config_.conn_name(), diff, sendUnacked_);
   if (sendUnacked_ == 0) {
     stopT1();
   } else {
@@ -889,7 +889,7 @@ void TcpSession::setDataTransferActive(bool active, const char *reason) {
   }
   dataTransferActive_ = active;
   if (active) {
-    LOG_INFO("IEC104 数据传输已激活: conn_name={}, reason={}", config_.conn_name(), reason);
+    LOG_INFO("IEC104 数据传输已激活: conn_name={}, 原因={}", config_.conn_name(), reason);
     stopT0();
     if (isClient_ && !autoInterrogationSent_) {
       sendAutoInterrogation(kQoiStation);
@@ -898,7 +898,7 @@ void TcpSession::setDataTransferActive(bool active, const char *reason) {
     return;
   }
 
-  LOG_INFO("IEC104 数据传输已停止: conn_name={}, reason={}", config_.conn_name(), reason);
+  LOG_INFO("IEC104 数据传输已停止: conn_name={}, 原因={}", config_.conn_name(), reason);
   stopT1();
   stopT2();
   ackPending_ = false;
@@ -950,7 +950,7 @@ void TcpSession::startT1() {
   t1Timer_.expires_after(std::chrono::seconds(apci_.t1));
   auto self = shared_from_this();
   t1Timer_.async_wait([self](const boost::system::error_code &ec) { self->onT1Timeout(ec); });
-  LOG_DEBUG("IEC104 启动 t1: conn_name={}, t1={}, unacked={}", config_.conn_name(), apci_.t1, sendUnacked_);
+  LOG_DEBUG("IEC104 启动 t1: conn_name={}, t1={}, 未确认={}", config_.conn_name(), apci_.t1, sendUnacked_);
 }
 
 void TcpSession::stopT1() {
@@ -964,7 +964,7 @@ void TcpSession::onT1Timeout(const boost::system::error_code &ec) {
   if (closing_ || sendUnacked_ == 0) {
     return;
   }
-  LOG_WARNING("IEC104 t1 超时: conn_name={}, t1={}, unacked={}", config_.conn_name(), apci_.t1, sendUnacked_);
+  LOG_WARNING("IEC104 t1 超时: conn_name={}, t1={}, 未确认={}", config_.conn_name(), apci_.t1, sendUnacked_);
   Stop();
 }
 
@@ -975,7 +975,7 @@ void TcpSession::startT2() {
   t2Timer_.expires_after(std::chrono::seconds(apci_.t2));
   auto self = shared_from_this();
   t2Timer_.async_wait([self](const boost::system::error_code &ec) { self->onT2Timeout(ec); });
-  LOG_DEBUG("IEC104 启动 t2: conn_name={}, t2={}, pending_ack={}", config_.conn_name(), apci_.t2, recvSinceLastAck_);
+  LOG_DEBUG("IEC104 启动 t2: conn_name={}, t2={}, 待确认={}", config_.conn_name(), apci_.t2, recvSinceLastAck_);
 }
 
 void TcpSession::stopT2() {
@@ -989,7 +989,7 @@ void TcpSession::onT2Timeout(const boost::system::error_code &ec) {
   if (closing_ || !ackPending_) {
     return;
   }
-  LOG_DEBUG("IEC104 t2 超时: conn_name={}, pending_ack={}", config_.conn_name(), recvSinceLastAck_);
+  LOG_DEBUG("IEC104 t2 超时: conn_name={}, 待确认={}", config_.conn_name(), recvSinceLastAck_);
   sendSFrame();
 }
 

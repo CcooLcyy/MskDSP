@@ -181,3 +181,59 @@ TEST(ModbusRtuPointTableTest, RejectsDefaultUint16OutOfRange) {
   auto st = table.Upsert(req.points(), req.replace());
   EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
 }
+
+// 验证：replace=false 时支持合并并更新已有点的 scale/offset。
+TEST(ModbusRtuPointTableTest, UpsertMergeUpdatesExistingFields) {
+  PointTable table;
+
+  ModbusRTUProto::UpsertPointTableRequest first;
+  auto p1 = MakePoint("A", ModbusRTUProto::FUNCTION_READ_COILS, 1, ModbusRTUProto::DATA_TYPE_BOOL);
+  p1.set_scale(1.0);
+  p1.set_offset(2.0);
+  *first.add_points() = p1;
+  first.set_replace(true);
+  ASSERT_TRUE(table.Upsert(first.points(), first.replace()).ok());
+
+  ModbusRTUProto::UpsertPointTableRequest second;
+  auto p2 = MakePoint("A", ModbusRTUProto::FUNCTION_READ_COILS, 1, ModbusRTUProto::DATA_TYPE_BOOL);
+  p2.set_scale(2.5);
+  p2.set_offset(-1.0);
+  *second.add_points() = p2;
+  *second.add_points() = MakePoint("C",
+                                   ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS,
+                                   2,
+                                   ModbusRTUProto::DATA_TYPE_UINT16);
+  second.set_replace(false);
+
+  ASSERT_TRUE(table.Upsert(second.points(), second.replace()).ok());
+
+  auto updated = table.FindByTag("A");
+  ASSERT_TRUE(updated.has_value());
+  EXPECT_DOUBLE_EQ(updated->scale, 2.5);
+  EXPECT_DOUBLE_EQ(updated->offset, -1.0);
+
+  auto tags = table.Tags();
+  ASSERT_EQ(tags.size(), 2u);
+  EXPECT_EQ(tags[0], "A");
+  EXPECT_EQ(tags[1], "C");
+}
+
+// 验证：replace=true 会清理已有点表，只保留新的点集合。
+TEST(ModbusRtuPointTableTest, ReplaceClearsExistingPoints) {
+  PointTable table;
+
+  ModbusRTUProto::UpsertPointTableRequest first;
+  *first.add_points() = MakePoint("B", ModbusRTUProto::FUNCTION_READ_COILS, 1, ModbusRTUProto::DATA_TYPE_BOOL);
+  *first.add_points() = MakePoint("A", ModbusRTUProto::FUNCTION_READ_COILS, 2, ModbusRTUProto::DATA_TYPE_BOOL);
+  first.set_replace(true);
+  ASSERT_TRUE(table.Upsert(first.points(), first.replace()).ok());
+
+  ModbusRTUProto::UpsertPointTableRequest second;
+  *second.add_points() = MakePoint("C", ModbusRTUProto::FUNCTION_READ_COILS, 3, ModbusRTUProto::DATA_TYPE_BOOL);
+  second.set_replace(true);
+  ASSERT_TRUE(table.Upsert(second.points(), second.replace()).ok());
+
+  EXPECT_FALSE(table.FindByTag("A").has_value());
+  EXPECT_FALSE(table.FindByTag("B").has_value());
+  ASSERT_TRUE(table.FindByTag("C").has_value());
+}

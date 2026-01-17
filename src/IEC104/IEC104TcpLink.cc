@@ -25,28 +25,28 @@ constexpr std::chrono::milliseconds kDefaultReconnectDelay{1000};
 
 grpc::Status validateLinkConfig(const IEC104Proto::LinkConfig& config) {
   if (config.conn_name().empty()) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_name is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_name 不能为空");
   }
   if (config.role() == IEC104Proto::ROLE_SERVER) {
     if (config.local().port() == 0) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "local.port is required for server role");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "server 角色下 local.port 不能为空");
     }
   } else if (config.role() == IEC104Proto::ROLE_CLIENT) {
     if (config.remote().ip().empty() || config.remote().port() == 0) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "remote.ip/port is required for client role");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "client 角色下 remote.ip/port 不能为空");
     }
   } else {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "role is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "role 不能为空");
   }
   return grpc::Status::OK;
 }
 
 grpc::Status parseEndpoint(const IEC104Proto::Endpoint& ep, bool allowAny, tcp::endpoint* out) {
   if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   if (ep.port() == 0) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "port is required");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "port 不能为空");
   }
 
   if (ep.ip().empty() || ep.ip() == "0.0.0.0") {
@@ -61,7 +61,7 @@ grpc::Status parseEndpoint(const IEC104Proto::Endpoint& ep, bool allowAny, tcp::
   boost::system::error_code ec;
   auto addr = asio::ip::make_address(ep.ip(), ec);
   if (ec) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::format("invalid ip: {}", ep.ip()));
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::format("ip 非法: {}", ep.ip()));
   }
   *out = tcp::endpoint(addr, ep.port());
   return grpc::Status::OK;
@@ -82,12 +82,12 @@ grpc::Status TcpLink::Start() {
 
   std::lock_guard<std::mutex> lock(mu_);
   if (thread_.joinable()) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "link already running");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路已在运行");
   }
 
   LOG_INFO("IEC104 链路启动: conn_name={}, 角色={}",
            config_.conn_name(),
-           config_.role() == IEC104Proto::ROLE_CLIENT ? "CLIENT" : "SERVER");
+           config_.role() == IEC104Proto::ROLE_CLIENT ? "客户端" : "服务端");
 
   io_.restart();
   acceptor_.reset();
@@ -105,29 +105,29 @@ grpc::Status TcpLink::Start() {
     boost::system::error_code ec;
     acceptor_->open(endpoint.protocol(), ec);
     if (ec) {
-      LOG_ERROR("IEC104 监听器打开失败: conn_name={}, error={}", config_.conn_name(), ec.message());
+      LOG_ERROR("IEC104 监听器打开失败: conn_name={}, 错误={}", config_.conn_name(), ec.message());
       acceptor_.reset();
-      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("acceptor open failed: {}", ec.message()));
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("acceptor 打开失败: {}", ec.message()));
     }
     acceptor_->set_option(tcp::acceptor::reuse_address(true), ec);
     if (ec) {
-      LOG_ERROR("IEC104 监听器设置参数失败: conn_name={}, error={}", config_.conn_name(), ec.message());
+      LOG_ERROR("IEC104 监听器设置参数失败: conn_name={}, 错误={}", config_.conn_name(), ec.message());
       acceptor_.reset();
-      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("acceptor set_option failed: {}", ec.message()));
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("acceptor 设置参数失败: {}", ec.message()));
     }
     acceptor_->bind(endpoint, ec);
     if (ec) {
-      LOG_ERROR("IEC104 监听器绑定失败: conn_name={}, error={}", config_.conn_name(), ec.message());
+      LOG_ERROR("IEC104 监听器绑定失败: conn_name={}, 错误={}", config_.conn_name(), ec.message());
       acceptor_.reset();
-      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("acceptor bind failed: {}", ec.message()));
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("acceptor 绑定失败: {}", ec.message()));
     }
     acceptor_->listen(tcp::acceptor::max_listen_connections, ec);
     if (ec) {
-      LOG_ERROR("IEC104 监听器监听失败: conn_name={}, error={}", config_.conn_name(), ec.message());
+      LOG_ERROR("IEC104 监听器监听失败: conn_name={}, 错误={}", config_.conn_name(), ec.message());
       acceptor_.reset();
-      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("acceptor listen failed: {}", ec.message()));
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("acceptor 监听失败: {}", ec.message()));
     }
-    LOG_INFO("IEC104 开始监听: conn_name={}, local={}:{}", config_.conn_name(), endpoint.address().to_string(), endpoint.port());
+    LOG_INFO("IEC104 开始监听: conn_name={}, 本地={}:{}", config_.conn_name(), endpoint.address().to_string(), endpoint.port());
   }
 
   thread_ = std::jthread([this](std::stop_token st) { run(st); });
@@ -212,7 +212,7 @@ void TcpLink::startAccept() {
   acceptor_->async_accept([this](const boost::system::error_code& ec, tcp::socket socket) {
     if (ec) {
       if (ec != boost::asio::error::operation_aborted) {
-        LOG_WARNING("IEC104 接收连接失败: conn_name={}, error={}", config_.conn_name(), ec.message());
+        LOG_WARNING("IEC104 接收连接失败: conn_name={}, 错误={}", config_.conn_name(), ec.message());
         startAccept();
       }
       return;
@@ -221,7 +221,7 @@ void TcpLink::startAccept() {
     boost::system::error_code remoteEc;
     auto remote = socket.remote_endpoint(remoteEc);
     if (remoteEc) {
-      LOG_INFO("IEC104 已接受连接: conn_name={}, 远端未知, error={}",
+      LOG_INFO("IEC104 已接受连接: conn_name={}, 远端未知, 错误={}",
                config_.conn_name(),
                remoteEc.message());
     } else {
@@ -259,7 +259,7 @@ void TcpLink::startConnect() {
 
   resolver_->async_resolve(host, port, [this](const boost::system::error_code& ec, tcp::resolver::results_type results) {
     if (ec) {
-      LOG_WARNING("IEC104 解析远端地址失败: conn_name={}, remote={}:{}, error={}",
+      LOG_WARNING("IEC104 解析远端地址失败: conn_name={}, 远端={}:{}, 错误={}",
                   config_.conn_name(),
                   config_.remote().ip(),
                   config_.remote().port(),
@@ -270,7 +270,7 @@ void TcpLink::startConnect() {
     auto sock = std::make_shared<tcp::socket>(io_);
     asio::async_connect(*sock, results, [this, sock](const boost::system::error_code& ec, const tcp::endpoint&) {
       if (ec) {
-        LOG_WARNING("IEC104 连接远端失败: conn_name={}, remote={}:{}, error={}",
+        LOG_WARNING("IEC104 连接远端失败: conn_name={}, 远端={}:{}, 错误={}",
                     config_.conn_name(),
                     config_.remote().ip(),
                     config_.remote().port(),
