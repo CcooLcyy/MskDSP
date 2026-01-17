@@ -18,7 +18,6 @@
 #include <string>
 #include <string_view>
 #include <thread>
-#include <utility>
 
 #include "COMMock.grpc.pb.h"
 #include "ConfigPusher.pb.h"
@@ -53,10 +52,12 @@ namespace {
 constexpr const char *kIec104ConfigPath = "./conf/configPusher/iec104.jsonc";
 constexpr const char *kModbusRtuConfigPath = "./conf/configPusher/modbus_rtu.jsonc";
 constexpr const char *kDataCenterConfigPath = "./conf/configPusher/DataCenter.jsonc";
+constexpr const char *kComMockConfigPath = "./conf/configPusher/COMMock.jsonc";
 constexpr const char *kModuleManagerAddress = "127.0.0.1:7000";
 constexpr const char *kDataCenterModuleName = "DataCenter";
 constexpr const char *kIec104ModuleName = "IEC104";
 constexpr const char *kModbusRtuModuleName = "ModbusRTU";
+constexpr const char *kComMockModuleName = "COMMock";
 constexpr auto kModulePollInterval = std::chrono::milliseconds(200);
 constexpr auto kModuleStartTimeout = std::chrono::seconds(5);
 
