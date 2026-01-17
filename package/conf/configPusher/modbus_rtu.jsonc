@@ -7,7 +7,7 @@
           "config": {
             "conn_name": "rtu-1",
             "serial": {
-              "device": "/dev/ttyUSB0",
+              "device": "/dev/ttyS0",
               "baud_rate": 9600,
               "data_bits": 8,
               "parity": "PARITY_NONE",
