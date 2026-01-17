@@ -644,24 +644,40 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
   }
   status = bus->Open();
   if (!status.ok()) {
-    std::lock_guard<std::mutex> lock(mu_);
-    auto released = releaseBusLocked(serialKey);
-    if (released) {
-      released->Close();
+    const auto errorMessage = status.error_message();
+    const auto device = config.serial().device();
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto released = releaseBusLocked(serialKey);
+      if (released) {
+        released->Close();
+      }
+      auto it = linksByName_.find(connName);
+      if (it != linksByName_.end()) {
+        it->second.lastError = errorMessage;
+      }
     }
-    updateLastError(connName, status.error_message());
+    LOG_ERROR("ModbusRTU 打开串口失败: conn_name={}, device={}, 原因={}", connName, device, errorMessage);
     return status;
   }
 
   if (config.mode() == ModbusRTUProto::LINK_MODE_SLAVE) {
     status = startSlaveLink(connName, config, pointTable, connId, serialKey, bus);
     if (!status.ok()) {
-      std::lock_guard<std::mutex> lock(mu_);
-      auto released = releaseBusLocked(serialKey);
-      if (released) {
-        released->Close();
+      const auto errorMessage = status.error_message();
+      const auto device = config.serial().device();
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto released = releaseBusLocked(serialKey);
+        if (released) {
+          released->Close();
+        }
+        auto it = linksByName_.find(connName);
+        if (it != linksByName_.end()) {
+          it->second.lastError = errorMessage;
+        }
       }
-      updateLastError(connName, status.error_message());
+      LOG_ERROR("ModbusRTU 启动从站响应失败: conn_name={}, device={}, 原因={}", connName, device, errorMessage);
       return status;
     }
     LOG_INFO("ModbusRTU 已启动从站响应: conn_name={}, slave_id={}, device={}",
