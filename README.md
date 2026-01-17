@@ -61,7 +61,7 @@ ModuleManager 使用模块 manifest 构建依赖图，并自动处理依赖启�
 ## 目录结构
 - `src/`：核心与模块源码（`core/ModuleManager`、`DataCenter`、`IEC104` 等）
 - `protobuf/`：Protobuf/gRPC 协议定义与生成代码（通过 `dspProto` 目标链接）
-- `3rdlibs/`：第三方依赖子工程（如 `siren`）
+- `3rdlibs/`：第三方依赖子工程
 - `test/`：单元测试（GTest）
 - `script/`：辅助脚本
 - `package/`：构建输出目录（可执行文件、共享库、配置等）

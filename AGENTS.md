@@ -1,7 +1,7 @@
 # 仓库指南
 
 ## 项目结构与模块组织
-核心代码位于 `src/`：`core/ModuleManager` 负责管理模块生命周期并暴露 gRPC 服务；`DataCenter` 与 `IEC104` 是插件式共享库，通过管理器进行链接；`main.cc` 在后台线程启动管理器。Protobuf 协议位于 `protobuf/`，生成的 gRPC 桩由 `dspProto` 目标统一链接。第三方代码位于 `3rdlibs/siren/`（以子工程方式构建）。构建产物输出到 `package/`（`package/MskDSP` 可执行文件、`package/lib` 共享库、`package/conf` 生成的配置头文件）；`package/conf/configPusher/` 下所有配置仅供 configPusher 下发/示例使用，不作为具体模块运行时配置来源。辅助脚本位于 `script/`。
+核心代码位于 `src/`：`core/ModuleManager` 负责管理模块生命周期并暴露 gRPC 服务；`DataCenter` 与 `IEC104` 是插件式共享库，通过管理器进行链接；`main.cc` 在后台线程启动管理器。Protobuf 协议位于 `protobuf/`，生成的 gRPC 桩由 `dspProto` 目标统一链接。第三方代码位于 `3rdlibs/`（以子工程方式构建）。构建产物输出到 `package/`（`package/MskDSP` 可执行文件、`package/lib` 共享库、`package/conf` 生成的配置头文件）；`package/conf/configPusher/` 下所有配置仅供 configPusher 下发/示例使用，不作为具体模块运行时配置来源。辅助脚本位于 `script/`。
 
 ## 构建、测试与开发命令
 依赖通过 CMake + vcpkg manifest（`vcpkg*.json`）管理，包含 gRPC、Protobuf、Boost、GTest。典型流程：
@@ -33,14 +33,16 @@ VSCode CMake Tools（用户确认可用的配置命令）：
 - 修改完代码后，不要自动执行编译/构建/测试动作（如 `cmake --build ...`、`ctest` 等）；因为其他 AGENT 可能同步修改导致构建失败；仅在用户明确要求时才执行。
 - 除非用户允许，否则不要执行任何 `git ...` 命令（包括 `git status/diff/add/restore/commit/reset` 等）；需要 git 操作时要询问并请求用户统一。
 - 如需查找日志，默认在 `package/log` 目录中进行查找。
+- 所有模块配置统一由 configPusher 通过 gRPC 下发；涉及配置来源或下发流程的变更时先询问用户是否需要修改，否则默认继续使用 configPusher。
 - 所有代码改动也要增加日志。
+- 回复中如有“启动”描述，需要明确是启动模块还是启动模块内的功能（例如启动连接/任务）。
 - 新增的 C++ 模板代码文件使用 `.hpp` 后缀（例如 `Foo.hpp`）。
 - 新增模块请优先使用脚手架 `bash script/new_module.sh <NewModule>` 生成骨架（目录结构/CMake/LibInfo 等），避免从零手工创建或复制粘贴现有模块。
 - 本项目有配套上位机：接口实现需考虑上位机调用场景；且上位机开发会参考本项目文档，新增/变更接口时需同步补充上位机侧的设计建议与使用说明。
 - 实现代码时应遵循高内聚、低耦合与单一职责原则：避免把“控制面/数据面/外部依赖适配”长期堆叠在同一个类/文件中；当功能增长导致职责变杂时，优先拆分与抽象边界。
 
 ## 测试规范
-单元测试使用 GTest（`3rdlibs/siren` 在 Debug 下启用；顶层测试放在 `test/` 或模块内 `test` 目录）。测试文件命名为 `*_test.cc`，通过 `add_test` 注册，使用 `ctest --output-on-failure` 运行。覆盖模块生命周期边界（load/unload、端口复用）以及 protobuf/grpc 协议兼容性。优先确定性测试；避免绑定固定服务端口，必要时通过随机可用端口进行隔离。
+单元测试使用 GTest（顶层测试放在 `test/` 或模块内 `test` 目录）。测试文件命名为 `*_test.cc`，通过 `add_test` 注册，使用 `ctest --output-on-failure` 运行。覆盖模块生命周期边界（load/unload、端口复用）以及 protobuf/grpc 协议兼容性。优先确定性测试；避免绑定固定服务端口，必要时通过随机可用端口进行隔离。
 
 - 所有自有测试用例（`test/` 与 `src/**/test`）需要在每个 `TEST/TEST_F/TEST_P` 前增加一行注释，明确该用例验证的功能点/边界条件；`3rdlibs/` 下的第三方测试不要求遵守本条。
 - 后续模块测试若需依赖 DataCenter，一律使用 `test/support/FakeDataCenter.hpp` 的 `FakeDataCenterState/MakeStub` 进行 gmock，不启动真实 DataCenter 服务。
