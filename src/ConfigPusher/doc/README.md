@@ -1,13 +1,14 @@
 # ConfigPusher 模块
 
 ## 简介
-ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRTU，并按配置调用对应 gRPC 接口完成 IEC104/ModbusRTU 连接/点表下发，以及 DataCenter 点表/路由下发。
+ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRTU，并按配置调用对应 gRPC 接口完成 IEC104/ModbusRTU 连接/点表下发，以及 DataCenter 点表/路由下发；COMMock 仅在模块已启动时下发配置。
 
 ## 能力清单
 - 自动通过 ModuleManager 启动 DataCenter 与 IEC104/ModbusRTU
 - 解析 JSONC（支持 `//` 与 `/* */` 注释）
 - 下发 IEC104 配置：UpsertLink / UpsertPointTable / StartLink
 - 下发 ModbusRTU 配置：UpsertLink / UpsertPointTable / StartLink
+- 下发 COMMock 配置：ApplyConfig（仅对已运行 COMMock 模块生效）
 - 下发 DataCenter 配置：UpsertPointTable / UpsertRoutes（仅对已存在连接生效）
 - 失败记录日志（当前不做重试）
 
@@ -28,6 +29,7 @@ ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRT
 ## 配置与数据
 - 配置文件：
   - `./conf/configPusher/DataCenter.jsonc`
+  - `./conf/configPusher/COMMock.jsonc`
   - `./conf/configPusher/iec104.jsonc`
   - `./conf/configPusher/modbus_rtu.jsonc`
 - 使用 Protobuf JSON 映射：枚举需写全名（例如 `ROLE_SERVER`、`TELEMETRY_TYPE_FLOAT`、`FUNCTION_READ_COILS`）
@@ -35,6 +37,7 @@ ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRT
 - IEC104 可选下发遥测合包参数（`telemetry_batch_window_ms/telemetry_max_asdu_bytes/telemetry_use_standard_limit/telemetry_dedupe`）
 - DataCenter 配置要求连接已存在（由模块或上位机创建）；若 `point_tables/routes` 引用连接不存在，则该次 DataCenter 配置不下发
 - `replace=true` 表示覆盖配置；`replace=false` 表示增量追加
+- COMMock 配置不触发模块启动，仅在 COMMock 模块已运行时下发
 
 DataCenter 示例：
 ```jsonc
@@ -94,6 +97,7 @@ IEC104 示例：
 }
 ```
 ModbusRTU 示例见 `./conf/configPusher/modbus_rtu.jsonc`。
+COMMock 示例见 `./conf/configPusher/COMMock.jsonc`。
 
 ## 构建产物
 - 共享库：`package/lib/libConfigPusher.so.<version>`（版本见 `src/ConfigPusher/cmake/LibInfo.cmake`）

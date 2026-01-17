@@ -20,6 +20,7 @@
 #include <thread>
 #include <utility>
 
+#include "COMMock.grpc.pb.h"
 #include "ConfigPusher.pb.h"
 #include "ConfigPusherDataCenter.h"
 #include "ConfigPusherGrpcService.h"
@@ -378,6 +379,23 @@ bool applyModbusRtuConfig(const ConfigPusherProto::ModbusRtuConfig &config, Modb
 
   return ok;
 }
+
+bool applyComMockConfig(const COMMockProto::COMMockConfig &config, COMMockProto::COMMockService::StubInterface *stub) {
+  if (stub == nullptr) {
+    LOG_ERROR("COMMock gRPC stub 为空");
+    return false;
+  }
+
+  grpc::ClientContext ctx;
+  COMMockProto::Empty resp;
+  auto status = stub->ApplyConfig(&ctx, config, &resp);
+  if (!status.ok()) {
+    LOG_ERROR("COMMock 配置下发失败: {}", status.error_message());
+    return false;
+  }
+  LOG_INFO("COMMock 配置下发成功: ports={}", config.ports_size());
+  return true;
+}
 }  // namespace
 
 ConfigPusher::ConfigPusher() :
@@ -403,18 +421,18 @@ void ConfigPusher::start(std::stop_token stopToken) {
 }
 
 void ConfigPusher::applyConfig() {
+  auto comMockConfig = loadConfigFile(kComMockConfigPath);
   auto iec104Config = loadConfigFile(kIec104ConfigPath);
   auto modbusConfig = loadConfigFile(kModbusRtuConfigPath);
   auto dataCenterConfig = loadDataCenterConfigFile(kDataCenterConfigPath);
 
+  const bool hasComMock = comMockConfig && comMockConfig->has_com_mock() && comMockConfig->com_mock().ports_size() > 0;
   const bool hasIec104 = iec104Config && iec104Config->has_iec104() && !iec104Config->iec104().links().empty();
   const bool hasModbus = modbusConfig && modbusConfig->has_modbus_rtu() && !modbusConfig->modbus_rtu().links().empty();
-  const bool hasDataCenter =
-      dataCenterConfig &&
-      (!dataCenterConfig->point_tables().empty() || (dataCenterConfig->has_routes() && dataCenterConfig->routes().routes_size() > 0));
+  const bool hasDataCenter = dataCenterConfig && (!dataCenterConfig->point_tables().empty() || (dataCenterConfig->has_routes() && dataCenterConfig->routes().routes_size() > 0));
   const bool needsDataCenter = hasIec104 || hasModbus || hasDataCenter;
-  if (!hasIec104 && !hasModbus && !hasDataCenter) {
-    LOG_INFO("配置中未包含 IEC104/ModbusRTU/DataCenter 配置");
+  if (!hasComMock && !hasIec104 && !hasModbus && !hasDataCenter) {
+    LOG_INFO("配置中未包含 COMMock/IEC104/ModbusRTU/DataCenter 配置");
     return;
   }
   LOG_INFO("ConfigPusher 配置解析完成，开始准备下发配置");
@@ -450,6 +468,13 @@ void ConfigPusher::applyConfig() {
     if (!modbusInfo) {
       LOG_ERROR("未找到模块: {}", kModbusRtuModuleName);
       return;
+    }
+  }
+  std::optional<ModuleManagerProto::ModuleInfo> comMockInfo;
+  if (hasComMock) {
+    comMockInfo = findModuleInfo(moduleInfos, kComMockModuleName);
+    if (!comMockInfo) {
+      LOG_ERROR("未找到模块: {}", kComMockModuleName);
     }
   }
 
@@ -528,6 +553,16 @@ void ConfigPusher::applyConfig() {
     }
   }
 
+  std::optional<ModuleManagerProto::ModuleRunningInfo> runningComMock;
+  if (hasComMock && comMockInfo) {
+    runningComMock = findRunningInfo(running, kComMockModuleName);
+    if (!runningComMock) {
+      LOG_INFO("COMMock 模块未运行，跳过配置下发");
+    } else {
+      LOG_INFO("COMMock 模块已在运行");
+    }
+  }
+
   if (hasIec104 && runningIec104) {
     auto iecChannel = grpc::CreateChannel(runningIec104->inner_grpc_server(), grpc::InsecureChannelCredentials());
     auto iecStub = IEC104Proto::IEC104Service::NewStub(iecChannel);
@@ -545,6 +580,16 @@ void ConfigPusher::applyConfig() {
       LOG_ERROR("ModbusRTU 配置下发存在错误");
     } else {
       LOG_INFO("ModbusRTU 配置下发完成");
+    }
+  }
+
+  if (hasComMock && runningComMock) {
+    auto comMockChannel = grpc::CreateChannel(runningComMock->inner_grpc_server(), grpc::InsecureChannelCredentials());
+    auto comMockStub = COMMockProto::COMMockService::NewStub(comMockChannel);
+    if (!applyComMockConfig(comMockConfig->com_mock(), comMockStub.get())) {
+      LOG_ERROR("COMMock 配置下发存在错误");
+    } else {
+      LOG_INFO("COMMock 配置下发完成");
     }
   }
 

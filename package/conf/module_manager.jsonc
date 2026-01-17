@@ -6,6 +6,7 @@
   // - 每日 00:00 轮转，历史日志自动压缩为 .gz
   // - 仅保留最近 30 天
   "auto_start_modules": [
-    "ConfigPusher"
+    "ConfigPusher",
+    "COMMock"
   ]
 }
