@@ -18,6 +18,24 @@ constexpr uint8_t kFunctionReadCoils = 0x01;
 constexpr uint8_t kFunctionReadHoldingRegisters = 0x03;
 constexpr uint8_t kFunctionWriteMultipleCoils = 0x0F;
 constexpr uint8_t kFunctionWriteMultipleRegisters = 0x10;
+constexpr char kHexDigits[] = "0123456789ABCDEF";
+
+std::string bytesToHex(const std::vector<uint8_t> &data) {
+  if (data.empty()) {
+    return {};
+  }
+  std::string out;
+  out.reserve(data.size() * 3 - 1);
+  for (size_t i = 0; i < data.size(); ++i) {
+    const auto byte = data[i];
+    out.push_back(kHexDigits[(byte >> 4) & 0x0F]);
+    out.push_back(kHexDigits[byte & 0x0F]);
+    if (i + 1 != data.size()) {
+      out.push_back(' ');
+    }
+  }
+  return out;
+}
 }  // namespace
 
 SerialBus::SerialBus(ModbusRTUProto::SerialConfig config) :
@@ -191,6 +209,10 @@ grpc::Status SerialBus::ReadRequest(RtuRequest* out) {
   out->address = static_cast<uint16_t>((static_cast<uint16_t>(body[0]) << 8) | body[1]);
   out->quantity = static_cast<uint16_t>((static_cast<uint16_t>(body[2]) << 8) | body[3]);
   out->frame = std::move(frame);
+  LOG_INFO("ModbusRTU 报文接收: 设备={}, 长度={}, 数据={}",
+           config_.device(),
+           out->frame.size(),
+           bytesToHex(out->frame));
   return grpc::Status::OK;
 }
 
@@ -278,6 +300,10 @@ grpc::Status SerialBus::writeRequestLocked(const std::vector<uint8_t>& frame) {
   if (ec) {
     return grpc::Status(grpc::StatusCode::UNAVAILABLE, std::format("串口写入失败: {}", ec.message()));
   }
+  LOG_INFO("ModbusRTU 报文发送: 设备={}, 长度={}, 数据={}",
+           config_.device(),
+           frame.size(),
+           bytesToHex(frame));
   return grpc::Status::OK;
 }
 
@@ -350,6 +376,14 @@ grpc::Status SerialBus::readResponseLocked(
     if (!tailStatus.ok()) {
       return tailStatus;
     }
+    std::vector<uint8_t> frame;
+    frame.reserve(header.size() + tail.size());
+    frame.insert(frame.end(), header.begin(), header.end());
+    frame.insert(frame.end(), tail.begin(), tail.end());
+    LOG_INFO("ModbusRTU 报文接收: 设备={}, 长度={}, 数据={}",
+             config_.device(),
+             frame.size(),
+             bytesToHex(frame));
     const uint16_t crc = computeCrc(header.data(), header.size());
     const uint16_t respCrc = static_cast<uint16_t>(tail[0]) | (static_cast<uint16_t>(tail[1]) << 8);
     if (crc != respCrc) {
@@ -371,12 +405,16 @@ grpc::Status SerialBus::readResponseLocked(
     return status;
   }
 
-  std::vector<uint8_t> full;
-  full.reserve(header.size() + byteCount);
-  full.insert(full.end(), header.begin(), header.end());
-  full.insert(full.end(), body.begin(), body.begin() + byteCount);
+  std::vector<uint8_t> frame;
+  frame.reserve(header.size() + body.size());
+  frame.insert(frame.end(), header.begin(), header.end());
+  frame.insert(frame.end(), body.begin(), body.end());
+  LOG_INFO("ModbusRTU 报文接收: 设备={}, 长度={}, 数据={}",
+           config_.device(),
+           frame.size(),
+           bytesToHex(frame));
 
-  const uint16_t crc = computeCrc(full.data(), full.size());
+  const uint16_t crc = computeCrc(frame.data(), frame.size() - 2);
   const uint16_t respCrc = static_cast<uint16_t>(body[byteCount]) | (static_cast<uint16_t>(body[byteCount + 1]) << 8);
   if (crc != respCrc) {
     return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应 CRC 不匹配");

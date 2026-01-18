@@ -1,11 +1,16 @@
 #include "DataCenterGrpcService.h"
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
+#include <iomanip>
 #include <memory>
 #include <mutex>
+#include <sstream>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -18,6 +23,61 @@
 #include "Logger.h"
 
 namespace DataCenter {
+namespace {
+std::string formatBytesHexPreview(const std::string& bytes, size_t maxLen = 32) {
+  std::ostringstream oss;
+  oss << std::uppercase << std::hex << std::setfill('0');
+  const auto total = bytes.size();
+  const auto count = std::min(total, maxLen);
+  for (size_t i = 0; i < count; ++i) {
+    if (i > 0) {
+      oss << ' ';
+    }
+    const auto byte = static_cast<unsigned char>(bytes[i]);
+    oss << std::setw(2) << static_cast<unsigned>(byte);
+  }
+  if (total > maxLen) {
+    oss << " ...";
+  }
+  return oss.str();
+}
+
+const char* qualityToString(DataCenterProto::Quality quality) {
+  switch (quality) {
+    case DataCenterProto::QUALITY_GOOD:
+      return "良好";
+    case DataCenterProto::QUALITY_BAD:
+      return "异常";
+    case DataCenterProto::QUALITY_UNCERTAIN:
+      return "不确定";
+    case DataCenterProto::QUALITY_UNSPECIFIED:
+    default:
+      return "未指定";
+  }
+}
+
+std::string formatPointValue(const DataCenterProto::PointValue& value) {
+  switch (value.kind_case()) {
+    case DataCenterProto::PointValue::kBoolValue:
+      return std::string("类型=布尔, 值=") + (value.bool_value() ? "真" : "假");
+    case DataCenterProto::PointValue::kIntValue:
+      return "类型=整数, 值=" + std::to_string(value.int_value());
+    case DataCenterProto::PointValue::kDoubleValue:
+      return "类型=双精度, 值=" + std::to_string(value.double_value());
+    case DataCenterProto::PointValue::kStringValue:
+      return "类型=字符串, 值=\"" + value.string_value() + "\"";
+    case DataCenterProto::PointValue::kBytesValue: {
+      const auto& bytes = value.bytes_value();
+      return "类型=字节串, 长度=" + std::to_string(bytes.size()) +
+             ", 十六进制=" + formatBytesHexPreview(bytes);
+    }
+    case DataCenterProto::PointValue::KIND_NOT_SET:
+    default:
+      return "类型=未设置";
+  }
+}
+}  // namespace
+
 struct DataCenterGrpcServiceImpl::Impl {
   struct Subscriber {
     uint64_t id{};
@@ -451,6 +511,10 @@ grpc::Status DataCenterGrpcServiceImpl::Publish(grpc::ServerContext*, const Data
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求为空");
   }
 
+  LOG_INFO("DataCenter 收到点值发布: src_conn_id={}, src_tag={}, {}, 质量={}({}), 请求时间戳={}",
+           request->conn_id(), request->tag(), formatPointValue(request->value()),
+           static_cast<int>(request->quality()), qualityToString(request->quality()), request->ts_ms());
+
   std::vector<DataCenterProto::PointUpdate> updates;
   std::vector<Impl::Delivery> deliveries;
   size_t updateCount = 0;
@@ -458,15 +522,32 @@ grpc::Status DataCenterGrpcServiceImpl::Publish(grpc::ServerContext*, const Data
     std::lock_guard<std::mutex> lock(impl_->mu);
     auto status = impl_->core.Publish(*request, &updates);
     if (!status.ok()) {
+      LOG_ERROR("DataCenter 点值发布失败: src_conn_id={}, src_tag={}, {}, 质量={}({}), 请求时间戳={}, 原因={}",
+                request->conn_id(), request->tag(), formatPointValue(request->value()),
+                static_cast<int>(request->quality()), qualityToString(request->quality()), request->ts_ms(),
+                status.error_message());
       return status;
     }
     updateCount = updates.size();
+    if (updateCount == 0) {
+      LOG_INFO("DataCenter 点值发布未匹配路由: src_conn_id={}, src_tag={}, {}, 质量={}({}), 请求时间戳={}",
+               request->conn_id(), request->tag(), formatPointValue(request->value()),
+               static_cast<int>(request->quality()), qualityToString(request->quality()), request->ts_ms());
+    }
     deliveries.reserve(updates.size());
     for (const auto& update : updates) {
       auto subs = impl_->matchSubscribersLocked(update.dst_conn_id(), update.dst_tag());
       if (subs.empty()) {
+        LOG_INFO("DataCenter 点值已路由但无订阅者: src_conn_id={}, src_tag={}, dst_conn_id={}, dst_tag={}, {}, 质量={}({}), 时间戳={}",
+                 update.src_conn_id(), update.src_tag(), update.dst_conn_id(), update.dst_tag(),
+                 formatPointValue(update.value()), static_cast<int>(update.quality()),
+                 qualityToString(update.quality()), update.ts_ms());
         continue;
       }
+      LOG_INFO("DataCenter 点值转发: src_conn_id={}, src_tag={}, dst_conn_id={}, dst_tag={}, {}, 质量={}({}), 时间戳={}, 订阅者数={}",
+               update.src_conn_id(), update.src_tag(), update.dst_conn_id(), update.dst_tag(),
+               formatPointValue(update.value()), static_cast<int>(update.quality()),
+               qualityToString(update.quality()), update.ts_ms(), subs.size());
       deliveries.emplace_back(Impl::Delivery{.update = &update, .subscribers = std::move(subs)});
     }
   }
@@ -487,23 +568,61 @@ grpc::Status DataCenterGrpcServiceImpl::BatchPublish(grpc::ServerContext*, const
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求为空");
   }
 
+  LOG_INFO("DataCenter 收到批量点值发布: 点数={}", request->points_size());
+
+  struct SrcKey {
+    uint32_t connId{};
+    std::string tag;
+    bool operator==(const SrcKey& other) const { return connId == other.connId && tag == other.tag; }
+  };
+  struct SrcKeyHash {
+    size_t operator()(const SrcKey& key) const noexcept {
+      size_t h1 = std::hash<uint32_t>{}(key.connId);
+      size_t h2 = std::hash<std::string>{}(key.tag);
+      return h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2));
+    }
+  };
+
   std::vector<DataCenterProto::PointUpdate> updates;
   std::vector<Impl::Delivery> deliveries;
   size_t updateCount = 0;
+  std::unordered_map<SrcKey, size_t, SrcKeyHash> updateCountBySrc;
   {
     std::lock_guard<std::mutex> lock(impl_->mu);
     auto status = impl_->core.BatchPublish(*request, &updates);
     if (!status.ok()) {
+      LOG_ERROR("DataCenter 批量点值发布失败: 点数={}, 原因={}", request->points_size(), status.error_message());
       return status;
     }
     updateCount = updates.size();
+    updateCountBySrc.reserve(updates.size());
     deliveries.reserve(updates.size());
     for (const auto& update : updates) {
+      ++updateCountBySrc[SrcKey{update.src_conn_id(), update.src_tag()}];
       auto subs = impl_->matchSubscribersLocked(update.dst_conn_id(), update.dst_tag());
       if (subs.empty()) {
+        LOG_INFO("DataCenter 点值已路由但无订阅者: src_conn_id={}, src_tag={}, dst_conn_id={}, dst_tag={}, {}, 质量={}({}), 时间戳={}",
+                 update.src_conn_id(), update.src_tag(), update.dst_conn_id(), update.dst_tag(),
+                 formatPointValue(update.value()), static_cast<int>(update.quality()),
+                 qualityToString(update.quality()), update.ts_ms());
         continue;
       }
+      LOG_INFO("DataCenter 点值转发: src_conn_id={}, src_tag={}, dst_conn_id={}, dst_tag={}, {}, 质量={}({}), 时间戳={}, 订阅者数={}",
+               update.src_conn_id(), update.src_tag(), update.dst_conn_id(), update.dst_tag(),
+               formatPointValue(update.value()), static_cast<int>(update.quality()),
+               qualityToString(update.quality()), update.ts_ms(), subs.size());
       deliveries.emplace_back(Impl::Delivery{.update = &update, .subscribers = std::move(subs)});
+    }
+  }
+
+  size_t noRouteCount = 0;
+  for (const auto& point : request->points()) {
+    SrcKey key{point.conn_id(), point.tag()};
+    if (!updateCountBySrc.contains(key)) {
+      ++noRouteCount;
+      LOG_INFO("DataCenter 点值发布未匹配路由: src_conn_id={}, src_tag={}, {}, 质量={}({}), 请求时间戳={}",
+               point.conn_id(), point.tag(), formatPointValue(point.value()),
+               static_cast<int>(point.quality()), qualityToString(point.quality()), point.ts_ms());
     }
   }
 
@@ -512,8 +631,8 @@ grpc::Status DataCenterGrpcServiceImpl::BatchPublish(grpc::ServerContext*, const
       Impl::enqueue(sub, *delivery.update);
     }
   }
-  LOG_DEBUG("DataCenter 批量发布: 点数={}, 更新数={}, 投递数={}",
-            request->points_size(), updateCount, deliveries.size());
+  LOG_INFO("DataCenter 批量发布完成: 点数={}, 更新数={}, 投递数={}, 未匹配路由点数={}",
+           request->points_size(), updateCount, deliveries.size(), noRouteCount);
   return grpc::Status::OK;
 }
 

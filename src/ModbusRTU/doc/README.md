@@ -24,6 +24,7 @@ ModbusRTU 主站/从站模块：主站基于串口轮询从站点表并发布到
 - 配置入口：ConfigPusher `./conf/configPusher/modbus_rtu.jsonc`
 - 关键配置：serial.device/baud_rate/data_bits/parity/stop_bits/read_timeout_ms、slave_id、poll_interval_ms、address_base、mode
 - 点表字段：tag/function/address/type、default_value（从站兜底），scale/offset 预留但当前不生效
+- function 字段支持枚举名/数字/十六进制字符串（`0x01`/`0x03`）
 
 ## 地址与点表说明
 - `address_base=ADDRESS_BASE_ZERO`：点表地址按协议偏移填写（例如保持寄存器 0 对应 40001）。
@@ -39,6 +40,10 @@ ModbusRTU 主站/从站模块：主站基于串口轮询从站点表并发布到
 - 配置流程：`UpsertLink(create_only=true)` → `UpsertPointTable` → `StartLink`。
 - 同串口多从站：不同 `conn_name` + 不同 `slave_id`，其余串口参数必须一致。
 - 读出数据将发布到 DataCenter，点值类型分别映射为 bool/int64（uint16）。
+
+## 报文日志
+- 报文日志为 INFO 级别，逐帧输出完整 RTU 帧（包含发送/接收、设备、长度、数据）。
+- 报文日志输出量大，生产环境需关注日志大小与磁盘占用。
 
 ## 常见错误码
 - `INVALID_ARGUMENT`：参数缺失、address_base 与点表地址不匹配、点表类型不合法。

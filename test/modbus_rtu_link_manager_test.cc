@@ -1,17 +1,30 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <array>
+#include <cerrno>
+#include <chrono>
+#include <cstdlib>
+#include <fcntl.h>
+#include <poll.h>
 #include <string>
+#include <termios.h>
+#include <thread>
+#include <unistd.h>
 #include <unordered_set>
+#include <vector>
 
 #include "DataCenter_mock.grpc.pb.h"
 #include "ModbusRTULinkManager.h"
+#include "ModbusRTUSerialBus.h"
 #include "support/FakeDataCenter.hpp"
 
 namespace {
 using ModbusRTU::LinkManager;
+using ModbusRTU::SerialBus;
 
 using ::testing::_;
+using ::testing::Invoke;
 using ::testing::Return;
 
 ModbusRTUProto::UpsertLinkRequest MakeLinkReq(const char* connName, const char* device, uint32_t baud, uint32_t slaveId) {
@@ -47,6 +60,114 @@ ModbusRTUProto::Point MakeCoilPoint(const char* tag, uint32_t address) {
   p.set_address(address);
   p.set_type(ModbusRTUProto::DATA_TYPE_BOOL);
   return p;
+}
+
+ModbusRTUProto::Point MakeRegisterPoint(const char* tag, uint32_t address) {
+  ModbusRTUProto::Point p;
+  p.set_tag(tag);
+  p.set_function(ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS);
+  p.set_address(address);
+  p.set_type(ModbusRTUProto::DATA_TYPE_UINT16);
+  return p;
+}
+
+struct PtyPair {
+  int master_fd = -1;
+  std::string slave_path;
+};
+
+void CloseFd(int* fd) {
+  if (fd == nullptr || *fd < 0) {
+    return;
+  }
+  ::close(*fd);
+  *fd = -1;
+}
+
+bool SetRawMode(int fd) {
+  termios tio{};
+  if (::tcgetattr(fd, &tio) != 0) {
+    return false;
+  }
+  ::cfmakeraw(&tio);
+  return ::tcsetattr(fd, TCSANOW, &tio) == 0;
+}
+
+PtyPair CreatePtyPair() {
+  PtyPair pair;
+  pair.master_fd = ::posix_openpt(O_RDWR | O_NOCTTY);
+  if (pair.master_fd < 0) {
+    return pair;
+  }
+  if (::grantpt(pair.master_fd) != 0 || ::unlockpt(pair.master_fd) != 0) {
+    CloseFd(&pair.master_fd);
+    return pair;
+  }
+  char* slave_name = ::ptsname(pair.master_fd);
+  if (slave_name == nullptr) {
+    CloseFd(&pair.master_fd);
+    return pair;
+  }
+  pair.slave_path = slave_name;
+  int slave_fd = ::open(slave_name, O_RDWR | O_NOCTTY);
+  if (slave_fd < 0) {
+    CloseFd(&pair.master_fd);
+    pair.slave_path.clear();
+    return pair;
+  }
+  SetRawMode(slave_fd);
+  ::close(slave_fd);
+  return pair;
+}
+
+bool WriteAll(int fd, const std::vector<uint8_t>& data) {
+  size_t offset = 0;
+  while (offset < data.size()) {
+    const ssize_t n = ::write(fd, data.data() + offset, data.size() - offset);
+    if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return false;
+    }
+    offset += static_cast<size_t>(n);
+  }
+  return true;
+}
+
+bool ReadExact(int fd, uint8_t* out, size_t len, std::chrono::milliseconds timeout) {
+  size_t offset = 0;
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (offset < len) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      return false;
+    }
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+    pollfd pfd{fd, POLLIN, 0};
+    const int rc = ::poll(&pfd, 1, static_cast<int>(remaining));
+    if (rc < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return false;
+    }
+    if (rc == 0) {
+      return false;
+    }
+    const ssize_t n = ::read(fd, out + offset, len - offset);
+    if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return false;
+    }
+    if (n == 0) {
+      return false;
+    }
+    offset += static_cast<size_t>(n);
+  }
+  return true;
 }
 }  // namespace
 
@@ -117,6 +238,126 @@ TEST(ModbusRtuLinkManagerTest, UpsertLinkRejectsSerialConflict) {
   ModbusRTUProto::LinkInfo info2;
   auto st = mgr.UpsertLink(req2, &info2);
   EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+}
+
+// 验证：从站 0x03 在 DataCenter 无值时使用 default_uint16 兜底返回。
+TEST(ModbusRtuLinkManagerTest, SlaveHoldingRegistersUsesDefaultWhenDataCenterEmpty) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  EXPECT_CALL(*stub, GetLatest(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext*,
+                          const DataCenterProto::GetLatestRequest& req,
+                          DataCenterProto::GetLatestResponse* resp) {
+        EXPECT_GT(req.conn_id(), 0u);
+        EXPECT_EQ(req.tags_size(), 1);
+        if (req.tags_size() > 0) {
+          EXPECT_EQ(req.tags(0), "reg-1");
+        }
+        resp->Clear();
+        return grpc::Status::OK;
+      }));
+
+  LinkManager mgr("ModbusRTU");
+  mgr.setDataCenterStub(stub);
+
+  auto pair = CreatePtyPair();
+  ASSERT_GE(pair.master_fd, 0);
+  ASSERT_FALSE(pair.slave_path.empty());
+
+  auto linkReq = MakeLinkReq("slave-1", pair.slave_path.c_str(), 9600, 1);
+  linkReq.mutable_config()->set_mode(ModbusRTUProto::LINK_MODE_SLAVE);
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(linkReq, &info).ok());
+
+  ModbusRTUProto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("slave-1");
+  auto* point = ptReq.add_points();
+  *point = MakeRegisterPoint("reg-1", 0);
+  point->set_default_uint16(0x1234);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  ASSERT_TRUE(mgr.StartLink("slave-1").ok());
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  std::vector<uint8_t> reqFrame = {0x01, 0x03, 0x00, 0x00, 0x00, 0x01};
+  SerialBus::appendCrc(&reqFrame);
+  ASSERT_TRUE(WriteAll(pair.master_fd, reqFrame));
+
+  std::array<uint8_t, 7> resp{};
+  ASSERT_TRUE(ReadExact(pair.master_fd, resp.data(), resp.size(), std::chrono::milliseconds(500)));
+
+  EXPECT_EQ(resp[0], 0x01);
+  EXPECT_EQ(resp[1], 0x03);
+  EXPECT_EQ(resp[2], 0x02);
+  const uint16_t value = static_cast<uint16_t>((static_cast<uint16_t>(resp[3]) << 8) | resp[4]);
+  EXPECT_EQ(value, 0x1234);
+  const uint16_t expectCrc = SerialBus::computeCrc(resp.data(), resp.size() - 2);
+  const uint16_t gotCrc = static_cast<uint16_t>(resp[5]) | (static_cast<uint16_t>(resp[6]) << 8);
+  EXPECT_EQ(gotCrc, expectCrc);
+
+  EXPECT_TRUE(mgr.StopLink("slave-1").ok());
+  CloseFd(&pair.master_fd);
+}
+
+// 验证：从站 0x03 在值缺失/越界时返回 0x04 异常。
+TEST(ModbusRtuLinkManagerTest, SlaveHoldingRegistersReturnsExceptionOnMissingValue) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  EXPECT_CALL(*stub, GetLatest(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext*,
+                          const DataCenterProto::GetLatestRequest& req,
+                          DataCenterProto::GetLatestResponse* resp) {
+        EXPECT_GT(req.conn_id(), 0u);
+        EXPECT_EQ(req.tags_size(), 1);
+        if (req.tags_size() > 0) {
+          EXPECT_EQ(req.tags(0), "reg-1");
+        }
+        auto* update = resp->add_updates();
+        update->set_dst_tag("reg-1");
+        update->mutable_value()->set_int_value(70000);
+        return grpc::Status::OK;
+      }));
+
+  LinkManager mgr("ModbusRTU");
+  mgr.setDataCenterStub(stub);
+
+  auto pair = CreatePtyPair();
+  ASSERT_GE(pair.master_fd, 0);
+  ASSERT_FALSE(pair.slave_path.empty());
+
+  auto linkReq = MakeLinkReq("slave-2", pair.slave_path.c_str(), 9600, 1);
+  linkReq.mutable_config()->set_mode(ModbusRTUProto::LINK_MODE_SLAVE);
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(linkReq, &info).ok());
+
+  ModbusRTUProto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("slave-2");
+  *ptReq.add_points() = MakeRegisterPoint("reg-1", 0);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  ASSERT_TRUE(mgr.StartLink("slave-2").ok());
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  std::vector<uint8_t> reqFrame = {0x01, 0x03, 0x00, 0x00, 0x00, 0x01};
+  SerialBus::appendCrc(&reqFrame);
+  ASSERT_TRUE(WriteAll(pair.master_fd, reqFrame));
+
+  std::array<uint8_t, 5> resp{};
+  ASSERT_TRUE(ReadExact(pair.master_fd, resp.data(), resp.size(), std::chrono::milliseconds(500)));
+
+  EXPECT_EQ(resp[0], 0x01);
+  EXPECT_EQ(resp[1], 0x83);
+  EXPECT_EQ(resp[2], 0x04);
+  const uint16_t expectCrc = SerialBus::computeCrc(resp.data(), resp.size() - 2);
+  const uint16_t gotCrc = static_cast<uint16_t>(resp[3]) | (static_cast<uint16_t>(resp[4]) << 8);
+  EXPECT_EQ(gotCrc, expectCrc);
+
+  EXPECT_TRUE(mgr.StopLink("slave-2").ok());
+  CloseFd(&pair.master_fd);
 }
 
 // 验证：当 DataCenter 删除失败时，DeleteLink 标记 PENDING_DELETE 且保留本地配置以便重试。
