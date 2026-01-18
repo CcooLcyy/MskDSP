@@ -18,7 +18,9 @@ constexpr uint32_t kDefaultDataBits = 8;
 constexpr uint32_t kDefaultReadTimeoutMs = 1000;
 constexpr uint32_t kDefaultPollIntervalMs = 1000;
 constexpr uint16_t kMaxReadCoilsQuantity = 2000;
+constexpr uint16_t kMaxReadHoldingRegistersQuantity = 125;
 constexpr uint8_t kFunctionReadCoils = 0x01;
+constexpr uint8_t kFunctionReadHoldingRegisters = 0x03;
 constexpr uint8_t kExceptionIllegalFunction = 0x01;
 constexpr uint8_t kExceptionIllegalDataAddress = 0x02;
 constexpr uint8_t kExceptionIllegalDataValue = 0x03;
@@ -344,129 +346,260 @@ void LinkManager::slaveLoop(SerialKey serialKey, std::shared_ptr<SerialBus> bus,
       }
     };
 
-  if (request.function != kFunctionReadCoils) {
-      sendException(kExceptionIllegalFunction, "不支持的功能码");
-      continue;
-    }
-    if (request.quantity == 0 || request.quantity > kMaxReadCoilsQuantity) {
-      sendException(kExceptionIllegalDataValue, "线圈数量非法");
-      continue;
-    }
-    if (static_cast<uint32_t>(request.address) + request.quantity - 1 > 0xFFFF) {
-      sendException(kExceptionIllegalDataAddress, "线圈地址超出范围");
-      continue;
-    }
-
-    struct CoilSlot {
-      bool hasPoint = false;
-      std::string tag;
-      std::optional<bool> defaultValue;
-    };
-    std::vector<CoilSlot> slots;
-    slots.resize(request.quantity);
-    std::vector<std::string> tags;
-    tags.reserve(request.quantity);
-
-    bool addressOverflow = false;
-    for (uint16_t i = 0; i < request.quantity; ++i) {
-      uint32_t reqAddr = static_cast<uint32_t>(request.address) + i;
-      uint32_t lookupAddr = reqAddr;
-      if (link->config.address_base() == ModbusRTUProto::ADDRESS_BASE_ONE) {
-        if (reqAddr == 0xFFFF) {
-          addressOverflow = true;
-          break;
-        }
-        lookupAddr = reqAddr + 1;
-      }
-      auto point = link->pointTable.FindByAddress(ModbusRTUProto::FUNCTION_READ_COILS, lookupAddr);
-      if (!point.has_value()) {
+    if (request.function == kFunctionReadCoils) {
+      if (request.quantity == 0 || request.quantity > kMaxReadCoilsQuantity) {
+        sendException(kExceptionIllegalDataValue, "线圈数量非法");
         continue;
       }
-      slots[i].hasPoint = true;
-      slots[i].tag = point->tag;
-      slots[i].defaultValue = point->defaultBool;
-      tags.push_back(point->tag);
-    }
+      if (static_cast<uint32_t>(request.address) + request.quantity - 1 > 0xFFFF) {
+        sendException(kExceptionIllegalDataAddress, "线圈地址超出范围");
+        continue;
+      }
 
-    if (addressOverflow) {
-      sendException(kExceptionIllegalDataAddress, "线圈地址溢出");
-      continue;
-    }
+      struct CoilSlot {
+        bool hasPoint = false;
+        std::string tag;
+        std::optional<bool> defaultValue;
+      };
+      std::vector<CoilSlot> slots;
+      slots.resize(request.quantity);
+      std::vector<std::string> tags;
+      tags.reserve(request.quantity);
 
-    std::unordered_map<std::string, std::optional<bool>> valuesByTag;
-    bool dcOk = true;
-    if (!tags.empty()) {
-      DataCenterProto::GetLatestResponse resp;
-      auto dcStatus = dataCenter_.GetLatest(link->connId, tags, &resp);
-      if (!dcStatus.ok()) {
-        dcOk = false;
-        LOG_WARNING("ModbusRTU 从站获取 DataCenter 最新值失败: conn_name={}, 原因={}",
-                    link->connName, dcStatus.error_message());
-        updateLastError(link->connName, dcStatus.error_message());
-      } else {
-        for (const auto& update : resp.updates()) {
-          if (update.value().kind_case() == DataCenterProto::PointValue::kBoolValue) {
-            valuesByTag[update.dst_tag()] = update.value().bool_value();
-          } else {
-            valuesByTag[update.dst_tag()] = std::nullopt;
-            LOG_WARNING("ModbusRTU 从站点值类型不匹配: conn_name={}, tag={}",
-                        link->connName, update.dst_tag());
+      bool addressOverflow = false;
+      for (uint16_t i = 0; i < request.quantity; ++i) {
+        uint32_t reqAddr = static_cast<uint32_t>(request.address) + i;
+        uint32_t lookupAddr = reqAddr;
+        if (link->config.address_base() == ModbusRTUProto::ADDRESS_BASE_ONE) {
+          if (reqAddr == 0xFFFF) {
+            addressOverflow = true;
+            break;
+          }
+          lookupAddr = reqAddr + 1;
+        }
+        auto point = link->pointTable.FindByAddress(ModbusRTUProto::FUNCTION_READ_COILS, lookupAddr);
+        if (!point.has_value()) {
+          continue;
+        }
+        slots[i].hasPoint = true;
+        slots[i].tag = point->tag;
+        slots[i].defaultValue = point->defaultBool;
+        tags.push_back(point->tag);
+      }
+
+      if (addressOverflow) {
+        sendException(kExceptionIllegalDataAddress, "线圈地址溢出");
+        continue;
+      }
+
+      std::unordered_map<std::string, std::optional<bool>> valuesByTag;
+      bool dcOk = true;
+      if (!tags.empty()) {
+        DataCenterProto::GetLatestResponse resp;
+        auto dcStatus = dataCenter_.GetLatest(link->connId, tags, &resp);
+        if (!dcStatus.ok()) {
+          dcOk = false;
+          LOG_WARNING("ModbusRTU 从站获取 DataCenter 最新值失败: conn_name={}, 原因={}",
+                      link->connName, dcStatus.error_message());
+          updateLastError(link->connName, dcStatus.error_message());
+        } else {
+          for (const auto& update : resp.updates()) {
+            if (update.value().kind_case() == DataCenterProto::PointValue::kBoolValue) {
+              valuesByTag[update.dst_tag()] = update.value().bool_value();
+            } else {
+              valuesByTag[update.dst_tag()] = std::nullopt;
+              LOG_WARNING("ModbusRTU 从站点值类型不匹配: conn_name={}, tag={}",
+                          link->connName, update.dst_tag());
+            }
           }
         }
       }
-    }
 
-    const size_t byteCount = (static_cast<size_t>(request.quantity) + 7) / 8;
-    std::vector<uint8_t> coilBytes(byteCount, 0);
-    bool missingValue = false;
+      const size_t byteCount = (static_cast<size_t>(request.quantity) + 7) / 8;
+      std::vector<uint8_t> coilBytes(byteCount, 0);
+      bool missingValue = false;
 
-    for (uint16_t i = 0; i < request.quantity; ++i) {
-      bool value = false;
-      if (!slots[i].hasPoint) {
-        value = false;
-      } else if (dcOk) {
-        auto it = valuesByTag.find(slots[i].tag);
-        if (it != valuesByTag.end() && it->second.has_value()) {
-          value = it->second.value();
-        } else if (slots[i].defaultValue.has_value()) {
-          value = slots[i].defaultValue.value();
+      for (uint16_t i = 0; i < request.quantity; ++i) {
+        bool value = false;
+        if (!slots[i].hasPoint) {
+          value = false;
+        } else if (dcOk) {
+          auto it = valuesByTag.find(slots[i].tag);
+          if (it != valuesByTag.end() && it->second.has_value()) {
+            value = it->second.value();
+          } else if (slots[i].defaultValue.has_value()) {
+            value = slots[i].defaultValue.value();
+          } else {
+            missingValue = true;
+          }
         } else {
-          missingValue = true;
+          if (slots[i].defaultValue.has_value()) {
+            value = slots[i].defaultValue.value();
+          } else {
+            missingValue = true;
+          }
         }
-      } else {
-        if (slots[i].defaultValue.has_value()) {
-          value = slots[i].defaultValue.value();
-        } else {
-          missingValue = true;
+
+        if (missingValue) {
+          break;
+        }
+        if (value) {
+          coilBytes[static_cast<size_t>(i / 8)] |= static_cast<uint8_t>(1u << (i % 8));
         }
       }
 
       if (missingValue) {
-        break;
+        sendException(kExceptionSlaveDeviceFailure, "线圈值缺失");
+        continue;
       }
-      if (value) {
-        coilBytes[static_cast<size_t>(i / 8)] |= static_cast<uint8_t>(1u << (i % 8));
-      }
-    }
 
-    if (missingValue) {
-      sendException(kExceptionSlaveDeviceFailure, "线圈值缺失");
+      std::vector<uint8_t> response;
+      response.reserve(3 + coilBytes.size() + 2);
+      response.push_back(request.slaveId);
+      response.push_back(kFunctionReadCoils);
+      response.push_back(static_cast<uint8_t>(coilBytes.size()));
+      response.insert(response.end(), coilBytes.begin(), coilBytes.end());
+      SerialBus::appendCrc(&response);
+
+      auto sendStatus = bus->WriteFrame(response);
+      if (!sendStatus.ok()) {
+        LOG_ERROR("ModbusRTU 从站响应发送失败: conn_name={}, 原因={}", link->connName, sendStatus.error_message());
+        updateLastError(link->connName, sendStatus.error_message());
+      }
       continue;
     }
 
-    std::vector<uint8_t> response;
-    response.reserve(3 + coilBytes.size() + 2);
-    response.push_back(request.slaveId);
-    response.push_back(kFunctionReadCoils);
-    response.push_back(static_cast<uint8_t>(coilBytes.size()));
-    response.insert(response.end(), coilBytes.begin(), coilBytes.end());
-    SerialBus::appendCrc(&response);
+    if (request.function == kFunctionReadHoldingRegisters) {
+      if (request.quantity == 0 || request.quantity > kMaxReadHoldingRegistersQuantity) {
+        sendException(kExceptionIllegalDataValue, "保持寄存器数量非法");
+        continue;
+      }
+      if (static_cast<uint32_t>(request.address) + request.quantity - 1 > 0xFFFF) {
+        sendException(kExceptionIllegalDataAddress, "保持寄存器地址超出范围");
+        continue;
+      }
 
-    auto sendStatus = bus->WriteFrame(response);
-    if (!sendStatus.ok()) {
-      LOG_ERROR("ModbusRTU 从站响应发送失败: conn_name={}, 原因={}", link->connName, sendStatus.error_message());
-      updateLastError(link->connName, sendStatus.error_message());
+      struct RegisterSlot {
+        bool hasPoint = false;
+        std::string tag;
+        std::optional<uint16_t> defaultValue;
+      };
+      std::vector<RegisterSlot> slots;
+      slots.resize(request.quantity);
+      std::vector<std::string> tags;
+      tags.reserve(request.quantity);
+
+      bool addressOverflow = false;
+      for (uint16_t i = 0; i < request.quantity; ++i) {
+        uint32_t reqAddr = static_cast<uint32_t>(request.address) + i;
+        uint32_t lookupAddr = reqAddr;
+        if (link->config.address_base() == ModbusRTUProto::ADDRESS_BASE_ONE) {
+          if (reqAddr == 0xFFFF) {
+            addressOverflow = true;
+            break;
+          }
+          lookupAddr = reqAddr + 1;
+        }
+        auto point = link->pointTable.FindByAddress(ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS, lookupAddr);
+        if (!point.has_value()) {
+          continue;
+        }
+        slots[i].hasPoint = true;
+        slots[i].tag = point->tag;
+        slots[i].defaultValue = point->defaultUInt16;
+        tags.push_back(point->tag);
+      }
+
+      if (addressOverflow) {
+        sendException(kExceptionIllegalDataAddress, "保持寄存器地址溢出");
+        continue;
+      }
+
+      std::unordered_map<std::string, std::optional<uint16_t>> valuesByTag;
+      bool dcOk = true;
+      if (!tags.empty()) {
+        DataCenterProto::GetLatestResponse resp;
+        auto dcStatus = dataCenter_.GetLatest(link->connId, tags, &resp);
+        if (!dcStatus.ok()) {
+          dcOk = false;
+          LOG_WARNING("ModbusRTU 从站获取 DataCenter 最新值失败: conn_name={}, 原因={}",
+                      link->connName, dcStatus.error_message());
+          updateLastError(link->connName, dcStatus.error_message());
+        } else {
+          for (const auto& update : resp.updates()) {
+            if (update.value().kind_case() == DataCenterProto::PointValue::kIntValue) {
+              const auto rawValue = update.value().int_value();
+              if (rawValue < 0 || rawValue > 0xFFFF) {
+                valuesByTag[update.dst_tag()] = std::nullopt;
+                LOG_WARNING("ModbusRTU 从站点值超出范围: conn_name={}, tag={}, value={}",
+                            link->connName, update.dst_tag(), rawValue);
+              } else {
+                valuesByTag[update.dst_tag()] = static_cast<uint16_t>(rawValue);
+              }
+            } else {
+              valuesByTag[update.dst_tag()] = std::nullopt;
+              LOG_WARNING("ModbusRTU 从站点值类型不匹配: conn_name={}, tag={}",
+                          link->connName, update.dst_tag());
+            }
+          }
+        }
+      }
+
+      const size_t byteCount = static_cast<size_t>(request.quantity) * 2;
+      std::vector<uint8_t> registerBytes(byteCount, 0);
+      bool missingValue = false;
+
+      for (uint16_t i = 0; i < request.quantity; ++i) {
+        uint16_t value = 0;
+        if (!slots[i].hasPoint) {
+          value = 0;
+        } else if (dcOk) {
+          auto it = valuesByTag.find(slots[i].tag);
+          if (it != valuesByTag.end() && it->second.has_value()) {
+            value = it->second.value();
+          } else if (slots[i].defaultValue.has_value()) {
+            value = slots[i].defaultValue.value();
+          } else {
+            missingValue = true;
+          }
+        } else {
+          if (slots[i].defaultValue.has_value()) {
+            value = slots[i].defaultValue.value();
+          } else {
+            missingValue = true;
+          }
+        }
+
+        if (missingValue) {
+          break;
+        }
+        const auto offset = static_cast<size_t>(i) * 2;
+        registerBytes[offset] = static_cast<uint8_t>((value >> 8) & 0xFF);
+        registerBytes[offset + 1] = static_cast<uint8_t>(value & 0xFF);
+      }
+
+      if (missingValue) {
+        sendException(kExceptionSlaveDeviceFailure, "保持寄存器值缺失");
+        continue;
+      }
+
+      std::vector<uint8_t> response;
+      response.reserve(3 + registerBytes.size() + 2);
+      response.push_back(request.slaveId);
+      response.push_back(kFunctionReadHoldingRegisters);
+      response.push_back(static_cast<uint8_t>(registerBytes.size()));
+      response.insert(response.end(), registerBytes.begin(), registerBytes.end());
+      SerialBus::appendCrc(&response);
+
+      auto sendStatus = bus->WriteFrame(response);
+      if (!sendStatus.ok()) {
+        LOG_ERROR("ModbusRTU 从站响应发送失败: conn_name={}, 原因={}", link->connName, sendStatus.error_message());
+        updateLastError(link->connName, sendStatus.error_message());
+      }
+      continue;
     }
+
+    sendException(kExceptionIllegalFunction, "不支持的功能码");
   }
 
   LOG_INFO("ModbusRTU 从站监听结束: device={}", serialKey.device);

@@ -6,7 +6,7 @@ ModbusRTU 主站/从站模块：主站基于串口轮询从站点表并发布到
 
 ## 能力清单
 - 主站读线圈（0x01）与保持寄存器（0x03）
-- 从站读线圈（0x01），按点表响应
+- 从站读线圈（0x01）与保持寄存器（0x03），按点表响应
 - 支持同一串口多个从站（串口参数需一致，模式不可混用）
 - 点表管理、启停轮询/响应
 - 轮询数据发布到 DataCenter（bool/uint16）
@@ -31,7 +31,7 @@ ModbusRTU 主站/从站模块：主站基于串口轮询从站点表并发布到
 - `function/type` 约束：READ_COILS 仅支持 BOOL；READ_HOLDING_REGISTERS 仅支持 UINT16。
 
 ## 从站说明
-- `mode=LINK_MODE_SLAVE` 时，模块作为从站响应请求（当前仅支持 0x01）。
+- `mode=LINK_MODE_SLAVE` 时，模块作为从站响应请求（支持 0x01/0x03）。
 - 点值来源：优先读取 DataCenter 最新值；若无值或 DataCenter 不可用则使用点表 `default_value` 兜底。
 - 广播地址（slave_id=0）不应答；不支持的功能码返回异常。
 
