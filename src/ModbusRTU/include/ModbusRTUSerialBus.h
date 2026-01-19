@@ -31,6 +31,7 @@ public:
 
   grpc::Status ReadCoil(uint8_t slaveId, uint16_t address, bool* out);
   grpc::Status ReadHoldingRegister(uint8_t slaveId, uint16_t address, uint16_t* out);
+  grpc::Status ReadHoldingRegisters(uint8_t slaveId, uint16_t address, uint16_t quantity, std::vector<uint16_t>* out);
 
   grpc::Status ReadRequest(RtuRequest* out);
   grpc::Status WriteFrame(const std::vector<uint8_t>& frame);

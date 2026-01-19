@@ -1,5 +1,6 @@
 #include "ModbusRTULinkManager.h"
 
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <format>
@@ -26,6 +27,38 @@ constexpr uint8_t kExceptionIllegalFunction = 0x01;
 constexpr uint8_t kExceptionIllegalDataAddress = 0x02;
 constexpr uint8_t kExceptionIllegalDataValue = 0x03;
 constexpr uint8_t kExceptionSlaveDeviceFailure = 0x04;
+
+uint16_t swapWordBytes(uint16_t value) {
+  return static_cast<uint16_t>((value << 8) | (value >> 8));
+}
+
+uint32_t decodeUint32(uint16_t first,
+                      uint16_t second,
+                      ModbusRTUProto::WordOrder wordOrder,
+                      ModbusRTUProto::ByteOrder byteOrder) {
+  if (byteOrder == ModbusRTUProto::BYTE_ORDER_BA) {
+    first = swapWordBytes(first);
+    second = swapWordBytes(second);
+  }
+  if (wordOrder == ModbusRTUProto::WORD_ORDER_LH) {
+    std::swap(first, second);
+  }
+  return (static_cast<uint32_t>(first) << 16) | static_cast<uint32_t>(second);
+}
+
+std::array<uint16_t, 2> encodeUint32(uint32_t value,
+                                     ModbusRTUProto::WordOrder wordOrder,
+                                     ModbusRTUProto::ByteOrder byteOrder) {
+  uint16_t high = static_cast<uint16_t>((value >> 16) & 0xFFFF);
+  uint16_t low = static_cast<uint16_t>(value & 0xFFFF);
+  uint16_t first = (wordOrder == ModbusRTUProto::WORD_ORDER_LH) ? low : high;
+  uint16_t second = (wordOrder == ModbusRTUProto::WORD_ORDER_LH) ? high : low;
+  if (byteOrder == ModbusRTUProto::BYTE_ORDER_BA) {
+    first = swapWordBytes(first);
+    second = swapWordBytes(second);
+  }
+  return {first, second};
+}
 
 bool shouldReport(double value, double deadband, const std::optional<double>& last) {
   if (deadband <= 0 || !last.has_value()) {
@@ -490,14 +523,23 @@ void LinkManager::slaveLoop(SerialKey serialKey, std::shared_ptr<SerialBus> bus,
       struct RegisterSlot {
         bool hasPoint = false;
         std::string tag;
-        std::optional<uint16_t> defaultValue;
+        ModbusRTUProto::DataType type = ModbusRTUProto::DATA_TYPE_UNSPECIFIED;
+        uint32_t wordIndex = 0;
+      };
+
+      struct PointMeta {
+        ModbusRTUProto::DataType type = ModbusRTUProto::DATA_TYPE_UNSPECIFIED;
+        uint32_t regCount = 1;
+        ModbusRTUProto::WordOrder wordOrder = ModbusRTUProto::WORD_ORDER_HL;
+        ModbusRTUProto::ByteOrder byteOrder = ModbusRTUProto::BYTE_ORDER_AB;
         double scale = 1.0;
         double offset = 0.0;
+        std::optional<uint32_t> defaultValue;
       };
-      std::vector<RegisterSlot> slots;
-      slots.resize(request.quantity);
-      std::vector<std::string> tags;
-      tags.reserve(request.quantity);
+
+      std::vector<RegisterSlot> slots(request.quantity);
+      std::unordered_map<std::string, PointMeta> metaByTag;
+      metaByTag.reserve(request.quantity);
 
       bool addressOverflow = false;
       for (uint16_t i = 0; i < request.quantity; ++i) {
@@ -510,21 +552,40 @@ void LinkManager::slaveLoop(SerialKey serialKey, std::shared_ptr<SerialBus> bus,
           }
           lookupAddr = reqAddr + 1;
         }
-        auto point = link->pointTable.FindByAddress(ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS, lookupAddr);
-        if (!point.has_value()) {
+        auto point = link->pointTable.FindRegisterByAddress(ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS, lookupAddr);
+        if (!point) {
           continue;
         }
         slots[i].hasPoint = true;
-        slots[i].tag = point->tag;
-        slots[i].defaultValue = point->defaultUInt16;
-        slots[i].scale = point->scale;
-        slots[i].offset = point->offset;
-        tags.push_back(point->tag);
+        slots[i].tag = point->point.tag;
+        slots[i].type = point->point.type;
+        slots[i].wordIndex = point->wordIndex;
+        if (metaByTag.find(point->point.tag) == metaByTag.end()) {
+          PointMeta meta;
+          meta.type = point->point.type;
+          meta.regCount = point->point.regCount;
+          meta.wordOrder = point->point.wordOrder;
+          meta.byteOrder = point->point.byteOrder;
+          meta.scale = point->point.scale;
+          meta.offset = point->point.offset;
+          if (point->point.defaultUInt16.has_value()) {
+            meta.defaultValue = point->point.defaultUInt16.value();
+          } else if (point->point.defaultUInt32.has_value()) {
+            meta.defaultValue = point->point.defaultUInt32.value();
+          }
+          metaByTag.emplace(point->point.tag, meta);
+        }
       }
 
       if (addressOverflow) {
         sendException(kExceptionIllegalDataAddress, "保持寄存器地址溢出");
         continue;
+      }
+
+      std::vector<std::string> tags;
+      tags.reserve(metaByTag.size());
+      for (const auto& [tag, _] : metaByTag) {
+        tags.push_back(tag);
       }
 
       std::unordered_map<std::string, std::optional<double>> valuesByTag;
@@ -552,50 +613,113 @@ void LinkManager::slaveLoop(SerialKey serialKey, std::shared_ptr<SerialBus> bus,
         }
       }
 
-      const size_t byteCount = static_cast<size_t>(request.quantity) * 2;
-      std::vector<uint8_t> registerBytes(byteCount, 0);
+      std::unordered_map<std::string, std::optional<uint32_t>> rawByTag;
+      rawByTag.reserve(metaByTag.size());
       bool missingValue = false;
 
+      for (const auto& [tag, meta] : metaByTag) {
+        uint32_t value = 0;
+        bool hasValue = false;
+        if (dcOk) {
+          auto it = valuesByTag.find(tag);
+          if (it != valuesByTag.end() && it->second.has_value()) {
+            const double engValue = it->second.value();
+            const double scale = meta.scale == 0.0 ? 1.0 : meta.scale;
+            const double rawValue = (engValue - meta.offset) / scale;
+            if (!std::isfinite(rawValue)) {
+              LOG_WARNING("ModbusRTU 从站点值无法反向缩放: conn_name={}, tag={}, value={}",
+                          link->connName, tag, engValue);
+              missingValue = true;
+            } else {
+              long long rounded = std::llround(rawValue);
+              const unsigned long long maxValue =
+                  meta.type == ModbusRTUProto::DATA_TYPE_UINT32 ? 0xFFFFFFFFull : 0xFFFFull;
+              if (rounded < 0) {
+                LOG_WARNING("ModbusRTU 从站点值超出范围已截断: conn_name={}, tag={}, raw={}",
+                            link->connName, tag, rounded);
+                rounded = 0;
+              } else if (static_cast<unsigned long long>(rounded) > maxValue) {
+                LOG_WARNING("ModbusRTU 从站点值超出范围已截断: conn_name={}, tag={}, raw={}",
+                            link->connName, tag, rounded);
+                rounded = static_cast<long long>(maxValue);
+              }
+              value = static_cast<uint32_t>(rounded);
+              hasValue = true;
+            }
+          }
+        }
+        if (!hasValue && meta.defaultValue.has_value()) {
+          value = meta.defaultValue.value();
+          hasValue = true;
+        }
+        if (!hasValue) {
+          missingValue = true;
+        } else {
+          rawByTag[tag] = value;
+        }
+        if (missingValue) {
+          break;
+        }
+      }
+
+      if (missingValue) {
+        sendException(kExceptionSlaveDeviceFailure, "保持寄存器值缺失");
+        continue;
+      }
+
+      std::unordered_map<std::string, std::array<uint16_t, 2>> wordsByTag;
+      wordsByTag.reserve(metaByTag.size());
+      for (const auto& [tag, meta] : metaByTag) {
+        if (meta.type != ModbusRTUProto::DATA_TYPE_UINT32) {
+          continue;
+        }
+        auto rawIt = rawByTag.find(tag);
+        if (rawIt == rawByTag.end() || !rawIt->second.has_value()) {
+          missingValue = true;
+          break;
+        }
+        auto words = encodeUint32(rawIt->second.value(), meta.wordOrder, meta.byteOrder);
+        wordsByTag.emplace(tag, words);
+        LOG_DEBUG("ModbusRTU 从站32位寄存器编码: conn_name={}, tag={}, raw={}, reg0={}, reg1={}, word_order={}, byte_order={}",
+                  link->connName,
+                  tag,
+                  rawIt->second.value(),
+                  words[0],
+                  words[1],
+                  static_cast<int>(meta.wordOrder),
+                  static_cast<int>(meta.byteOrder));
+      }
+
+      if (missingValue) {
+        sendException(kExceptionSlaveDeviceFailure, "保持寄存器值缺失");
+        continue;
+      }
+
+      const size_t byteCount = static_cast<size_t>(request.quantity) * 2;
+      std::vector<uint8_t> registerBytes(byteCount, 0);
       for (uint16_t i = 0; i < request.quantity; ++i) {
         uint16_t value = 0;
         if (!slots[i].hasPoint) {
           value = 0;
-        } else if (dcOk) {
-          auto it = valuesByTag.find(slots[i].tag);
-          if (it != valuesByTag.end() && it->second.has_value()) {
-            const double engValue = it->second.value();
-            const double scale = slots[i].scale == 0.0 ? 1.0 : slots[i].scale;
-            const double rawValue = (engValue - slots[i].offset) / scale;
-            if (!std::isfinite(rawValue)) {
-              LOG_WARNING("ModbusRTU 从站点值无法反向缩放: conn_name={}, tag={}, value={}",
-                          link->connName, slots[i].tag, engValue);
+        } else {
+          auto rawIt = rawByTag.find(slots[i].tag);
+          if (rawIt == rawByTag.end() || !rawIt->second.has_value()) {
+            missingValue = true;
+          } else if (slots[i].type == ModbusRTUProto::DATA_TYPE_UINT32) {
+            auto wordsIt = wordsByTag.find(slots[i].tag);
+            if (wordsIt == wordsByTag.end() || slots[i].wordIndex >= wordsIt->second.size()) {
               missingValue = true;
             } else {
-              long long rounded = std::llround(rawValue);
-              if (rounded < 0) {
-                LOG_WARNING("ModbusRTU 从站点值超出范围已截断: conn_name={}, tag={}, raw={}",
-                            link->connName, slots[i].tag, rounded);
-                rounded = 0;
-              } else if (rounded > 0xFFFF) {
-                LOG_WARNING("ModbusRTU 从站点值超出范围已截断: conn_name={}, tag={}, raw={}",
-                            link->connName, slots[i].tag, rounded);
-                rounded = 0xFFFF;
-              }
-              value = static_cast<uint16_t>(rounded);
+              value = wordsIt->second[slots[i].wordIndex];
             }
-          } else if (slots[i].defaultValue.has_value()) {
-            value = slots[i].defaultValue.value();
           } else {
-            missingValue = true;
-          }
-        } else {
-          if (slots[i].defaultValue.has_value()) {
-            value = slots[i].defaultValue.value();
-          } else {
-            missingValue = true;
+            value = static_cast<uint16_t>(rawIt->second.value());
+            auto metaIt = metaByTag.find(slots[i].tag);
+            if (metaIt != metaByTag.end() && metaIt->second.byteOrder == ModbusRTUProto::BYTE_ORDER_BA) {
+              value = swapWordBytes(value);
+            }
           }
         }
-
         if (missingValue) {
           break;
         }
@@ -1059,31 +1183,86 @@ void LinkManager::pollLoop(std::string connName,
           }
         }
       } else if (point.function == ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS) {
-        uint16_t value = 0;
-        status = bus->ReadHoldingRegister(static_cast<uint8_t>(config.slave_id()), static_cast<uint16_t>(address), &value);
-        if (status.ok()) {
-          const double engValue = static_cast<double>(value) * point.scale + point.offset;
-          std::optional<double> last;
-          auto lastIt = lastReportedByTag.find(point.tag);
-          if (lastIt != lastReportedByTag.end()) {
-            last = lastIt->second;
-          }
-          if (!shouldReport(engValue, point.deadband, last)) {
-            LOG_DEBUG("ModbusRTU 死区过滤上报: conn_name={}, tag={}, value={}, last={}, 死区={}",
+        if (point.type == ModbusRTUProto::DATA_TYPE_UINT16) {
+          uint16_t value = 0;
+          status = bus->ReadHoldingRegister(static_cast<uint8_t>(config.slave_id()), static_cast<uint16_t>(address), &value);
+          if (status.ok()) {
+            if (point.byteOrder == ModbusRTUProto::BYTE_ORDER_BA) {
+              value = swapWordBytes(value);
+            }
+            LOG_DEBUG("ModbusRTU 读取UINT16寄存器: conn_name={}, tag={}, raw={}, byte_order={}",
                       connName,
                       point.tag,
-                      engValue,
-                      last.value(),
-                      point.deadband);
-            continue;
+                      value,
+                      static_cast<int>(point.byteOrder));
+            const double engValue = static_cast<double>(value) * point.scale + point.offset;
+            std::optional<double> last;
+            auto lastIt = lastReportedByTag.find(point.tag);
+            if (lastIt != lastReportedByTag.end()) {
+              last = lastIt->second;
+            }
+            if (!shouldReport(engValue, point.deadband, last)) {
+              LOG_DEBUG("ModbusRTU 死区过滤上报: conn_name={}, tag={}, value={}, last={}, 死区={}",
+                        connName,
+                        point.tag,
+                        engValue,
+                        last.value(),
+                        point.deadband);
+              continue;
+            }
+            auto dc = dataCenter_.PublishDouble(connId, point.tag, engValue, DataCenterProto::QUALITY_GOOD, 0);
+            if (!dc.ok()) {
+              updateLastError(connName, dc.error_message());
+              LOG_ERROR("ModbusRTU 发布点值失败: conn_name={}, tag={}, 原因={}", connName, point.tag, dc.error_message());
+            } else {
+              lastReportedByTag[point.tag] = engValue;
+            }
           }
-          auto dc = dataCenter_.PublishDouble(connId, point.tag, engValue, DataCenterProto::QUALITY_GOOD, 0);
-          if (!dc.ok()) {
-            updateLastError(connName, dc.error_message());
-            LOG_ERROR("ModbusRTU 发布点值失败: conn_name={}, tag={}, 原因={}", connName, point.tag, dc.error_message());
-          } else {
-            lastReportedByTag[point.tag] = engValue;
+        } else if (point.type == ModbusRTUProto::DATA_TYPE_UINT32) {
+          std::vector<uint16_t> values;
+          status = bus->ReadHoldingRegisters(static_cast<uint8_t>(config.slave_id()),
+                                             static_cast<uint16_t>(address),
+                                             2,
+                                             &values);
+          if (status.ok()) {
+            if (values.size() != 2) {
+              status = grpc::Status(grpc::StatusCode::UNAVAILABLE, "保持寄存器响应数量异常");
+            } else {
+              const uint32_t raw = decodeUint32(values[0], values[1], point.wordOrder, point.byteOrder);
+              LOG_DEBUG("ModbusRTU 读取UINT32寄存器: conn_name={}, tag={}, raw={}, reg0={}, reg1={}, word_order={}, byte_order={}",
+                        connName,
+                        point.tag,
+                        raw,
+                        values[0],
+                        values[1],
+                        static_cast<int>(point.wordOrder),
+                        static_cast<int>(point.byteOrder));
+              const double engValue = static_cast<double>(raw) * point.scale + point.offset;
+              std::optional<double> last;
+              auto lastIt = lastReportedByTag.find(point.tag);
+              if (lastIt != lastReportedByTag.end()) {
+                last = lastIt->second;
+              }
+              if (!shouldReport(engValue, point.deadband, last)) {
+                LOG_DEBUG("ModbusRTU 死区过滤上报: conn_name={}, tag={}, value={}, last={}, 死区={}",
+                          connName,
+                          point.tag,
+                          engValue,
+                          last.value(),
+                          point.deadband);
+                continue;
+              }
+              auto dc = dataCenter_.PublishDouble(connId, point.tag, engValue, DataCenterProto::QUALITY_GOOD, 0);
+              if (!dc.ok()) {
+                updateLastError(connName, dc.error_message());
+                LOG_ERROR("ModbusRTU 发布点值失败: conn_name={}, tag={}, 原因={}", connName, point.tag, dc.error_message());
+              } else {
+                lastReportedByTag[point.tag] = engValue;
+              }
+            }
           }
+        } else {
+          status = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "保持寄存器点位类型不支持");
         }
       } else {
         status = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "不支持的功能码");

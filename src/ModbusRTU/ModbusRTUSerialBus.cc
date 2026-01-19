@@ -107,6 +107,29 @@ grpc::Status SerialBus::ReadHoldingRegister(uint8_t slaveId, uint16_t address, u
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
+  std::vector<uint16_t> values;
+  auto status = ReadHoldingRegisters(slaveId, address, 1, &values);
+  if (!status.ok()) {
+    return status;
+  }
+  if (values.size() != 1) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "保持寄存器响应数量异常");
+  }
+  *out = values.front();
+  return grpc::Status::OK;
+}
+
+grpc::Status SerialBus::ReadHoldingRegisters(uint8_t slaveId,
+                                             uint16_t address,
+                                             uint16_t quantity,
+                                             std::vector<uint16_t>* out) {
+  if (out == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
+  }
+  if (quantity == 0) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "quantity 不能为空");
+  }
+
   std::lock_guard<std::mutex> lock(mu_);
   auto status = ensureOpenLocked();
   if (!status.ok()) {
@@ -119,8 +142,8 @@ grpc::Status SerialBus::ReadHoldingRegister(uint8_t slaveId, uint16_t address, u
   frame.push_back(kFunctionReadHoldingRegisters);
   frame.push_back(static_cast<uint8_t>((address >> 8) & 0xFF));
   frame.push_back(static_cast<uint8_t>(address & 0xFF));
-  frame.push_back(0x00);
-  frame.push_back(0x01);
+  frame.push_back(static_cast<uint8_t>((quantity >> 8) & 0xFF));
+  frame.push_back(static_cast<uint8_t>(quantity & 0xFF));
   appendCrc(&frame);
 
   status = writeRequestLocked(frame);
@@ -129,14 +152,26 @@ grpc::Status SerialBus::ReadHoldingRegister(uint8_t slaveId, uint16_t address, u
   }
 
   std::vector<uint8_t> data;
-  status = readResponseLocked(slaveId, kFunctionReadHoldingRegisters, 1, &data);
+  status = readResponseLocked(slaveId, kFunctionReadHoldingRegisters, quantity, &data);
   if (!status.ok()) {
     return status;
   }
-  if (data.size() != 2) {
+  if (data.size() != static_cast<size_t>(quantity) * 2) {
     return grpc::Status(grpc::StatusCode::UNAVAILABLE, "保持寄存器响应长度异常");
   }
-  *out = static_cast<uint16_t>((static_cast<uint16_t>(data[0]) << 8) | data[1]);
+
+  out->clear();
+  out->reserve(quantity);
+  for (uint16_t i = 0; i < quantity; ++i) {
+    const size_t offset = static_cast<size_t>(i) * 2;
+    const uint16_t value = static_cast<uint16_t>((static_cast<uint16_t>(data[offset]) << 8) | data[offset + 1]);
+    out->push_back(value);
+  }
+  LOG_DEBUG("ModbusRTU 保持寄存器响应解析完成: device={}, address={}, quantity={}, 数据={}",
+            config_.device(),
+            address,
+            quantity,
+            bytesToHex(data));
   return grpc::Status::OK;
 }
 
