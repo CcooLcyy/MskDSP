@@ -20,6 +20,7 @@ public:
     IEC104Proto::TelemetryType type = IEC104Proto::TELEMETRY_TYPE_UNSPECIFIED;
     double scale = 1.0;
     double offset = 0.0;
+    double deadband = 0.0;
   };
 
   grpc::Status Upsert(const google::protobuf::RepeatedPtrField<IEC104Proto::TelemetryPoint>& points, bool replace);
@@ -39,4 +40,3 @@ private:
 };
 
 }  // namespace IEC104
-

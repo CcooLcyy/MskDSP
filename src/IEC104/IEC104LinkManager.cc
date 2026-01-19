@@ -408,6 +408,7 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
     return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路已在运行");
   }
 
+  link.lastReportedByTag.clear();
   link.transport = std::make_unique<TcpLink>(link.config);
   configureTransportCallbacksLocked(connName, &link);
 
@@ -522,6 +523,7 @@ grpc::Status LinkManager::UpsertPointTable(const IEC104Proto::UpsertPointTableRe
     return makeNotFound(request.conn_name());
   }
   it->second.pointTable = std::move(next);
+  it->second.lastReportedByTag.clear();
   return grpc::Status::OK;
 }
 

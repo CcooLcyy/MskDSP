@@ -52,6 +52,7 @@ private:
     IEC104Proto::LinkState state = IEC104Proto::LINK_STATE_STOPPED;
     std::string lastError;
     PointTable pointTable;
+    std::unordered_map<std::string, double> lastReportedByTag;
 
     std::unique_ptr<TcpLink> transport;
 

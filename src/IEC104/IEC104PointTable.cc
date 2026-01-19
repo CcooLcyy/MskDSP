@@ -36,6 +36,9 @@ grpc::Status PointTable::validatePoint(const IEC104Proto::TelemetryPoint& point)
   if (point.type() == IEC104Proto::TELEMETRY_TYPE_UNSPECIFIED) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "telemetry_type 不能为空");
   }
+  if (point.deadband() < 0) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "死区不能为负");
+  }
   return grpc::Status::OK;
 }
 
@@ -49,7 +52,11 @@ grpc::Status PointTable::insertOrUpdatePoint(const IEC104Proto::TelemetryPoint& 
     p.ioa = point.ioa();
     p.type = point.type();
     p.scale = point.scale();
+    if (p.scale == 0.0) {
+      p.scale = 1.0;
+    }
     p.offset = point.offset();
+    p.deadband = point.deadband();
     byTag_.emplace(p.tag, p);
     tagByIoa_.emplace(p.ioa, p.tag);
     return grpc::Status::OK;
@@ -67,7 +74,11 @@ grpc::Status PointTable::insertOrUpdatePoint(const IEC104Proto::TelemetryPoint& 
   p.ioa = point.ioa();
   p.type = point.type();
   p.scale = point.scale();
+  if (p.scale == 0.0) {
+    p.scale = 1.0;
+  }
   p.offset = point.offset();
+  p.deadband = point.deadband();
   byTag_[p.tag] = p;
   tagByIoa_[p.ioa] = p.tag;
   return grpc::Status::OK;
@@ -114,6 +125,7 @@ void PointTable::ToProto(const std::string& connName, IEC104Proto::PointTable* o
     dst->set_type(p.type);
     dst->set_scale(p.scale);
     dst->set_offset(p.offset);
+    dst->set_deadband(p.deadband);
   }
 }
 

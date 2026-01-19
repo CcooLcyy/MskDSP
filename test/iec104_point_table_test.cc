@@ -73,6 +73,51 @@ TEST(IEC104PointTableTest, RejectsInvalidPoint) {
   EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
 }
 
+// 验证：scale=0 会规范为 1，死区能写入与序列化。
+TEST(IEC104PointTableTest, NormalizesScaleAndKeepsDeadband) {
+  PointTable table;
+
+  IEC104Proto::UpsertPointTableRequest req;
+  auto* p = req.add_points();
+  p->set_tag("A");
+  p->set_ioa(1);
+  p->set_type(IEC104Proto::TELEMETRY_TYPE_FLOAT);
+  p->set_scale(0.0);
+  p->set_offset(-2.0);
+  p->set_deadband(0.5);
+  req.set_replace(true);
+
+  ASSERT_TRUE(table.Upsert(req.points(), req.replace()).ok());
+
+  auto updated = table.FindByTag("A");
+  ASSERT_TRUE(updated.has_value());
+  EXPECT_DOUBLE_EQ(updated->scale, 1.0);
+  EXPECT_DOUBLE_EQ(updated->offset, -2.0);
+  EXPECT_DOUBLE_EQ(updated->deadband, 0.5);
+
+  IEC104Proto::PointTable out;
+  table.ToProto("conn-1", &out);
+  ASSERT_EQ(out.points_size(), 1);
+  EXPECT_DOUBLE_EQ(out.points(0).scale(), 1.0);
+  EXPECT_DOUBLE_EQ(out.points(0).deadband(), 0.5);
+}
+
+// 验证：死区为负时拒绝。
+TEST(IEC104PointTableTest, RejectsNegativeDeadband) {
+  PointTable table;
+
+  IEC104Proto::UpsertPointTableRequest req;
+  auto* p = req.add_points();
+  p->set_tag("A");
+  p->set_ioa(1);
+  p->set_type(IEC104Proto::TELEMETRY_TYPE_FLOAT);
+  p->set_deadband(-0.5);
+  req.set_replace(true);
+
+  auto st = table.Upsert(req.points(), req.replace());
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
 // 验证：点表拒绝冲突映射（同 tag 不同 ioa、同 ioa 不同 tag）。
 TEST(IEC104PointTableTest, RejectsConflictingMappings) {
   PointTable table;

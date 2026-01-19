@@ -1,6 +1,8 @@
 #include "IEC104LinkManager.h"
 
+#include <cmath>
 #include <format>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -36,6 +38,35 @@ uint8_t toIec104Quality(DataCenterProto::Quality q) {
   default:
     return kIec104QualityInvalid;
   }
+}
+
+double applyScale(double raw, double scale, double offset) {
+  if (scale == 0.0) {
+    scale = 1.0;
+  }
+  return raw * scale + offset;
+}
+
+bool reverseScale(double eng, double scale, double offset, double* out) {
+  if (out == nullptr) {
+    return false;
+  }
+  if (scale == 0.0) {
+    scale = 1.0;
+  }
+  const double value = (eng - offset) / scale;
+  if (!std::isfinite(value)) {
+    return false;
+  }
+  *out = value;
+  return true;
+}
+
+bool shouldReport(double value, double deadband, const std::optional<double>& last) {
+  if (deadband <= 0 || !last.has_value()) {
+    return true;
+  }
+  return std::fabs(value - last.value()) >= deadband;
 }
 
 bool pointValueToDouble(const DataCenterProto::PointValue& v, double* out) {
@@ -81,12 +112,18 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, Li
   stopDataCenterSubscribeLocked(link);
 
   auto tags = link->pointTable.Tags();
-  std::unordered_map<std::string, uint32_t> ioaByTag;
-  ioaByTag.reserve(tags.size());
+  struct PointMeta {
+    uint32_t ioa = 0;
+    double scale = 1.0;
+    double offset = 0.0;
+    double deadband = 0.0;
+  };
+  std::unordered_map<std::string, PointMeta> metaByTag;
+  metaByTag.reserve(tags.size());
   for (const auto& tag : tags) {
     auto p = link->pointTable.FindByTag(tag);
     if (p) {
-      ioaByTag.emplace(tag, p->ioa);
+      metaByTag.emplace(tag, PointMeta{p->ioa, p->scale, p->offset, p->deadband});
     }
   }
 
@@ -98,7 +135,7 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, Li
   link->dcSubscribeContext = std::make_shared<grpc::ClientContext>();
   auto ctx = link->dcSubscribeContext;
 
-  link->dcSubscribeThread = std::jthread([this, connName, ctx, connId, tags, ioaByTag, transport](std::stop_token st) {
+  link->dcSubscribeThread = std::jthread([this, connName, ctx, connId, tags, metaByTag, transport](std::stop_token st) {
     ModuleManager::LogModuleScope moduleScope(IEC104LibInfo.LIB_NAME);
     std::stop_callback cb(st, [&ctx]() { ctx->TryCancel(); });
 
@@ -108,18 +145,40 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, Li
       return;
     }
 
+    std::unordered_map<std::string, double> lastSentByTag;
+    lastSentByTag.reserve(metaByTag.size());
     DataCenterProto::PointUpdate update;
     while (reader->Read(&update)) {
-      auto it = ioaByTag.find(update.dst_tag());
-      if (it == ioaByTag.end()) {
+      auto it = metaByTag.find(update.dst_tag());
+      if (it == metaByTag.end()) {
         continue;
       }
       double value = 0;
       if (!pointValueToDouble(update.value(), &value)) {
         continue;
       }
+      std::optional<double> last;
+      auto lastIt = lastSentByTag.find(update.dst_tag());
+      if (lastIt != lastSentByTag.end()) {
+        last = lastIt->second;
+      }
+      if (!shouldReport(value, it->second.deadband, last)) {
+        LOG_DEBUG("IEC104 死区过滤上送: conn_name={}, tag={}, value={}, last={}, 死区={}",
+                  connName,
+                  update.dst_tag(),
+                  value,
+                  last.value(),
+                  it->second.deadband);
+        continue;
+      }
+      double rawValue = 0;
+      if (!reverseScale(value, it->second.scale, it->second.offset, &rawValue)) {
+        LOG_WARNING("IEC104 点值反向缩放失败: conn_name={}, tag={}, value={}", connName, update.dst_tag(), value);
+        continue;
+      }
       uint8_t qds = toIec104Quality(update.quality());
-      transport->SendMeasuredValue(it->second, value, qds, kCotSpontaneous);
+      transport->SendMeasuredValue(it->second.ioa, rawValue, qds, kCotSpontaneous);
+      lastSentByTag[update.dst_tag()] = value;
     }
 
     auto finishStatus = reader->Finish();
@@ -140,6 +199,10 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, Li
 grpc::Status LinkManager::handleClientMeasuredValue(const std::string& connName, const MeasuredValue& mv) {
   uint32_t connId = 0;
   std::string tag;
+  double scale = 1.0;
+  double offset = 0.0;
+  double deadband = 0.0;
+  std::optional<double> last;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = linksByName_.find(connName);
@@ -152,10 +215,27 @@ grpc::Status LinkManager::handleClientMeasuredValue(const std::string& connName,
       return grpc::Status::OK;
     }
     tag = p->tag;
+    scale = p->scale;
+    offset = p->offset;
+    deadband = p->deadband;
+    auto lastIt = it->second.lastReportedByTag.find(tag);
+    if (lastIt != it->second.lastReportedByTag.end()) {
+      last = lastIt->second;
+    }
   }
 
   auto quality = toDataCenterQuality(mv.quality);
-  auto st = dataCenter_.PublishDouble(connId, tag, mv.value, quality, 0);
+  const double engValue = applyScale(mv.value, scale, offset);
+  if (!shouldReport(engValue, deadband, last)) {
+    LOG_DEBUG("IEC104 死区过滤上报: conn_name={}, tag={}, value={}, last={}, 死区={}",
+              connName,
+              tag,
+              engValue,
+              last.value(),
+              deadband);
+    return grpc::Status::OK;
+  }
+  auto st = dataCenter_.PublishDouble(connId, tag, engValue, quality, 0);
   if (!st.ok()) {
     LOG_WARNING("IEC104 发布点位失败: conn_name={}, tag={}, 错误={}", connName, tag, st.error_message());
     std::lock_guard<std::mutex> lock(mu_);
@@ -163,13 +243,24 @@ grpc::Status LinkManager::handleClientMeasuredValue(const std::string& connName,
     if (it != linksByName_.end()) {
       it->second.lastError = st.error_message();
     }
+  } else {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = linksByName_.find(connName);
+    if (it != linksByName_.end()) {
+      it->second.lastReportedByTag[tag] = engValue;
+    }
   }
   return st;
 }
 
 std::vector<MeasuredValue> LinkManager::buildInterrogationSnapshot(const std::string& connName) {
   uint32_t connId = 0;
-  std::unordered_map<std::string, uint32_t> ioaByTag;
+  struct PointMeta {
+    uint32_t ioa = 0;
+    double scale = 1.0;
+    double offset = 0.0;
+  };
+  std::unordered_map<std::string, PointMeta> metaByTag;
   std::vector<std::string> tags;
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -179,11 +270,11 @@ std::vector<MeasuredValue> LinkManager::buildInterrogationSnapshot(const std::st
     }
     connId = it->second.connId;
     tags = it->second.pointTable.Tags();
-    ioaByTag.reserve(tags.size());
+    metaByTag.reserve(tags.size());
     for (const auto& tag : tags) {
       auto p = it->second.pointTable.FindByTag(tag);
       if (p) {
-        ioaByTag.emplace(tag, p->ioa);
+        metaByTag.emplace(tag, PointMeta{p->ioa, p->scale, p->offset});
       }
     }
   }
@@ -203,17 +294,22 @@ std::vector<MeasuredValue> LinkManager::buildInterrogationSnapshot(const std::st
   std::vector<MeasuredValue> out;
   out.reserve(static_cast<size_t>(resp.updates_size()));
   for (const auto& update : resp.updates()) {
-    auto it = ioaByTag.find(update.dst_tag());
-    if (it == ioaByTag.end()) {
+    auto it = metaByTag.find(update.dst_tag());
+    if (it == metaByTag.end()) {
       continue;
     }
     double value = 0;
     if (!pointValueToDouble(update.value(), &value)) {
       continue;
     }
+    double rawValue = 0;
+    if (!reverseScale(value, it->second.scale, it->second.offset, &rawValue)) {
+      LOG_WARNING("IEC104 总召点值反向缩放失败: conn_name={}, tag={}, value={}", connName, update.dst_tag(), value);
+      continue;
+    }
     MeasuredValue mv;
-    mv.ioa = it->second;
-    mv.value = value;
+    mv.ioa = it->second.ioa;
+    mv.value = rawValue;
     mv.quality = toIec104Quality(update.quality());
     out.emplace_back(std::move(mv));
   }

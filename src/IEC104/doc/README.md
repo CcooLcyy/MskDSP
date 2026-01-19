@@ -9,7 +9,7 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
 - 角色：Server / Client（通过上位机 gRPC 配置）
 - 连接名：`conn_name` 由上位机指定（模块内唯一，用于人类识别/配置归属）
 - `conn_id` 分配：IEC104 在配置连接时通过 DataCenter `GetOrCreateConnection` 取/建，并回传给上位机
-- 点表下发：上位机通过 IEC104 gRPC 下发 `tag <-> IOA` 映射（先支持 float 遥测）
+- 点表下发：上位机通过 IEC104 gRPC 下发 `tag <-> IOA` 映射（先支持 float 遥测，支持 scale/offset/deadband）
 - 链路层：支持 `k/w` 窗口与 `t0/t1/t2/t3` 超时（通过 `LinkConfig.apci` 配置）
 - 与 DataCenter 联动：
   - Client 收到遥测后 `Publish(conn_id, tag, value)` 到 DataCenter
@@ -40,6 +40,24 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
 - `t2`：延迟确认超时（秒，触发 S 帧）
 - `t3`：空闲保活超时（秒，触发 TESTFR）
 - 参数由上位机在 `LinkConfig.apci` 下发，默认值：`k=12, w=8, t0=30, t1=15, t2=10, t3=20`
+
+### 点表字段（遥测）
+- `scale/offset`：工程量换算 `value = raw * scale + offset`（`scale=0` 视为 1）。
+- `deadband`：工程量单位；`|value - last_reported| < deadband` 时不上报，<=0 表示不过滤。
+- `deadband` 同时作用于 Client 发布与 Server 自发上送，总召快照不受 deadband 影响。
+- Client 收到遥测后按 `scale/offset` 转为工程量再发布；Server 上送遥测时按 `scale/offset` 反向换算。
+
+ConfigPusher 点表示例（含 scale/offset/deadband，字段可省略，默认 scale=1、offset=0、deadband=0）：
+```jsonc
+{
+  "tag": "1-A相电压",
+  "ioa": 16385,
+  "type": "TELEMETRY_TYPE_FLOAT",
+  "scale": 1.0,
+  "offset": 0.0,
+  "deadband": 0.0
+}
+```
 
 ### 遥测合包参数
 - `telemetry_batch_window_ms`：自发遥测合包窗口（毫秒）；0 表示使用默认值（20ms）。
@@ -80,7 +98,7 @@ ctest --test-dir build -R iec104TcpSession_test --output-on-failure
 - 链路层完善：已支持 `k/w` 与 `t0–t3`；未实现 I 帧重传策略与更细粒度链路统计
 - 报文打包：当前遥测按“单点一帧”发送，未做批量打包/VSQ 序列优化
 - 多主站/多会话：Server 模式当前同一 `conn_name` 只保留一个活动连接；多主站并发、会话级隔离策略未实现
-- 点表扩展：点表已预留 `scale/offset/type`，但当前不生效；后续可扩展工程量换算、更多类型与双向映射校验
+- 点表扩展：当前仅支持 float 遥测；后续可扩展更多类型与双向映射校验
 - 配置持久化：连接配置/点表/运行态信息未持久化；后续建议落盘到 `./conf/IEC104/` 并采用 tmp/bak/corrupt 策略
 - 观测性：已补充逐帧日志，但仍缺少链路状态统计（收发计数、最近一次总召、重连次数等）与可配置采样/汇总
 - 安全：gRPC 与 IEC104 TCP 目前均为明文/无鉴权；TLS、鉴权、白名单等未实现
