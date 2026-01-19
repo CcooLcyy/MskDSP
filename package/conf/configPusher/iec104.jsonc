@@ -5,7 +5,7 @@
       {
         "link": {
           "config": {
-            "conn_name": "line-1",
+            "conn_name": "模拟主站",
             "role": "ROLE_SERVER",
             "local": {
               "ip": "0.0.0.0",
@@ -40,9 +40,12 @@
           "replace": true,
           "points": [
             {
-              "tag": "Ua",
-              "ioa": 100,
-              "type": "TELEMETRY_TYPE_FLOAT"
+              "tag": "1-A相电压",
+              "ioa": 16385,
+              "type": "TELEMETRY_TYPE_FLOAT",
+              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
+              "offset": 0.0, // 偏移
+              "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
             }
           ]
         },

@@ -3,17 +3,35 @@
   "point_tables": [
     {
       "module_name": "IEC104",
-      "conn_name": "line-1",
+      "conn_name": "模拟主站",
       "replace": true,
-      "tags": ["P_CMD_SRC", "P_TOTAL_DST"]
+      "tags": [
+        "1-A相电压"
+      ]
+    },
+    {
+      "module_name": "ModbusRTU",
+      "conn_name": "模拟Modbus主站",
+      "replace": true,
+      "tags": [
+        "A相电压"
+      ]
     }
   ],
   "routes": {
     "replace": true,
     "routes": [
       {
-        "src": { "module_name": "IEC104", "conn_name": "line-1", "tag": "P_CMD_SRC" },
-        "dst": { "module_name": "AGC", "conn_name": "g-1", "tag": "P_CMD" }
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "模拟Modbus主站",
+          "tag": "A相电压"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟主站",
+          "tag": "1-A相电压"
+        }
       }
     ]
   }

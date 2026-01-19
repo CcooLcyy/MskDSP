@@ -5,9 +5,59 @@
       {
         "link": {
           "config": {
-            "conn_name": "rtu-1",
+            "conn_name": "模拟Modbus从站",
             "serial": {
-              "device": "/dev/ttyS0",
+              "device": "/dev/COMMock0",
+              "baud_rate": 9600,
+              "data_bits": 8,
+              "parity": "PARITY_NONE",
+              "stop_bits": "STOP_BITS_ONE",
+              "read_timeout_ms": 1000
+            },
+            "slave_id": 1,
+            "poll_interval_ms": 1000,
+            "address_base": "ADDRESS_BASE_ZERO",
+            "mode": "LINK_MODE_SLAVE" // 从站模式使用 LINK_MODE_SLAVE
+          }
+        },
+        "point_table": {
+          "replace": true,
+          "points": [
+            {
+              "tag": "1号逆变器-A相电压",
+              "function": "0x03", // 读保持寄存器
+              "address": 0,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1；仅 UINT16/UINT32 生效）
+              "offset": 0.0, // 偏移：仅 UINT16/UINT32 生效
+              "deadband": 0.0, // 死区：工程量单位，<=0 不过滤（仅 UINT16/UINT32 生效）
+              "default_uint16": 2200 // 从站模式下的默认值
+            },
+            {
+              "tag": "1号逆变器-总有功功率",
+              "function": "0x03", // 读保持寄存器
+              "address": 10,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1；仅 UINT16/UINT32 生效）
+              "offset": 0.0, // 偏移：仅 UINT16/UINT32 生效
+              "deadband": 0.0, // 死区：工程量单位，<=0 不过滤（仅 UINT16/UINT32 生效）
+              "default_uint32": 123456 // 从站模式下的默认值
+            }
+          ]
+        },
+        "start": true
+      },
+      {
+        "link": {
+          "config": {
+            "conn_name": "模拟Modbus主站",
+            "serial": {
+              "device": "/dev/COMMock1",
               "baud_rate": 9600,
               "data_bits": 8,
               "parity": "PARITY_NONE",
@@ -24,17 +74,27 @@
           "replace": true,
           "points": [
             {
-              "tag": "coil_1",
-              "function": "FUNCTION_READ_COILS",
+              "tag": "A相电压",
+              "function": "0x03", // 读保持寄存器
               "address": 0,
-              "type": "DATA_TYPE_BOOL",
-              "default_bool": false // 从站模式下的默认值
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1；仅 UINT16/UINT32 生效）
+              "offset": 0.0, // 偏移：仅 UINT16/UINT32 生效
+              "deadband": 0 // 死区：工程量单位，<=0 不过滤（仅 UINT16/UINT32 生效）
             },
             {
-              "tag": "reg_1",
-              "function": "FUNCTION_READ_HOLDING_REGISTERS",
-              "address": 0,
-              "type": "DATA_TYPE_UINT16"
+              "tag": "总有功功率",
+              "function": "0x03", // 读保持寄存器
+              "address": 10,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1；仅 UINT16/UINT32 生效）
+              "offset": 0.0, // 偏移：仅 UINT16/UINT32 生效
+              "deadband": 0 // 死区：工程量单位，<=0 不过滤（仅 UINT16/UINT32 生效）
             }
           ]
         },
