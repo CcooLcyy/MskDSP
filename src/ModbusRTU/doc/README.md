@@ -35,7 +35,7 @@ ConfigPusher 点表示例（含 scale/offset/deadband，字段可省略，默认
     "address": 0,
     "type": "DATA_TYPE_UINT16",
     "reg_count": 1,
-    "byte_order": "BYTE_ORDER_AB",
+    "byte_order": "AB",
     "scale": 1.0,
     "offset": 0.0,
     "deadband": 0.0,
@@ -47,8 +47,8 @@ ConfigPusher 点表示例（含 scale/offset/deadband，字段可省略，默认
     "address": 10,
     "type": "DATA_TYPE_UINT32",
     "reg_count": 2,
-    "word_order": "WORD_ORDER_HL",
-    "byte_order": "BYTE_ORDER_AB",
+    "word_order": "HL",
+    "byte_order": "AB",
     "scale": 1.0,
     "offset": 0.0,
     "deadband": 0.0,
@@ -62,8 +62,8 @@ ConfigPusher 点表示例（含 scale/offset/deadband，字段可省略，默认
 - `address_base=ADDRESS_BASE_ONE`：点表地址按人类编号填写，模块会在轮询时自动减 1（地址需 >=1）。
 - `function/type` 约束：READ_COILS 仅支持 BOOL；READ_HOLDING_REGISTERS 支持 UINT16/UINT32。
 - `reg_count`：寄存器数量（0 表示按 type 默认：UINT16=1、UINT32=2）；UINT32 必须为 2；address 为起始寄存器地址。
-- `word_order`：32 位拼接字序（HL 高字在前/LH 低字在前），仅对 UINT32 生效，默认 HL。
-- `byte_order`：16 位字节序（AB 高字节在前/BA 低字节在前），对 UINT16/UINT32 生效，默认 AB。
+- `word_order`：32 位拼接字序（HL 高字在前/LH 低字在前），仅对 UINT32 生效，默认 HL（兼容 WORD_ORDER_HL/WORD_ORDER_LH）。
+- `byte_order`：16 位字节序（AB 高字节在前/BA 低字节在前），对 UINT16/UINT32 生效，默认 AB（兼容 BYTE_ORDER_AB/BYTE_ORDER_BA）。
 - `scale/offset`：工程量换算 `value = raw * scale + offset`（`scale=0` 视为 1）；仅对 UINT16/UINT32 生效。
 - `deadband`：工程量单位，仅对 UINT16/UINT32 生效；`|value - last_reported| < deadband` 时不上报，<=0 表示不过滤。
 - `deadband` 仅对主站轮询发布生效，从站响应不受 deadband 影响。
