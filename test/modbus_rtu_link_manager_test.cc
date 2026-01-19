@@ -301,8 +301,8 @@ TEST(ModbusRtuLinkManagerTest, SlaveHoldingRegistersUsesDefaultWhenDataCenterEmp
   CloseFd(&pair.master_fd);
 }
 
-// 验证：从站 0x03 在值缺失/越界时返回 0x04 异常。
-TEST(ModbusRtuLinkManagerTest, SlaveHoldingRegistersReturnsExceptionOnMissingValue) {
+// 验证：从站 0x03 对越界值进行截断并正常响应。
+TEST(ModbusRtuLinkManagerTest, SlaveHoldingRegistersClampsOutOfRangeValue) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
@@ -346,6 +346,65 @@ TEST(ModbusRtuLinkManagerTest, SlaveHoldingRegistersReturnsExceptionOnMissingVal
   SerialBus::appendCrc(&reqFrame);
   ASSERT_TRUE(WriteAll(pair.master_fd, reqFrame));
 
+  std::array<uint8_t, 7> resp{};
+  ASSERT_TRUE(ReadExact(pair.master_fd, resp.data(), resp.size(), std::chrono::milliseconds(500)));
+
+  EXPECT_EQ(resp[0], 0x01);
+  EXPECT_EQ(resp[1], 0x03);
+  EXPECT_EQ(resp[2], 0x02);
+  EXPECT_EQ(resp[3], 0xFF);
+  EXPECT_EQ(resp[4], 0xFF);
+  const uint16_t expectCrc = SerialBus::computeCrc(resp.data(), resp.size() - 2);
+  const uint16_t gotCrc = static_cast<uint16_t>(resp[5]) | (static_cast<uint16_t>(resp[6]) << 8);
+  EXPECT_EQ(gotCrc, expectCrc);
+
+  EXPECT_TRUE(mgr.StopLink("slave-2").ok());
+  CloseFd(&pair.master_fd);
+}
+
+// 验证：从站 0x03 在值缺失且无默认值时返回 0x04 异常。
+TEST(ModbusRtuLinkManagerTest, SlaveHoldingRegistersReturnsExceptionOnMissingValue) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  EXPECT_CALL(*stub, GetLatest(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext*,
+                          const DataCenterProto::GetLatestRequest& req,
+                          DataCenterProto::GetLatestResponse* resp) {
+        EXPECT_GT(req.conn_id(), 0u);
+        EXPECT_EQ(req.tags_size(), 1);
+        if (req.tags_size() > 0) {
+          EXPECT_EQ(req.tags(0), "reg-1");
+        }
+        (void)resp;
+        return grpc::Status::OK;
+      }));
+
+  LinkManager mgr("ModbusRTU");
+  mgr.setDataCenterStub(stub);
+
+  auto pair = CreatePtyPair();
+  ASSERT_GE(pair.master_fd, 0);
+  ASSERT_FALSE(pair.slave_path.empty());
+
+  auto linkReq = MakeLinkReq("slave-2-missing", pair.slave_path.c_str(), 9600, 1);
+  linkReq.mutable_config()->set_mode(ModbusRTUProto::LINK_MODE_SLAVE);
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(linkReq, &info).ok());
+
+  ModbusRTUProto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("slave-2-missing");
+  *ptReq.add_points() = MakeRegisterPoint("reg-1", 0);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  ASSERT_TRUE(mgr.StartLink("slave-2-missing").ok());
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  std::vector<uint8_t> reqFrame = {0x01, 0x03, 0x00, 0x00, 0x00, 0x01};
+  SerialBus::appendCrc(&reqFrame);
+  ASSERT_TRUE(WriteAll(pair.master_fd, reqFrame));
+
   std::array<uint8_t, 5> resp{};
   ASSERT_TRUE(ReadExact(pair.master_fd, resp.data(), resp.size(), std::chrono::milliseconds(500)));
 
@@ -356,7 +415,7 @@ TEST(ModbusRtuLinkManagerTest, SlaveHoldingRegistersReturnsExceptionOnMissingVal
   const uint16_t gotCrc = static_cast<uint16_t>(resp[3]) | (static_cast<uint16_t>(resp[4]) << 8);
   EXPECT_EQ(gotCrc, expectCrc);
 
-  EXPECT_TRUE(mgr.StopLink("slave-2").ok());
+  EXPECT_TRUE(mgr.StopLink("slave-2-missing").ok());
   CloseFd(&pair.master_fd);
 }
 

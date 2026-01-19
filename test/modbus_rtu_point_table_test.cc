@@ -218,6 +218,47 @@ TEST(ModbusRtuPointTableTest, UpsertMergeUpdatesExistingFields) {
   EXPECT_EQ(tags[1], "C");
 }
 
+// 验证：scale=0 会规范为 1，死区能写入与序列化。
+TEST(ModbusRtuPointTableTest, NormalizesScaleAndKeepsDeadband) {
+  PointTable table;
+
+  ModbusRTUProto::UpsertPointTableRequest req;
+  auto p = MakePoint("A", ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS, 1, ModbusRTUProto::DATA_TYPE_UINT16);
+  p.set_scale(0.0);
+  p.set_offset(1.5);
+  p.set_deadband(2.0);
+  *req.add_points() = p;
+  req.set_replace(true);
+
+  ASSERT_TRUE(table.Upsert(req.points(), req.replace()).ok());
+
+  auto updated = table.FindByTag("A");
+  ASSERT_TRUE(updated.has_value());
+  EXPECT_DOUBLE_EQ(updated->scale, 1.0);
+  EXPECT_DOUBLE_EQ(updated->offset, 1.5);
+  EXPECT_DOUBLE_EQ(updated->deadband, 2.0);
+
+  ModbusRTUProto::PointTable out;
+  table.ToProto("conn-1", &out);
+  ASSERT_EQ(out.points_size(), 1);
+  EXPECT_DOUBLE_EQ(out.points(0).scale(), 1.0);
+  EXPECT_DOUBLE_EQ(out.points(0).deadband(), 2.0);
+}
+
+// 验证：死区为负时拒绝。
+TEST(ModbusRtuPointTableTest, RejectsNegativeDeadband) {
+  PointTable table;
+
+  ModbusRTUProto::UpsertPointTableRequest req;
+  auto p = MakePoint("A", ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS, 1, ModbusRTUProto::DATA_TYPE_UINT16);
+  p.set_deadband(-0.1);
+  *req.add_points() = p;
+  req.set_replace(true);
+
+  auto st = table.Upsert(req.points(), req.replace());
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
 // 验证：replace=true 会清理已有点表，只保留新的点集合。
 TEST(ModbusRtuPointTableTest, ReplaceClearsExistingPoints) {
   PointTable table;

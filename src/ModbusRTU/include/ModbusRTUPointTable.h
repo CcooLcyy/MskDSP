@@ -21,6 +21,7 @@ public:
     ModbusRTUProto::DataType type = ModbusRTUProto::DATA_TYPE_UNSPECIFIED;
     double scale = 1.0;
     double offset = 0.0;
+    double deadband = 0.0;
     std::optional<bool> defaultBool;
     std::optional<uint16_t> defaultUInt16;
   };

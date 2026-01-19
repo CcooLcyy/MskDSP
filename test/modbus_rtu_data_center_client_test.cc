@@ -111,3 +111,26 @@ TEST(ModbusRtuDataCenterClientTest, PublishUInt16BuildsRequest) {
   auto st = client.PublishUInt16(10, "reg-1", 65535, DataCenterProto::QUALITY_UNCERTAIN, 456);
   EXPECT_TRUE(st.ok());
 }
+
+// 验证：PublishDouble 使用 double_value 并携带元信息。
+TEST(ModbusRtuDataCenterClientTest, PublishDoubleBuildsRequest) {
+  auto stub = std::make_shared<DataCenterProto::MockDataCenterServiceStub>();
+  DataCenterClient client("ModbusRTU");
+  client.setStub(stub);
+
+  EXPECT_CALL(*stub, Publish(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext*,
+                          const DataCenterProto::PublishRequest& req,
+                          DataCenterProto::Empty*) {
+        EXPECT_EQ(req.conn_id(), 11u);
+        EXPECT_EQ(req.tag(), "reg-2");
+        EXPECT_EQ(req.value().kind_case(), DataCenterProto::PointValue::kDoubleValue);
+        EXPECT_DOUBLE_EQ(req.value().double_value(), 220.5);
+        EXPECT_EQ(req.quality(), DataCenterProto::QUALITY_GOOD);
+        EXPECT_EQ(req.ts_ms(), 789);
+        return grpc::Status::OK;
+      }));
+
+  auto st = client.PublishDouble(11, "reg-2", 220.5, DataCenterProto::QUALITY_GOOD, 789);
+  EXPECT_TRUE(st.ok());
+}

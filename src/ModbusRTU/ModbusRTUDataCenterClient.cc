@@ -188,6 +188,30 @@ grpc::Status DataCenterClient::PublishUInt16(
   return stub->Publish(&ctx, req, &resp);
 }
 
+grpc::Status DataCenterClient::PublishDouble(
+    uint32_t connId, const std::string& tag, double value, DataCenterProto::Quality quality, int64_t tsMs) {
+  if (connId == 0) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id 不能为空");
+  }
+  if (tag.empty()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tag 不能为空");
+  }
+  auto stub = getStub();
+
+  DataCenterProto::PublishRequest req;
+  req.set_conn_id(connId);
+  req.set_tag(tag);
+  req.mutable_value()->set_double_value(value);
+  if (tsMs > 0) {
+    req.set_ts_ms(tsMs);
+  }
+  req.set_quality(quality);
+
+  grpc::ClientContext ctx;
+  DataCenterProto::Empty resp;
+  return stub->Publish(&ctx, req, &resp);
+}
+
 std::shared_ptr<DataCenterProto::DataCenterService::StubInterface> DataCenterClient::getStub() {
   std::lock_guard<std::mutex> lock(mu_);
   ensureStubLocked();

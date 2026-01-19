@@ -1,6 +1,7 @@
 #include "ModbusRTULinkManager.h"
 
 #include <chrono>
+#include <cmath>
 #include <format>
 #include <optional>
 #include <string>
@@ -25,6 +26,13 @@ constexpr uint8_t kExceptionIllegalFunction = 0x01;
 constexpr uint8_t kExceptionIllegalDataAddress = 0x02;
 constexpr uint8_t kExceptionIllegalDataValue = 0x03;
 constexpr uint8_t kExceptionSlaveDeviceFailure = 0x04;
+
+bool shouldReport(double value, double deadband, const std::optional<double>& last) {
+  if (deadband <= 0 || !last.has_value()) {
+    return true;
+  }
+  return std::fabs(value - last.value()) >= deadband;
+}
 
 grpc::Status makeNotFound(const std::string& connName) {
   return grpc::Status(grpc::StatusCode::NOT_FOUND, std::format("未找到链路: {}", connName));
@@ -483,6 +491,8 @@ void LinkManager::slaveLoop(SerialKey serialKey, std::shared_ptr<SerialBus> bus,
         bool hasPoint = false;
         std::string tag;
         std::optional<uint16_t> defaultValue;
+        double scale = 1.0;
+        double offset = 0.0;
       };
       std::vector<RegisterSlot> slots;
       slots.resize(request.quantity);
@@ -507,6 +517,8 @@ void LinkManager::slaveLoop(SerialKey serialKey, std::shared_ptr<SerialBus> bus,
         slots[i].hasPoint = true;
         slots[i].tag = point->tag;
         slots[i].defaultValue = point->defaultUInt16;
+        slots[i].scale = point->scale;
+        slots[i].offset = point->offset;
         tags.push_back(point->tag);
       }
 
@@ -515,7 +527,7 @@ void LinkManager::slaveLoop(SerialKey serialKey, std::shared_ptr<SerialBus> bus,
         continue;
       }
 
-      std::unordered_map<std::string, std::optional<uint16_t>> valuesByTag;
+      std::unordered_map<std::string, std::optional<double>> valuesByTag;
       bool dcOk = true;
       if (!tags.empty()) {
         DataCenterProto::GetLatestResponse resp;
@@ -527,15 +539,10 @@ void LinkManager::slaveLoop(SerialKey serialKey, std::shared_ptr<SerialBus> bus,
           updateLastError(link->connName, dcStatus.error_message());
         } else {
           for (const auto& update : resp.updates()) {
-            if (update.value().kind_case() == DataCenterProto::PointValue::kIntValue) {
-              const auto rawValue = update.value().int_value();
-              if (rawValue < 0 || rawValue > 0xFFFF) {
-                valuesByTag[update.dst_tag()] = std::nullopt;
-                LOG_WARNING("ModbusRTU 从站点值超出范围: conn_name={}, tag={}, value={}",
-                            link->connName, update.dst_tag(), rawValue);
-              } else {
-                valuesByTag[update.dst_tag()] = static_cast<uint16_t>(rawValue);
-              }
+            if (update.value().kind_case() == DataCenterProto::PointValue::kDoubleValue) {
+              valuesByTag[update.dst_tag()] = update.value().double_value();
+            } else if (update.value().kind_case() == DataCenterProto::PointValue::kIntValue) {
+              valuesByTag[update.dst_tag()] = static_cast<double>(update.value().int_value());
             } else {
               valuesByTag[update.dst_tag()] = std::nullopt;
               LOG_WARNING("ModbusRTU 从站点值类型不匹配: conn_name={}, tag={}",
@@ -556,7 +563,26 @@ void LinkManager::slaveLoop(SerialKey serialKey, std::shared_ptr<SerialBus> bus,
         } else if (dcOk) {
           auto it = valuesByTag.find(slots[i].tag);
           if (it != valuesByTag.end() && it->second.has_value()) {
-            value = it->second.value();
+            const double engValue = it->second.value();
+            const double scale = slots[i].scale == 0.0 ? 1.0 : slots[i].scale;
+            const double rawValue = (engValue - slots[i].offset) / scale;
+            if (!std::isfinite(rawValue)) {
+              LOG_WARNING("ModbusRTU 从站点值无法反向缩放: conn_name={}, tag={}, value={}",
+                          link->connName, slots[i].tag, engValue);
+              missingValue = true;
+            } else {
+              long long rounded = std::llround(rawValue);
+              if (rounded < 0) {
+                LOG_WARNING("ModbusRTU 从站点值超出范围已截断: conn_name={}, tag={}, raw={}",
+                            link->connName, slots[i].tag, rounded);
+                rounded = 0;
+              } else if (rounded > 0xFFFF) {
+                LOG_WARNING("ModbusRTU 从站点值超出范围已截断: conn_name={}, tag={}, raw={}",
+                            link->connName, slots[i].tag, rounded);
+                rounded = 0xFFFF;
+              }
+              value = static_cast<uint16_t>(rounded);
+            }
           } else if (slots[i].defaultValue.has_value()) {
             value = slots[i].defaultValue.value();
           } else {
@@ -1001,6 +1027,8 @@ void LinkManager::pollLoop(std::string connName,
                            std::stop_token stopToken) {
   const auto interval = std::chrono::milliseconds(config.poll_interval_ms());
   const auto points = pointTable.Points();
+  std::unordered_map<std::string, double> lastReportedByTag;
+  lastReportedByTag.reserve(points.size());
   LOG_INFO("ModbusRTU 轮询开始: conn_name={}, points={}, interval={}ms", connName, points.size(), config.poll_interval_ms());
 
   while (!stopToken.stop_requested()) {
@@ -1034,10 +1062,27 @@ void LinkManager::pollLoop(std::string connName,
         uint16_t value = 0;
         status = bus->ReadHoldingRegister(static_cast<uint8_t>(config.slave_id()), static_cast<uint16_t>(address), &value);
         if (status.ok()) {
-          auto dc = dataCenter_.PublishUInt16(connId, point.tag, value, DataCenterProto::QUALITY_GOOD, 0);
+          const double engValue = static_cast<double>(value) * point.scale + point.offset;
+          std::optional<double> last;
+          auto lastIt = lastReportedByTag.find(point.tag);
+          if (lastIt != lastReportedByTag.end()) {
+            last = lastIt->second;
+          }
+          if (!shouldReport(engValue, point.deadband, last)) {
+            LOG_DEBUG("ModbusRTU 死区过滤上报: conn_name={}, tag={}, value={}, last={}, 死区={}",
+                      connName,
+                      point.tag,
+                      engValue,
+                      last.value(),
+                      point.deadband);
+            continue;
+          }
+          auto dc = dataCenter_.PublishDouble(connId, point.tag, engValue, DataCenterProto::QUALITY_GOOD, 0);
           if (!dc.ok()) {
             updateLastError(connName, dc.error_message());
             LOG_ERROR("ModbusRTU 发布点值失败: conn_name={}, tag={}, 原因={}", connName, point.tag, dc.error_message());
+          } else {
+            lastReportedByTag[point.tag] = engValue;
           }
         }
       } else {

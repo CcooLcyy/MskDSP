@@ -29,6 +29,7 @@ public:
 
   grpc::Status PublishBool(uint32_t connId, const std::string& tag, bool value, DataCenterProto::Quality quality, int64_t tsMs);
   grpc::Status PublishUInt16(uint32_t connId, const std::string& tag, uint16_t value, DataCenterProto::Quality quality, int64_t tsMs);
+  grpc::Status PublishDouble(uint32_t connId, const std::string& tag, double value, DataCenterProto::Quality quality, int64_t tsMs);
 
   void setServerAddress(std::string address);
 

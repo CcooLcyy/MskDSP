@@ -57,6 +57,9 @@ grpc::Status PointTable::validatePoint(const ModbusRTUProto::Point& point) const
   if (point.function() == ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS && point.type() != ModbusRTUProto::DATA_TYPE_UINT16) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "保持寄存器点位需要 UINT16 类型");
   }
+  if (point.deadband() < 0) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "死区不能为负");
+  }
   return grpc::Status::OK;
 }
 
@@ -72,7 +75,11 @@ grpc::Status PointTable::insertOrUpdatePoint(const ModbusRTUProto::Point& point)
     p.address = point.address();
     p.type = point.type();
     p.scale = point.scale();
+    if (p.scale == 0.0) {
+      p.scale = 1.0;
+    }
     p.offset = point.offset();
+    p.deadband = point.deadband();
     if (point.default_value_case() == ModbusRTUProto::Point::kDefaultBool) {
       p.defaultBool = point.default_bool();
       p.defaultUInt16.reset();
@@ -103,7 +110,11 @@ grpc::Status PointTable::insertOrUpdatePoint(const ModbusRTUProto::Point& point)
   p.address = point.address();
   p.type = point.type();
   p.scale = point.scale();
+  if (p.scale == 0.0) {
+    p.scale = 1.0;
+  }
   p.offset = point.offset();
+  p.deadband = point.deadband();
   if (point.default_value_case() == ModbusRTUProto::Point::kDefaultBool) {
     p.defaultBool = point.default_bool();
     p.defaultUInt16.reset();
@@ -177,6 +188,7 @@ void PointTable::ToProto(const std::string& connName, ModbusRTUProto::PointTable
     dst->set_type(point.type);
     dst->set_scale(point.scale);
     dst->set_offset(point.offset);
+    dst->set_deadband(point.deadband);
     if (point.defaultBool.has_value()) {
       dst->set_default_bool(point.defaultBool.value());
     } else if (point.defaultUInt16.has_value()) {
