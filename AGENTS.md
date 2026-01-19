@@ -24,6 +24,7 @@ VSCode CMake Tools（用户确认可用的配置命令）：
 
 - Protobuf 注释规范：`protobuf/*.proto` 中所有 `service` 与每个 `rpc` 声明必须添加 `//` 注释，详细说明该 RPC 的用途/调用场景、关键语义（是否 stream、是否幂等、是否有落盘/启停/清理缓存等副作用）、以及主要错误码与边界条件；上位机对接将以该注释为依据。
 - Protobuf 脚手架默认 `Ping`：新模块脚手架会在 `.proto` 中生成默认的 `Ping(Empty)->Empty` RPC；当该 service 开始实现其他业务 RPC 后，应删除该默认 `Ping` RPC（避免长期保留占位接口）。
+- 协议点表设计需支持每点 `scale/offset/deadband`：`scale/offset` 用于工程量换算（`value = raw * scale + offset`，`scale=0` 视为 1），`deadband` 为工程量单位（<=0 不过滤）；BOOL 点忽略这三个参数。
 
 ## 改动原则
 在满足需求与修复问题的前提下，改动尽量小且聚焦；避免无关重构、批量格式化或大范围重命名。
@@ -59,6 +60,7 @@ VSCode CMake Tools（用户确认可用的配置命令）：
 
 ## 提交与 PR 规范
 近期提交历史使用方括号前缀（如 `[feature]`）+ 简短中文摘要。保持该风格（可用 `[fix]`、`[refactor]` 等），首行尽量控制在 ~72 字符内。PR 建议包含：范围/目的、各模块关键变更、已执行的构建/测试命令、端口/配置变更。关联相关 issue；协议/互操作变更附带截图或日志。
+- 当用户说“git 提交”且已授权执行 git 命令时，先查看仓库改动，按改动点分批提交，并且不要提交任何 JSON 配置文件（如 `*.json`）。
 
 ## 架构说明
 模块以共享库形式由管理器动态加载；版本元信息由 `cmake/LibInfo.h.in` 生成到各模块的 `include/` 中。gRPC 服务是主要集成面：先更新 `.proto`，再通过 CMake 重新生成。`package/conf` 仅保留模板纳入版本控制，避免提交本地运行时产物。
