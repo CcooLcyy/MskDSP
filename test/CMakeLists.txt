@@ -392,6 +392,10 @@ target_link_libraries(configPusherModuleManager_test PRIVATE
   moduleManager
 )
 
+target_compile_definitions(configPusherModuleManager_test PRIVATE
+  MSKDSP_TEST_DISABLE_PROTO_LOG=1
+)
+
 add_test(NAME configPusherModuleManager_test COMMAND configPusherModuleManager_test)
 
 set(MSKDSP_TEST_TARGETS

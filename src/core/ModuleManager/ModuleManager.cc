@@ -33,6 +33,15 @@
 namespace {
 constexpr const char *kAutoStartConfigPath = "./conf/module_manager.jsonc";
 
+void warmupGrpcClientSymbols() {
+  auto channel = grpc::CreateChannel("127.0.0.1:0", grpc::InsecureChannelCredentials());
+  if (channel) {
+    LOG_INFO("gRPC 客户端符号预加载完成");
+  } else {
+    LOG_WARNING("gRPC 客户端符号预加载失败");
+  }
+}
+
 std::string stripJsonComments(std::string_view input) {
   std::string out;
   out.reserve(input.size());
@@ -445,6 +454,7 @@ ModuleManager::~ModuleManager() {}
 void ModuleManager::start(std::stop_token stopToken) {
   LogModuleScope moduleScope(metaData_.name);
   LOG_INFO("正在启动模块管理器");
+  warmupGrpcClientSymbols();
   moduleManagerService_->getModuleManager(this);
   grpcServerBuilder(moduleManagerService_);
   initModuleInfos();
