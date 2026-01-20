@@ -26,14 +26,17 @@
               "t2": 10,
               "t3": 20
             },
-            // 自发遥测合包参数（仅影响从站上送）
+            // 自发点值合包参数（仅影响从站上送）
             "telemetry_batch_window_ms": 20,
             // ASDU 单帧最大字节数（<=249），use_standard_limit=true 时忽略
             "telemetry_max_asdu_bytes": 240,
             // true: 强制使用 IEC104 标准上限（249 字节）
             "telemetry_use_standard_limit": false,
-            // 自发遥测合包去重（按 IOA 保留最新）
-            "telemetry_dedupe": true
+            // 自发点值合包去重（按 IOA 保留最新）
+            "telemetry_dedupe": true,
+            // 对时触发 tag（ROLE_CLIENT 订阅该 tag 的 DataCenter 更新并发送对时命令）
+            // 为空时默认 "__time_sync__"
+            "time_sync_tag": "__time_sync__"
           }
         },
         "point_table": {
@@ -42,7 +45,7 @@
             {
               "tag": "1-A相电压",
               "ioa": 16385,
-              "type": "TELEMETRY_TYPE_FLOAT",
+              "type": "POINT_TYPE_FLOAT",
               "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
               "offset": 0.0, // 偏移
               "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
@@ -64,7 +67,7 @@
       //       "apci": { "k": 12, "w": 8, "t0": 30, "t1": 15, "t2": 10, "t3": 20 }
       //     }
       //   },
-      //   "point_table": { "replace": true, "points": [{ "tag": "Ua", "ioa": 100, "type": "TELEMETRY_TYPE_FLOAT" }] },
+      //   "point_table": { "replace": true, "points": [{ "tag": "Ua", "ioa": 100, "type": "POINT_TYPE_FLOAT" }] },
       //   "start": true
       // }
     ]

@@ -1,10 +1,12 @@
 #include "IEC104TcpSession.h"
 
 #include <algorithm>
+#include <array>
 #include <boost/asio/post.hpp>
 #include <boost/asio/read_until.hpp>
 #include <boost/asio/write.hpp>
 #include <chrono>
+#include <ctime>
 #include <cstring>
 #include <format>
 #include <istream>
@@ -17,8 +19,12 @@ namespace IEC104 {
 namespace {
 constexpr uint8_t kApduStart = 0x68;
 
-constexpr uint8_t kTypeIdMeasuredValueShort = 13;  // M_ME_NC_1
-constexpr uint8_t kTypeIdInterrogationCmd = 100;   // C_IC_NA_1
+constexpr uint8_t kTypeIdSinglePoint = 1;               // M_SP_NA_1
+constexpr uint8_t kTypeIdSinglePointWithTime = 30;      // M_SP_TB_1
+constexpr uint8_t kTypeIdMeasuredValueShort = 13;       // M_ME_NC_1
+constexpr uint8_t kTypeIdMeasuredValueShortWithTime = 36;  // M_ME_TF_1
+constexpr uint8_t kTypeIdInterrogationCmd = 100;        // C_IC_NA_1
+constexpr uint8_t kTypeIdTimeSyncCmd = 103;             // C_CS_NA_1
 
 constexpr uint8_t kCotActivation = 6;
 constexpr uint8_t kCotActivationCon = 7;
@@ -30,25 +36,28 @@ constexpr uint8_t kQoiStation = 20;
 constexpr char kHexDigits[] = "0123456789ABCDEF";
 
 constexpr uint32_t kMaxAsduBytes = 249;
-constexpr uint32_t kMeasuredValueAsduHeaderSize = 6;
-constexpr uint32_t kMeasuredValueSq0ObjectSize = 8;
+constexpr uint32_t kAsduHeaderSize = 6;
 constexpr uint32_t kMeasuredValueSq1BaseSize = 3;
+constexpr uint32_t kSinglePointSq0ObjectSize = 4;
+constexpr uint32_t kSinglePointSq1ObjectSize = 1;
+constexpr uint32_t kMeasuredValueSq0ObjectSize = 8;
 constexpr uint32_t kMeasuredValueSq1ObjectSize = 5;
-constexpr uint32_t kMinMeasuredValueAsduBytes = kMeasuredValueAsduHeaderSize + kMeasuredValueSq0ObjectSize;
+constexpr uint32_t kCp56Time2aSize = 7;
+constexpr uint32_t kMinMeasuredValueAsduBytes = kAsduHeaderSize + 3 + 4 + 1 + kCp56Time2aSize;
 constexpr uint32_t kDefaultTelemetryBatchWindowMs = 20;
 
-size_t maxSq0Objects(uint32_t maxAsduBytes) {
-  if (maxAsduBytes <= kMeasuredValueAsduHeaderSize) {
+size_t maxSq0Objects(uint32_t maxAsduBytes, uint32_t objectSize) {
+  if (maxAsduBytes <= kAsduHeaderSize) {
     return 0;
   }
-  return (maxAsduBytes - kMeasuredValueAsduHeaderSize) / kMeasuredValueSq0ObjectSize;
+  return (maxAsduBytes - kAsduHeaderSize) / objectSize;
 }
 
-size_t maxSq1Objects(uint32_t maxAsduBytes) {
-  if (maxAsduBytes <= kMeasuredValueAsduHeaderSize + kMeasuredValueSq1BaseSize) {
+size_t maxSq1Objects(uint32_t maxAsduBytes, uint32_t objectSize) {
+  if (maxAsduBytes <= kAsduHeaderSize + kMeasuredValueSq1BaseSize) {
     return 0;
   }
-  return (maxAsduBytes - kMeasuredValueAsduHeaderSize - kMeasuredValueSq1BaseSize) / kMeasuredValueSq1ObjectSize;
+  return (maxAsduBytes - kAsduHeaderSize - kMeasuredValueSq1BaseSize) / objectSize;
 }
 
 inline uint16_t parseSeq(const std::vector<uint8_t> &apdu, size_t offset) {
@@ -123,7 +132,7 @@ void TcpSession::Start(boost::asio::ip::tcp::socket socket) {
   writing_ = false;
 
   LOG_INFO("IEC104 会话启动: conn_name={}, 角色={}, k={}, w={}, t0={}, t1={}, t2={}, t3={}", config_.conn_name(), isClient_ ? "客户端" : "服务端", apci_.k, apci_.w, apci_.t0, apci_.t1, apci_.t2, apci_.t3);
-  LOG_INFO("IEC104 遥测合包参数: conn_name={}, window_ms={}, max_asdu_bytes={}, 去重={}",
+  LOG_INFO("IEC104 点值合包参数: conn_name={}, window_ms={}, max_asdu_bytes={}, 去重={}",
            config_.conn_name(),
            telemetryBatchWindow_.count(),
            telemetryMaxAsduBytes_,
@@ -159,7 +168,7 @@ void TcpSession::Stop() {
     self->recvSinceLastAck_ = 0;
     self->writeQueue_.clear();
     self->pendingAsdu_.clear();
-    self->telemetryPendingByIoa_.clear();
+    self->telemetryPendingByKey_.clear();
     self->telemetryPending_.clear();
     self->telemetryFlushScheduled_ = false;
     self->writing_ = false;
@@ -169,24 +178,37 @@ void TcpSession::Stop() {
   });
 }
 
-void TcpSession::SetMeasuredValueCallback(MeasuredValueCallback cb) {
-  onMeasuredValue_ = std::move(cb);
+void TcpSession::SetPointValueCallback(PointValueCallback cb) {
+  onPointValue_ = std::move(cb);
 }
 
 void TcpSession::SetInterrogationSnapshotProvider(SnapshotProvider provider) {
   interrogationSnapshotProvider_ = std::move(provider);
 }
 
+void TcpSession::SetTimeSyncCallback(TimeSyncCallback cb) {
+  onTimeSync_ = std::move(cb);
+}
+
 void TcpSession::SetClosedCallback(std::function<void()> cb) {
   onClosed_ = std::move(cb);
 }
 
-void TcpSession::SendMeasuredValue(uint32_t ioa, double value, uint8_t quality, uint8_t cause) {
-  boost::asio::post(io_, [self = shared_from_this(), ioa, value, quality, cause]() {
+void TcpSession::SendPointValue(const PointValue& value, uint8_t cause) {
+  boost::asio::post(io_, [self = shared_from_this(), value, cause]() {
     if (self->closing_) {
       return;
     }
-    self->enqueueMeasuredValue(ioa, value, quality, cause);
+    self->enqueuePointValue(value, cause);
+  });
+}
+
+void TcpSession::SendTimeSync(int64_t tsMs) {
+  boost::asio::post(io_, [self = shared_from_this(), tsMs]() {
+    if (self->closing_) {
+      return;
+    }
+    self->sendTimeSync(tsMs);
   });
 }
 
@@ -207,15 +229,14 @@ void TcpSession::initTelemetryBatchSettings() {
   telemetryDedupe_ = config_.has_telemetry_dedupe() ? config_.telemetry_dedupe() : true;
 }
 
-void TcpSession::enqueueMeasuredValue(uint32_t ioa, double value, uint8_t quality, uint8_t cause) {
-  PendingMeasuredValue entry;
-  entry.value.ioa = ioa;
-  entry.value.value = value;
-  entry.value.quality = quality;
+void TcpSession::enqueuePointValue(const PointValue& value, uint8_t cause) {
+  PendingPointValue entry;
+  entry.value = value;
   entry.cause = cause;
 
   if (telemetryDedupe_) {
-    telemetryPendingByIoa_[ioa] = entry;
+    const uint64_t key = (static_cast<uint64_t>(value.type) << 32) | value.ioa;
+    telemetryPendingByKey_[key] = entry;
   } else {
     telemetryPending_.push_back(entry);
   }
@@ -250,13 +271,13 @@ void TcpSession::drainTelemetryQueue() {
     return;
   }
 
-  std::vector<PendingMeasuredValue> pending;
+  std::vector<PendingPointValue> pending;
   if (telemetryDedupe_) {
-    pending.reserve(telemetryPendingByIoa_.size());
-    for (auto &pair : telemetryPendingByIoa_) {
+    pending.reserve(telemetryPendingByKey_.size());
+    for (auto &pair : telemetryPendingByKey_) {
       pending.push_back(pair.second);
     }
-    telemetryPendingByIoa_.clear();
+    telemetryPendingByKey_.clear();
   } else {
     pending.swap(telemetryPending_);
   }
@@ -265,42 +286,56 @@ void TcpSession::drainTelemetryQueue() {
     return;
   }
 
-  LOG_DEBUG("IEC104 遥测合包刷新: conn_name={}, 待处理={}, 去重={}, window_ms={}, max_asdu_bytes={}",
+  LOG_DEBUG("IEC104 点值合包刷新: conn_name={}, 待处理={}, 去重={}, window_ms={}, max_asdu_bytes={}",
             config_.conn_name(),
             pending.size(),
             telemetryDedupe_,
             telemetryBatchWindow_.count(),
             telemetryMaxAsduBytes_);
 
-  std::unordered_map<uint8_t, std::vector<MeasuredValue>> byCause;
-  byCause.reserve(pending.size());
+  std::unordered_map<uint32_t, std::vector<PointValue>> byKey;
+  byKey.reserve(pending.size());
   for (const auto &entry : pending) {
-    byCause[entry.cause].push_back(entry.value);
+    const uint32_t key = (static_cast<uint32_t>(entry.value.type) << 8) | entry.cause;
+    byKey[key].push_back(entry.value);
   }
 
-  for (auto &pair : byCause) {
-    enqueueMeasuredValuesBatch(std::move(pair.second), pair.first);
+  for (auto &pair : byKey) {
+    const uint8_t cause = static_cast<uint8_t>(pair.first & 0xFF);
+    enqueuePointValuesBatch(std::move(pair.second), cause);
   }
 }
 
 void TcpSession::clearTelemetryQueue() {
-  telemetryPendingByIoa_.clear();
+  telemetryPendingByKey_.clear();
   telemetryPending_.clear();
   telemetryFlushScheduled_ = false;
   telemetryFlushTimer_.cancel();
 }
 
-void TcpSession::enqueueMeasuredValuesBatch(std::vector<MeasuredValue> values, uint8_t cause) {
+void TcpSession::enqueuePointValuesBatch(std::vector<PointValue> values, uint8_t cause) {
   if (values.empty()) {
     return;
   }
+  const auto type = values.front().type;
 
-  std::stable_sort(values.begin(), values.end(), [](const MeasuredValue &a, const MeasuredValue &b) {
+  std::stable_sort(values.begin(), values.end(), [](const PointValue &a, const PointValue &b) {
     return a.ioa < b.ioa;
   });
 
-  auto maxSq0 = maxSq0Objects(telemetryMaxAsduBytes_);
-  auto maxSq1 = maxSq1Objects(telemetryMaxAsduBytes_);
+  const bool withTime = true;
+  uint32_t sq0ObjectSize = 0;
+  uint32_t sq1ObjectSize = 0;
+  if (type == IEC104Proto::POINT_TYPE_FLOAT) {
+    sq0ObjectSize = kMeasuredValueSq0ObjectSize + (withTime ? kCp56Time2aSize : 0);
+    sq1ObjectSize = kMeasuredValueSq1ObjectSize + (withTime ? kCp56Time2aSize : 0);
+  } else {
+    sq0ObjectSize = kSinglePointSq0ObjectSize + (withTime ? kCp56Time2aSize : 0);
+    sq1ObjectSize = kSinglePointSq1ObjectSize + (withTime ? kCp56Time2aSize : 0);
+  }
+
+  auto maxSq0 = maxSq0Objects(telemetryMaxAsduBytes_, sq0ObjectSize);
+  auto maxSq1 = maxSq1Objects(telemetryMaxAsduBytes_, sq1ObjectSize);
   if (maxSq0 == 0) {
     maxSq0 = 1;
   }
@@ -308,14 +343,28 @@ void TcpSession::enqueueMeasuredValuesBatch(std::vector<MeasuredValue> values, u
     maxSq1 = 1;
   }
 
-  std::vector<MeasuredValue> sq0Buffer;
+  std::vector<PointValue> sq0Buffer;
   sq0Buffer.reserve(std::min(values.size(), maxSq0));
 
-  auto flushSq0 = [this, &sq0Buffer, maxSq0, cause]() {
+  auto flushSq0 = [this, &sq0Buffer, maxSq0, cause, type, withTime]() {
     size_t offset = 0;
     while (offset < sq0Buffer.size()) {
       const size_t count = std::min(maxSq0, sq0Buffer.size() - offset);
-      enqueueAsdu(buildMeasuredValueAsduSq0(sq0Buffer, offset, count, cause));
+      if (type == IEC104Proto::POINT_TYPE_FLOAT) {
+        auto asdu = buildMeasuredValueAsduSq0(sq0Buffer, offset, count, cause, withTime);
+        if (!asdu.empty()) {
+          enqueueAsdu(std::move(asdu));
+        } else {
+          LOG_WARNING("IEC104 构造遥测报文失败: conn_name={}, count={}", config_.conn_name(), count);
+        }
+      } else {
+        auto asdu = buildSinglePointAsduSq0(sq0Buffer, offset, count, cause, withTime);
+        if (!asdu.empty()) {
+          enqueueAsdu(std::move(asdu));
+        } else {
+          LOG_WARNING("IEC104 构造单点报文失败: conn_name={}, count={}", config_.conn_name(), count);
+        }
+      }
       offset += count;
     }
     sq0Buffer.clear();
@@ -333,7 +382,21 @@ void TcpSession::enqueueMeasuredValuesBatch(std::vector<MeasuredValue> values, u
       size_t offset = 0;
       while (offset < runLen) {
         const size_t count = std::min(maxSq1, runLen - offset);
-        enqueueAsdu(buildMeasuredValueAsduSq1(values, i + offset, count, cause));
+        if (type == IEC104Proto::POINT_TYPE_FLOAT) {
+          auto asdu = buildMeasuredValueAsduSq1(values, i + offset, count, cause, withTime);
+          if (!asdu.empty()) {
+            enqueueAsdu(std::move(asdu));
+          } else {
+            LOG_WARNING("IEC104 构造遥测报文失败: conn_name={}, count={}", config_.conn_name(), count);
+          }
+        } else {
+          auto asdu = buildSinglePointAsduSq1(values, i + offset, count, cause, withTime);
+          if (!asdu.empty()) {
+            enqueueAsdu(std::move(asdu));
+          } else {
+            LOG_WARNING("IEC104 构造单点报文失败: conn_name={}, count={}", config_.conn_name(), count);
+          }
+        }
         offset += count;
       }
     } else {
@@ -499,18 +562,31 @@ void TcpSession::processAsdu(const std::vector<uint8_t> &asdu) {
   auto typeId = asdu[0];
   switch (typeId) {
   case kTypeIdMeasuredValueShort:
-    handleMeasuredValue(asdu);
+    handleMeasuredValue(asdu, false);
+    break;
+  case kTypeIdMeasuredValueShortWithTime:
+    handleMeasuredValue(asdu, true);
+    break;
+  case kTypeIdSinglePoint:
+    handleSinglePoint(asdu, false);
+    break;
+  case kTypeIdSinglePointWithTime:
+    handleSinglePoint(asdu, true);
     break;
   case kTypeIdInterrogationCmd:
     handleInterrogation(asdu);
+    break;
+  case kTypeIdTimeSyncCmd:
+    handleTimeSyncCommand(asdu);
     break;
   default:
     break;
   }
 }
 
-void TcpSession::handleMeasuredValue(const std::vector<uint8_t> &asdu) {
-  if (asdu.size() < 12) {
+void TcpSession::handleMeasuredValue(const std::vector<uint8_t> &asdu, bool withTime) {
+  const size_t minSize = withTime ? 12 + kCp56Time2aSize : 12;
+  if (asdu.size() < minSize) {
     return;
   }
   auto vsq = asdu[1];
@@ -558,12 +634,94 @@ void TcpSession::handleMeasuredValue(const std::vector<uint8_t> &asdu) {
     auto qds = static_cast<uint8_t>(asdu[offset + 4]);
     offset += 5;
 
-    if (onMeasuredValue_) {
-      MeasuredValue mv;
+    int64_t tsMs = 0;
+    if (withTime) {
+      if (asdu.size() < offset + kCp56Time2aSize) {
+        return;
+      }
+      if (!decodeCp56Time2a(asdu.data() + offset, kCp56Time2aSize, &tsMs)) {
+        LOG_WARNING("IEC104 遥测时标解析失败: conn_name={}, ioa={}", config_.conn_name(), ioa);
+        tsMs = 0;
+      }
+      offset += kCp56Time2aSize;
+    }
+
+    if (onPointValue_) {
+      PointValue mv;
       mv.ioa = ioa;
-      mv.value = static_cast<double>(f);
+      mv.type = IEC104Proto::POINT_TYPE_FLOAT;
+      mv.doubleValue = static_cast<double>(f);
       mv.quality = qds;
-      onMeasuredValue_(mv);
+      mv.tsMs = tsMs;
+      onPointValue_(mv);
+    }
+  }
+}
+
+void TcpSession::handleSinglePoint(const std::vector<uint8_t> &asdu, bool withTime) {
+  const size_t minSize = withTime ? 10 + kCp56Time2aSize : 10;
+  if (asdu.size() < minSize) {
+    return;
+  }
+  auto vsq = asdu[1];
+  auto sq = (vsq & 0x80) != 0;
+  auto count = static_cast<int>(vsq & 0x7F);
+  if (count <= 0) {
+    return;
+  }
+
+  size_t offset = 6;
+  uint32_t baseIoa = 0;
+  if (sq) {
+    if (asdu.size() < offset + 3) {
+      return;
+    }
+    baseIoa = static_cast<uint32_t>(asdu[offset]) |
+        (static_cast<uint32_t>(asdu[offset + 1]) << 8) |
+        (static_cast<uint32_t>(asdu[offset + 2]) << 16);
+    offset += 3;
+  }
+
+  for (int i = 0; i < count; ++i) {
+    uint32_t ioa = 0;
+    if (!sq) {
+      if (asdu.size() < offset + 3) {
+        return;
+      }
+      ioa = static_cast<uint32_t>(asdu[offset]) |
+          (static_cast<uint32_t>(asdu[offset + 1]) << 8) |
+          (static_cast<uint32_t>(asdu[offset + 2]) << 16);
+      offset += 3;
+    } else {
+      ioa = baseIoa + static_cast<uint32_t>(i);
+    }
+
+    if (asdu.size() < offset + 1) {
+      return;
+    }
+    auto siq = static_cast<uint8_t>(asdu[offset]);
+    offset += 1;
+
+    int64_t tsMs = 0;
+    if (withTime) {
+      if (asdu.size() < offset + kCp56Time2aSize) {
+        return;
+      }
+      if (!decodeCp56Time2a(asdu.data() + offset, kCp56Time2aSize, &tsMs)) {
+        LOG_WARNING("IEC104 单点时标解析失败: conn_name={}, ioa={}", config_.conn_name(), ioa);
+        tsMs = 0;
+      }
+      offset += kCp56Time2aSize;
+    }
+
+    if (onPointValue_) {
+      PointValue pv;
+      pv.ioa = ioa;
+      pv.type = IEC104Proto::POINT_TYPE_SINGLE;
+      pv.boolValue = (siq & 0x01) != 0;
+      pv.quality = siq;
+      pv.tsMs = tsMs;
+      onPointValue_(pv);
     }
   }
 }
@@ -590,17 +748,53 @@ void TcpSession::handleInterrogation(const std::vector<uint8_t> &asdu) {
   LOG_INFO("IEC104 接收总召激活: conn_name={}, qoi={}", config_.conn_name(), qoi);
   enqueueAsdu(buildInterrogationAsdu(kCotActivationCon, qoi));
 
-  std::vector<MeasuredValue> snapshot;
+  std::vector<PointValue> snapshot;
   if (interrogationSnapshotProvider_) {
     snapshot = interrogationSnapshotProvider_();
   }
 
   LOG_DEBUG("IEC104 总召快照: conn_name={}, 数量={}", config_.conn_name(), snapshot.size());
   if (!snapshot.empty() && !closing_ && dataTransferActive_) {
-    enqueueMeasuredValuesBatch(std::move(snapshot), kCotInterrogatedByStation);
+    enqueuePointValuesBatch(std::move(snapshot), kCotInterrogatedByStation);
   }
 
   enqueueAsdu(buildInterrogationAsdu(kCotActivationTermination, qoi));
+}
+
+void TcpSession::handleTimeSyncCommand(const std::vector<uint8_t> &asdu) {
+  if (asdu.size() < kAsduHeaderSize + 3 + kCp56Time2aSize) {
+    return;
+  }
+
+  auto cot = static_cast<uint8_t>(asdu[2] & 0x3F);
+  if (cot != kCotActivation) {
+    return;
+  }
+  if (!dataTransferActive_) {
+    LOG_WARNING("IEC104 未 STARTDT 即收到对时: conn_name={}", config_.conn_name());
+    return;
+  }
+
+  int64_t tsMs = 0;
+  if (!decodeCp56Time2a(asdu.data() + kAsduHeaderSize + 3, kCp56Time2aSize, &tsMs)) {
+    LOG_WARNING("IEC104 对时时标解析失败: conn_name={}", config_.conn_name());
+    tsMs = 0;
+  } else {
+    LOG_INFO("IEC104 接收对时激活: conn_name={}, ts_ms={}", config_.conn_name(), tsMs);
+  }
+
+  if (onTimeSync_ && tsMs > 0) {
+    onTimeSync_(tsMs);
+  }
+
+  auto actCon = buildTimeSyncAsdu(kCotActivationCon, tsMs);
+  if (!actCon.empty()) {
+    enqueueAsdu(std::move(actCon));
+  }
+  auto actTerm = buildTimeSyncAsdu(kCotActivationTermination, tsMs);
+  if (!actTerm.empty()) {
+    enqueueAsdu(std::move(actTerm));
+  }
 }
 
 void TcpSession::enqueueAsdu(std::vector<uint8_t> asdu) {
@@ -740,10 +934,12 @@ void TcpSession::doWrite() {
       });
 }
 
-std::vector<uint8_t> TcpSession::buildMeasuredValueAsdu(uint32_t ioa, double value, uint8_t quality, uint8_t cause) const {
+std::vector<uint8_t> TcpSession::buildMeasuredValueAsdu(
+    uint32_t ioa, double value, uint8_t quality, uint8_t cause, int64_t tsMs, bool withTime) const {
   std::vector<uint8_t> asdu;
-  asdu.reserve(6 + 3 + 4 + 1);
-  asdu.emplace_back(kTypeIdMeasuredValueShort);
+  const auto typeId = withTime ? kTypeIdMeasuredValueShortWithTime : kTypeIdMeasuredValueShort;
+  asdu.reserve(kAsduHeaderSize + 3 + 4 + 1 + (withTime ? kCp56Time2aSize : 0));
+  asdu.emplace_back(typeId);
   asdu.emplace_back(0x01);  // VSQ: 1 object, SQ=0
   asdu.emplace_back(cause & 0x3F);
   asdu.emplace_back(static_cast<uint8_t>(config_.oa() & 0xFF));
@@ -762,19 +958,60 @@ std::vector<uint8_t> TcpSession::buildMeasuredValueAsdu(uint32_t ioa, double val
   asdu.emplace_back(static_cast<uint8_t>((bits >> 16) & 0xFF));
   asdu.emplace_back(static_cast<uint8_t>((bits >> 24) & 0xFF));
   asdu.emplace_back(quality);
+
+  if (withTime) {
+    std::array<uint8_t, kCp56Time2aSize> time{};
+    if (!encodeCp56Time2a(tsMs, &time)) {
+      return {};
+    }
+    asdu.insert(asdu.end(), time.begin(), time.end());
+  }
   return asdu;
 }
 
-std::vector<uint8_t> TcpSession::buildMeasuredValueAsduSq0(const std::vector<MeasuredValue>& values,
+std::vector<uint8_t> TcpSession::buildSinglePointAsdu(
+    uint32_t ioa, bool value, uint8_t quality, uint8_t cause, int64_t tsMs, bool withTime) const {
+  std::vector<uint8_t> asdu;
+  const auto typeId = withTime ? kTypeIdSinglePointWithTime : kTypeIdSinglePoint;
+  asdu.reserve(kAsduHeaderSize + 3 + 1 + (withTime ? kCp56Time2aSize : 0));
+  asdu.emplace_back(typeId);
+  asdu.emplace_back(0x01);  // VSQ: 1 object, SQ=0
+  asdu.emplace_back(cause & 0x3F);
+  asdu.emplace_back(static_cast<uint8_t>(config_.oa() & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>(config_.ca() & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>((config_.ca() >> 8) & 0xFF));
+
+  asdu.emplace_back(static_cast<uint8_t>(ioa & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>((ioa >> 8) & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>((ioa >> 16) & 0xFF));
+
+  auto siq = static_cast<uint8_t>(value ? 0x01 : 0x00);
+  siq |= (quality & 0xFE);
+  asdu.emplace_back(siq);
+
+  if (withTime) {
+    std::array<uint8_t, kCp56Time2aSize> time{};
+    if (!encodeCp56Time2a(tsMs, &time)) {
+      return {};
+    }
+    asdu.insert(asdu.end(), time.begin(), time.end());
+  }
+  return asdu;
+}
+
+std::vector<uint8_t> TcpSession::buildMeasuredValueAsduSq0(const std::vector<PointValue>& values,
                                                            size_t start,
                                                            size_t count,
-                                                           uint8_t cause) const {
+                                                           uint8_t cause,
+                                                           bool withTime) const {
   std::vector<uint8_t> asdu;
   if (count == 0) {
     return asdu;
   }
-  asdu.reserve(kMeasuredValueAsduHeaderSize + kMeasuredValueSq0ObjectSize * count);
-  asdu.emplace_back(kTypeIdMeasuredValueShort);
+  const auto typeId = withTime ? kTypeIdMeasuredValueShortWithTime : kTypeIdMeasuredValueShort;
+  const uint32_t objectSize = kMeasuredValueSq0ObjectSize + (withTime ? kCp56Time2aSize : 0);
+  asdu.reserve(kAsduHeaderSize + objectSize * count);
+  asdu.emplace_back(typeId);
   asdu.emplace_back(static_cast<uint8_t>(count & 0x7F));
   asdu.emplace_back(cause & 0x3F);
   asdu.emplace_back(static_cast<uint8_t>(config_.oa() & 0xFF));
@@ -787,7 +1024,7 @@ std::vector<uint8_t> TcpSession::buildMeasuredValueAsduSq0(const std::vector<Mea
     asdu.emplace_back(static_cast<uint8_t>((mv.ioa >> 8) & 0xFF));
     asdu.emplace_back(static_cast<uint8_t>((mv.ioa >> 16) & 0xFF));
 
-    float f = toFloat(mv.value);
+    float f = toFloat(mv.doubleValue);
     uint32_t bits = 0;
     std::memcpy(&bits, &f, sizeof(f));
     asdu.emplace_back(static_cast<uint8_t>(bits & 0xFF));
@@ -795,20 +1032,30 @@ std::vector<uint8_t> TcpSession::buildMeasuredValueAsduSq0(const std::vector<Mea
     asdu.emplace_back(static_cast<uint8_t>((bits >> 16) & 0xFF));
     asdu.emplace_back(static_cast<uint8_t>((bits >> 24) & 0xFF));
     asdu.emplace_back(mv.quality);
+    if (withTime) {
+      std::array<uint8_t, kCp56Time2aSize> time{};
+      if (!encodeCp56Time2a(mv.tsMs, &time)) {
+        return {};
+      }
+      asdu.insert(asdu.end(), time.begin(), time.end());
+    }
   }
   return asdu;
 }
 
-std::vector<uint8_t> TcpSession::buildMeasuredValueAsduSq1(const std::vector<MeasuredValue>& values,
+std::vector<uint8_t> TcpSession::buildMeasuredValueAsduSq1(const std::vector<PointValue>& values,
                                                            size_t start,
                                                            size_t count,
-                                                           uint8_t cause) const {
+                                                           uint8_t cause,
+                                                           bool withTime) const {
   std::vector<uint8_t> asdu;
   if (count == 0) {
     return asdu;
   }
-  asdu.reserve(kMeasuredValueAsduHeaderSize + kMeasuredValueSq1BaseSize + kMeasuredValueSq1ObjectSize * count);
-  asdu.emplace_back(kTypeIdMeasuredValueShort);
+  const auto typeId = withTime ? kTypeIdMeasuredValueShortWithTime : kTypeIdMeasuredValueShort;
+  const uint32_t objectSize = kMeasuredValueSq1ObjectSize + (withTime ? kCp56Time2aSize : 0);
+  asdu.reserve(kAsduHeaderSize + kMeasuredValueSq1BaseSize + objectSize * count);
+  asdu.emplace_back(typeId);
   asdu.emplace_back(static_cast<uint8_t>(0x80 | (count & 0x7F)));
   asdu.emplace_back(cause & 0x3F);
   asdu.emplace_back(static_cast<uint8_t>(config_.oa() & 0xFF));
@@ -822,7 +1069,7 @@ std::vector<uint8_t> TcpSession::buildMeasuredValueAsduSq1(const std::vector<Mea
 
   for (size_t i = 0; i < count; ++i) {
     const auto& mv = values[start + i];
-    float f = toFloat(mv.value);
+    float f = toFloat(mv.doubleValue);
     uint32_t bits = 0;
     std::memcpy(&bits, &f, sizeof(f));
     asdu.emplace_back(static_cast<uint8_t>(bits & 0xFF));
@@ -830,13 +1077,98 @@ std::vector<uint8_t> TcpSession::buildMeasuredValueAsduSq1(const std::vector<Mea
     asdu.emplace_back(static_cast<uint8_t>((bits >> 16) & 0xFF));
     asdu.emplace_back(static_cast<uint8_t>((bits >> 24) & 0xFF));
     asdu.emplace_back(mv.quality);
+    if (withTime) {
+      std::array<uint8_t, kCp56Time2aSize> time{};
+      if (!encodeCp56Time2a(mv.tsMs, &time)) {
+        return {};
+      }
+      asdu.insert(asdu.end(), time.begin(), time.end());
+    }
+  }
+  return asdu;
+}
+
+std::vector<uint8_t> TcpSession::buildSinglePointAsduSq0(const std::vector<PointValue>& values,
+                                                         size_t start,
+                                                         size_t count,
+                                                         uint8_t cause,
+                                                         bool withTime) const {
+  std::vector<uint8_t> asdu;
+  if (count == 0) {
+    return asdu;
+  }
+  const auto typeId = withTime ? kTypeIdSinglePointWithTime : kTypeIdSinglePoint;
+  const uint32_t objectSize = kSinglePointSq0ObjectSize + (withTime ? kCp56Time2aSize : 0);
+  asdu.reserve(kAsduHeaderSize + objectSize * count);
+  asdu.emplace_back(typeId);
+  asdu.emplace_back(static_cast<uint8_t>(count & 0x7F));
+  asdu.emplace_back(cause & 0x3F);
+  asdu.emplace_back(static_cast<uint8_t>(config_.oa() & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>(config_.ca() & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>((config_.ca() >> 8) & 0xFF));
+
+  for (size_t i = 0; i < count; ++i) {
+    const auto& pv = values[start + i];
+    asdu.emplace_back(static_cast<uint8_t>(pv.ioa & 0xFF));
+    asdu.emplace_back(static_cast<uint8_t>((pv.ioa >> 8) & 0xFF));
+    asdu.emplace_back(static_cast<uint8_t>((pv.ioa >> 16) & 0xFF));
+    auto siq = static_cast<uint8_t>(pv.boolValue ? 0x01 : 0x00);
+    siq |= (pv.quality & 0xFE);
+    asdu.emplace_back(siq);
+    if (withTime) {
+      std::array<uint8_t, kCp56Time2aSize> time{};
+      if (!encodeCp56Time2a(pv.tsMs, &time)) {
+        return {};
+      }
+      asdu.insert(asdu.end(), time.begin(), time.end());
+    }
+  }
+  return asdu;
+}
+
+std::vector<uint8_t> TcpSession::buildSinglePointAsduSq1(const std::vector<PointValue>& values,
+                                                         size_t start,
+                                                         size_t count,
+                                                         uint8_t cause,
+                                                         bool withTime) const {
+  std::vector<uint8_t> asdu;
+  if (count == 0) {
+    return asdu;
+  }
+  const auto typeId = withTime ? kTypeIdSinglePointWithTime : kTypeIdSinglePoint;
+  const uint32_t objectSize = kSinglePointSq1ObjectSize + (withTime ? kCp56Time2aSize : 0);
+  asdu.reserve(kAsduHeaderSize + kMeasuredValueSq1BaseSize + objectSize * count);
+  asdu.emplace_back(typeId);
+  asdu.emplace_back(static_cast<uint8_t>(0x80 | (count & 0x7F)));
+  asdu.emplace_back(cause & 0x3F);
+  asdu.emplace_back(static_cast<uint8_t>(config_.oa() & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>(config_.ca() & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>((config_.ca() >> 8) & 0xFF));
+
+  const auto baseIoa = values[start].ioa;
+  asdu.emplace_back(static_cast<uint8_t>(baseIoa & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>((baseIoa >> 8) & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>((baseIoa >> 16) & 0xFF));
+
+  for (size_t i = 0; i < count; ++i) {
+    const auto& pv = values[start + i];
+    auto siq = static_cast<uint8_t>(pv.boolValue ? 0x01 : 0x00);
+    siq |= (pv.quality & 0xFE);
+    asdu.emplace_back(siq);
+    if (withTime) {
+      std::array<uint8_t, kCp56Time2aSize> time{};
+      if (!encodeCp56Time2a(pv.tsMs, &time)) {
+        return {};
+      }
+      asdu.insert(asdu.end(), time.begin(), time.end());
+    }
   }
   return asdu;
 }
 
 std::vector<uint8_t> TcpSession::buildInterrogationAsdu(uint8_t cause, uint8_t qoi) const {
   std::vector<uint8_t> asdu;
-  asdu.reserve(6 + 3 + 1);
+  asdu.reserve(kAsduHeaderSize + 3 + 1);
   asdu.emplace_back(kTypeIdInterrogationCmd);
   asdu.emplace_back(0x01);
   asdu.emplace_back(cause & 0x3F);
@@ -849,6 +1181,102 @@ std::vector<uint8_t> TcpSession::buildInterrogationAsdu(uint8_t cause, uint8_t q
   asdu.emplace_back(0x00);
   asdu.emplace_back(qoi);
   return asdu;
+}
+
+std::vector<uint8_t> TcpSession::buildTimeSyncAsdu(uint8_t cause, int64_t tsMs) const {
+  std::vector<uint8_t> asdu;
+  asdu.reserve(kAsduHeaderSize + 3 + kCp56Time2aSize);
+  asdu.emplace_back(kTypeIdTimeSyncCmd);
+  asdu.emplace_back(0x01);
+  asdu.emplace_back(cause & 0x3F);
+  asdu.emplace_back(static_cast<uint8_t>(config_.oa() & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>(config_.ca() & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>((config_.ca() >> 8) & 0xFF));
+
+  asdu.emplace_back(0x00);
+  asdu.emplace_back(0x00);
+  asdu.emplace_back(0x00);
+
+  std::array<uint8_t, kCp56Time2aSize> time{};
+  if (!encodeCp56Time2a(tsMs, &time)) {
+    return {};
+  }
+  asdu.insert(asdu.end(), time.begin(), time.end());
+  return asdu;
+}
+
+bool TcpSession::encodeCp56Time2a(int64_t tsMs, std::array<uint8_t, kCp56Time2aSize>* out) {
+  if (out == nullptr) {
+    return false;
+  }
+  if (tsMs <= 0) {
+    auto now = std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now());
+    tsMs = now.time_since_epoch().count();
+  }
+
+  auto tp = std::chrono::system_clock::time_point(std::chrono::milliseconds(tsMs));
+  std::time_t tt = std::chrono::system_clock::to_time_t(tp);
+  std::tm tm{};
+  if (localtime_r(&tt, &tm) == nullptr) {
+    return false;
+  }
+
+  const int ms = static_cast<int>(tsMs % 1000);
+  const int msec = tm.tm_sec * 1000 + (ms < 0 ? 0 : ms);
+  if (msec < 0 || msec > 59999) {
+    return false;
+  }
+  (*out)[0] = static_cast<uint8_t>(msec & 0xFF);
+  (*out)[1] = static_cast<uint8_t>((msec >> 8) & 0xFF);
+
+  (*out)[2] = static_cast<uint8_t>(tm.tm_min & 0x3F);
+  uint8_t hour = static_cast<uint8_t>(tm.tm_hour & 0x1F);
+  if (tm.tm_isdst > 0) {
+    hour |= 0x80;
+  }
+  (*out)[3] = hour;
+
+  const int dayOfWeek = (tm.tm_wday == 0) ? 7 : tm.tm_wday;
+  (*out)[4] = static_cast<uint8_t>((tm.tm_mday & 0x1F) | ((dayOfWeek & 0x07) << 5));
+  (*out)[5] = static_cast<uint8_t>((tm.tm_mon + 1) & 0x0F);
+  const int year = (tm.tm_year + 1900) % 100;
+  (*out)[6] = static_cast<uint8_t>(year & 0x7F);
+  return true;
+}
+
+bool TcpSession::decodeCp56Time2a(const uint8_t* data, size_t size, int64_t* outMs) {
+  if (data == nullptr || outMs == nullptr || size < kCp56Time2aSize) {
+    return false;
+  }
+  const uint16_t msec = static_cast<uint16_t>(data[0] | (static_cast<uint16_t>(data[1]) << 8));
+  if (msec > 59999) {
+    return false;
+  }
+  const int minute = data[2] & 0x3F;
+  const int hour = data[3] & 0x1F;
+  const bool isDst = (data[3] & 0x80) != 0;
+  const int day = data[4] & 0x1F;
+  const int month = data[5] & 0x0F;
+  const int year = data[6] & 0x7F;
+  if (minute > 59 || hour > 23 || day <= 0 || day > 31 || month <= 0 || month > 12) {
+    return false;
+  }
+
+  std::tm tm{};
+  tm.tm_year = 2000 + year - 1900;
+  tm.tm_mon = month - 1;
+  tm.tm_mday = day;
+  tm.tm_hour = hour;
+  tm.tm_min = minute;
+  tm.tm_sec = static_cast<int>(msec / 1000);
+  tm.tm_isdst = isDst ? 1 : 0;
+  std::time_t tt = std::mktime(&tm);
+  if (tt == static_cast<std::time_t>(-1)) {
+    return false;
+  }
+  const int ms = static_cast<int>(msec % 1000);
+  *outMs = static_cast<int64_t>(tt) * 1000 + ms;
+  return true;
 }
 
 uint16_t TcpSession::seqDistance(uint16_t from, uint16_t to) {
@@ -916,6 +1344,24 @@ void TcpSession::sendAutoInterrogation(uint8_t qoi) {
   autoInterrogationSent_ = true;
   LOG_INFO("IEC104 自动总召: conn_name={}, qoi={}", config_.conn_name(), qoi);
   enqueueAsdu(buildInterrogationAsdu(kCotActivation, qoi));
+}
+
+void TcpSession::sendTimeSync(int64_t tsMs) {
+  if (!isClient_) {
+    LOG_WARNING("IEC104 非客户端发送对时命令: conn_name={}", config_.conn_name());
+    return;
+  }
+  if (!dataTransferActive_) {
+    LOG_WARNING("IEC104 未激活状态发送对时命令: conn_name={}", config_.conn_name());
+    return;
+  }
+  auto asdu = buildTimeSyncAsdu(kCotActivation, tsMs);
+  if (asdu.empty()) {
+    LOG_WARNING("IEC104 构造对时报文失败: conn_name={}", config_.conn_name());
+    return;
+  }
+  LOG_INFO("IEC104 发送对时命令: conn_name={}, ts_ms={}", config_.conn_name(), tsMs);
+  enqueueAsdu(std::move(asdu));
 }
 
 void TcpSession::startT0() {

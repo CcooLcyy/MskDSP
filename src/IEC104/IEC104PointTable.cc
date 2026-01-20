@@ -4,7 +4,7 @@
 
 namespace IEC104 {
 
-grpc::Status PointTable::Upsert(const google::protobuf::RepeatedPtrField<IEC104Proto::TelemetryPoint>& points, bool replace) {
+grpc::Status PointTable::Upsert(const google::protobuf::RepeatedPtrField<IEC104Proto::Point>& points, bool replace) {
   if (replace) {
     byTag_.clear();
     tagByIoa_.clear();
@@ -26,15 +26,18 @@ grpc::Status PointTable::Upsert(const google::protobuf::RepeatedPtrField<IEC104P
   return grpc::Status::OK;
 }
 
-grpc::Status PointTable::validatePoint(const IEC104Proto::TelemetryPoint& point) const {
+grpc::Status PointTable::validatePoint(const IEC104Proto::Point& point) const {
   if (point.tag().empty()) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tag 不能为空");
   }
   if (point.ioa() == 0) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "ioa 不能为空");
   }
-  if (point.type() == IEC104Proto::TELEMETRY_TYPE_UNSPECIFIED) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "telemetry_type 不能为空");
+  if (point.type() == IEC104Proto::POINT_TYPE_UNSPECIFIED) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "point_type 不能为空");
+  }
+  if (point.type() != IEC104Proto::POINT_TYPE_FLOAT && point.type() != IEC104Proto::POINT_TYPE_SINGLE) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "point_type 不支持");
   }
   if (point.deadband() < 0) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "死区不能为负");
@@ -42,7 +45,7 @@ grpc::Status PointTable::validatePoint(const IEC104Proto::TelemetryPoint& point)
   return grpc::Status::OK;
 }
 
-grpc::Status PointTable::insertOrUpdatePoint(const IEC104Proto::TelemetryPoint& point) {
+grpc::Status PointTable::insertOrUpdatePoint(const IEC104Proto::Point& point) {
   auto existingTag = byTag_.find(point.tag());
   auto existingIoa = tagByIoa_.find(point.ioa());
 
@@ -51,12 +54,18 @@ grpc::Status PointTable::insertOrUpdatePoint(const IEC104Proto::TelemetryPoint& 
     p.tag = point.tag();
     p.ioa = point.ioa();
     p.type = point.type();
-    p.scale = point.scale();
-    if (p.scale == 0.0) {
+    if (p.type == IEC104Proto::POINT_TYPE_FLOAT) {
+      p.scale = point.scale();
+      if (p.scale == 0.0) {
+        p.scale = 1.0;
+      }
+      p.offset = point.offset();
+      p.deadband = point.deadband();
+    } else {
       p.scale = 1.0;
+      p.offset = 0.0;
+      p.deadband = 0.0;
     }
-    p.offset = point.offset();
-    p.deadband = point.deadband();
     byTag_.emplace(p.tag, p);
     tagByIoa_.emplace(p.ioa, p.tag);
     return grpc::Status::OK;
@@ -73,12 +82,18 @@ grpc::Status PointTable::insertOrUpdatePoint(const IEC104Proto::TelemetryPoint& 
   p.tag = point.tag();
   p.ioa = point.ioa();
   p.type = point.type();
-  p.scale = point.scale();
-  if (p.scale == 0.0) {
+  if (p.type == IEC104Proto::POINT_TYPE_FLOAT) {
+    p.scale = point.scale();
+    if (p.scale == 0.0) {
+      p.scale = 1.0;
+    }
+    p.offset = point.offset();
+    p.deadband = point.deadband();
+  } else {
     p.scale = 1.0;
+    p.offset = 0.0;
+    p.deadband = 0.0;
   }
-  p.offset = point.offset();
-  p.deadband = point.deadband();
   byTag_[p.tag] = p;
   tagByIoa_[p.ioa] = p.tag;
   return grpc::Status::OK;

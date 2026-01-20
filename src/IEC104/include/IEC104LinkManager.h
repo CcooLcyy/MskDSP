@@ -1,5 +1,8 @@
 #pragma once
 
+#include <grpcpp/client_context.h>
+#include <grpcpp/support/status.h>
+
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -8,9 +11,6 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
-
-#include <grpcpp/client_context.h>
-#include <grpcpp/support/status.h>
 
 #include "IEC104.pb.h"
 #include "IEC104DataCenterClient.h"
@@ -26,15 +26,16 @@ public:
   void setDataCenterServerAddress(std::string address);
   void setDataCenterStub(std::shared_ptr<DataCenterProto::DataCenterService::StubInterface> stub);
 
-  grpc::Status UpsertLink(const IEC104Proto::UpsertLinkRequest& request, IEC104Proto::LinkInfo* out);
-  grpc::Status GetLink(const std::string& connName, IEC104Proto::LinkInfo* out) const;
-  grpc::Status ListLinks(IEC104Proto::ListLinksResponse* out) const;
-  grpc::Status StartLink(const std::string& connName);
-  grpc::Status StopLink(const std::string& connName);
-  grpc::Status DeleteLink(const std::string& connName);
+  grpc::Status UpsertLink(const IEC104Proto::UpsertLinkRequest &request, IEC104Proto::LinkInfo *out);
+  grpc::Status GetLink(const std::string &connName, IEC104Proto::LinkInfo *out) const;
+  grpc::Status ListLinks(IEC104Proto::ListLinksResponse *out) const;
+  grpc::Status StartLink(const std::string &connName);
+  grpc::Status StopLink(const std::string &connName);
+  grpc::Status DeleteLink(const std::string &connName);
+  grpc::Status SendTimeSync(const std::string &connName, int64_t tsMs);
 
-  grpc::Status UpsertPointTable(const IEC104Proto::UpsertPointTableRequest& request);
-  grpc::Status GetPointTable(const std::string& connName, IEC104Proto::PointTable* out) const;
+  grpc::Status UpsertPointTable(const IEC104Proto::UpsertPointTableRequest &request);
+  grpc::Status GetPointTable(const std::string &connName, IEC104Proto::PointTable *out) const;
 
 private:
   struct ListenEndpoint {
@@ -58,25 +59,33 @@ private:
 
     std::shared_ptr<grpc::ClientContext> dcSubscribeContext;
     std::jthread dcSubscribeThread;
+
+    std::shared_ptr<grpc::ClientContext> dcTimeSyncContext;
+    std::jthread dcTimeSyncThread;
   };
 
-  static grpc::Status validateConnName(const std::string& connName);
-  static grpc::Status validateLinkConfig(const IEC104Proto::LinkConfig& config);
+  static grpc::Status validateConnName(const std::string &connName);
+  static grpc::Status validateLinkConfig(const IEC104Proto::LinkConfig &config);
 
-  static bool listenEndpointsConflict(const ListenEndpoint& a, const ListenEndpoint& b);
-  static bool listenEndpointsEqual(const ListenEndpoint& a, const ListenEndpoint& b);
-  static std::string listenEndpointToString(const ListenEndpoint& ep);
-  static grpc::Status makeListenEndpoint(const IEC104Proto::Endpoint& local, ListenEndpoint* out);
-  static grpc::Status checkSystemListenAvailable(const ListenEndpoint& ep);
+  static bool listenEndpointsConflict(const ListenEndpoint &a, const ListenEndpoint &b);
+  static bool listenEndpointsEqual(const ListenEndpoint &a, const ListenEndpoint &b);
+  static std::string listenEndpointToString(const ListenEndpoint &ep);
+  static grpc::Status makeListenEndpoint(const IEC104Proto::Endpoint &local, ListenEndpoint *out);
+  static grpc::Status checkSystemListenAvailable(const ListenEndpoint &ep);
 
-  grpc::Status fillLinkInfoLocked(const LinkRuntime& link, IEC104Proto::LinkInfo* out) const;
+  grpc::Status fillLinkInfoLocked(const LinkRuntime &link, IEC104Proto::LinkInfo *out) const;
 
-  void configureTransportCallbacksLocked(const std::string& connName, LinkRuntime* link);
-  void startDataCenterSubscribeLocked(const std::string& connName, LinkRuntime* link);
-  void stopDataCenterSubscribeLocked(LinkRuntime* link);
+  void configureTransportCallbacksLocked(const std::string &connName, LinkRuntime *link);
+  void startDataCenterSubscribeLocked(const std::string &connName, LinkRuntime *link);
+  void stopDataCenterSubscribeLocked(LinkRuntime *link);
+  void startTimeSyncSubscribeLocked(const std::string &connName, LinkRuntime *link);
+  void stopTimeSyncSubscribeLocked(LinkRuntime *link);
 
-  grpc::Status handleClientMeasuredValue(const std::string& connName, const MeasuredValue& mv);
-  std::vector<MeasuredValue> buildInterrogationSnapshot(const std::string& connName);
+  grpc::Status handleClientPointValue(const std::string &connName, const PointValue &pv);
+  grpc::Status handleTimeSyncCommand(const std::string &connName, int64_t tsMs);
+  std::vector<PointValue> buildInterrogationSnapshot(const std::string &connName);
+
+  static std::string normalizeTimeSyncTag(const IEC104Proto::LinkConfig &config);
 
   mutable std::mutex mu_;
   std::unordered_map<std::string, LinkRuntime> linksByName_;

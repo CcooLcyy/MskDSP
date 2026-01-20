@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -50,8 +51,9 @@ struct MatchIEC104 {
 
 class TcpSession : public std::enable_shared_from_this<TcpSession> {
 public:
-  using MeasuredValueCallback = TcpLink::MeasuredValueCallback;
+  using PointValueCallback = TcpLink::PointValueCallback;
   using SnapshotProvider = TcpLink::SnapshotProvider;
+  using TimeSyncCallback = TcpLink::TimeSyncCallback;
 
   TcpSession(boost::asio::io_context& io, IEC104Proto::LinkConfig config, bool isClient);
   ~TcpSession();
@@ -59,10 +61,12 @@ public:
   void Start(boost::asio::ip::tcp::socket socket);
   void Stop();
 
-  void SendMeasuredValue(uint32_t ioa, double value, uint8_t quality, uint8_t cause);
+  void SendPointValue(const PointValue& value, uint8_t cause);
+  void SendTimeSync(int64_t tsMs);
 
-  void SetMeasuredValueCallback(MeasuredValueCallback cb);
+  void SetPointValueCallback(PointValueCallback cb);
   void SetInterrogationSnapshotProvider(SnapshotProvider provider);
+  void SetTimeSyncCallback(TimeSyncCallback cb);
   void SetClosedCallback(std::function<void()> cb);
 
 private:
@@ -111,17 +115,18 @@ private:
   std::deque<std::vector<uint8_t>> pendingAsdu_;
   bool writing_ = false;
 
-  MeasuredValueCallback onMeasuredValue_;
+  PointValueCallback onPointValue_;
   SnapshotProvider interrogationSnapshotProvider_;
+  TimeSyncCallback onTimeSync_;
   std::function<void()> onClosed_;
 
-  struct PendingMeasuredValue {
-    MeasuredValue value;
+  struct PendingPointValue {
+    PointValue value;
     uint8_t cause = 0;
   };
 
-  std::unordered_map<uint32_t, PendingMeasuredValue> telemetryPendingByIoa_;
-  std::vector<PendingMeasuredValue> telemetryPending_;
+  std::unordered_map<uint64_t, PendingPointValue> telemetryPendingByKey_;
+  std::vector<PendingPointValue> telemetryPending_;
   std::chrono::milliseconds telemetryBatchWindow_{0};
   uint32_t telemetryMaxAsduBytes_ = 0;
   bool telemetryDedupe_ = true;
@@ -134,16 +139,18 @@ private:
   void handleUFrame(const std::vector<uint8_t>& apdu);
 
   void processAsdu(const std::vector<uint8_t>& asdu);
-  void handleMeasuredValue(const std::vector<uint8_t>& asdu);
+  void handleMeasuredValue(const std::vector<uint8_t>& asdu, bool withTime);
+  void handleSinglePoint(const std::vector<uint8_t>& asdu, bool withTime);
+  void handleTimeSyncCommand(const std::vector<uint8_t>& asdu);
   void handleInterrogation(const std::vector<uint8_t>& asdu);
 
   void enqueueAsdu(std::vector<uint8_t> asdu);
-  void enqueueMeasuredValue(uint32_t ioa, double value, uint8_t quality, uint8_t cause);
+  void enqueuePointValue(const PointValue& value, uint8_t cause);
   void scheduleTelemetryFlush();
   void flushTelemetry(const boost::system::error_code& ec);
   void drainTelemetryQueue();
   void clearTelemetryQueue();
-  void enqueueMeasuredValuesBatch(std::vector<MeasuredValue> values, uint8_t cause);
+  void enqueuePointValuesBatch(std::vector<PointValue> values, uint8_t cause);
   void trySendPending();
   void sendIFrame(const std::vector<uint8_t>& asdu);
   void sendSFrame();
@@ -151,16 +158,32 @@ private:
   void enqueueWrite(std::vector<uint8_t> frame);
   void doWrite();
 
-  std::vector<uint8_t> buildMeasuredValueAsdu(uint32_t ioa, double value, uint8_t quality, uint8_t cause) const;
-  std::vector<uint8_t> buildMeasuredValueAsduSq0(const std::vector<MeasuredValue>& values,
+  std::vector<uint8_t> buildMeasuredValueAsdu(uint32_t ioa, double value, uint8_t quality, uint8_t cause, int64_t tsMs, bool withTime) const;
+  std::vector<uint8_t> buildSinglePointAsdu(uint32_t ioa, bool value, uint8_t quality, uint8_t cause, int64_t tsMs, bool withTime) const;
+  std::vector<uint8_t> buildMeasuredValueAsduSq0(const std::vector<PointValue>& values,
                                                   size_t start,
                                                   size_t count,
-                                                  uint8_t cause) const;
-  std::vector<uint8_t> buildMeasuredValueAsduSq1(const std::vector<MeasuredValue>& values,
-                                                  size_t start,
-                                                  size_t count,
-                                                  uint8_t cause) const;
+                                                  uint8_t cause,
+                                                  bool withTime) const;
+  std::vector<uint8_t> buildMeasuredValueAsduSq1(const std::vector<PointValue>& values,
+                                                   size_t start,
+                                                   size_t count,
+                                                   uint8_t cause,
+                                                   bool withTime) const;
+  std::vector<uint8_t> buildSinglePointAsduSq0(const std::vector<PointValue>& values,
+                                               size_t start,
+                                               size_t count,
+                                               uint8_t cause,
+                                               bool withTime) const;
+  std::vector<uint8_t> buildSinglePointAsduSq1(const std::vector<PointValue>& values,
+                                               size_t start,
+                                               size_t count,
+                                               uint8_t cause,
+                                               bool withTime) const;
   std::vector<uint8_t> buildInterrogationAsdu(uint8_t cause, uint8_t qoi) const;
+  std::vector<uint8_t> buildTimeSyncAsdu(uint8_t cause, int64_t tsMs) const;
+  static bool encodeCp56Time2a(int64_t tsMs, std::array<uint8_t, 7>* out);
+  static bool decodeCp56Time2a(const uint8_t* data, size_t size, int64_t* outMs);
 
   static FrameType frameType(const std::vector<uint8_t>& apdu);
   static uint16_t seqDistance(uint16_t from, uint16_t to);
@@ -169,6 +192,7 @@ private:
   void handleAck(uint16_t remoteAckSeq);
   void setDataTransferActive(bool active, const char* reason);
   void sendAutoInterrogation(uint8_t qoi);
+  void sendTimeSync(int64_t tsMs);
   void initTelemetryBatchSettings();
 
   void startT0();

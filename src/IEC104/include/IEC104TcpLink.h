@@ -20,16 +20,20 @@
 
 namespace IEC104 {
 
-struct MeasuredValue {
+struct PointValue {
   uint32_t ioa = 0;
-  double value = 0.0;
+  IEC104Proto::PointType type = IEC104Proto::POINT_TYPE_UNSPECIFIED;
+  bool boolValue = false;
+  double doubleValue = 0.0;
   uint8_t quality = 0;
+  int64_t tsMs = 0;
 };
 
 class TcpLink {
 public:
-  using MeasuredValueCallback = std::function<void(const MeasuredValue&)>;
-  using SnapshotProvider = std::function<std::vector<MeasuredValue>()>;
+  using PointValueCallback = std::function<void(const PointValue&)>;
+  using SnapshotProvider = std::function<std::vector<PointValue>()>;
+  using TimeSyncCallback = std::function<void(int64_t)>;
 
   explicit TcpLink(IEC104Proto::LinkConfig config);
   ~TcpLink();
@@ -41,9 +45,11 @@ public:
   void Stop();
   bool IsRunning() const;
 
-  void SendMeasuredValue(uint32_t ioa, double value, uint8_t quality, uint8_t cause);
-  void SetMeasuredValueCallback(MeasuredValueCallback cb);
+  void SendPointValue(const PointValue& value, uint8_t cause);
+  void SendTimeSync(int64_t tsMs);
+  void SetPointValueCallback(PointValueCallback cb);
   void SetInterrogationSnapshotProvider(SnapshotProvider provider);
+  void SetTimeSyncCallback(TimeSyncCallback cb);
 
 private:
   void run(std::stop_token st);
@@ -67,8 +73,9 @@ private:
   std::optional<boost::asio::steady_timer> reconnectTimer_;
 
   std::shared_ptr<TcpSession> session_;
-  MeasuredValueCallback onMeasuredValue_;
+  PointValueCallback onPointValue_;
   SnapshotProvider interrogationSnapshotProvider_;
+  TimeSyncCallback onTimeSync_;
 };
 
 }  // namespace IEC104

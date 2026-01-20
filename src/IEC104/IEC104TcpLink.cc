@@ -154,19 +154,27 @@ bool TcpLink::IsRunning() const {
   return thread_.joinable();
 }
 
-void TcpLink::SendMeasuredValue(uint32_t ioa, double value, uint8_t quality, uint8_t cause) {
+void TcpLink::SendPointValue(const PointValue& value, uint8_t cause) {
   auto s = session();
   if (!s) {
     return;
   }
-  s->SendMeasuredValue(ioa, value, quality, cause);
+  s->SendPointValue(value, cause);
 }
 
-void TcpLink::SetMeasuredValueCallback(MeasuredValueCallback cb) {
+void TcpLink::SendTimeSync(int64_t tsMs) {
+  auto s = session();
+  if (!s) {
+    return;
+  }
+  s->SendTimeSync(tsMs);
+}
+
+void TcpLink::SetPointValueCallback(PointValueCallback cb) {
   std::lock_guard<std::mutex> lock(mu_);
-  onMeasuredValue_ = std::move(cb);
+  onPointValue_ = std::move(cb);
   if (session_) {
-    session_->SetMeasuredValueCallback(onMeasuredValue_);
+    session_->SetPointValueCallback(onPointValue_);
   }
 }
 
@@ -175,6 +183,14 @@ void TcpLink::SetInterrogationSnapshotProvider(SnapshotProvider provider) {
   interrogationSnapshotProvider_ = std::move(provider);
   if (session_) {
     session_->SetInterrogationSnapshotProvider(interrogationSnapshotProvider_);
+  }
+}
+
+void TcpLink::SetTimeSyncCallback(TimeSyncCallback cb) {
+  std::lock_guard<std::mutex> lock(mu_);
+  onTimeSync_ = std::move(cb);
+  if (session_) {
+    session_->SetTimeSyncCallback(onTimeSync_);
   }
 }
 
@@ -237,8 +253,9 @@ void TcpLink::startAccept() {
         session_->Stop();
       }
       session_ = newSession;
-      session_->SetMeasuredValueCallback(onMeasuredValue_);
+      session_->SetPointValueCallback(onPointValue_);
       session_->SetInterrogationSnapshotProvider(interrogationSnapshotProvider_);
+      session_->SetTimeSyncCallback(onTimeSync_);
     }
     newSession->Start(std::move(socket));
 
@@ -303,10 +320,11 @@ void TcpLink::startConnect() {
         if (session_) {
           session_->Stop();
         }
-        session_ = newSession;
-        session_->SetMeasuredValueCallback(onMeasuredValue_);
-        session_->SetInterrogationSnapshotProvider(interrogationSnapshotProvider_);
-      }
+      session_ = newSession;
+      session_->SetPointValueCallback(onPointValue_);
+      session_->SetInterrogationSnapshotProvider(interrogationSnapshotProvider_);
+      session_->SetTimeSyncCallback(onTimeSync_);
+    }
       newSession->Start(std::move(*sock));
     });
   });

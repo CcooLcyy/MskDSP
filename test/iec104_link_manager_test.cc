@@ -59,11 +59,11 @@ IEC104Proto::UpsertLinkRequest MakeServerLinkReq(const char* connName, const cha
   return req;
 }
 
-IEC104Proto::TelemetryPoint MakePoint(const char* tag, uint32_t ioa) {
-  IEC104Proto::TelemetryPoint p;
+IEC104Proto::Point MakePoint(const char* tag, uint32_t ioa) {
+  IEC104Proto::Point p;
   p.set_tag(tag);
   p.set_ioa(ioa);
-  p.set_type(IEC104Proto::TELEMETRY_TYPE_FLOAT);
+  p.set_type(IEC104Proto::POINT_TYPE_FLOAT);
   return p;
 }
 }  // namespace
@@ -264,7 +264,7 @@ TEST(IEC104LinkManagerTest, UpsertPointTableMergesAndSendsTags) {
         EXPECT_EQ(req.conn_id(), connId);
         EXPECT_TRUE(req.replace());
         std::vector<std::string> tags(req.tags().begin(), req.tags().end());
-        EXPECT_THAT(tags, ::testing::ElementsAre("A", "B", "C"));
+        EXPECT_THAT(tags, ::testing::ElementsAre("A", "B", "C", "__time_sync__"));
         return grpc::Status::OK;
       }));
 

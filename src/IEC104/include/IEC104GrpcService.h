@@ -19,6 +19,7 @@ public:
   grpc::Status StopLink(grpc::ServerContext *context, const IEC104Proto::StopLinkRequest *request, IEC104Proto::Empty *) override;
   grpc::Status UpsertPointTable(grpc::ServerContext *context, const IEC104Proto::UpsertPointTableRequest *request, IEC104Proto::Empty *) override;
   grpc::Status GetPointTable(grpc::ServerContext *context, const IEC104Proto::GetPointTableRequest *request, IEC104Proto::PointTable *response) override;
+  grpc::Status SendTimeSync(grpc::ServerContext *context, const IEC104Proto::SendTimeSyncRequest *request, IEC104Proto::Empty *) override;
 
 private:
   IEC104 *iec104_;

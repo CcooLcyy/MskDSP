@@ -27,7 +27,9 @@ public:
   grpc::Status DeleteConnection(const std::string& connName);
   grpc::Status UpsertPointTable(uint32_t connId, const std::vector<std::string>& tags, bool replace);
 
+  grpc::Status PublishBool(uint32_t connId, const std::string& tag, bool value, DataCenterProto::Quality quality, int64_t tsMs);
   grpc::Status PublishDouble(uint32_t connId, const std::string& tag, double value, DataCenterProto::Quality quality, int64_t tsMs);
+  grpc::Status PublishInt64(uint32_t connId, const std::string& tag, int64_t value, DataCenterProto::Quality quality, int64_t tsMs);
 
   grpc::Status GetLatest(uint32_t connId, const std::vector<std::string>& tags, DataCenterProto::GetLatestResponse* out);
   std::unique_ptr<grpc::ClientReaderInterface<DataCenterProto::PointUpdate>> Subscribe(

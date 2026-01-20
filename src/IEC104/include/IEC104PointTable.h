@@ -17,13 +17,13 @@ public:
   struct Point {
     std::string tag;
     uint32_t ioa = 0;
-    IEC104Proto::TelemetryType type = IEC104Proto::TELEMETRY_TYPE_UNSPECIFIED;
+    IEC104Proto::PointType type = IEC104Proto::POINT_TYPE_UNSPECIFIED;
     double scale = 1.0;
     double offset = 0.0;
     double deadband = 0.0;
   };
 
-  grpc::Status Upsert(const google::protobuf::RepeatedPtrField<IEC104Proto::TelemetryPoint>& points, bool replace);
+  grpc::Status Upsert(const google::protobuf::RepeatedPtrField<IEC104Proto::Point>& points, bool replace);
 
   std::optional<Point> FindByTag(const std::string& tag) const;
   std::optional<Point> FindByIoa(uint32_t ioa) const;
@@ -32,8 +32,8 @@ public:
   void ToProto(const std::string& connName, IEC104Proto::PointTable* out) const;
 
 private:
-  grpc::Status validatePoint(const IEC104Proto::TelemetryPoint& point) const;
-  grpc::Status insertOrUpdatePoint(const IEC104Proto::TelemetryPoint& point);
+  grpc::Status validatePoint(const IEC104Proto::Point& point) const;
+  grpc::Status insertOrUpdatePoint(const IEC104Proto::Point& point);
 
   std::unordered_map<std::string, Point> byTag_;
   std::unordered_map<uint32_t, std::string> tagByIoa_;

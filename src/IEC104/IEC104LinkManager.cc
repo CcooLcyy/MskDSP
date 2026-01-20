@@ -1,14 +1,16 @@
 #include "IEC104LinkManager.h"
 
+#include <algorithm>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/ip/address.hpp>
+#include <boost/asio/ip/tcp.hpp>
+#include <boost/system/error_code.hpp>
 #include <cstdint>
 #include <format>
 #include <string>
 #include <utility>
 
-#include <boost/asio/io_context.hpp>
-#include <boost/asio/ip/address.hpp>
-#include <boost/asio/ip/tcp.hpp>
-#include <boost/system/error_code.hpp>
+#include "Logger.h"
 
 namespace IEC104 {
 namespace {
@@ -17,7 +19,8 @@ grpc::Status makeNotFound(const std::string &connName) {
 }
 
 constexpr uint32_t kMaxAsduBytes = 249;
-constexpr uint32_t kMinMeasuredValueAsduBytes = 14;
+constexpr uint32_t kMinMeasuredValueAsduBytes = 21;
+constexpr const char *kDefaultTimeSyncTag = "__time_sync__";
 }  // namespace
 
 LinkManager::LinkManager(std::string moduleName) :
@@ -67,7 +70,7 @@ grpc::Status LinkManager::validateLinkConfig(const IEC104Proto::LinkConfig &conf
       return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "telemetry_max_asdu_bytes 必须 <= 249");
     }
     if (config.telemetry_max_asdu_bytes() < kMinMeasuredValueAsduBytes) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "telemetry_max_asdu_bytes 必须 >= 14");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "telemetry_max_asdu_bytes 必须 >= 21");
     }
   }
   return grpc::Status::OK;
@@ -177,15 +180,19 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
-  auto status = validateLinkConfig(request.config());
+  IEC104Proto::LinkConfig config = request.config();
+  if (config.time_sync_tag().empty()) {
+    config.set_time_sync_tag(kDefaultTimeSyncTag);
+  }
+  auto status = validateLinkConfig(config);
   if (!status.ok()) {
     return status;
   }
-  const auto connName = request.config().conn_name();
-  const bool isServer = (request.config().role() == IEC104Proto::ROLE_SERVER);
+  const auto connName = config.conn_name();
+  const bool isServer = (config.role() == IEC104Proto::ROLE_SERVER);
   ListenEndpoint desiredListen;
   if (isServer) {
-    status = makeListenEndpoint(request.config().local(), &desiredListen);
+    status = makeListenEndpoint(config.local(), &desiredListen);
     if (!status.ok()) {
       return status;
     }
@@ -225,10 +232,7 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
             if (listenEndpointsConflict(otherListen, desiredListen)) {
               return grpc::Status(
                   grpc::StatusCode::ALREADY_EXISTS,
-                  std::format("监听端点 {} 与 {} 冲突 ({})",
-                              listenEndpointToString(desiredListen),
-                              otherName,
-                              listenEndpointToString(otherListen)));
+                  std::format("监听端点 {} 与 {} 冲突 ({})", listenEndpointToString(desiredListen), otherName, listenEndpointToString(otherListen)));
             }
           }
           status = checkSystemListenAvailable(desiredListen);
@@ -242,7 +246,7 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
         reservedServerListenByName_.erase(connName);
       }
 
-      it->second.config = request.config();
+      it->second.config = config;
       it->second.lastError.clear();
       return fillLinkInfoLocked(it->second, out);
     }
@@ -256,10 +260,7 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
         if (listenEndpointsConflict(otherListen, desiredListen)) {
           return grpc::Status(
               grpc::StatusCode::ALREADY_EXISTS,
-              std::format("监听端点 {} 与 {} 冲突 ({})",
-                          listenEndpointToString(desiredListen),
-                          otherName,
-                          listenEndpointToString(otherListen)));
+              std::format("监听端点 {} 与 {} 冲突 ({})", listenEndpointToString(desiredListen), otherName, listenEndpointToString(otherListen)));
         }
       }
       status = checkSystemListenAvailable(desiredListen);
@@ -328,7 +329,7 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
       return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路处于待删除状态");
     }
 
-    it->second.config = request.config();
+    it->second.config = config;
     it->second.lastError.clear();
     if (isServer) {
       reservedServerListenByName_[connName] = desiredListen;
@@ -338,7 +339,7 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
     return fillLinkInfoLocked(it->second, out);
   }
 
-  it->second.config = request.config();
+  it->second.config = config;
   it->second.connId = connInfo.conn_id();
   it->second.state = IEC104Proto::LINK_STATE_STOPPED;
   it->second.lastError.clear();
@@ -380,13 +381,16 @@ void LinkManager::configureTransportCallbacksLocked(const std::string &connName,
     return;
   }
   if (link->config.role() == IEC104Proto::ROLE_CLIENT) {
-    link->transport->SetMeasuredValueCallback([this, connName](const MeasuredValue &mv) {
-      (void)handleClientMeasuredValue(connName, mv);
+    link->transport->SetPointValueCallback([this, connName](const PointValue &pv) {
+      (void)handleClientPointValue(connName, pv);
     });
   }
   if (link->config.role() == IEC104Proto::ROLE_SERVER) {
     link->transport->SetInterrogationSnapshotProvider([this, connName]() { return buildInterrogationSnapshot(connName); });
   }
+  link->transport->SetTimeSyncCallback([this, connName](int64_t tsMs) {
+    (void)handleTimeSyncCommand(connName, tsMs);
+  });
 }
 
 grpc::Status LinkManager::StartLink(const std::string &connName) {
@@ -423,6 +427,8 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
   link.lastError.clear();
   if (link.config.role() == IEC104Proto::ROLE_SERVER) {
     startDataCenterSubscribeLocked(connName, &link);
+  } else if (link.config.role() == IEC104Proto::ROLE_CLIENT) {
+    startTimeSyncSubscribeLocked(connName, &link);
   }
   return grpc::Status::OK;
 }
@@ -443,6 +449,7 @@ grpc::Status LinkManager::StopLink(const std::string &connName) {
     }
     pendingDelete = (it->second.state == IEC104Proto::LINK_STATE_PENDING_DELETE);
     stopDataCenterSubscribeLocked(&it->second);
+    stopTimeSyncSubscribeLocked(&it->second);
     transport = std::move(it->second.transport);
     it->second.state = pendingDelete ? IEC104Proto::LINK_STATE_PENDING_DELETE : IEC104Proto::LINK_STATE_STOPPED;
   }
@@ -488,6 +495,7 @@ grpc::Status LinkManager::UpsertPointTable(const IEC104Proto::UpsertPointTableRe
   }
 
   uint32_t connId = 0;
+  IEC104Proto::LinkConfig config;
   PointTable current;
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -502,6 +510,7 @@ grpc::Status LinkManager::UpsertPointTable(const IEC104Proto::UpsertPointTableRe
       return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路处于待删除状态");
     }
     connId = it->second.connId;
+    config = it->second.config;
     current = it->second.pointTable;
   }
 
@@ -512,6 +521,11 @@ grpc::Status LinkManager::UpsertPointTable(const IEC104Proto::UpsertPointTableRe
   }
 
   auto tags = next.Tags();
+  const auto timeSyncTag = normalizeTimeSyncTag(config);
+  if (!timeSyncTag.empty() && std::find(tags.begin(), tags.end(), timeSyncTag) == tags.end()) {
+    tags.emplace_back(timeSyncTag);
+    std::sort(tags.begin(), tags.end());
+  }
   status = dataCenter_.UpsertPointTable(connId, tags, true);
   if (!status.ok()) {
     return status;
@@ -543,6 +557,36 @@ grpc::Status LinkManager::GetPointTable(const std::string &connName, IEC104Proto
   }
   it->second.pointTable.ToProto(connName, out);
   return grpc::Status::OK;
+}
+
+grpc::Status LinkManager::SendTimeSync(const std::string &connName, int64_t tsMs) {
+  auto status = validateConnName(connName);
+  if (!status.ok()) {
+    return status;
+  }
+
+  std::lock_guard<std::mutex> lock(mu_);
+  auto it = linksByName_.find(connName);
+  if (it == linksByName_.end()) {
+    return makeNotFound(connName);
+  }
+  if (it->second.state != IEC104Proto::LINK_STATE_RUNNING || !it->second.transport) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路未运行");
+  }
+  if (it->second.config.role() != IEC104Proto::ROLE_CLIENT) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "仅 ROLE_CLIENT 允许主动对时");
+  }
+
+  LOG_INFO("IEC104 触发主动对时: conn_name={}, ts_ms={}", connName, tsMs);
+  it->second.transport->SendTimeSync(tsMs);
+  return grpc::Status::OK;
+}
+
+std::string LinkManager::normalizeTimeSyncTag(const IEC104Proto::LinkConfig &config) {
+  if (!config.time_sync_tag().empty()) {
+    return config.time_sync_tag();
+  }
+  return kDefaultTimeSyncTag;
 }
 
 }  // namespace IEC104

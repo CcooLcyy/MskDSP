@@ -33,10 +33,12 @@ ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRT
   - `./conf/configPusher/COMMock.jsonc`
   - `./conf/configPusher/iec104.jsonc`
   - `./conf/configPusher/modbus_rtu.jsonc`
-- 使用 Protobuf JSON 映射：枚举需写全名（例如 `ROLE_SERVER`、`TELEMETRY_TYPE_FLOAT`、`FUNCTION_READ_COILS`）
+- 使用 Protobuf JSON 映射：枚举需写全名（例如 `ROLE_SERVER`、`POINT_TYPE_FLOAT`、`FUNCTION_READ_COILS`）
 - `modbus_rtu.jsonc` 的 `function` 支持十六进制字符串（`0x01`/`0x03`），解析时会自动转换为枚举值
 - `point_table.conn_name` 可省略（默认使用 `link.config.conn_name`）
-- IEC104 可选下发遥测合包参数（`telemetry_batch_window_ms/telemetry_max_asdu_bytes/telemetry_use_standard_limit/telemetry_dedupe`）
+- IEC104 可选下发点值合包参数（`telemetry_batch_window_ms/telemetry_max_asdu_bytes/telemetry_use_standard_limit/telemetry_dedupe`）
+- IEC104 可选下发对时触发 tag（`time_sync_tag`；为空时默认 `__time_sync__`）
+- IEC104 点表类型支持 `POINT_TYPE_FLOAT` 与 `POINT_TYPE_SINGLE`
 - DataCenter 配置要求连接已存在（由模块或上位机创建）；若 `point_tables/routes` 引用连接不存在，则该次 DataCenter 配置不下发
 - `replace=true` 表示覆盖配置；`replace=false` 表示增量追加
 - COMMock 配置不触发模块启动，仅在 COMMock 模块已运行时下发
@@ -83,13 +85,14 @@ IEC104 示例：
             "telemetry_batch_window_ms": 20,
             "telemetry_max_asdu_bytes": 240,
             "telemetry_use_standard_limit": false,
-            "telemetry_dedupe": true
+            "telemetry_dedupe": true,
+            "time_sync_tag": "__time_sync__"
           }
         },
         "point_table": {
           "replace": true,
           "points": [
-            { "tag": "Ua", "ioa": 100, "type": "TELEMETRY_TYPE_FLOAT" }
+            { "tag": "Ua", "ioa": 100, "type": "POINT_TYPE_FLOAT" }
           ]
         },
         "start": true

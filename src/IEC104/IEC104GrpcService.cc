@@ -165,4 +165,26 @@ grpc::Status IEC104GrpcServiceImpl::GetPointTable(
   }
   return status;
 }
+
+grpc::Status IEC104GrpcServiceImpl::SendTimeSync(
+    grpc::ServerContext *, const IEC104Proto::SendTimeSyncRequest *request, IEC104Proto::Empty *) {
+  if (iec104_ == nullptr) {
+    LOG_ERROR("IEC104 服务未就绪");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
+  }
+  if (request == nullptr) {
+    LOG_ERROR("IEC104 对时请求为空");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求为空");
+  }
+  auto status = iec104_->linkManager().SendTimeSync(request->conn_name(), request->ts_ms());
+  if (!status.ok()) {
+    LOG_ERROR("IEC104 对时发送失败: conn_name={}, ts_ms={}, 原因={}",
+              request->conn_name(),
+              request->ts_ms(),
+              status.error_message());
+  } else {
+    LOG_INFO("IEC104 已触发对时发送: conn_name={}, ts_ms={}", request->conn_name(), request->ts_ms());
+  }
+  return status;
+}
 }  // namespace IEC104
