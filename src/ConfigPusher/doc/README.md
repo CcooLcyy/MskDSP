@@ -10,6 +10,7 @@ ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRT
 - 下发 ModbusRTU 配置：UpsertLink / UpsertPointTable / StartLink
 - 下发 COMMock 配置：ApplyConfig（仅对已运行 COMMock 模块生效）
 - 下发 DataCenter 配置：UpsertPointTable / UpsertRoutes（仅对已存在连接生效）
+- 下发流程记录请求/响应报文日志（ModuleManager/IEC104/ModbusRTU/COMMock/DataCenter）
 - 失败记录日志（当前不做重试）
 
 ## 接口与协议
@@ -33,6 +34,7 @@ ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRT
   - `./conf/configPusher/iec104.jsonc`
   - `./conf/configPusher/modbus_rtu.jsonc`
 - 使用 Protobuf JSON 映射：枚举需写全名（例如 `ROLE_SERVER`、`TELEMETRY_TYPE_FLOAT`、`FUNCTION_READ_COILS`）
+- `modbus_rtu.jsonc` 的 `function` 支持十六进制字符串（`0x01`/`0x03`），解析时会自动转换为枚举值
 - `point_table.conn_name` 可省略（默认使用 `link.config.conn_name`）
 - IEC104 可选下发遥测合包参数（`telemetry_batch_window_ms/telemetry_max_asdu_bytes/telemetry_use_standard_limit/telemetry_dedupe`）
 - DataCenter 配置要求连接已存在（由模块或上位机创建）；若 `point_tables/routes` 引用连接不存在，则该次 DataCenter 配置不下发

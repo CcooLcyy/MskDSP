@@ -215,11 +215,13 @@ add_executable(modbusRtuPointTable_test
 
 target_include_directories(modbusRtuPointTable_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/ModbusRTU/include
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
 )
 
 target_link_libraries(modbusRtuPointTable_test PRIVATE
   GTest::gtest_main
   dspProto
+  moduleManager
 )
 
 add_test(NAME modbusRtuPointTable_test COMMAND modbusRtuPointTable_test)
@@ -358,6 +360,40 @@ target_link_libraries(configPusherDataCenter_test PRIVATE
 
 add_test(NAME configPusherDataCenter_test COMMAND configPusherDataCenter_test)
 
+add_executable(configPusherConfigLoader_test
+  config_pusher_config_loader_test.cc
+  ${CMAKE_SOURCE_DIR}/src/ConfigPusher/ConfigPusherConfigLoader.cc
+)
+
+target_include_directories(configPusherConfigLoader_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/ConfigPusher/include
+)
+
+target_link_libraries(configPusherConfigLoader_test PRIVATE
+  GTest::gtest_main
+  dspProto
+  moduleManager
+)
+
+add_test(NAME configPusherConfigLoader_test COMMAND configPusherConfigLoader_test)
+
+add_executable(configPusherModuleManager_test
+  config_pusher_module_manager_test.cc
+  ${CMAKE_SOURCE_DIR}/src/ConfigPusher/ConfigPusherModuleManager.cc
+)
+
+target_include_directories(configPusherModuleManager_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/ConfigPusher/include
+)
+
+target_link_libraries(configPusherModuleManager_test PRIVATE
+  GTest::gtest_main
+  dspProto
+  moduleManager
+)
+
+add_test(NAME configPusherModuleManager_test COMMAND configPusherModuleManager_test)
+
 set(MSKDSP_TEST_TARGETS
   moduleManager_test
   moduleInterface_test
@@ -377,6 +413,8 @@ set(MSKDSP_TEST_TARGETS
   agcGroupManager_test
   agcControl_test
   configPusherDataCenter_test
+  configPusherConfigLoader_test
+  configPusherModuleManager_test
 )
 
 # Allow overriding via -DGCOVR_EXECUTABLE=/path/to/gcovr (cache variable).

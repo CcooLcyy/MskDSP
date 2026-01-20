@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "Logger.h"
+
 namespace {
 uint32_t defaultRegCount(ModbusRTUProto::DataType type) {
   return type == ModbusRTUProto::DATA_TYPE_UINT32 ? 2u : 1u;
@@ -184,9 +186,10 @@ grpc::Status PointTable::insertOrUpdatePoint(const ModbusRTUProto::Point &point)
   }
 
   byTag_[p.tag] = p;
-  for (size_t i = 0; i < keys.size(); ++i) {
+  for (uint32_t i = 0; i < p.regCount; ++i) {
     tagByKey_[keys[i]] = AddressEntry{p.tag, i};
   }
+  LOG_DEBUG("ModbusRTU 点表写入点位: tag={}, address={}, reg_count={}", p.tag, p.address, p.regCount);
   return grpc::Status::OK;
 }
 

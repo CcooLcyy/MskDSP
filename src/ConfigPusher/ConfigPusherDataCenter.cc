@@ -1,7 +1,9 @@
 #include "ConfigPusherDataCenter.h"
 
 #include <grpcpp/client_context.h>
+#include <google/protobuf/message.h>
 
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -25,6 +27,14 @@ struct ConnKeyHash {
     return h(k.module) ^ (h(k.conn) << 1);
   }
 };
+
+std::string formatProtoForLog(const google::protobuf::Message &message) {
+  auto text = message.ShortDebugString();
+  if (text.empty()) {
+    return "空";
+  }
+  return text;
+}
 
 bool HasDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config) {
   if (!config.point_tables().empty()) {
@@ -68,11 +78,13 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
   DataCenterProto::ListConnectionsResponse connections;
   grpc::ClientContext listCtx;
   DataCenterProto::Empty listReq;
+  LOG_INFO("发送 DataCenter 获取连接列表请求报文: {}", formatProtoForLog(listReq));
   auto status = stub->ListConnections(&listCtx, listReq, &connections);
   if (!status.ok()) {
-    LOG_ERROR("获取 DataCenter 连接列表失败: {}", status.error_message());
+    LOG_ERROR("获取 DataCenter 连接列表失败: 请求={}, 原因={}", formatProtoForLog(listReq), status.error_message());
     return false;
   }
+  LOG_INFO("收到 DataCenter 获取连接列表响应报文: {}", formatProtoForLog(connections));
 
   std::unordered_map<ConnKey, uint32_t, ConnKeyHash> connIds;
   connIds.reserve(static_cast<size_t>(connections.conns_size()));
@@ -96,19 +108,19 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
 
   for (const auto &table : config.point_tables()) {
     if (!ValidateConnKey(table.module_name(), table.conn_name())) {
-      LOG_ERROR("DataCenter 点表配置缺少 module_name/conn_name");
+      LOG_ERROR("DataCenter 点表配置缺少 模块名/连接名");
       ok = false;
       continue;
     }
     if (table.tags().empty()) {
-      LOG_ERROR("DataCenter 点表配置缺少 tags: module_name={}, conn_name={}", table.module_name(), table.conn_name());
+      LOG_ERROR("DataCenter 点表配置缺少标签: 模块名={}, 连接名={}", table.module_name(), table.conn_name());
       ok = false;
       continue;
     }
 
     uint32_t connId = 0;
     if (!ResolveConnId(connIds, table.module_name(), table.conn_name(), &connId)) {
-      LOG_ERROR("DataCenter 未找到连接: module_name={}, conn_name={}", table.module_name(), table.conn_name());
+      LOG_ERROR("DataCenter 未找到连接: 模块名={}, 连接名={}", table.module_name(), table.conn_name());
       ok = false;
       continue;
     }
@@ -118,7 +130,7 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
     tags.reserve(static_cast<size_t>(table.tags_size()));
     for (const auto &tag : table.tags()) {
       if (tag.empty()) {
-        LOG_ERROR("DataCenter 点表配置包含空 tag: module_name={}, conn_name={}", table.module_name(), table.conn_name());
+        LOG_ERROR("DataCenter 点表配置包含空标签: 模块名={}, 连接名={}", table.module_name(), table.conn_name());
         tagsOk = false;
         continue;
       }
@@ -150,12 +162,12 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
       const auto &src = route.src();
       const auto &dst = route.dst();
       if (!ValidateConnKey(src.module_name(), src.conn_name()) || !ValidateConnKey(dst.module_name(), dst.conn_name())) {
-        LOG_ERROR("DataCenter 路由配置缺少 module_name/conn_name");
+        LOG_ERROR("DataCenter 路由配置缺少 模块名/连接名");
         ok = false;
         continue;
       }
       if (src.tag().empty() || dst.tag().empty()) {
-        LOG_ERROR("DataCenter 路由配置缺少 tag: src={}:{}, dst={}:{}",
+        LOG_ERROR("DataCenter 路由配置缺少标签: 源模块名={}, 源连接名={}, 目标模块名={}, 目标连接名={}",
                   src.module_name(),
                   src.conn_name(),
                   dst.module_name(),
@@ -167,14 +179,14 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
       uint32_t srcConnId = 0;
       uint32_t dstConnId = 0;
       if (!ResolveConnId(connIds, src.module_name(), src.conn_name(), &srcConnId)) {
-        LOG_ERROR("DataCenter 未找到路由源连接: module_name={}, conn_name={}",
+        LOG_ERROR("DataCenter 未找到路由源连接: 模块名={}, 连接名={}",
                   src.module_name(),
                   src.conn_name());
         ok = false;
         continue;
       }
       if (!ResolveConnId(connIds, dst.module_name(), dst.conn_name(), &dstConnId)) {
-        LOG_ERROR("DataCenter 未找到路由目的连接: module_name={}, conn_name={}",
+        LOG_ERROR("DataCenter 未找到路由目的连接: 模块名={}, 连接名={}",
                   dst.module_name(),
                   dst.conn_name());
         ok = false;
@@ -203,22 +215,25 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
       req.add_tags(tag);
     }
 
-    LOG_INFO("开始下发 DataCenter 点表: module_name={}, conn_name={}, tags={}, replace={}",
+    LOG_INFO("开始下发 DataCenter 点表: 模块名={}, 连接名={}, 标签数={}, 是否替换={}",
              table.moduleName,
              table.connName,
              req.tags_size(),
              req.replace());
+    LOG_INFO("发送 DataCenter 点表请求报文: {}", formatProtoForLog(req));
     grpc::ClientContext ctx;
     DataCenterProto::Empty resp;
     status = stub->UpsertPointTable(&ctx, req, &resp);
     if (!status.ok()) {
-      LOG_ERROR("DataCenter 点表下发失败: module_name={}, conn_name={}, 原因={}",
+      LOG_ERROR("DataCenter 点表下发失败: 模块名={}, 连接名={}, 请求={}, 原因={}",
                 table.moduleName,
                 table.connName,
+                formatProtoForLog(req),
                 status.error_message());
       return false;
     }
-    LOG_INFO("DataCenter 点表下发成功: module_name={}, conn_name={}, tags={}",
+    LOG_INFO("收到 DataCenter 点表响应报文: {}", formatProtoForLog(resp));
+    LOG_INFO("DataCenter 点表下发成功: 模块名={}, 连接名={}, 标签数={}",
              table.moduleName,
              table.connName,
              req.tags_size());
@@ -231,15 +246,17 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
       *req.add_routes() = route;
     }
 
-    LOG_INFO("开始下发 DataCenter 路由: routes={}, replace={}", req.routes_size(), req.replace());
+    LOG_INFO("开始下发 DataCenter 路由: 路由数={}, 是否替换={}", req.routes_size(), req.replace());
+    LOG_INFO("发送 DataCenter 路由请求报文: {}", formatProtoForLog(req));
     grpc::ClientContext ctx;
     DataCenterProto::Empty resp;
     status = stub->UpsertRoutes(&ctx, req, &resp);
     if (!status.ok()) {
-      LOG_ERROR("DataCenter 路由下发失败: {}", status.error_message());
+      LOG_ERROR("DataCenter 路由下发失败: 请求={}, 原因={}", formatProtoForLog(req), status.error_message());
       return false;
     }
-    LOG_INFO("DataCenter 路由下发成功: routes={}", req.routes_size());
+    LOG_INFO("收到 DataCenter 路由响应报文: {}", formatProtoForLog(resp));
+    LOG_INFO("DataCenter 路由下发成功: 路由数={}", req.routes_size());
   }
 
   return true;
