@@ -105,4 +105,4 @@ ModbusRTU 示例见 `./conf/configPusher/modbus_rtu.jsonc`。
 COMMock 示例见 `./conf/configPusher/COMMock.jsonc`。
 
 ## 构建产物
-- 共享库：`package/lib/libConfigPusher.so.<version>`（版本见 `src/ConfigPusher/cmake/LibInfo.cmake`）
+- 共享库：`package/module/libConfigPusher.so.<version>`（版本见 `src/ConfigPusher/cmake/LibInfo.cmake`）

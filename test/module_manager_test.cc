@@ -15,7 +15,7 @@ namespace fs = std::filesystem;
 
 constexpr const char *kDummyModuleName = "Dummy";
 
-fs::path LibDir() { return fs::path("lib"); }
+fs::path LibDir() { return fs::path("module"); }
 fs::path ConfDir() { return fs::path("conf"); }
 fs::path SocketDir() { return fs::path("socket"); }
 fs::path LogDir() { return fs::path("log"); }
@@ -86,16 +86,16 @@ class ModuleManagerTest : public ::testing::Test {
 protected:
   void SetUp() override {
     CleanTestEnvKeepDummyLib();
-    ASSERT_TRUE(fs::exists(LibDir())) << "`lib/` must exist in test WORKING_DIRECTORY";
+    ASSERT_TRUE(fs::exists(LibDir())) << "测试工作目录下必须存在 `module/`";
 
-    // Ensure the dummy module has been built and placed under `./lib`.
+    // 确认假模块已构建并放置到 `./module`。
     ASSERT_FALSE(FindDummyLibFileName().empty())
-        << "Dummy module shared library not found under `./lib` (expected prefix: " << DummyLibPrefix() << ")";
+        << "未在 `./module` 找到假模块共享库（期望前缀: " << DummyLibPrefix() << ")";
   }
 };
 }  // namespace
 
-// 验证：getModuleInfos 会扫描 ./lib 中的模块，并读取 manifest 与 manifest_error。
+// 验证：getModuleInfos 会扫描 ./module 中的模块，并读取 manifest 与 manifest_error。
 TEST_F(ModuleManagerTest, GetModuleInfosScansLibDirAndParsesVersion) {
   // Create extra entries to cover scan filters/branches.
   std::ofstream(LibDir() / "libNoVersion.so").put('\n');

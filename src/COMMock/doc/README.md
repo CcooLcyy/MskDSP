@@ -49,4 +49,4 @@ COMMock 用于通过 socat 创建成对互通的虚拟串口，并按配置生�
 ```
 
 ## 构建产物
-- 共享库：`package/lib/libCOMMock.so.<version>`（版本见 `src/COMMock/cmake/LibInfo.cmake`）
+- 共享库：`package/module/libCOMMock.so.<version>`（版本见 `src/COMMock/cmake/LibInfo.cmake`）

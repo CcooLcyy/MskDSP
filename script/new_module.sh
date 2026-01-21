@@ -156,7 +156,7 @@ TODO：一句话说明模块职责/边界。
 - TODO：运行时配置项、文件位置、持久化数据目录等
 
 ## 构建产物
-- 共享库：\`package/lib/lib${LIB_NAME}.so.<version>\`（版本见 \`src/${MODULE_NAME}/cmake/LibInfo.cmake\`）
+- 共享库：\`package/module/lib${LIB_NAME}.so.<version>\`（版本见 \`src/${MODULE_NAME}/cmake/LibInfo.cmake\`）
 EOF
 
 cat > "${MODULE_DIR}/CMakeLists.txt" <<EOF

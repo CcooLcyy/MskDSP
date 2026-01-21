@@ -19,4 +19,5 @@ target_link_libraries(${LIB_NAME} PUBLIC
 set_target_properties(${LIB_NAME} PROPERTIES
     VERSION ${VERSION}
     SOVERSION ${VERSION_MAJOR}
+    LIBRARY_OUTPUT_DIRECTORY ${libPath}
 )

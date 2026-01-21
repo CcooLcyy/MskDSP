@@ -4,7 +4,7 @@
 MskDSP 是一个基于 C++23 的模块化系统：核心由 `ModuleManager` 管理模块生命周期，并通过 gRPC 对外提供服务；具体业务能力以共享库模块的形式接入。
 
 ## 模块机制概览
-- 模块以共享库形式接入：构建产物输出到 `package/lib/`，运行时由模块管理器从工作目录的 `./lib` 扫描发现并动态加载。
+- 模块以共享库形式接入：构建产物输出到 `package/module/`，运行时由模块管理器从工作目录的 `./module` 扫描发现并动态加载。
 - 加载约定：模块库需要导出 `create()` 工厂函数，返回 `ModuleInterface::ModuleInterface*`（示例：`src/DataCenter/DataCenter.cc`、`src/IEC104/IEC104.cc`）。
 - 依赖约定：模块需导出 `GetModuleManifestPb`，返回 `ModuleManagerProto::ModuleManifest`（模块名/版本/依赖）；ModuleManager 启动时构建依赖图，`StartModule` 会自动拉起依赖。
 - 服务约定：每个模块基于 `ModuleInterface` 同时启动两套 gRPC Server：内部 `unix socket`（`./socket/<模块名>.sock`）+ 对外 `0.0.0.0:<端口>`（默认范围 7001–7999）。
@@ -40,7 +40,7 @@ bash script/new_module.sh <NewModule>
    - `configure_file(${CMAKE_SOURCE_DIR}/cmake/LibInfo.h.in ...)` 生成 `<LIB_NAME>LibInfo.h` 供 `initLibInfo()` 使用。
    - `add_library(${LIB_NAME} SHARED ...)` 并链接 `moduleManager`，设置 `VERSION/SOVERSION` 以生成形如 `lib<name>.so.<version>` 的文件名。
    - 在 `src/CMakeLists.txt` 中 `add_subdirectory(<NewModule>)` 参与构建。
-6. 构建后，将生成的 `.so` 放在运行时工作目录的 `./lib`（默认即 `package/lib/`），通过 gRPC 调用 `StartModule` 启动模块。
+6. 构建后，将生成的 `.so` 放在运行时工作目录的 `./module`（默认即 `package/module/`），通过 gRPC 调用 `StartModule` 启动模块。
 
 ## 模块依赖与上位机使用
 ModuleManager 使用模块 manifest 构建依赖图，并自动处理依赖启动/级联停止。上位机侧建议遵循以下流程：
@@ -77,14 +77,14 @@ cmake --build build --parallel
 ```
 
 ### 运行
-构建产物默认输出到 `package/`。程序使用相对路径访问 `./lib`、`./conf`、`./socket`，因此推荐以 `package/` 作为工作目录运行：
+构建产物默认输出到 `package/`。程序使用相对路径访问 `./module`、`./conf`、`./socket`，因此推荐以 `package/` 作为工作目录运行：
 ```bash
 cd package
 ./MskDSP
 ```
 
 ## Docker 打包与运行
-本项目提供根目录 `Dockerfile`，用于将 `package/` 下的运行产物打包成运行镜像（仅拷贝 `MskDSP`、`lib/` 与 `conf/`，同目录的 `*_test` 不会进入镜像）。
+本项目提供根目录 `Dockerfile`，用于将 `package/` 下的运行产物打包成运行镜像（仅拷贝 `MskDSP`、`module/`、`lib/` 与 `conf/`，同目录的 `*_test` 不会进入镜像）。
 
 1) 先构建生成 `package/` 产物（交叉编译或本机编译均可）。
 2) 构建镜像（arm64）：
@@ -139,7 +139,8 @@ cmake --build build-cov --parallel
 
 ## 构建产物
 - `package/MskDSP`：主程序（Windows 下可能为 `MskDSP.exe`）
-- `package/lib/`：模块共享库
+- `package/module/`：模块共享库
+- `package/lib/`：运行时依赖共享库
 - `package/conf/`：配置与生成文件（如运行时保存的 `modConf.bin`）
 
 ## 开发约定

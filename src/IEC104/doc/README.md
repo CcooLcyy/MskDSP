@@ -210,4 +210,4 @@ DataCenter `Publish`（触发对时，需先配置路由）：
 ```
 
 ## 构建产物
-- 共享库：`package/lib/libIEC104.so.<version>`（版本见 `src/IEC104/include/IEC104LibInfo.h`）
+- 共享库：`package/module/libIEC104.so.<version>`（版本见 `src/IEC104/include/IEC104LibInfo.h`）

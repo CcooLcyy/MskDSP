@@ -88,4 +88,4 @@ ConfigPusher 点表示例（含 scale/offset/deadband，字段可省略，默认
 - `FAILED_PRECONDITION`：链路状态不允许操作、串口参数冲突。
 
 ## 构建产物
-- 共享库：`package/lib/libModbusRTU.so.<version>`（版本见 `src/ModbusRTU/include/ModbusRTULibInfo.h`）
+- 共享库：`package/module/libModbusRTU.so.<version>`（版本见 `src/ModbusRTU/include/ModbusRTULibInfo.h`）

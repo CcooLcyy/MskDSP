@@ -85,4 +85,4 @@ AGC 不直接对接 IEC104/ModbusRTU；上下游均通过 DataCenter 的有向�
 - 可在 `package/log` 查看关键告警（如 `AGC 分配受限`）。
 
 ## 构建产物
-- 共享库：`package/lib/libAGC.so.<version>`（版本见 `src/AGVC/AGC/cmake/LibInfo.cmake`）
+- 共享库：`package/module/libAGC.so.<version>`（版本见 `src/AGVC/AGC/cmake/LibInfo.cmake`）

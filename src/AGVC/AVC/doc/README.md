@@ -19,4 +19,4 @@ AVC（Automatic Voltage Control）自动电压控制模块（骨架/预留）：
 - TODO：运行时配置项、文件位置、持久化数据目录等
 
 ## 构建产物
-- 共享库：`package/lib/libAVC.so.<version>`（版本见 `src/AGVC/AVC/cmake/LibInfo.cmake`）
+- 共享库：`package/module/libAVC.so.<version>`（版本见 `src/AGVC/AVC/cmake/LibInfo.cmake`）

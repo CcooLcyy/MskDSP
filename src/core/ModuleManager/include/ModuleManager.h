@@ -43,7 +43,9 @@ public:
     auto module = std::shared_ptr<LibInfo>(new LibInfo());
 
     module->stopSource = {std::make_shared<std::stop_source>()};
-    module->lib.load(std::string("./lib/") + moduleInfo.lib_name());
+    auto libPath = std::string("./module/") + moduleInfo.lib_name();
+    LOG_INFO("加载模块库: {}", libPath);
+    module->lib.load(libPath);
     auto create = module->lib.get<ModuleInterface::ModuleInterface *()>("create");
     module->instance = std::shared_ptr<ModuleInterface::ModuleInterface>((create()));
     module->metaData = module->instance->metaData();

@@ -13,11 +13,16 @@ find_package(ZLIB REQUIRED)
 
 set(packPath ${CMAKE_SOURCE_DIR}/package)
 set(libPath ${packPath}/lib)
+set(modulePath ${packPath}/module)
 set(configPath ${packPath}/conf)
-file(MAKE_DIRECTORY ${packPath} ${libPath} ${configPath})
+file(MAKE_DIRECTORY ${packPath} ${libPath} ${modulePath} ${configPath})
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${packPath})
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${libPath})
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${modulePath})
+
+set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
+set(CMAKE_BUILD_RPATH "$ORIGIN;$ORIGIN/lib;$ORIGIN/../lib")
+set(CMAKE_INSTALL_RPATH "$ORIGIN;$ORIGIN/lib;$ORIGIN/../lib")
 
 add_subdirectory(3rdlibs)
 
@@ -35,6 +40,30 @@ endif()
 
 add_subdirectory(protobuf)
 add_subdirectory(src)
+
+set(MSKDSP_MODULE_TARGETS
+  ConfigPusher
+  COMMock
+  DataCenter
+  IEC104
+  DLT645
+  ModbusRTU
+  AGC
+  AVC
+)
+add_custom_target(mskdsp_stage_runtime_deps ALL
+  COMMAND ${CMAKE_COMMAND}
+          -DMSKDSP_PACKAGE_DIR=${packPath}
+          -DMSKDSP_MODULE_DIR=${modulePath}
+          -DMSKDSP_LIB_DIR=${libPath}
+          -DMSKDSP_VCPKG_INSTALLED_DIR=${VCPKG_INSTALLED_DIR}
+          -DMSKDSP_VCPKG_TRIPLET=${VCPKG_TARGET_TRIPLET}
+          -DMSKDSP_OBJDUMP=${CMAKE_OBJDUMP}
+          -P ${CMAKE_SOURCE_DIR}/cmake/StageRuntimeDeps.cmake
+  COMMENT "整理 vcpkg 动态库到 package/lib"
+  DEPENDS MskDSP dspProto moduleManager ${MSKDSP_MODULE_TARGETS}
+  VERBATIM
+)
 
 if(MSKDSP_BUILD_TESTS)
   enable_testing()

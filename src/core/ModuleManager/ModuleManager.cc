@@ -837,7 +837,8 @@ void ModuleManager::initModuleInfos() {
   moduleInfoByName_.clear();
   reverseDependencies_.clear();
   moduleInfosReady_ = true;
-  const std::filesystem::path libDir("./lib");
+  const std::filesystem::path libDir("./module");
+  LOG_INFO("模块目录: {}", libDir.string());
   if (!std::filesystem::exists(libDir) || !std::filesystem::is_directory(libDir)) {
     LOG_WARNING("模块目录不存在或不可访问: {}", libDir.string());
     return;

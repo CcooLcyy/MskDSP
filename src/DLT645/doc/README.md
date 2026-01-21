@@ -19,4 +19,4 @@ TODO：一句话说明模块职责/边界。
 - TODO：运行时配置项、文件位置、持久化数据目录等
 
 ## 构建产物
-- 共享库：`package/lib/libDLT645.so.<version>`（版本见 `src/DLT645/include/DLT645LibInfo.h`）
+- 共享库：`package/module/libDLT645.so.<version>`（版本见 `src/DLT645/include/DLT645LibInfo.h`）
