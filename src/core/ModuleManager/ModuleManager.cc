@@ -482,17 +482,22 @@ void ModuleManager::autoStartModulesFromConfig() {
   }
 
   auto json = stripJsonComments(raw);
-  google::protobuf::Struct config;
+  google::protobuf::Value config;
   google::protobuf::util::JsonParseOptions options;
-  options.ignore_unknown_fields = true;
   auto status = google::protobuf::util::JsonStringToMessage(json, &config, options);
   if (!status.ok()) {
     LOG_ERROR("解析自动启动配置失败: {}", status.ToString());
     return;
   }
 
-  auto fieldIt = config.fields().find("auto_start_modules");
-  if (fieldIt == config.fields().end()) {
+  if (config.kind_case() != google::protobuf::Value::kStructValue) {
+    LOG_ERROR("自动启动配置必须为对象");
+    return;
+  }
+
+  const auto &fields = config.struct_value().fields();
+  auto fieldIt = fields.find("auto_start_modules");
+  if (fieldIt == fields.end()) {
     LOG_INFO("自动启动配置未包含 auto_start_modules");
     return;
   }
