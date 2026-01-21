@@ -1319,7 +1319,7 @@ void TcpSession::setDataTransferActive(bool active, const char *reason) {
   if (active) {
     LOG_INFO("IEC104 数据传输已激活: conn_name={}, 原因={}", config_.conn_name(), reason);
     stopT0();
-    if (isClient_ && !autoInterrogationSent_) {
+    if (isMasterStation() && !autoInterrogationSent_) {
       sendAutoInterrogation(kQoiStation);
     }
     trySendPending();
@@ -1337,8 +1337,18 @@ void TcpSession::setDataTransferActive(bool active, const char *reason) {
   clearTelemetryQueue();
 }
 
+bool TcpSession::isMasterStation() const {
+  if (config_.station_role() == IEC104Proto::STATION_ROLE_MASTER) {
+    return true;
+  }
+  if (config_.station_role() == IEC104Proto::STATION_ROLE_SLAVE) {
+    return false;
+  }
+  return config_.role() == IEC104Proto::ROLE_CLIENT;
+}
+
 void TcpSession::sendAutoInterrogation(uint8_t qoi) {
-  if (!isClient_ || autoInterrogationSent_) {
+  if (!isMasterStation() || autoInterrogationSent_) {
     return;
   }
   autoInterrogationSent_ = true;
@@ -1347,8 +1357,8 @@ void TcpSession::sendAutoInterrogation(uint8_t qoi) {
 }
 
 void TcpSession::sendTimeSync(int64_t tsMs) {
-  if (!isClient_) {
-    LOG_WARNING("IEC104 非客户端发送对时命令: conn_name={}", config_.conn_name());
+  if (!isMasterStation()) {
+    LOG_WARNING("IEC104 非主站发送对时命令: conn_name={}", config_.conn_name());
     return;
   }
   if (!dataTransferActive_) {

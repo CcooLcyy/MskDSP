@@ -15,6 +15,17 @@ const char* roleToString(IEC104Proto::Role role) {
       return "未指定";
   }
 }
+
+const char* stationRoleToString(IEC104Proto::StationRole role) {
+  switch (role) {
+    case IEC104Proto::STATION_ROLE_MASTER:
+      return "主站";
+    case IEC104Proto::STATION_ROLE_SLAVE:
+      return "从站";
+    default:
+      return "未指定";
+  }
+}
 }  // namespace
 
 void IEC104GrpcServiceImpl::getIEC104(IEC104 *iec104) {
@@ -32,11 +43,19 @@ grpc::Status IEC104GrpcServiceImpl::UpsertLink(
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
   }
   auto status = iec104_->linkManager().UpsertLink(*request, response);
-  const auto &config = request->config();
+  const auto &config = status.ok() ? response->config() : request->config();
   if (!status.ok()) {
-    LOG_ERROR("IEC104 配置连接失败: conn_name={}, 角色={}, 原因={}", config.conn_name(), roleToString(config.role()), status.error_message());
+    LOG_ERROR("IEC104 配置连接失败: conn_name={}, 传输角色={}, 站点角色={}, 原因={}",
+              config.conn_name(),
+              roleToString(config.role()),
+              stationRoleToString(config.station_role()),
+              status.error_message());
   } else {
-    LOG_INFO("IEC104 已配置连接: conn_name={}, 角色={}, conn_id={}", config.conn_name(), roleToString(config.role()), response->conn_id());
+    LOG_INFO("IEC104 已配置连接: conn_name={}, 传输角色={}, 站点角色={}, conn_id={}",
+             config.conn_name(),
+             roleToString(config.role()),
+             stationRoleToString(config.station_role()),
+             response->conn_id());
   }
   return status;
 }

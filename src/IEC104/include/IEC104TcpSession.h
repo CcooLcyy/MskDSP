@@ -191,6 +191,7 @@ private:
 
   void handleAck(uint16_t remoteAckSeq);
   void setDataTransferActive(bool active, const char* reason);
+  bool isMasterStation() const;
   void sendAutoInterrogation(uint8_t qoi);
   void sendTimeSync(int64_t tsMs);
   void initTelemetryBatchSettings();

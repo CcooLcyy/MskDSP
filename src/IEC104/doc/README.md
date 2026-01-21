@@ -6,18 +6,19 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
 当前实现聚焦：**遥测（M_ME_TF_1，短浮点带时标）** 与 **单点遥信（M_SP_TB_1，带时标）**；遥控等后续按需扩展。
 
 ## 能力清单
-- 角色：Server / Client（通过上位机 gRPC 配置）
+- 传输角色 `role`：Server / Client（决定 TCP 监听/连接）
+- 站点角色 `station_role`：Master / Slave（决定业务语义）
 - 连接名：`conn_name` 由上位机指定（模块内唯一，用于人类识别/配置归属）
 - `conn_id` 分配：IEC104 在配置连接时通过 DataCenter `GetOrCreateConnection` 取/建，并回传给上位机
 - 点表下发：上位机通过 IEC104 gRPC 下发 `tag <-> IOA` 映射（支持短浮点与单点遥信；BOOL 忽略 scale/offset/deadband）
 - 链路层：支持 `k/w` 窗口与 `t0/t1/t2/t3` 超时（通过 `LinkConfig.apci` 配置）
 - 与 DataCenter 联动：
-  - Client 收到点值后 `Publish(conn_id, tag, value)` 到 DataCenter
-  - Server 订阅 DataCenter `Subscribe(conn_id)`，将点值转为 IEC104 点值自发上送
-  - Server 支持总召 `C_IC_NA_1`：通过 DataCenter `GetLatest(conn_id)` 拼装快照应答
-  - Client 在 STARTDT 成功后自动发起总召 `C_IC_NA_1(QOI=20)`
+  - STATION_ROLE_MASTER 收到点值后 `Publish(conn_id, tag, value)` 到 DataCenter
+  - STATION_ROLE_SLAVE 订阅 DataCenter `Subscribe(conn_id)`，将点值转为 IEC104 点值自发上送
+  - STATION_ROLE_SLAVE 支持总召 `C_IC_NA_1`：通过 DataCenter `GetLatest(conn_id)` 拼装快照应答
+  - STATION_ROLE_MASTER 在 STARTDT 成功后自动发起总召 `C_IC_NA_1(QOI=20)`
 - 点值合包：自发点值支持窗口合包与 IOA 顺序打包，连续 IOA 使用 SQ=1 压缩；总召快照按帧大小批量打包
-- 对时：ROLE_CLIENT 可通过 `time_sync_tag` 订阅触发或 gRPC `SendTimeSync` 主动触发；ROLE_SERVER 收到对时命令后发布事件到 DataCenter
+- 对时：STATION_ROLE_MASTER 可通过 `time_sync_tag` 订阅触发或 gRPC `SendTimeSync` 主动触发；STATION_ROLE_SLAVE 收到对时命令后发布事件到 DataCenter
 - 时标：发送默认使用带时标类型（`M_SP_TB_1`/`M_ME_TF_1`），接收兼容不带时标类型
 
 ## 接口与协议
@@ -34,12 +35,14 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
 - `module_name`：固定为 `"IEC104"`（来自 `src/IEC104/include/IEC104LibInfo.h`），用于 DataCenter 的连接主键
 - `conn_name`：上位机指定的“代称”，可为任意字符串；要求在 IEC104 模块内唯一
 - `conn_id`：DataCenter 分配的连接 ID（稳定且可持久化），上位机后续用它在 DataCenter 配路由/订阅
+- `role`：传输角色（Server/Client），只影响 TCP 监听/连接行为
+- `station_role`：站点角色（Master/Slave），决定业务语义；未设置时默认 `ROLE_CLIENT -> MASTER`、`ROLE_SERVER -> SLAVE`；可与 `role` 任意组合
 
 ### DataCenter 交互与路由配置
 - DataCenter 以 `conn_id + tag` 作为路由端点；上位机负责下发连接/点表/路由配置，IEC104 仅负责 Publish/Subscribe 与协议互操作。
 - IEC104 在 `UpsertPointTable` 成功后，会把点表 tags（包含 `time_sync_tag`）同步到 DataCenter 点表，用于路由校验与展示。
-- ROLE_CLIENT：收到 IEC104 点值后 `Publish(conn_id, tag, value)` 到 DataCenter；是否能转发给其他模块由 DataCenter 路由配置决定。
-- ROLE_SERVER：通过 `Subscribe(conn_id)` 接收 DataCenter 更新并转为 IEC104 自发上送；总召通过 `GetLatest(conn_id)` 拉取快照。
+- STATION_ROLE_MASTER：收到 IEC104 点值后 `Publish(conn_id, tag, value)` 到 DataCenter；是否能转发给其他模块由 DataCenter 路由配置决定。
+- STATION_ROLE_SLAVE：通过 `Subscribe(conn_id)` 接收 DataCenter 更新并转为 IEC104 自发上送；总召通过 `GetLatest(conn_id)` 拉取快照。
 - 语义强调：DataCenter 订阅与最新值缓存为 best-effort，可能丢消息；配置落盘失败会返回错误，但内存状态不回滚。
 
 ### 链路层参数（APCI）
@@ -53,8 +56,8 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
 ### 点表字段
 - `scale/offset`：工程量换算 `value = raw * scale + offset`（`scale=0` 视为 1），仅对短浮点生效。
 - `deadband`：工程量单位；`|value - last_reported| < deadband` 时不上报，<=0 表示不过滤，仅对短浮点生效。
-- `deadband` 同时作用于 Client 发布与 Server 自发上送，总召快照不受 deadband 影响。
-- Client 收到短浮点后按 `scale/offset` 转为工程量再发布；Server 上送短浮点时按 `scale/offset` 反向换算；单点遥信忽略这些字段。
+- `deadband` 同时作用于 STATION_ROLE_MASTER 发布与 STATION_ROLE_SLAVE 自发上送，总召快照不受 deadband 影响。
+- STATION_ROLE_MASTER 收到短浮点后按 `scale/offset` 转为工程量再发布；STATION_ROLE_SLAVE 上送短浮点时按 `scale/offset` 反向换算；单点遥信忽略这些字段。
 
 ConfigPusher 点表示例（含 scale/offset/deadband，字段可省略，默认 scale=1、offset=0、deadband=0）：
 ```jsonc
@@ -76,10 +79,10 @@ ConfigPusher 点表示例（含 scale/offset/deadband，字段可省略，默认
 - 合包策略：按 IOA 顺序组织报文；连续 IOA 使用 SQ=1 压缩，不连续则 SQ=0 带 IOA。
 
 ### 对时触发
-- `time_sync_tag`：ROLE_CLIENT 订阅该 tag 的 DataCenter 更新并发送对时命令 `C_CS_NA_1`；为空时默认 `__time_sync__`。
+- `time_sync_tag`：STATION_ROLE_MASTER 订阅该 tag 的 DataCenter 更新并发送对时命令 `C_CS_NA_1`；为空时默认 `__time_sync__`。
 - 触发来源：DataCenter 推送更新时优先使用 `update.ts_ms` 作为对时毫秒时间戳；若 <=0 且 value 为 int/double，则取该数值；仍无效时使用本地当前时间。
 - gRPC 主动对时：上位机调用 `SendTimeSync(conn_name, ts_ms)`，`ts_ms<=0` 时使用本地当前时间。
-- ROLE_SERVER 收到对时命令后会发布对时事件到 DataCenter（tag 为 `time_sync_tag`），便于上位机或其他模块订阅。
+- STATION_ROLE_SLAVE 收到对时命令后会发布对时事件到 DataCenter（tag 为 `time_sync_tag`），便于上位机或其他模块订阅。
 - 强调：IEC104 不修改系统时钟，仅发送/转发对时报文并发布事件；如需修改系统时间需由上位机或独立模块负责。
 
 ### 配置示例
@@ -88,6 +91,7 @@ IEC104 链路配置示例（上位机下发的 LinkConfig 内容）：
 {
   "conn_name": "line-1",
   "role": "ROLE_CLIENT",
+  "station_role": "STATION_ROLE_MASTER",
   "local": { "ip": "0.0.0.0", "port": 0 },
   "remote": { "ip": "192.168.1.10", "port": 2404 },
   "ca": 1,
@@ -157,17 +161,18 @@ ctest --test-dir build -R iec104TcpSession_test --output-on-failure
 
 ### 对时
 上位机主动对时时，调用 `SendTimeSync(conn_name, ts_ms)`：
-- 仅 ROLE_CLIENT 允许主动对时；ROLE_SERVER 会返回 `FAILED_PRECONDITION`
+- 仅 STATION_ROLE_MASTER 允许主动对时；非主站会返回 `FAILED_PRECONDITION`
 - `ts_ms<=0` 时使用当前本地时间
 - IEC104 会发送 `C_CS_NA_1` 并记录日志；不会修改系统时间
 
 ### 上位机请求示例
-IEC104 `UpsertLink`（ROLE_CLIENT）：
+IEC104 `UpsertLink`（ROLE_CLIENT + STATION_ROLE_MASTER）：
 ```jsonc
 {
   "config": {
     "conn_name": "line-1",
     "role": "ROLE_CLIENT",
+    "station_role": "STATION_ROLE_MASTER",
     "remote": { "ip": "192.168.1.10", "port": 2404 },
     "apci": { "k": 12, "w": 8, "t0": 30, "t1": 15, "t2": 10, "t3": 20 },
     "ca": 1,

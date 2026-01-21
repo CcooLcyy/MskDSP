@@ -29,11 +29,11 @@ grpc::Status validateLinkConfig(const IEC104Proto::LinkConfig& config) {
   }
   if (config.role() == IEC104Proto::ROLE_SERVER) {
     if (config.local().port() == 0) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "server 角色下 local.port 不能为空");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "role=ROLE_SERVER 时 local.port 不能为空");
     }
   } else if (config.role() == IEC104Proto::ROLE_CLIENT) {
     if (config.remote().ip().empty() || config.remote().port() == 0) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "client 角色下 remote.ip/port 不能为空");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "role=ROLE_CLIENT 时 remote.ip/port 不能为空");
     }
   } else {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "role 不能为空");

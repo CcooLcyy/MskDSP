@@ -5,8 +5,10 @@
       {
         "link": {
           "config": {
-            "conn_name": "模拟主站",
+            "conn_name": "模拟从站",
             "role": "ROLE_SERVER",
+            // 站点角色：主站/从站（决定业务语义）
+            "station_role": "STATION_ROLE_SLAVE",
             "local": {
               "ip": "0.0.0.0",
               "port": 2404
@@ -34,7 +36,7 @@
             "telemetry_use_standard_limit": false,
             // 自发点值合包去重（按 IOA 保留最新）
             "telemetry_dedupe": true,
-            // 对时触发 tag（ROLE_CLIENT 订阅该 tag 的 DataCenter 更新并发送对时命令）
+            // 对时触发 tag（STATION_ROLE_MASTER 订阅该 tag 的 DataCenter 更新并发送对时命令）
             // 为空时默认 "__time_sync__"
             "time_sync_tag": "__time_sync__"
           }
@@ -60,6 +62,7 @@
       //     "config": {
       //       "conn_name": "line-2",
       //       "role": "ROLE_CLIENT",
+      //       "station_role": "STATION_ROLE_MASTER",
       //       "local": { "ip": "", "port": 0 },
       //       "remote": { "ip": "127.0.0.1", "port": 2404 },
       //       "ca": 1,

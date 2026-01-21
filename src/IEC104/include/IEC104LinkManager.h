@@ -66,6 +66,10 @@ private:
 
   static grpc::Status validateConnName(const std::string &connName);
   static grpc::Status validateLinkConfig(const IEC104Proto::LinkConfig &config);
+  static IEC104Proto::StationRole normalizeStationRole(const IEC104Proto::LinkConfig &config);
+  static bool isMasterStation(const IEC104Proto::LinkConfig &config);
+  static bool isSlaveStation(const IEC104Proto::LinkConfig &config);
+  static const char *stationRoleToString(IEC104Proto::StationRole role);
 
   static bool listenEndpointsConflict(const ListenEndpoint &a, const ListenEndpoint &b);
   static bool listenEndpointsEqual(const ListenEndpoint &a, const ListenEndpoint &b);

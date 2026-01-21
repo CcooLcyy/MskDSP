@@ -49,14 +49,19 @@ grpc::Status LinkManager::validateLinkConfig(const IEC104Proto::LinkConfig &conf
   if (config.role() != IEC104Proto::ROLE_SERVER && config.role() != IEC104Proto::ROLE_CLIENT) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "role 不能为空");
   }
+  if (config.station_role() != IEC104Proto::STATION_ROLE_UNSPECIFIED &&
+      config.station_role() != IEC104Proto::STATION_ROLE_MASTER &&
+      config.station_role() != IEC104Proto::STATION_ROLE_SLAVE) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "station_role 非法");
+  }
   if (config.role() == IEC104Proto::ROLE_SERVER) {
     if (config.local().port() == 0) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "server 角色下 local.port 不能为空");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "role=ROLE_SERVER 时 local.port 不能为空");
     }
   }
   if (config.role() == IEC104Proto::ROLE_CLIENT) {
     if (config.remote().ip().empty() || config.remote().port() == 0) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "client 角色下 remote.ip/port 不能为空");
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "role=ROLE_CLIENT 时 remote.ip/port 不能为空");
     }
   }
   if (config.ca() > 65535) {
@@ -74,6 +79,38 @@ grpc::Status LinkManager::validateLinkConfig(const IEC104Proto::LinkConfig &conf
     }
   }
   return grpc::Status::OK;
+}
+
+IEC104Proto::StationRole LinkManager::normalizeStationRole(const IEC104Proto::LinkConfig &config) {
+  if (config.station_role() != IEC104Proto::STATION_ROLE_UNSPECIFIED) {
+    return config.station_role();
+  }
+  if (config.role() == IEC104Proto::ROLE_CLIENT) {
+    return IEC104Proto::STATION_ROLE_MASTER;
+  }
+  if (config.role() == IEC104Proto::ROLE_SERVER) {
+    return IEC104Proto::STATION_ROLE_SLAVE;
+  }
+  return IEC104Proto::STATION_ROLE_UNSPECIFIED;
+}
+
+bool LinkManager::isMasterStation(const IEC104Proto::LinkConfig &config) {
+  return normalizeStationRole(config) == IEC104Proto::STATION_ROLE_MASTER;
+}
+
+bool LinkManager::isSlaveStation(const IEC104Proto::LinkConfig &config) {
+  return normalizeStationRole(config) == IEC104Proto::STATION_ROLE_SLAVE;
+}
+
+const char *LinkManager::stationRoleToString(IEC104Proto::StationRole role) {
+  switch (role) {
+    case IEC104Proto::STATION_ROLE_MASTER:
+      return "主站";
+    case IEC104Proto::STATION_ROLE_SLAVE:
+      return "从站";
+    default:
+      return "未指定";
+  }
 }
 
 bool LinkManager::listenEndpointsConflict(const ListenEndpoint &a, const ListenEndpoint &b) {
@@ -187,6 +224,15 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
   auto status = validateLinkConfig(config);
   if (!status.ok()) {
     return status;
+  }
+  if (config.station_role() == IEC104Proto::STATION_ROLE_UNSPECIFIED) {
+    const auto stationRole = normalizeStationRole(config);
+    if (stationRole != IEC104Proto::STATION_ROLE_UNSPECIFIED) {
+      config.set_station_role(stationRole);
+      LOG_INFO("IEC104 未指定站点角色，已按传输角色默认: conn_name={}, station_role={}",
+               config.conn_name(),
+               stationRoleToString(stationRole));
+    }
   }
   const auto connName = config.conn_name();
   const bool isServer = (config.role() == IEC104Proto::ROLE_SERVER);
@@ -380,12 +426,12 @@ void LinkManager::configureTransportCallbacksLocked(const std::string &connName,
   if (link == nullptr || !link->transport) {
     return;
   }
-  if (link->config.role() == IEC104Proto::ROLE_CLIENT) {
+  if (isMasterStation(link->config)) {
     link->transport->SetPointValueCallback([this, connName](const PointValue &pv) {
       (void)handleClientPointValue(connName, pv);
     });
   }
-  if (link->config.role() == IEC104Proto::ROLE_SERVER) {
+  if (isSlaveStation(link->config)) {
     link->transport->SetInterrogationSnapshotProvider([this, connName]() { return buildInterrogationSnapshot(connName); });
   }
   link->transport->SetTimeSyncCallback([this, connName](int64_t tsMs) {
@@ -425,9 +471,9 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
 
   link.state = IEC104Proto::LINK_STATE_RUNNING;
   link.lastError.clear();
-  if (link.config.role() == IEC104Proto::ROLE_SERVER) {
+  if (isSlaveStation(link.config)) {
     startDataCenterSubscribeLocked(connName, &link);
-  } else if (link.config.role() == IEC104Proto::ROLE_CLIENT) {
+  } else if (isMasterStation(link.config)) {
     startTimeSyncSubscribeLocked(connName, &link);
   }
   return grpc::Status::OK;
@@ -573,8 +619,8 @@ grpc::Status LinkManager::SendTimeSync(const std::string &connName, int64_t tsMs
   if (it->second.state != IEC104Proto::LINK_STATE_RUNNING || !it->second.transport) {
     return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路未运行");
   }
-  if (it->second.config.role() != IEC104Proto::ROLE_CLIENT) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "仅 ROLE_CLIENT 允许主动对时");
+  if (!isMasterStation(it->second.config)) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "仅主站允许主动对时");
   }
 
   LOG_INFO("IEC104 触发主动对时: conn_name={}, ts_ms={}", connName, tsMs);

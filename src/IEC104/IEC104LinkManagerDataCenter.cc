@@ -126,7 +126,7 @@ void LinkManager::stopDataCenterSubscribeLocked(LinkRuntime* link) {
 }
 
 void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, LinkRuntime* link) {
-  if (link == nullptr || link->config.role() != IEC104Proto::ROLE_SERVER || !link->transport) {
+  if (link == nullptr || !isSlaveStation(link->config) || !link->transport) {
     return;
   }
   stopDataCenterSubscribeLocked(link);
@@ -251,7 +251,7 @@ void LinkManager::stopTimeSyncSubscribeLocked(LinkRuntime* link) {
 }
 
 void LinkManager::startTimeSyncSubscribeLocked(const std::string& connName, LinkRuntime* link) {
-  if (link == nullptr || link->config.role() != IEC104Proto::ROLE_CLIENT || !link->transport) {
+  if (link == nullptr || !isMasterStation(link->config) || !link->transport) {
     return;
   }
   stopTimeSyncSubscribeLocked(link);
@@ -422,8 +422,8 @@ grpc::Status LinkManager::handleTimeSyncCommand(const std::string& connName, int
     if (it == linksByName_.end()) {
       return makeNotFound(connName);
     }
-    if (it->second.config.role() != IEC104Proto::ROLE_SERVER) {
-      LOG_INFO("IEC104 非 ROLE_SERVER 收到对时命令，忽略发布: conn_name={}", connName);
+    if (!isSlaveStation(it->second.config)) {
+      LOG_INFO("IEC104 非从站收到对时命令，忽略发布: conn_name={}", connName);
       return grpc::Status::OK;
     }
     connId = it->second.connId;
