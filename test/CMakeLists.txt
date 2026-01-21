@@ -441,31 +441,48 @@ if(DEFINED GCOV_EXECUTABLE AND
    (GCOV_EXECUTABLE STREQUAL "" OR GCOV_EXECUTABLE MATCHES "-NOTFOUND$"))
   unset(GCOV_EXECUTABLE CACHE)
 endif()
+set(MSKDSP_GCOV_EXECUTABLE "")
+set(MSKDSP_GCOV_IGNORE_ERRORS "no_working_dir_found")
 set(MSKDSP_GCOV_NAMES gcov)
+set(MSKDSP_REQUIRE_GCOV TRUE)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   string(REGEX MATCH "^[0-9]+" MSKDSP_GCC_MAJOR "${CMAKE_CXX_COMPILER_VERSION}")
   if(MSKDSP_GCC_MAJOR)
     list(PREPEND MSKDSP_GCOV_NAMES "gcov-${MSKDSP_GCC_MAJOR}")
   endif()
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  set(MSKDSP_LLVM_COV_NAMES llvm-cov llvm-cov-18 llvm-cov-17 llvm-cov-16 llvm-cov-15)
+  find_program(LLVM_COV_EXECUTABLE NAMES ${MSKDSP_LLVM_COV_NAMES} DOC "Path to llvm-cov")
+  if(LLVM_COV_EXECUTABLE)
+    set(MSKDSP_GCOV_EXECUTABLE "${LLVM_COV_EXECUTABLE} gcov")
+    set(MSKDSP_REQUIRE_GCOV FALSE)
+  else()
+    message(WARNING "未找到 llvm-cov，将使用 gcov 并忽略覆盖率工具错误")
+    set(MSKDSP_GCOV_IGNORE_ERRORS "all")
+  endif()
 endif()
-find_program(GCOV_EXECUTABLE NAMES ${MSKDSP_GCOV_NAMES} DOC "Path to gcov")
-if(NOT GCOV_EXECUTABLE)
-  message(FATAL_ERROR "gcov not found: install it or set -DGCOV_EXECUTABLE=/path/to/gcov")
-endif()
-if(NOT EXISTS "${GCOV_EXECUTABLE}")
-  message(FATAL_ERROR "GCOV_EXECUTABLE does not exist: ${GCOV_EXECUTABLE}")
+if(MSKDSP_REQUIRE_GCOV)
+  find_program(GCOV_EXECUTABLE NAMES ${MSKDSP_GCOV_NAMES} DOC "Path to gcov")
+  if(NOT GCOV_EXECUTABLE)
+    message(FATAL_ERROR "gcov not found: install it or set -DGCOV_EXECUTABLE=/path/to/gcov")
+  endif()
+  if(NOT EXISTS "${GCOV_EXECUTABLE}")
+    message(FATAL_ERROR "GCOV_EXECUTABLE does not exist: ${GCOV_EXECUTABLE}")
+  endif()
+  set(MSKDSP_GCOV_EXECUTABLE "${GCOV_EXECUTABLE}")
 endif()
 
 set(MSKDSP_COVERAGE_OUTPUT_DIR "${CMAKE_BINARY_DIR}/coverage")
-  add_custom_target(coverage
+add_custom_target(coverage
     COMMAND ${CMAKE_COMMAND} -E rm -rf "${MSKDSP_COVERAGE_OUTPUT_DIR}"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${MSKDSP_COVERAGE_OUTPUT_DIR}"
+    COMMAND ${CMAKE_COMMAND} -DMSKDSP_COVERAGE_ROOT="${CMAKE_BINARY_DIR}" -P "${CMAKE_SOURCE_DIR}/cmake/CleanCoverageData.cmake"
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
     COMMAND "${GCOVR_EXECUTABLE}"
       -r "${CMAKE_SOURCE_DIR}"
       --object-directory "${CMAKE_BINARY_DIR}"
-      --gcov-executable "${GCOV_EXECUTABLE}"
-      --gcov-ignore-errors=no_working_dir_found
+      --gcov-executable "${MSKDSP_GCOV_EXECUTABLE}"
+      --gcov-ignore-errors=${MSKDSP_GCOV_IGNORE_ERRORS}
       --merge-mode-functions=merge-use-line-min
       --filter "(^|.*/)src/.*[.](cc|cpp|cxx|c|hpp)$"
       --html-details
@@ -476,4 +493,4 @@ set(MSKDSP_COVERAGE_OUTPUT_DIR "${CMAKE_BINARY_DIR}/coverage")
     USES_TERMINAL
   )
 
-add_dependencies(coverage ${MSKDSP_TEST_TARGETS})
+add_dependencies(coverage ${MSKDSP_TEST_TARGETS} mskdsp_stage_runtime_deps)

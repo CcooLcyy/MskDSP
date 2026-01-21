@@ -182,43 +182,36 @@ cleanup_repo_tags() {
   done < <(docker images --format '{{.Repository}}:{{.Tag}}' "${IMAGE_REPO}" 2>/dev/null | sort -u)
 }
 
-update_host_artifacts() {
-  mkdir -p "${HOST_DIR}/lib"
-
-  local need_copy_mskdsp=0
-  local need_copy_lib=0
+ensure_module_dir() {
+  local module_dir="${HOST_DIR}/module"
+  local need_copy_module=0
 
   if [[ "${NEED_UPDATE}" -eq 1 ]]; then
-    rm -f "${HOST_DIR}/MskDSP"
-    find "${HOST_DIR}/lib" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
-    need_copy_mskdsp=1
-    need_copy_lib=1
-  else
-    if [[ ! -f "${HOST_DIR}/MskDSP" ]]; then
-      need_copy_mskdsp=1
+    if [[ -d "${module_dir}" ]]; then
+      find "${module_dir}" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
     fi
-    if [[ -z "$(ls -A "${HOST_DIR}/lib" 2>/dev/null || true)" ]]; then
-      need_copy_lib=1
+    need_copy_module=1
+  else
+    if [[ -z "$(ls -A "${module_dir}" 2>/dev/null || true)" ]]; then
+      need_copy_module=1
     fi
   fi
 
-  if [[ "${need_copy_mskdsp}" -eq 0 && "${need_copy_lib}" -eq 0 ]]; then
+  if [[ "${need_copy_module}" -eq 0 ]]; then
     return 0
   fi
 
+  mkdir -p "${module_dir}"
+  if [[ "${NEED_UPDATE}" -eq 1 ]]; then
+    echo "镜像已更新，重新同步模块目录到宿主机: ${module_dir}"
+  else
+    echo "模块目录为空，初始化模块到宿主机: ${module_dir}"
+  fi
   local init_name="mskdsp-init-$$"
   docker create --name "${init_name}" "${IMAGE_TAG}" >/dev/null
-  if [[ "${need_copy_mskdsp}" -eq 1 ]]; then
-    if ! docker cp "${init_name}:${CONTAINER_DIR}/MskDSP" "${HOST_DIR}/MskDSP"; then
-      docker rm -f "${init_name}" >/dev/null 2>&1 || true
-      die "Failed to update ${HOST_DIR}/MskDSP"
-    fi
-  fi
-  if [[ "${need_copy_lib}" -eq 1 ]]; then
-    if ! docker cp "${init_name}:${CONTAINER_DIR}/lib/." "${HOST_DIR}/lib/"; then
-      docker rm -f "${init_name}" >/dev/null 2>&1 || true
-      die "Failed to update ${HOST_DIR}/lib"
-    fi
+  if ! docker cp "${init_name}:${CONTAINER_DIR}/module/." "${module_dir}/"; then
+    docker rm -f "${init_name}" >/dev/null 2>&1 || true
+    die "模块目录初始化失败: ${module_dir}"
   fi
   docker rm "${init_name}" >/dev/null
 }
@@ -229,13 +222,23 @@ ensure_default_conf() {
     return 0
   fi
   mkdir -p "${conf_dir}"
+  echo "配置目录为空，初始化默认配置到宿主机: ${conf_dir}"
   local init_name="mskdsp-init-$$"
   docker create --name "${init_name}" "${IMAGE_TAG}" >/dev/null
   if ! docker cp "${init_name}:${CONTAINER_DIR}/conf/." "${conf_dir}/"; then
     docker rm -f "${init_name}" >/dev/null 2>&1 || true
-    die "Failed to initialize ${conf_dir}"
+    die "初始化配置目录失败: ${conf_dir}"
   fi
   docker rm "${init_name}" >/dev/null
+}
+
+ensure_log_dir() {
+  local log_dir="${HOST_DIR}/log"
+  if [[ -d "${log_dir}" ]]; then
+    return 0
+  fi
+  mkdir -p "${log_dir}"
+  echo "已创建日志目录: ${log_dir}"
 }
 
 start_container() {
@@ -245,19 +248,23 @@ start_container() {
 
   load_image_if_needed
   cleanup_repo_tags
-  update_host_artifacts
+  ensure_module_dir
   ensure_default_conf
+  ensure_log_dir
 
   docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
   if [[ "${1:-}" == "--" ]]; then
     shift
   fi
+  echo "运行容器仅映射 conf/module/log 目录"
   docker run -d \
     --name "${CONTAINER_NAME}" \
     --privileged \
     --restart unless-stopped \
     --network host \
-    -v "${HOST_DIR}:${CONTAINER_DIR}" \
+    -v "${HOST_DIR}/conf:${CONTAINER_DIR}/conf" \
+    -v "${HOST_DIR}/module:${CONTAINER_DIR}/module" \
+    -v "${HOST_DIR}/log:${CONTAINER_DIR}/log" \
     "$@" \
     "${IMAGE_TAG}"
 }

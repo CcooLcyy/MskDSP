@@ -11,7 +11,41 @@ find_package(Protobuf CONFIG REQUIRED)
 find_package(Boost REQUIRED COMPONENTS asio dll iostreams log log_setup)
 find_package(ZLIB REQUIRED)
 
-set(packPath ${CMAKE_SOURCE_DIR}/package)
+set(MSKDSP_BUILD_TESTS_DEFAULT OFF)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(MSKDSP_BUILD_TESTS_DEFAULT ON)
+endif()
+option(MSKDSP_BUILD_TESTS "Build tests (enables coverage & auto report)" ${MSKDSP_BUILD_TESTS_DEFAULT})
+option(MSKDSP_STRIP_DEBUG "Strip binaries and keep separate debug info under package/debug." OFF)
+
+set(MSKDSP_PACKAGE_DIR "${CMAKE_SOURCE_DIR}/package" CACHE PATH "MskDSP package output directory")
+if(MSKDSP_BUILD_TESTS)
+  set(_mskdsp_pkg_probe "${MSKDSP_PACKAGE_DIR}/lib/libdspProto.so")
+  if(EXISTS "${_mskdsp_pkg_probe}")
+    find_program(MSKDSP_FILE_TOOL file)
+    if(MSKDSP_FILE_TOOL)
+      execute_process(
+        COMMAND "${MSKDSP_FILE_TOOL}" -b "${_mskdsp_pkg_probe}"
+        OUTPUT_VARIABLE _mskdsp_pkg_file_info
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+      )
+      string(TOLOWER "${_mskdsp_pkg_file_info}" _mskdsp_pkg_file_lower)
+      set(_mskdsp_pkg_mismatch OFF)
+      if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)$" AND _mskdsp_pkg_file_lower MATCHES "aarch64|arm64")
+        set(_mskdsp_pkg_mismatch ON)
+      elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$" AND _mskdsp_pkg_file_lower MATCHES "x86-64")
+        set(_mskdsp_pkg_mismatch ON)
+      endif()
+      if(_mskdsp_pkg_mismatch)
+        set(MSKDSP_PACKAGE_DIR "${CMAKE_BINARY_DIR}/package" CACHE PATH "MskDSP package output directory" FORCE)
+        message(WARNING "检测到 package/lib 架构与当前编译器不一致，测试构建改用输出目录: ${MSKDSP_PACKAGE_DIR}")
+      endif()
+    endif()
+  endif()
+endif()
+
+set(packPath ${MSKDSP_PACKAGE_DIR})
 set(libPath ${packPath}/lib)
 set(modulePath ${packPath}/module)
 set(configPath ${packPath}/conf)
@@ -25,13 +59,6 @@ set(CMAKE_BUILD_RPATH "$ORIGIN;$ORIGIN/lib;$ORIGIN/../lib")
 set(CMAKE_INSTALL_RPATH "$ORIGIN;$ORIGIN/lib;$ORIGIN/../lib")
 
 add_subdirectory(3rdlibs)
-
-set(MSKDSP_BUILD_TESTS_DEFAULT OFF)
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-  set(MSKDSP_BUILD_TESTS_DEFAULT ON)
-endif()
-option(MSKDSP_BUILD_TESTS "Build tests (enables coverage & auto report)" ${MSKDSP_BUILD_TESTS_DEFAULT})
-option(MSKDSP_STRIP_DEBUG "Strip binaries and keep separate debug info under package/debug." OFF)
 
 if(MSKDSP_BUILD_TESTS)
   include(${CMAKE_SOURCE_DIR}/cmake/Coverage.cmake)
