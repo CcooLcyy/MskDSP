@@ -19,28 +19,43 @@ option(MSKDSP_BUILD_TESTS "Build tests (enables coverage & auto report)" ${MSKDS
 option(MSKDSP_STRIP_DEBUG "Strip binaries and keep separate debug info under package/debug." OFF)
 
 set(MSKDSP_PACKAGE_DIR "${CMAKE_SOURCE_DIR}/package" CACHE PATH "MskDSP package output directory")
-if(MSKDSP_BUILD_TESTS)
-  set(_mskdsp_pkg_probe "${MSKDSP_PACKAGE_DIR}/lib/libdspProto.so")
-  if(EXISTS "${_mskdsp_pkg_probe}")
-    find_program(MSKDSP_FILE_TOOL file)
-    if(MSKDSP_FILE_TOOL)
-      execute_process(
-        COMMAND "${MSKDSP_FILE_TOOL}" -b "${_mskdsp_pkg_probe}"
-        OUTPUT_VARIABLE _mskdsp_pkg_file_info
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET
-      )
-      string(TOLOWER "${_mskdsp_pkg_file_info}" _mskdsp_pkg_file_lower)
-      set(_mskdsp_pkg_mismatch OFF)
-      if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)$" AND _mskdsp_pkg_file_lower MATCHES "aarch64|arm64")
-        set(_mskdsp_pkg_mismatch ON)
-      elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$" AND _mskdsp_pkg_file_lower MATCHES "x86-64")
-        set(_mskdsp_pkg_mismatch ON)
+set(_mskdsp_pkg_probe "${MSKDSP_PACKAGE_DIR}/lib/libdspProto.so")
+if(EXISTS "${_mskdsp_pkg_probe}")
+  find_program(MSKDSP_FILE_TOOL file)
+  if(MSKDSP_FILE_TOOL)
+    execute_process(
+      COMMAND "${MSKDSP_FILE_TOOL}" -b "${_mskdsp_pkg_probe}"
+      OUTPUT_VARIABLE _mskdsp_pkg_file_info
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET
+    )
+    string(TOLOWER "${_mskdsp_pkg_file_info}" _mskdsp_pkg_file_lower)
+    set(_mskdsp_pkg_mismatch OFF)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)$" AND _mskdsp_pkg_file_lower MATCHES "aarch64|arm64")
+      set(_mskdsp_pkg_mismatch ON)
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$" AND _mskdsp_pkg_file_lower MATCHES "x86-64")
+      set(_mskdsp_pkg_mismatch ON)
+    endif()
+    if(_mskdsp_pkg_mismatch)
+      set(_mskdsp_pkg_bins "")
+      if(EXISTS "${MSKDSP_PACKAGE_DIR}/MskDSP")
+        list(APPEND _mskdsp_pkg_bins "${MSKDSP_PACKAGE_DIR}/MskDSP")
       endif()
-      if(_mskdsp_pkg_mismatch)
-        set(MSKDSP_PACKAGE_DIR "${CMAKE_BINARY_DIR}/package" CACHE PATH "MskDSP package output directory" FORCE)
-        message(WARNING "检测到 package/lib 架构与当前编译器不一致，测试构建改用输出目录: ${MSKDSP_PACKAGE_DIR}")
+      file(GLOB _mskdsp_pkg_tests "${MSKDSP_PACKAGE_DIR}/*_test")
+      list(APPEND _mskdsp_pkg_bins ${_mskdsp_pkg_tests})
+      if(EXISTS "${MSKDSP_PACKAGE_DIR}/lib")
+        file(GLOB _mskdsp_pkg_libs "${MSKDSP_PACKAGE_DIR}/lib/*")
+        list(APPEND _mskdsp_pkg_bins ${_mskdsp_pkg_libs})
       endif()
+      if(EXISTS "${MSKDSP_PACKAGE_DIR}/module")
+        file(GLOB _mskdsp_pkg_modules "${MSKDSP_PACKAGE_DIR}/module/*")
+        list(APPEND _mskdsp_pkg_bins ${_mskdsp_pkg_modules})
+      endif()
+      if(_mskdsp_pkg_bins)
+        file(REMOVE ${_mskdsp_pkg_bins})
+      endif()
+      message(WARNING
+              "检测到 package/lib 架构与当前编译器不一致，已清理 package 编译产物(保留 conf/log)，继续输出到: ${MSKDSP_PACKAGE_DIR}")
     endif()
   endif()
 endif()
@@ -79,6 +94,101 @@ set(MSKDSP_MODULE_TARGETS
   AGC
   AVC
 )
+
+set(MSKDSP_VCPKG_INSTALL_DIR "")
+if(DEFINED VCPKG_INSTALLED_DIR AND NOT VCPKG_INSTALLED_DIR STREQUAL "")
+  set(MSKDSP_VCPKG_INSTALL_DIR "${VCPKG_INSTALLED_DIR}")
+else()
+  set(MSKDSP_VCPKG_INSTALL_DIR "${CMAKE_BINARY_DIR}/vcpkg_installed")
+endif()
+if(NOT EXISTS "${MSKDSP_VCPKG_INSTALL_DIR}")
+  message(FATAL_ERROR "未找到 vcpkg_installed 目录: ${MSKDSP_VCPKG_INSTALL_DIR}")
+endif()
+if(NOT VCPKG_TARGET_TRIPLET)
+  message(FATAL_ERROR "未设置 VCPKG_TARGET_TRIPLET，无法收集 vcpkg 运行时依赖")
+endif()
+set(MSKDSP_VCPKG_TRIPLET_DIR "${MSKDSP_VCPKG_INSTALL_DIR}/${VCPKG_TARGET_TRIPLET}")
+if(NOT EXISTS "${MSKDSP_VCPKG_TRIPLET_DIR}")
+  message(FATAL_ERROR "未找到 vcpkg 目标目录: ${MSKDSP_VCPKG_TRIPLET_DIR}")
+endif()
+set(MSKDSP_VCPKG_RUNTIME_DIRS "")
+set(MSKDSP_VCPKG_LIB_DIR "${MSKDSP_VCPKG_TRIPLET_DIR}/lib")
+if(EXISTS "${MSKDSP_VCPKG_LIB_DIR}")
+  list(APPEND MSKDSP_VCPKG_RUNTIME_DIRS "${MSKDSP_VCPKG_LIB_DIR}")
+endif()
+set(MSKDSP_VCPKG_BIN_DIR "${MSKDSP_VCPKG_TRIPLET_DIR}/bin")
+if(EXISTS "${MSKDSP_VCPKG_BIN_DIR}")
+  list(APPEND MSKDSP_VCPKG_RUNTIME_DIRS "${MSKDSP_VCPKG_BIN_DIR}")
+endif()
+if(MSKDSP_VCPKG_RUNTIME_DIRS STREQUAL "")
+  message(FATAL_ERROR "未找到 vcpkg 运行时库目录: ${MSKDSP_VCPKG_TRIPLET_DIR}")
+endif()
+
+string(REGEX REPLACE "([][+.*^$(){}|\\\\])" "\\\\\\1"
+       MSKDSP_VCPKG_TRIPLET_DIR_REGEX "${MSKDSP_VCPKG_TRIPLET_DIR}")
+message(STATUS "安装阶段仅收集 vcpkg 运行时依赖: ${MSKDSP_VCPKG_TRIPLET_DIR}")
+
+if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+  set(CMAKE_INSTALL_PREFIX "${MSKDSP_PACKAGE_DIR}" CACHE PATH "MskDSP 安装输出目录" FORCE)
+endif()
+
+install(TARGETS ${PROJECT_NAME}
+  RUNTIME DESTINATION .
+)
+
+install(TARGETS moduleManager dspProto
+  LIBRARY DESTINATION lib
+)
+
+install(TARGETS ${MSKDSP_MODULE_TARGETS}
+  LIBRARY DESTINATION module
+)
+
+set(MSKDSP_INSTALL_EXEC_PATHS "$<TARGET_FILE:${PROJECT_NAME}>")
+set(MSKDSP_INSTALL_LIB_PATHS "")
+list(APPEND MSKDSP_INSTALL_LIB_PATHS "$<TARGET_FILE:moduleManager>")
+list(APPEND MSKDSP_INSTALL_LIB_PATHS "$<TARGET_FILE:dspProto>")
+foreach(MSKDSP_INSTALL_TARGET IN LISTS MSKDSP_MODULE_TARGETS)
+  list(APPEND MSKDSP_INSTALL_LIB_PATHS "$<TARGET_FILE:${MSKDSP_INSTALL_TARGET}>")
+endforeach()
+
+set(MSKDSP_INSTALL_SCRIPT_TEMPLATE
+    "${CMAKE_CURRENT_BINARY_DIR}/mskdsp_install_runtime_deps.cmake.in")
+set(MSKDSP_INSTALL_SCRIPT_CONFIGURED
+    "${CMAKE_CURRENT_BINARY_DIR}/mskdsp_install_runtime_deps.cmake.configured")
+set(MSKDSP_INSTALL_SCRIPT
+    "${CMAKE_CURRENT_BINARY_DIR}/mskdsp_install_runtime_deps.cmake")
+file(WRITE "${MSKDSP_INSTALL_SCRIPT_TEMPLATE}" [=[
+message(STATUS "开始收集 vcpkg 运行时依赖到: ${CMAKE_INSTALL_PREFIX}/lib")
+set(_mskdsp_execs "@MSKDSP_INSTALL_EXEC_PATHS@")
+set(_mskdsp_libs "@MSKDSP_INSTALL_LIB_PATHS@")
+set(_mskdsp_search_dirs "@MSKDSP_VCPKG_RUNTIME_DIRS@")
+set(_mskdsp_allow_regex "^@MSKDSP_VCPKG_TRIPLET_DIR_REGEX@/")
+file(MAKE_DIRECTORY "${CMAKE_INSTALL_PREFIX}/lib")
+file(GET_RUNTIME_DEPENDENCIES
+  RESOLVED_DEPENDENCIES_VAR _mskdsp_deps
+  UNRESOLVED_DEPENDENCIES_VAR _mskdsp_unresolved
+  EXECUTABLES ${_mskdsp_execs}
+  LIBRARIES ${_mskdsp_libs}
+  DIRECTORIES ${_mskdsp_search_dirs}
+  POST_INCLUDE_REGEXES "${_mskdsp_allow_regex}"
+  POST_EXCLUDE_REGEXES ".*"
+)
+if(_mskdsp_unresolved)
+  message(STATUS "以下依赖未解析，将被忽略: ${_mskdsp_unresolved}")
+endif()
+list(REMOVE_DUPLICATES _mskdsp_deps)
+foreach(_dep IN LISTS _mskdsp_deps)
+  message(STATUS "复制依赖库: ${_dep}")
+  execute_process(COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                  "${_dep}" "${CMAKE_INSTALL_PREFIX}/lib")
+endforeach()
+]=])
+
+configure_file("${MSKDSP_INSTALL_SCRIPT_TEMPLATE}"
+               "${MSKDSP_INSTALL_SCRIPT_CONFIGURED}" @ONLY)
+file(GENERATE OUTPUT "${MSKDSP_INSTALL_SCRIPT}" INPUT "${MSKDSP_INSTALL_SCRIPT_CONFIGURED}")
+install(SCRIPT "${MSKDSP_INSTALL_SCRIPT}")
 
 if(MSKDSP_BUILD_TESTS)
   enable_testing()

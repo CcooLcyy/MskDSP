@@ -27,6 +27,10 @@ podman exec -e VCPKG_ROOT=/data/3rdlibs/vcpkg -w "${WORKDIR}" "${CONTAINER_NAME}
 log "Building in container..."
 podman exec -e VCPKG_ROOT=/data/3rdlibs/vcpkg -w "${WORKDIR}" "${CONTAINER_NAME}" cmake --build --preset arm64
 
+log "安装产物到仓库 package 目录..."
+podman exec -e VCPKG_ROOT=/data/3rdlibs/vcpkg -w "${WORKDIR}" "${CONTAINER_NAME}" \
+  cmake --install "${WORKDIR}/build-arm64" --prefix "${WORKDIR}/package"
+
 log "Building image: ${IMAGE_TAG}"
 podman buildx build --platform linux/arm64 -t "${IMAGE_TAG}" "${PROJECT_ROOT}"
 
