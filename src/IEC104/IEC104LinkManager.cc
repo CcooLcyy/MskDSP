@@ -70,12 +70,12 @@ grpc::Status LinkManager::validateLinkConfig(const IEC104Proto::LinkConfig &conf
   if (config.oa() > 255) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "oa 必须 <= 255");
   }
-  if (config.telemetry_max_asdu_bytes() > 0) {
-    if (config.telemetry_max_asdu_bytes() > kMaxAsduBytes) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "telemetry_max_asdu_bytes 必须 <= 249");
+  if (config.point_max_asdu_bytes() > 0) {
+    if (config.point_max_asdu_bytes() > kMaxAsduBytes) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "point_max_asdu_bytes 必须 <= 249");
     }
-    if (config.telemetry_max_asdu_bytes() < kMinMeasuredValueAsduBytes) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "telemetry_max_asdu_bytes 必须 >= 21");
+    if (config.point_max_asdu_bytes() < kMinMeasuredValueAsduBytes) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "point_max_asdu_bytes 必须 >= 21");
     }
   }
   return grpc::Status::OK;
@@ -437,6 +437,9 @@ void LinkManager::configureTransportCallbacksLocked(const std::string &connName,
   link->transport->SetTimeSyncCallback([this, connName](int64_t tsMs) {
     (void)handleTimeSyncCommand(connName, tsMs);
   });
+  link->transport->SetCommandCallback([this, connName](const CommandValue &cv) {
+    (void)handleCommandValue(connName, cv);
+  });
 }
 
 grpc::Status LinkManager::StartLink(const std::string &connName) {
@@ -475,6 +478,7 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
     startDataCenterSubscribeLocked(connName, &link);
   } else if (isMasterStation(link.config)) {
     startTimeSyncSubscribeLocked(connName, &link);
+    startCommandSubscribeLocked(connName, &link);
   }
   return grpc::Status::OK;
 }
@@ -496,6 +500,7 @@ grpc::Status LinkManager::StopLink(const std::string &connName) {
     pendingDelete = (it->second.state == IEC104Proto::LINK_STATE_PENDING_DELETE);
     stopDataCenterSubscribeLocked(&it->second);
     stopTimeSyncSubscribeLocked(&it->second);
+    stopCommandSubscribeLocked(&it->second);
     transport = std::move(it->second.transport);
     it->second.state = pendingDelete ? IEC104Proto::LINK_STATE_PENDING_DELETE : IEC104Proto::LINK_STATE_STOPPED;
   }

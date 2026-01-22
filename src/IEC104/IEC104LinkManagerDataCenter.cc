@@ -1,5 +1,6 @@
 #include "IEC104LinkManager.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <format>
@@ -319,6 +320,115 @@ void LinkManager::startTimeSyncSubscribeLocked(const std::string& connName, Link
   });
 }
 
+void LinkManager::stopCommandSubscribeLocked(LinkRuntime* link) {
+  if (link == nullptr) {
+    return;
+  }
+  if (link->dcCommandThread.joinable()) {
+    LOG_INFO("IEC104 停止命令订阅: conn_name={}", link->config.conn_name());
+    link->dcCommandThread.request_stop();
+    link->dcCommandThread.join();
+  }
+  link->dcCommandContext.reset();
+}
+
+void LinkManager::startCommandSubscribeLocked(const std::string& connName, LinkRuntime* link) {
+  if (link == nullptr || !isMasterStation(link->config) || !link->transport) {
+    return;
+  }
+  stopCommandSubscribeLocked(link);
+
+  auto tags = link->pointTable.Tags();
+  const auto timeSyncTag = normalizeTimeSyncTag(link->config);
+  if (!timeSyncTag.empty()) {
+    tags.erase(std::remove(tags.begin(), tags.end(), timeSyncTag), tags.end());
+  }
+  if (tags.empty()) {
+    LOG_INFO("IEC104 命令订阅无可用点: conn_name={}", connName);
+    return;
+  }
+
+  struct PointMeta {
+    uint32_t ioa = 0;
+    IEC104Proto::PointType type = IEC104Proto::POINT_TYPE_UNSPECIFIED;
+    double scale = 1.0;
+    double offset = 0.0;
+  };
+  std::unordered_map<std::string, PointMeta> metaByTag;
+  metaByTag.reserve(tags.size());
+  for (const auto& tag : tags) {
+    auto p = link->pointTable.FindByTag(tag);
+    if (p) {
+      metaByTag.emplace(tag, PointMeta{p->ioa, p->type, p->scale, p->offset});
+    }
+  }
+
+  auto* transport = link->transport.get();
+  auto connId = link->connId;
+
+  LOG_INFO("IEC104 启动命令订阅: conn_name={}, conn_id={}, tags={}", connName, connId, tags.size());
+
+  link->dcCommandContext = std::make_shared<grpc::ClientContext>();
+  auto ctx = link->dcCommandContext;
+
+  link->dcCommandThread = std::jthread([this, connName, ctx, connId, tags, metaByTag, transport](std::stop_token st) {
+    ModuleManager::LogModuleScope moduleScope(IEC104LibInfo.LIB_NAME);
+    std::stop_callback cb(st, [&ctx]() { ctx->TryCancel(); });
+
+    auto reader = dataCenter_.Subscribe(ctx.get(), connId, tags, false);
+    if (!reader) {
+      LOG_ERROR("IEC104 创建命令订阅失败: conn_name={}, conn_id={}, tags={}", connName, connId, tags.size());
+      return;
+    }
+
+    DataCenterProto::PointUpdate update;
+    while (reader->Read(&update)) {
+      if (update.src_conn_id() == connId) {
+        continue;
+      }
+      auto it = metaByTag.find(update.dst_tag());
+      if (it == metaByTag.end()) {
+        continue;
+      }
+      if (it->second.type == IEC104Proto::POINT_TYPE_FLOAT) {
+        double value = 0;
+        if (!pointValueToDouble(update.value(), &value)) {
+          LOG_DEBUG("IEC104 设点点值类型不匹配: conn_name={}, tag={}", connName, update.dst_tag());
+          continue;
+        }
+        double rawValue = 0;
+        if (!reverseScale(value, it->second.scale, it->second.offset, &rawValue)) {
+          LOG_WARNING("IEC104 设点反向缩放失败: conn_name={}, tag={}, value={}", connName, update.dst_tag(), value);
+          continue;
+        }
+        LOG_INFO("IEC104 触发设点命令: conn_name={}, tag={}, ioa={}, value={}", connName, update.dst_tag(), it->second.ioa, value);
+        transport->SendSetpointCommand(it->second.ioa, rawValue);
+      } else if (it->second.type == IEC104Proto::POINT_TYPE_SINGLE) {
+        bool value = false;
+        if (!pointValueToBool(update.value(), &value)) {
+          LOG_DEBUG("IEC104 遥控点值类型不匹配: conn_name={}, tag={}", connName, update.dst_tag());
+          continue;
+        }
+        LOG_INFO("IEC104 触发遥控命令: conn_name={}, tag={}, ioa={}, value={}", connName, update.dst_tag(), it->second.ioa, value);
+        transport->SendSingleCommand(it->second.ioa, value, true);
+      }
+    }
+
+    auto finishStatus = reader->Finish();
+    if (!finishStatus.ok() && !st.stop_requested()) {
+      LOG_WARNING("IEC104 命令订阅异常结束: conn_name={}, conn_id={}, 错误={}",
+                  connName,
+                  connId,
+                  finishStatus.error_message());
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = linksByName_.find(connName);
+      if (it != linksByName_.end()) {
+        it->second.lastError = finishStatus.error_message();
+      }
+    }
+  });
+}
+
 grpc::Status LinkManager::handleClientPointValue(const std::string& connName, const PointValue& pv) {
   uint32_t connId = 0;
   std::string tag;
@@ -405,6 +515,77 @@ grpc::Status LinkManager::handleClientPointValue(const std::string& connName, co
   }
 
   LOG_WARNING("IEC104 点类型不匹配: conn_name={}, tag={}, type={}", connName, tag, static_cast<int>(type));
+  return grpc::Status::OK;
+}
+
+grpc::Status LinkManager::handleCommandValue(const std::string& connName, const CommandValue& cv) {
+  uint32_t connId = 0;
+  std::string tag;
+  IEC104Proto::PointType type = IEC104Proto::POINT_TYPE_UNSPECIFIED;
+  double scale = 1.0;
+  double offset = 0.0;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = linksByName_.find(connName);
+    if (it == linksByName_.end()) {
+      return makeNotFound(connName);
+    }
+    if (!isSlaveStation(it->second.config)) {
+      LOG_INFO("IEC104 非从站收到命令，忽略发布: conn_name={}", connName);
+      return grpc::Status::OK;
+    }
+    connId = it->second.connId;
+    auto p = it->second.pointTable.FindByIoa(cv.ioa);
+    if (!p) {
+      return grpc::Status::OK;
+    }
+    tag = p->tag;
+    type = p->type;
+    scale = p->scale;
+    offset = p->offset;
+  }
+
+  if (cv.type != IEC104Proto::POINT_TYPE_UNSPECIFIED && cv.type != type) {
+    LOG_WARNING("IEC104 命令点类型不一致: conn_name={}, tag={}, 配置类型={}, 实际类型={}",
+                connName,
+                tag,
+                static_cast<int>(type),
+                static_cast<int>(cv.type));
+    return grpc::Status::OK;
+  }
+
+  if (type == IEC104Proto::POINT_TYPE_FLOAT) {
+    const double engValue = applyScale(cv.doubleValue, scale, offset);
+    auto st = dataCenter_.PublishDouble(connId, tag, engValue, DataCenterProto::QUALITY_GOOD, 0);
+    if (!st.ok()) {
+      LOG_WARNING("IEC104 发布设点失败: conn_name={}, tag={}, 错误={}", connName, tag, st.error_message());
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = linksByName_.find(connName);
+      if (it != linksByName_.end()) {
+        it->second.lastError = st.error_message();
+      }
+    } else {
+      LOG_INFO("IEC104 已发布设点: conn_name={}, tag={}, value={}", connName, tag, engValue);
+    }
+    return st;
+  }
+
+  if (type == IEC104Proto::POINT_TYPE_SINGLE) {
+    auto st = dataCenter_.PublishBool(connId, tag, cv.boolValue, DataCenterProto::QUALITY_GOOD, 0);
+    if (!st.ok()) {
+      LOG_WARNING("IEC104 发布遥控失败: conn_name={}, tag={}, 错误={}", connName, tag, st.error_message());
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = linksByName_.find(connName);
+      if (it != linksByName_.end()) {
+        it->second.lastError = st.error_message();
+      }
+    } else {
+      LOG_INFO("IEC104 已发布遥控: conn_name={}, tag={}, value={}", connName, tag, cv.boolValue);
+    }
+    return st;
+  }
+
+  LOG_WARNING("IEC104 命令点类型不匹配: conn_name={}, tag={}, type={}", connName, tag, static_cast<int>(type));
   return grpc::Status::OK;
 }
 

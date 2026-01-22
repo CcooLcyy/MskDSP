@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <boost/asio/post.hpp>
 #include <boost/asio/read_until.hpp>
 #include <boost/asio/write.hpp>
@@ -23,6 +24,8 @@ constexpr uint8_t kTypeIdSinglePoint = 1;               // M_SP_NA_1
 constexpr uint8_t kTypeIdSinglePointWithTime = 30;      // M_SP_TB_1
 constexpr uint8_t kTypeIdMeasuredValueShort = 13;       // M_ME_NC_1
 constexpr uint8_t kTypeIdMeasuredValueShortWithTime = 36;  // M_ME_TF_1
+constexpr uint8_t kTypeIdSingleCommand = 45;            // C_SC_NA_1
+constexpr uint8_t kTypeIdSetpointShort = 50;            // C_SE_NC_1
 constexpr uint8_t kTypeIdInterrogationCmd = 100;        // C_IC_NA_1
 constexpr uint8_t kTypeIdTimeSyncCmd = 103;             // C_CS_NA_1
 
@@ -30,8 +33,13 @@ constexpr uint8_t kCotActivation = 6;
 constexpr uint8_t kCotActivationCon = 7;
 constexpr uint8_t kCotActivationTermination = 10;
 constexpr uint8_t kCotInterrogatedByStation = 20;
+constexpr uint8_t kCotNegative = 0x40;
 
 constexpr uint8_t kQoiStation = 20;
+
+constexpr uint8_t kScoSelectMask = 0x80;
+constexpr uint8_t kScoValueMask = 0x01;
+constexpr uint8_t kQosSelectMask = 0x80;
 
 constexpr char kHexDigits[] = "0123456789ABCDEF";
 
@@ -44,7 +52,8 @@ constexpr uint32_t kMeasuredValueSq0ObjectSize = 8;
 constexpr uint32_t kMeasuredValueSq1ObjectSize = 5;
 constexpr uint32_t kCp56Time2aSize = 7;
 constexpr uint32_t kMinMeasuredValueAsduBytes = kAsduHeaderSize + 3 + 4 + 1 + kCp56Time2aSize;
-constexpr uint32_t kDefaultTelemetryBatchWindowMs = 20;
+constexpr uint32_t kDefaultPointBatchWindowMs = 20;
+constexpr std::chrono::seconds kSingleCommandSelectTimeout{10};
 
 size_t maxSq0Objects(uint32_t maxAsduBytes, uint32_t objectSize) {
   if (maxAsduBytes <= kAsduHeaderSize) {
@@ -73,6 +82,14 @@ inline float toFloat(double v) {
   return static_cast<float>(v);
 }
 
+inline uint8_t buildCot(uint8_t cause, bool positive) {
+  uint8_t cot = static_cast<uint8_t>(cause & 0x3F);
+  if (!positive) {
+    cot |= kCotNegative;
+  }
+  return cot;
+}
+
 std::string bytesToHex(const std::vector<uint8_t> &data) {
   if (data.empty()) {
     return {};
@@ -99,11 +116,11 @@ TcpSession::TcpSession(boost::asio::io_context &io, IEC104Proto::LinkConfig conf
   t1Timer_(io),
   t2Timer_(io),
   t3Timer_(io),
-  telemetryFlushTimer_(io),
+  pointFlushTimer_(io),
   config_(std::move(config)),
   isClient_(isClient),
   apci_(parseApci(config_.apci())) {
-  initTelemetryBatchSettings();
+  initPointBatchSettings();
 }
 
 TcpSession::~TcpSession() {
@@ -111,7 +128,7 @@ TcpSession::~TcpSession() {
   t1Timer_.cancel();
   t2Timer_.cancel();
   t3Timer_.cancel();
-  telemetryFlushTimer_.cancel();
+  pointFlushTimer_.cancel();
   boost::system::error_code ec;
   socket_.close(ec);
 }
@@ -132,11 +149,13 @@ void TcpSession::Start(boost::asio::ip::tcp::socket socket) {
   writing_ = false;
 
   LOG_INFO("IEC104 会话启动: conn_name={}, 角色={}, k={}, w={}, t0={}, t1={}, t2={}, t3={}", config_.conn_name(), isClient_ ? "客户端" : "服务端", apci_.k, apci_.w, apci_.t0, apci_.t1, apci_.t2, apci_.t3);
-  LOG_INFO("IEC104 点值合包参数: conn_name={}, window_ms={}, max_asdu_bytes={}, 去重={}",
+  LOG_INFO("IEC104 点值上送参数: conn_name={}, 窗口毫秒={}, 最大ASDU字节={}, 标准上限={}, 去重={}, 带时标={}",
            config_.conn_name(),
-           telemetryBatchWindow_.count(),
-           telemetryMaxAsduBytes_,
-           telemetryDedupe_);
+           pointBatchWindow_.count(),
+           pointMaxAsduBytes_,
+           config_.point_use_standard_limit(),
+           pointDedupe_,
+           pointWithTime_);
   startT0();
   restartT3();
   handleRead();
@@ -158,7 +177,7 @@ void TcpSession::Stop() {
     self->t1Timer_.cancel();
     self->t2Timer_.cancel();
     self->t3Timer_.cancel();
-    self->telemetryFlushTimer_.cancel();
+    self->pointFlushTimer_.cancel();
     boost::system::error_code ec;
     self->socket_.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
     self->socket_.close(ec);
@@ -168,9 +187,10 @@ void TcpSession::Stop() {
     self->recvSinceLastAck_ = 0;
     self->writeQueue_.clear();
     self->pendingAsdu_.clear();
-    self->telemetryPendingByKey_.clear();
-    self->telemetryPending_.clear();
-    self->telemetryFlushScheduled_ = false;
+    self->pointPendingByKey_.clear();
+    self->pointPending_.clear();
+    self->pointFlushScheduled_ = false;
+    self->singleCommandSelectByIoa_.clear();
     self->writing_ = false;
     if (onClosed) {
       onClosed();
@@ -188,6 +208,10 @@ void TcpSession::SetInterrogationSnapshotProvider(SnapshotProvider provider) {
 
 void TcpSession::SetTimeSyncCallback(TimeSyncCallback cb) {
   onTimeSync_ = std::move(cb);
+}
+
+void TcpSession::SetCommandCallback(CommandCallback cb) {
+  onCommand_ = std::move(cb);
 }
 
 void TcpSession::SetClosedCallback(std::function<void()> cb) {
@@ -212,21 +236,45 @@ void TcpSession::SendTimeSync(int64_t tsMs) {
   });
 }
 
-void TcpSession::initTelemetryBatchSettings() {
-  const auto windowMs = config_.telemetry_batch_window_ms();
-  telemetryBatchWindow_ = std::chrono::milliseconds(windowMs == 0 ? kDefaultTelemetryBatchWindowMs : windowMs);
+void TcpSession::SendSingleCommand(uint32_t ioa, bool value, bool useSelect) {
+  boost::asio::post(io_, [self = shared_from_this(), ioa, value, useSelect]() {
+    if (self->closing_) {
+      return;
+    }
+    if (useSelect) {
+      self->sendSingleCommand(ioa, value, true);
+      self->sendSingleCommand(ioa, value, false);
+    } else {
+      self->sendSingleCommand(ioa, value, false);
+    }
+  });
+}
 
-  uint32_t maxBytes = config_.telemetry_max_asdu_bytes();
-  if (config_.telemetry_use_standard_limit() || maxBytes == 0) {
+void TcpSession::SendSetpointCommand(uint32_t ioa, double value) {
+  boost::asio::post(io_, [self = shared_from_this(), ioa, value]() {
+    if (self->closing_) {
+      return;
+    }
+    self->sendSetpointCommand(ioa, value);
+  });
+}
+
+void TcpSession::initPointBatchSettings() {
+  const auto windowMs = config_.point_batch_window_ms();
+  pointBatchWindow_ = std::chrono::milliseconds(windowMs == 0 ? kDefaultPointBatchWindowMs : windowMs);
+
+  uint32_t maxBytes = config_.point_max_asdu_bytes();
+  if (config_.point_use_standard_limit() || maxBytes == 0) {
     maxBytes = kMaxAsduBytes;
   }
   maxBytes = std::min(maxBytes, kMaxAsduBytes);
   if (maxBytes < kMinMeasuredValueAsduBytes) {
     maxBytes = kMinMeasuredValueAsduBytes;
   }
-  telemetryMaxAsduBytes_ = maxBytes;
+  pointMaxAsduBytes_ = maxBytes;
 
-  telemetryDedupe_ = config_.has_telemetry_dedupe() ? config_.telemetry_dedupe() : true;
+  pointDedupe_ = config_.has_point_dedupe() ? config_.point_dedupe() : true;
+  pointWithTime_ = config_.point_with_time();
 }
 
 void TcpSession::enqueuePointValue(const PointValue& value, uint8_t cause) {
@@ -234,52 +282,52 @@ void TcpSession::enqueuePointValue(const PointValue& value, uint8_t cause) {
   entry.value = value;
   entry.cause = cause;
 
-  if (telemetryDedupe_) {
+  if (pointDedupe_) {
     const uint64_t key = (static_cast<uint64_t>(value.type) << 32) | value.ioa;
-    telemetryPendingByKey_[key] = entry;
+    pointPendingByKey_[key] = entry;
   } else {
-    telemetryPending_.push_back(entry);
+    pointPending_.push_back(entry);
   }
-  scheduleTelemetryFlush();
+  schedulePointFlush();
 }
 
-void TcpSession::scheduleTelemetryFlush() {
-  if (telemetryBatchWindow_.count() <= 0) {
-    drainTelemetryQueue();
+void TcpSession::schedulePointFlush() {
+  if (pointBatchWindow_.count() <= 0) {
+    drainPointQueue();
     return;
   }
-  if (telemetryFlushScheduled_) {
+  if (pointFlushScheduled_) {
     return;
   }
-  telemetryFlushScheduled_ = true;
-  telemetryFlushTimer_.expires_after(telemetryBatchWindow_);
+  pointFlushScheduled_ = true;
+  pointFlushTimer_.expires_after(pointBatchWindow_);
   auto self = shared_from_this();
-  telemetryFlushTimer_.async_wait([self](const boost::system::error_code& ec) { self->flushTelemetry(ec); });
+  pointFlushTimer_.async_wait([self](const boost::system::error_code& ec) { self->flushPoint(ec); });
 }
 
-void TcpSession::flushTelemetry(const boost::system::error_code& ec) {
+void TcpSession::flushPoint(const boost::system::error_code& ec) {
   if (ec) {
     return;
   }
-  telemetryFlushScheduled_ = false;
-  drainTelemetryQueue();
+  pointFlushScheduled_ = false;
+  drainPointQueue();
 }
 
-void TcpSession::drainTelemetryQueue() {
+void TcpSession::drainPointQueue() {
   if (closing_) {
-    clearTelemetryQueue();
+    clearPointQueue();
     return;
   }
 
   std::vector<PendingPointValue> pending;
-  if (telemetryDedupe_) {
-    pending.reserve(telemetryPendingByKey_.size());
-    for (auto &pair : telemetryPendingByKey_) {
+  if (pointDedupe_) {
+    pending.reserve(pointPendingByKey_.size());
+    for (auto &pair : pointPendingByKey_) {
       pending.push_back(pair.second);
     }
-    telemetryPendingByKey_.clear();
+    pointPendingByKey_.clear();
   } else {
-    pending.swap(telemetryPending_);
+    pending.swap(pointPending_);
   }
 
   if (pending.empty()) {
@@ -289,9 +337,9 @@ void TcpSession::drainTelemetryQueue() {
   LOG_DEBUG("IEC104 点值合包刷新: conn_name={}, 待处理={}, 去重={}, window_ms={}, max_asdu_bytes={}",
             config_.conn_name(),
             pending.size(),
-            telemetryDedupe_,
-            telemetryBatchWindow_.count(),
-            telemetryMaxAsduBytes_);
+            pointDedupe_,
+            pointBatchWindow_.count(),
+            pointMaxAsduBytes_);
 
   std::unordered_map<uint32_t, std::vector<PointValue>> byKey;
   byKey.reserve(pending.size());
@@ -306,11 +354,11 @@ void TcpSession::drainTelemetryQueue() {
   }
 }
 
-void TcpSession::clearTelemetryQueue() {
-  telemetryPendingByKey_.clear();
-  telemetryPending_.clear();
-  telemetryFlushScheduled_ = false;
-  telemetryFlushTimer_.cancel();
+void TcpSession::clearPointQueue() {
+  pointPendingByKey_.clear();
+  pointPending_.clear();
+  pointFlushScheduled_ = false;
+  pointFlushTimer_.cancel();
 }
 
 void TcpSession::enqueuePointValuesBatch(std::vector<PointValue> values, uint8_t cause) {
@@ -323,7 +371,7 @@ void TcpSession::enqueuePointValuesBatch(std::vector<PointValue> values, uint8_t
     return a.ioa < b.ioa;
   });
 
-  const bool withTime = true;
+  const bool withTime = pointWithTime_;
   uint32_t sq0ObjectSize = 0;
   uint32_t sq1ObjectSize = 0;
   if (type == IEC104Proto::POINT_TYPE_FLOAT) {
@@ -334,8 +382,8 @@ void TcpSession::enqueuePointValuesBatch(std::vector<PointValue> values, uint8_t
     sq1ObjectSize = kSinglePointSq1ObjectSize + (withTime ? kCp56Time2aSize : 0);
   }
 
-  auto maxSq0 = maxSq0Objects(telemetryMaxAsduBytes_, sq0ObjectSize);
-  auto maxSq1 = maxSq1Objects(telemetryMaxAsduBytes_, sq1ObjectSize);
+  auto maxSq0 = maxSq0Objects(pointMaxAsduBytes_, sq0ObjectSize);
+  auto maxSq1 = maxSq1Objects(pointMaxAsduBytes_, sq1ObjectSize);
   if (maxSq0 == 0) {
     maxSq0 = 1;
   }
@@ -573,6 +621,12 @@ void TcpSession::processAsdu(const std::vector<uint8_t> &asdu) {
   case kTypeIdSinglePointWithTime:
     handleSinglePoint(asdu, true);
     break;
+  case kTypeIdSingleCommand:
+    handleSingleCommand(asdu);
+    break;
+  case kTypeIdSetpointShort:
+    handleSetpointCommand(asdu);
+    break;
   case kTypeIdInterrogationCmd:
     handleInterrogation(asdu);
     break;
@@ -723,6 +777,218 @@ void TcpSession::handleSinglePoint(const std::vector<uint8_t> &asdu, bool withTi
       pv.tsMs = tsMs;
       onPointValue_(pv);
     }
+  }
+}
+
+void TcpSession::handleSingleCommand(const std::vector<uint8_t>& asdu) {
+  const size_t minSize = 6 + 3 + 1;
+  if (asdu.size() < minSize) {
+    return;
+  }
+  if (isMasterStation()) {
+    LOG_INFO("IEC104 主站收到遥控命令，忽略: conn_name={}", config_.conn_name());
+    return;
+  }
+  if (!dataTransferActive_) {
+    LOG_WARNING("IEC104 未 STARTDT 即收到遥控命令: conn_name={}", config_.conn_name());
+    return;
+  }
+
+  const auto cotRaw = static_cast<uint8_t>(asdu[2]);
+  const auto cot = static_cast<uint8_t>(cotRaw & 0x3F);
+  if (cot != kCotActivation) {
+    return;
+  }
+
+  auto vsq = asdu[1];
+  auto sq = (vsq & 0x80) != 0;
+  auto count = static_cast<int>(vsq & 0x7F);
+  if (count <= 0) {
+    return;
+  }
+
+  size_t offset = 6;
+  uint32_t baseIoa = 0;
+  if (sq) {
+    if (asdu.size() < offset + 3) {
+      return;
+    }
+    baseIoa = static_cast<uint32_t>(asdu[offset]) |
+        (static_cast<uint32_t>(asdu[offset + 1]) << 8) |
+        (static_cast<uint32_t>(asdu[offset + 2]) << 16);
+    offset += 3;
+  }
+
+  const auto now = std::chrono::steady_clock::now();
+  for (int i = 0; i < count; ++i) {
+    uint32_t ioa = 0;
+    if (!sq) {
+      if (asdu.size() < offset + 3) {
+        return;
+      }
+      ioa = static_cast<uint32_t>(asdu[offset]) |
+          (static_cast<uint32_t>(asdu[offset + 1]) << 8) |
+          (static_cast<uint32_t>(asdu[offset + 2]) << 16);
+      offset += 3;
+    } else {
+      ioa = baseIoa + static_cast<uint32_t>(i);
+    }
+
+    if (asdu.size() < offset + 1) {
+      return;
+    }
+    const auto sco = static_cast<uint8_t>(asdu[offset]);
+    offset += 1;
+
+    const bool select = (sco & kScoSelectMask) != 0;
+    const bool value = (sco & kScoValueMask) != 0;
+
+    auto sendConfirm = [this, ioa, value, select](uint8_t cause, bool positive) {
+      auto asdu = buildSingleCommandAsdu(ioa, value, select, cause, positive);
+      if (asdu.empty()) {
+        return;
+      }
+      enqueueAsdu(std::move(asdu));
+    };
+
+    if (select) {
+      singleCommandSelectByIoa_[ioa] = SingleCommandSelect{value, now};
+      LOG_INFO("IEC104 收到遥控预置: conn_name={}, ioa={}, value={}", config_.conn_name(), ioa, value);
+      sendConfirm(kCotActivationCon, true);
+      continue;
+    }
+
+    bool validSelect = false;
+    auto it = singleCommandSelectByIoa_.find(ioa);
+    if (it != singleCommandSelectByIoa_.end()) {
+      const auto elapsed = now - it->second.time;
+      if (elapsed > kSingleCommandSelectTimeout) {
+        LOG_WARNING("IEC104 遥控预置已超时: conn_name={}, ioa={}", config_.conn_name(), ioa);
+        singleCommandSelectByIoa_.erase(it);
+      } else if (it->second.value != value) {
+        LOG_WARNING("IEC104 遥控预置与执行值不一致: conn_name={}, ioa={}, 预置={}, 执行={}",
+                    config_.conn_name(),
+                    ioa,
+                    it->second.value,
+                    value);
+        singleCommandSelectByIoa_.erase(it);
+      } else {
+        singleCommandSelectByIoa_.erase(it);
+        validSelect = true;
+      }
+    }
+
+    if (!validSelect) {
+      LOG_WARNING("IEC104 遥控执行缺少预置: conn_name={}, ioa={}, value={}", config_.conn_name(), ioa, value);
+      sendConfirm(kCotActivationCon, false);
+      continue;
+    }
+
+    LOG_INFO("IEC104 收到遥控执行: conn_name={}, ioa={}, value={}", config_.conn_name(), ioa, value);
+    if (onCommand_) {
+      CommandValue cv;
+      cv.ioa = ioa;
+      cv.type = IEC104Proto::POINT_TYPE_SINGLE;
+      cv.boolValue = value;
+      onCommand_(cv);
+    }
+    sendConfirm(kCotActivationCon, true);
+    sendConfirm(kCotActivationTermination, true);
+  }
+}
+
+void TcpSession::handleSetpointCommand(const std::vector<uint8_t>& asdu) {
+  const size_t minSize = 6 + 3 + 4 + 1;
+  if (asdu.size() < minSize) {
+    return;
+  }
+  if (isMasterStation()) {
+    LOG_INFO("IEC104 主站收到设点命令，忽略: conn_name={}", config_.conn_name());
+    return;
+  }
+  if (!dataTransferActive_) {
+    LOG_WARNING("IEC104 未 STARTDT 即收到设点命令: conn_name={}", config_.conn_name());
+    return;
+  }
+
+  const auto cotRaw = static_cast<uint8_t>(asdu[2]);
+  const auto cot = static_cast<uint8_t>(cotRaw & 0x3F);
+  if (cot != kCotActivation) {
+    return;
+  }
+
+  auto vsq = asdu[1];
+  auto sq = (vsq & 0x80) != 0;
+  auto count = static_cast<int>(vsq & 0x7F);
+  if (count <= 0) {
+    return;
+  }
+
+  size_t offset = 6;
+  uint32_t baseIoa = 0;
+  if (sq) {
+    if (asdu.size() < offset + 3) {
+      return;
+    }
+    baseIoa = static_cast<uint32_t>(asdu[offset]) |
+        (static_cast<uint32_t>(asdu[offset + 1]) << 8) |
+        (static_cast<uint32_t>(asdu[offset + 2]) << 16);
+    offset += 3;
+  }
+
+  for (int i = 0; i < count; ++i) {
+    uint32_t ioa = 0;
+    if (!sq) {
+      if (asdu.size() < offset + 3) {
+        return;
+      }
+      ioa = static_cast<uint32_t>(asdu[offset]) |
+          (static_cast<uint32_t>(asdu[offset + 1]) << 8) |
+          (static_cast<uint32_t>(asdu[offset + 2]) << 16);
+      offset += 3;
+    } else {
+      ioa = baseIoa + static_cast<uint32_t>(i);
+    }
+
+    if (asdu.size() < offset + 5) {
+      return;
+    }
+    uint32_t bits = static_cast<uint32_t>(asdu[offset]) |
+        (static_cast<uint32_t>(asdu[offset + 1]) << 8) |
+        (static_cast<uint32_t>(asdu[offset + 2]) << 16) |
+        (static_cast<uint32_t>(asdu[offset + 3]) << 24);
+    float f = 0.0f;
+    std::memcpy(&f, &bits, sizeof(f));
+    auto qos = static_cast<uint8_t>(asdu[offset + 4]);
+    offset += 5;
+
+    const bool select = (qos & kQosSelectMask) != 0;
+    const double value = static_cast<double>(f);
+
+    auto sendConfirm = [this, ioa, value, select](uint8_t cause, bool positive) {
+      auto asdu = buildSetpointCommandAsdu(ioa, value, select, cause, positive);
+      if (asdu.empty()) {
+        return;
+      }
+      enqueueAsdu(std::move(asdu));
+    };
+
+    if (select) {
+      LOG_INFO("IEC104 收到设点预置: conn_name={}, ioa={}, value={}", config_.conn_name(), ioa, value);
+      sendConfirm(kCotActivationCon, true);
+      continue;
+    }
+
+    LOG_INFO("IEC104 收到设点执行: conn_name={}, ioa={}, value={}", config_.conn_name(), ioa, value);
+    if (onCommand_) {
+      CommandValue cv;
+      cv.ioa = ioa;
+      cv.type = IEC104Proto::POINT_TYPE_FLOAT;
+      cv.doubleValue = value;
+      onCommand_(cv);
+    }
+    sendConfirm(kCotActivationCon, true);
+    sendConfirm(kCotActivationTermination, true);
   }
 }
 
@@ -1205,6 +1471,66 @@ std::vector<uint8_t> TcpSession::buildTimeSyncAsdu(uint8_t cause, int64_t tsMs) 
   return asdu;
 }
 
+std::vector<uint8_t> TcpSession::buildSingleCommandAsdu(uint32_t ioa,
+                                                        bool value,
+                                                        bool select,
+                                                        uint8_t cause,
+                                                        bool positive) const {
+  std::vector<uint8_t> asdu;
+  asdu.reserve(kAsduHeaderSize + 3 + 1);
+  asdu.emplace_back(kTypeIdSingleCommand);
+  asdu.emplace_back(0x01);
+  asdu.emplace_back(buildCot(cause, positive));
+  asdu.emplace_back(static_cast<uint8_t>(config_.oa() & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>(config_.ca() & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>((config_.ca() >> 8) & 0xFF));
+
+  asdu.emplace_back(static_cast<uint8_t>(ioa & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>((ioa >> 8) & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>((ioa >> 16) & 0xFF));
+
+  uint8_t sco = value ? kScoValueMask : 0x00;
+  if (select) {
+    sco |= kScoSelectMask;
+  }
+  asdu.emplace_back(sco);
+  return asdu;
+}
+
+std::vector<uint8_t> TcpSession::buildSetpointCommandAsdu(uint32_t ioa,
+                                                          double value,
+                                                          bool select,
+                                                          uint8_t cause,
+                                                          bool positive) const {
+  std::vector<uint8_t> asdu;
+  asdu.reserve(kAsduHeaderSize + 3 + 4 + 1);
+  asdu.emplace_back(kTypeIdSetpointShort);
+  asdu.emplace_back(0x01);
+  asdu.emplace_back(buildCot(cause, positive));
+  asdu.emplace_back(static_cast<uint8_t>(config_.oa() & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>(config_.ca() & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>((config_.ca() >> 8) & 0xFF));
+
+  asdu.emplace_back(static_cast<uint8_t>(ioa & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>((ioa >> 8) & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>((ioa >> 16) & 0xFF));
+
+  float f = toFloat(value);
+  uint32_t bits = 0;
+  std::memcpy(&bits, &f, sizeof(f));
+  asdu.emplace_back(static_cast<uint8_t>(bits & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>((bits >> 8) & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>((bits >> 16) & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>((bits >> 24) & 0xFF));
+
+  uint8_t qos = 0x00;
+  if (select) {
+    qos |= kQosSelectMask;
+  }
+  asdu.emplace_back(qos);
+  return asdu;
+}
+
 bool TcpSession::encodeCp56Time2a(int64_t tsMs, std::array<uint8_t, kCp56Time2aSize>* out) {
   if (out == nullptr) {
     return false;
@@ -1334,7 +1660,7 @@ void TcpSession::setDataTransferActive(bool active, const char *reason) {
   sendUnacked_ = 0;
   sendAckedSeq_ = sendSeq_;
   pendingAsdu_.clear();
-  clearTelemetryQueue();
+  clearPointQueue();
 }
 
 bool TcpSession::isMasterStation() const {
@@ -1371,6 +1697,50 @@ void TcpSession::sendTimeSync(int64_t tsMs) {
     return;
   }
   LOG_INFO("IEC104 发送对时命令: conn_name={}, ts_ms={}", config_.conn_name(), tsMs);
+  enqueueAsdu(std::move(asdu));
+}
+
+void TcpSession::sendSingleCommand(uint32_t ioa, bool value, bool select) {
+  if (!isMasterStation()) {
+    LOG_WARNING("IEC104 非主站发送遥控命令: conn_name={}", config_.conn_name());
+    return;
+  }
+  if (!dataTransferActive_) {
+    LOG_WARNING("IEC104 未激活状态发送遥控命令: conn_name={}", config_.conn_name());
+    return;
+  }
+  auto asdu = buildSingleCommandAsdu(ioa, value, select, kCotActivation, true);
+  if (asdu.empty()) {
+    LOG_WARNING("IEC104 构造遥控命令失败: conn_name={}, ioa={}", config_.conn_name(), ioa);
+    return;
+  }
+  LOG_INFO("IEC104 发送遥控命令: conn_name={}, ioa={}, value={}, select={}",
+           config_.conn_name(),
+           ioa,
+           value,
+           select);
+  enqueueAsdu(std::move(asdu));
+}
+
+void TcpSession::sendSetpointCommand(uint32_t ioa, double value) {
+  if (!isMasterStation()) {
+    LOG_WARNING("IEC104 非主站发送设点命令: conn_name={}", config_.conn_name());
+    return;
+  }
+  if (!dataTransferActive_) {
+    LOG_WARNING("IEC104 未激活状态发送设点命令: conn_name={}", config_.conn_name());
+    return;
+  }
+  if (!std::isfinite(value)) {
+    LOG_WARNING("IEC104 设点值非法: conn_name={}, ioa={}, value={}", config_.conn_name(), ioa, value);
+    return;
+  }
+  auto asdu = buildSetpointCommandAsdu(ioa, value, false, kCotActivation, true);
+  if (asdu.empty()) {
+    LOG_WARNING("IEC104 构造设点命令失败: conn_name={}, ioa={}", config_.conn_name(), ioa);
+    return;
+  }
+  LOG_INFO("IEC104 发送设点命令: conn_name={}, ioa={}, value={}", config_.conn_name(), ioa, value);
   enqueueAsdu(std::move(asdu));
 }
 

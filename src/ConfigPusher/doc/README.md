@@ -36,7 +36,7 @@ ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRT
 - 使用 Protobuf JSON 映射：枚举需写全名（例如 `ROLE_SERVER`、`POINT_TYPE_FLOAT`、`FUNCTION_READ_COILS`）
 - `modbus_rtu.jsonc` 的 `function` 支持十六进制字符串（`0x01`/`0x03`），解析时会自动转换为枚举值
 - `point_table.conn_name` 可省略（默认使用 `link.config.conn_name`）
-- IEC104 可选下发点值合包参数（`telemetry_batch_window_ms/telemetry_max_asdu_bytes/telemetry_use_standard_limit/telemetry_dedupe`）
+- IEC104 可选下发点值上送参数（`point_batch_window_ms/point_max_asdu_bytes/point_use_standard_limit/point_dedupe/point_with_time`；默认不带时标）
 - IEC104 可选下发对时触发 tag（`time_sync_tag`；为空时默认 `__time_sync__`）
 - IEC104 点表类型支持 `POINT_TYPE_FLOAT` 与 `POINT_TYPE_SINGLE`
 - DataCenter 配置要求连接已存在（由模块或上位机创建）；若 `point_tables/routes` 引用连接不存在，则该次 DataCenter 配置不下发
@@ -82,10 +82,11 @@ IEC104 示例：
             "ca": 1,
             "oa": 1,
             "apci": { "k": 12, "w": 8, "t0": 30, "t1": 15, "t2": 10, "t3": 20 },
-            "telemetry_batch_window_ms": 20,
-            "telemetry_max_asdu_bytes": 240,
-            "telemetry_use_standard_limit": false,
-            "telemetry_dedupe": true,
+            "point_batch_window_ms": 20,
+            "point_max_asdu_bytes": 240,
+            "point_use_standard_limit": false,
+            "point_dedupe": true,
+            "point_with_time": false,
             "time_sync_tag": "__time_sync__"
           }
         },

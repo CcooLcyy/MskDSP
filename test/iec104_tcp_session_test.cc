@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <atomic>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/read.hpp>
 #include <boost/asio/write.hpp>
@@ -20,9 +21,20 @@ using tcp = boost::asio::ip::tcp;
 constexpr uint8_t kApduStart = 0x68;
 constexpr uint8_t kUStartDtAct = 0x07;
 constexpr uint8_t kUStartDtCon = 0x0B;
+constexpr uint8_t kTypeIdSinglePoint = 1;
+constexpr uint8_t kTypeIdSinglePointWithTime = 30;
+constexpr uint8_t kTypeIdMeasuredValueShort = 13;
+constexpr uint8_t kTypeIdMeasuredValueShortWithTime = 36;
 constexpr uint8_t kTypeIdInterrogationCmd = 100;
+constexpr uint8_t kTypeIdSingleCommand = 45;
 constexpr uint8_t kCotActivation = 6;
+constexpr uint8_t kCotActivationCon = 7;
+constexpr uint8_t kCotActivationTermination = 10;
+constexpr uint8_t kCotNegative = 0x40;
+constexpr uint8_t kCotSpontaneous = 3;
 constexpr uint8_t kQoiStation = 20;
+constexpr uint8_t kScoSelectMask = 0x80;
+constexpr uint8_t kScoValueMask = 0x01;
 
 enum class FrameType { I, S, U };
 
@@ -111,6 +123,26 @@ std::vector<uint8_t> BuildIFrame(uint16_t send_seq, uint16_t recv_seq, const std
   WriteSeq(&apdu, 4, recv_seq);
   apdu.insert(apdu.end(), asdu.begin(), asdu.end());
   return apdu;
+}
+
+std::vector<uint8_t> BuildSingleCommandAsdu(uint32_t ioa, bool value, bool select, uint8_t cause) {
+  std::vector<uint8_t> asdu;
+  asdu.reserve(10);
+  asdu.emplace_back(kTypeIdSingleCommand);
+  asdu.emplace_back(0x01);
+  asdu.emplace_back(static_cast<uint8_t>(cause & 0x3F));
+  asdu.emplace_back(0x00);
+  asdu.emplace_back(0x01);
+  asdu.emplace_back(0x00);
+  asdu.emplace_back(static_cast<uint8_t>(ioa & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>((ioa >> 8) & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>((ioa >> 16) & 0xFF));
+  uint8_t sco = value ? kScoValueMask : 0x00;
+  if (select) {
+    sco |= kScoSelectMask;
+  }
+  asdu.emplace_back(sco);
+  return asdu;
 }
 
 struct SocketPair {
@@ -224,6 +256,210 @@ TEST(IEC104TcpSessionTest, DelayedAckUsesT2Timer) {
   ASSERT_FALSE(s_frame.empty());
   EXPECT_EQ(FrameTypeOf(s_frame), FrameType::S);
   EXPECT_EQ(ParseSeq(s_frame, 4), 1);
+
+  session->Stop();
+  io->stop();
+}
+
+// 验证遥控预置后执行会回调命令并发送确认报文。
+TEST(IEC104TcpSessionTest, SingleCommandSelectExecute) {
+  auto io = std::make_shared<boost::asio::io_context>();
+  auto sockets = MakeConnectedSockets(*io);
+
+  auto config = MakeConfig("cmd-select-execute", IEC104Proto::ROLE_SERVER, 2, 2, 1, 5, 8);
+  auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
+
+  std::promise<IEC104::CommandValue> cmdPromise;
+  session->SetCommandCallback([&](const IEC104::CommandValue& cv) { cmdPromise.set_value(cv); });
+  session->Start(std::move(sockets.session_socket));
+
+  std::jthread session_thread([&]() { io->run(); });
+
+  auto start_act = BuildUFrame(kUStartDtAct);
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(start_act));
+
+  auto start_con = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "STARTDT_CON");
+  ASSERT_FALSE(start_con.empty());
+  EXPECT_EQ(FrameTypeOf(start_con), FrameType::U);
+  EXPECT_EQ(start_con[2], kUStartDtCon);
+
+  auto select_asdu = BuildSingleCommandAsdu(100, true, true, kCotActivation);
+  auto select_frame = BuildIFrame(0, 0, select_asdu);
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(select_frame));
+
+  auto select_con = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "SELECT_CON");
+  ASSERT_FALSE(select_con.empty());
+  ASSERT_EQ(FrameTypeOf(select_con), FrameType::I);
+  ASSERT_GT(select_con.size(), 6u);
+  EXPECT_EQ(select_con[6], kTypeIdSingleCommand);
+  EXPECT_EQ(static_cast<uint8_t>(select_con[8] & 0x3F), kCotActivationCon);
+
+  auto exec_asdu = BuildSingleCommandAsdu(100, true, false, kCotActivation);
+  auto exec_frame = BuildIFrame(1, 0, exec_asdu);
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(exec_frame));
+
+  auto exec_con = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "EXEC_CON");
+  ASSERT_FALSE(exec_con.empty());
+  EXPECT_EQ(exec_con[6], kTypeIdSingleCommand);
+  EXPECT_EQ(static_cast<uint8_t>(exec_con[8] & 0x3F), kCotActivationCon);
+
+  auto exec_term = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "EXEC_TERM");
+  ASSERT_FALSE(exec_term.empty());
+  EXPECT_EQ(exec_term[6], kTypeIdSingleCommand);
+  EXPECT_EQ(static_cast<uint8_t>(exec_term[8] & 0x3F), kCotActivationTermination);
+
+  auto future = cmdPromise.get_future();
+  auto status = future.wait_for(std::chrono::milliseconds(500));
+  ASSERT_EQ(status, std::future_status::ready);
+  auto cmd = future.get();
+  EXPECT_EQ(cmd.ioa, 100u);
+  EXPECT_EQ(cmd.type, IEC104Proto::POINT_TYPE_SINGLE);
+  EXPECT_TRUE(cmd.boolValue);
+
+  session->Stop();
+  io->stop();
+}
+
+// 验证未预置的遥控执行会返回否定确认且不回调命令。
+TEST(IEC104TcpSessionTest, SingleCommandExecuteWithoutSelect) {
+  auto io = std::make_shared<boost::asio::io_context>();
+  auto sockets = MakeConnectedSockets(*io);
+
+  auto config = MakeConfig("cmd-execute-only", IEC104Proto::ROLE_SERVER, 2, 2, 1, 5, 8);
+  auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
+
+  std::atomic<bool> called{false};
+  session->SetCommandCallback([&](const IEC104::CommandValue&) { called = true; });
+  session->Start(std::move(sockets.session_socket));
+
+  std::jthread session_thread([&]() { io->run(); });
+
+  auto start_act = BuildUFrame(kUStartDtAct);
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(start_act));
+
+  auto start_con = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "STARTDT_CON");
+  ASSERT_FALSE(start_con.empty());
+  EXPECT_EQ(FrameTypeOf(start_con), FrameType::U);
+  EXPECT_EQ(start_con[2], kUStartDtCon);
+
+  auto exec_asdu = BuildSingleCommandAsdu(200, false, false, kCotActivation);
+  auto exec_frame = BuildIFrame(0, 0, exec_asdu);
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(exec_frame));
+
+  auto exec_con = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "EXEC_CON_NEGATIVE");
+  ASSERT_FALSE(exec_con.empty());
+  ASSERT_EQ(FrameTypeOf(exec_con), FrameType::I);
+  ASSERT_GT(exec_con.size(), 6u);
+  EXPECT_EQ(exec_con[6], kTypeIdSingleCommand);
+  EXPECT_EQ(static_cast<uint8_t>(exec_con[8] & 0x3F), kCotActivationCon);
+  EXPECT_NE(exec_con[8] & kCotNegative, 0);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  EXPECT_FALSE(called.load());
+
+  session->Stop();
+  io->stop();
+}
+
+// 验证 point_with_time=false 时上送点值使用不带时标类型。
+TEST(IEC104TcpSessionTest, PointWithoutTimeUsesNoTimestampTypes) {
+  auto io = std::make_shared<boost::asio::io_context>();
+  auto sockets = MakeConnectedSockets(*io);
+
+  auto config = MakeConfig("point-no-time", IEC104Proto::ROLE_SERVER, 2, 2, 1, 5, 8);
+  config.set_point_batch_window_ms(1);
+  config.set_point_with_time(false);
+  auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
+  session->Start(std::move(sockets.session_socket));
+
+  std::jthread session_thread([&]() { io->run(); });
+
+  auto start_act = BuildUFrame(kUStartDtAct);
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(start_act));
+
+  auto start_con = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "启动确认");
+  ASSERT_FALSE(start_con.empty());
+  EXPECT_EQ(FrameTypeOf(start_con), FrameType::U);
+  EXPECT_EQ(start_con[2], kUStartDtCon);
+
+  IEC104::PointValue mv;
+  mv.ioa = 1;
+  mv.type = IEC104Proto::POINT_TYPE_FLOAT;
+  mv.doubleValue = 1.23;
+  mv.quality = 0;
+  session->SendPointValue(mv, kCotSpontaneous);
+
+  auto mv_apdu = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "遥测无时标");
+  ASSERT_FALSE(mv_apdu.empty());
+  ASSERT_EQ(FrameTypeOf(mv_apdu), FrameType::I);
+  ASSERT_GT(mv_apdu.size(), 6u);
+  EXPECT_EQ(mv_apdu[6], kTypeIdMeasuredValueShort);
+
+  IEC104::PointValue sv;
+  sv.ioa = 2;
+  sv.type = IEC104Proto::POINT_TYPE_SINGLE;
+  sv.boolValue = true;
+  sv.quality = 0;
+  session->SendPointValue(sv, kCotSpontaneous);
+
+  auto sp_apdu = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "单点无时标");
+  ASSERT_FALSE(sp_apdu.empty());
+  ASSERT_EQ(FrameTypeOf(sp_apdu), FrameType::I);
+  ASSERT_GT(sp_apdu.size(), 6u);
+  EXPECT_EQ(sp_apdu[6], kTypeIdSinglePoint);
+
+  session->Stop();
+  io->stop();
+}
+
+// 验证 point_with_time=true 时上送点值使用带时标类型。
+TEST(IEC104TcpSessionTest, PointWithTimeUsesTimestampTypes) {
+  auto io = std::make_shared<boost::asio::io_context>();
+  auto sockets = MakeConnectedSockets(*io);
+
+  auto config = MakeConfig("point-with-time", IEC104Proto::ROLE_SERVER, 2, 2, 1, 5, 8);
+  config.set_point_batch_window_ms(1);
+  config.set_point_with_time(true);
+  auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
+  session->Start(std::move(sockets.session_socket));
+
+  std::jthread session_thread([&]() { io->run(); });
+
+  auto start_act = BuildUFrame(kUStartDtAct);
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(start_act));
+
+  auto start_con = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "启动确认");
+  ASSERT_FALSE(start_con.empty());
+  EXPECT_EQ(FrameTypeOf(start_con), FrameType::U);
+  EXPECT_EQ(start_con[2], kUStartDtCon);
+
+  IEC104::PointValue mv;
+  mv.ioa = 1;
+  mv.type = IEC104Proto::POINT_TYPE_FLOAT;
+  mv.doubleValue = 2.34;
+  mv.quality = 0;
+  mv.tsMs = 1710000000000;
+  session->SendPointValue(mv, kCotSpontaneous);
+
+  auto mv_apdu = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "遥测带时标");
+  ASSERT_FALSE(mv_apdu.empty());
+  ASSERT_EQ(FrameTypeOf(mv_apdu), FrameType::I);
+  ASSERT_GT(mv_apdu.size(), 6u);
+  EXPECT_EQ(mv_apdu[6], kTypeIdMeasuredValueShortWithTime);
+
+  IEC104::PointValue sv;
+  sv.ioa = 2;
+  sv.type = IEC104Proto::POINT_TYPE_SINGLE;
+  sv.boolValue = true;
+  sv.quality = 0;
+  sv.tsMs = 1710000000000;
+  session->SendPointValue(sv, kCotSpontaneous);
+
+  auto sp_apdu = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "单点带时标");
+  ASSERT_FALSE(sp_apdu.empty());
+  ASSERT_EQ(FrameTypeOf(sp_apdu), FrameType::I);
+  ASSERT_GT(sp_apdu.size(), 6u);
+  EXPECT_EQ(sp_apdu[6], kTypeIdSinglePointWithTime);
 
   session->Stop();
   io->stop();

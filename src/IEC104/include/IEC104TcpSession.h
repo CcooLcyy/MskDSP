@@ -54,6 +54,7 @@ public:
   using PointValueCallback = TcpLink::PointValueCallback;
   using SnapshotProvider = TcpLink::SnapshotProvider;
   using TimeSyncCallback = TcpLink::TimeSyncCallback;
+  using CommandCallback = TcpLink::CommandCallback;
 
   TcpSession(boost::asio::io_context& io, IEC104Proto::LinkConfig config, bool isClient);
   ~TcpSession();
@@ -63,10 +64,13 @@ public:
 
   void SendPointValue(const PointValue& value, uint8_t cause);
   void SendTimeSync(int64_t tsMs);
+  void SendSingleCommand(uint32_t ioa, bool value, bool useSelect);
+  void SendSetpointCommand(uint32_t ioa, double value);
 
   void SetPointValueCallback(PointValueCallback cb);
   void SetInterrogationSnapshotProvider(SnapshotProvider provider);
   void SetTimeSyncCallback(TimeSyncCallback cb);
+  void SetCommandCallback(CommandCallback cb);
   void SetClosedCallback(std::function<void()> cb);
 
 private:
@@ -96,7 +100,7 @@ private:
   boost::asio::steady_timer t1Timer_;
   boost::asio::steady_timer t2Timer_;
   boost::asio::steady_timer t3Timer_;
-  boost::asio::steady_timer telemetryFlushTimer_;
+  boost::asio::steady_timer pointFlushTimer_;
 
   IEC104Proto::LinkConfig config_;
   bool isClient_;
@@ -118,6 +122,7 @@ private:
   PointValueCallback onPointValue_;
   SnapshotProvider interrogationSnapshotProvider_;
   TimeSyncCallback onTimeSync_;
+  CommandCallback onCommand_;
   std::function<void()> onClosed_;
 
   struct PendingPointValue {
@@ -125,12 +130,19 @@ private:
     uint8_t cause = 0;
   };
 
-  std::unordered_map<uint64_t, PendingPointValue> telemetryPendingByKey_;
-  std::vector<PendingPointValue> telemetryPending_;
-  std::chrono::milliseconds telemetryBatchWindow_{0};
-  uint32_t telemetryMaxAsduBytes_ = 0;
-  bool telemetryDedupe_ = true;
-  bool telemetryFlushScheduled_ = false;
+  std::unordered_map<uint64_t, PendingPointValue> pointPendingByKey_;
+  std::vector<PendingPointValue> pointPending_;
+  std::chrono::milliseconds pointBatchWindow_{0};
+  uint32_t pointMaxAsduBytes_ = 0;
+  bool pointDedupe_ = true;
+  bool pointFlushScheduled_ = false;
+
+  struct SingleCommandSelect {
+    bool value = false;
+    std::chrono::steady_clock::time_point time;
+  };
+  std::unordered_map<uint32_t, SingleCommandSelect> singleCommandSelectByIoa_;
+  bool pointWithTime_ = false;
 
   void handleRead();
   void handleFrame(const std::vector<uint8_t>& apdu);
@@ -141,15 +153,17 @@ private:
   void processAsdu(const std::vector<uint8_t>& asdu);
   void handleMeasuredValue(const std::vector<uint8_t>& asdu, bool withTime);
   void handleSinglePoint(const std::vector<uint8_t>& asdu, bool withTime);
+  void handleSingleCommand(const std::vector<uint8_t>& asdu);
+  void handleSetpointCommand(const std::vector<uint8_t>& asdu);
   void handleTimeSyncCommand(const std::vector<uint8_t>& asdu);
   void handleInterrogation(const std::vector<uint8_t>& asdu);
 
   void enqueueAsdu(std::vector<uint8_t> asdu);
   void enqueuePointValue(const PointValue& value, uint8_t cause);
-  void scheduleTelemetryFlush();
-  void flushTelemetry(const boost::system::error_code& ec);
-  void drainTelemetryQueue();
-  void clearTelemetryQueue();
+  void schedulePointFlush();
+  void flushPoint(const boost::system::error_code& ec);
+  void drainPointQueue();
+  void clearPointQueue();
   void enqueuePointValuesBatch(std::vector<PointValue> values, uint8_t cause);
   void trySendPending();
   void sendIFrame(const std::vector<uint8_t>& asdu);
@@ -182,6 +196,16 @@ private:
                                                bool withTime) const;
   std::vector<uint8_t> buildInterrogationAsdu(uint8_t cause, uint8_t qoi) const;
   std::vector<uint8_t> buildTimeSyncAsdu(uint8_t cause, int64_t tsMs) const;
+  std::vector<uint8_t> buildSingleCommandAsdu(uint32_t ioa,
+                                              bool value,
+                                              bool select,
+                                              uint8_t cause,
+                                              bool positive) const;
+  std::vector<uint8_t> buildSetpointCommandAsdu(uint32_t ioa,
+                                                double value,
+                                                bool select,
+                                                uint8_t cause,
+                                                bool positive) const;
   static bool encodeCp56Time2a(int64_t tsMs, std::array<uint8_t, 7>* out);
   static bool decodeCp56Time2a(const uint8_t* data, size_t size, int64_t* outMs);
 
@@ -194,7 +218,9 @@ private:
   bool isMasterStation() const;
   void sendAutoInterrogation(uint8_t qoi);
   void sendTimeSync(int64_t tsMs);
-  void initTelemetryBatchSettings();
+  void sendSingleCommand(uint32_t ioa, bool value, bool select);
+  void sendSetpointCommand(uint32_t ioa, double value);
+  void initPointBatchSettings();
 
   void startT0();
   void stopT0();

@@ -3,7 +3,7 @@
 ## 简介
 IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并通过 DataCenter 完成“点值转发/路由”的闭环。
 
-当前实现聚焦：**遥测（M_ME_TF_1，短浮点带时标）** 与 **单点遥信（M_SP_TB_1，带时标）**；遥控等后续按需扩展。
+当前实现聚焦：**短浮点遥测（M_ME_NC_1/M_ME_TF_1）**、**单点遥信（M_SP_NA_1/M_SP_TB_1）**、**单点遥控（C_SC_NA_1，选择-执行）** 与 **短浮点设点（C_SE_NC_1）**。
 
 ## 能力清单
 - 传输角色 `role`：Server / Client（决定 TCP 监听/连接）
@@ -19,7 +19,8 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
   - STATION_ROLE_MASTER 在 STARTDT 成功后自动发起总召 `C_IC_NA_1(QOI=20)`
 - 点值合包：自发点值支持窗口合包与 IOA 顺序打包，连续 IOA 使用 SQ=1 压缩；总召快照按帧大小批量打包
 - 对时：STATION_ROLE_MASTER 可通过 `time_sync_tag` 订阅触发或 gRPC `SendTimeSync` 主动触发；STATION_ROLE_SLAVE 收到对时命令后发布事件到 DataCenter
-- 时标：发送默认使用带时标类型（`M_SP_TB_1`/`M_ME_TF_1`），接收兼容不带时标类型
+- 时标：发送默认使用不带时标类型（`M_SP_NA_1`/`M_ME_NC_1`），可通过 `point_with_time` 切换为带时标；接收兼容带/不带时标类型
+- 遥控/设点：主站通过 DataCenter 订阅命令触发发送 `C_SC_NA_1`（预置+执行）与 `C_SE_NC_1`；从站收到命令后发布到 DataCenter
 
 ## 接口与协议
 - Protobuf：`protobuf/IEC104.proto`
@@ -58,6 +59,7 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
 - `deadband`：工程量单位；`|value - last_reported| < deadband` 时不上报，<=0 表示不过滤，仅对短浮点生效。
 - `deadband` 同时作用于 STATION_ROLE_MASTER 发布与 STATION_ROLE_SLAVE 自发上送，总召快照不受 deadband 影响。
 - STATION_ROLE_MASTER 收到短浮点后按 `scale/offset` 转为工程量再发布；STATION_ROLE_SLAVE 上送短浮点时按 `scale/offset` 反向换算；单点遥信忽略这些字段。
+- 遥控/设点复用同一张点表：`POINT_TYPE_SINGLE` 作为单点遥控，`POINT_TYPE_FLOAT` 作为短浮点设点；设点按 `scale/offset` 做工程量换算。
 
 ConfigPusher 点表示例（含 scale/offset/deadband，字段可省略，默认 scale=1、offset=0、deadband=0）：
 ```jsonc
@@ -71,12 +73,21 @@ ConfigPusher 点表示例（含 scale/offset/deadband，字段可省略，默认
 }
 ```
 
-### 点值合包参数
-- `telemetry_batch_window_ms`：自发点值合包窗口（毫秒）；0 表示使用默认值（20ms）。
-- `telemetry_max_asdu_bytes`：ASDU 单帧最大字节数（<=249）；0 表示默认值（249）。
-- `telemetry_use_standard_limit`：true 时强制使用标准上限 249 字节，忽略 `telemetry_max_asdu_bytes`。
-- `telemetry_dedupe`：自发点值合包去重（按 IOA 保留最新值），默认开启。
+### 点值上送参数
+- `point_batch_window_ms`：自发点值合包窗口（毫秒）；0 表示使用默认值（20ms）。
+- `point_max_asdu_bytes`：ASDU 单帧最大字节数（<=249）；0 表示默认值（249）。
+- `point_use_standard_limit`：true 时强制使用标准上限 249 字节，忽略 `point_max_asdu_bytes`。
+- `point_dedupe`：自发点值合包去重（按 IOA 保留最新值），默认开启。
+- `point_with_time`：点值上送是否带时标；false 默认不带（`M_SP_NA_1`/`M_ME_NC_1`），true 使用带时标（`M_SP_TB_1`/`M_ME_TF_1`）。
+- `point_with_time` 同时影响自发上送与总召应答。
 - 合包策略：按 IOA 顺序组织报文；连续 IOA 使用 SQ=1 压缩，不连续则 SQ=0 带 IOA。
+
+### 遥控/设点（命令触发）
+- 触发方式：上位机或其他模块通过 DataCenter 路由将命令写入 IEC104 的 `conn_id + tag`，IEC104 主站订阅后发送命令。
+- 单点遥控：`POINT_TYPE_SINGLE`，DataCenter value 使用 `bool`（或 int/double 非 0 视为 true）；IEC104 发送 `C_SC_NA_1`，先预置再执行。
+- 短浮点设点：`POINT_TYPE_FLOAT`，DataCenter value 使用 `double`（或 int 转换为 double）；IEC104 发送 `C_SE_NC_1`（执行）。
+- 设点工程量：DataCenter 侧提供工程量；IEC104 发送前按 `scale/offset` 反向换算为原始值；从站收到命令后按 `scale/offset` 正向换算再发布到 DataCenter。
+- 命令确认：IEC104 仅在 IEC104 协议内发送 ACT_CON/ACT_TERM，不向 DataCenter 发布确认结果点。
 
 ### 对时触发
 - `time_sync_tag`：STATION_ROLE_MASTER 订阅该 tag 的 DataCenter 更新并发送对时命令 `C_CS_NA_1`；为空时默认 `__time_sync__`。
@@ -97,6 +108,11 @@ IEC104 链路配置示例（上位机下发的 LinkConfig 内容）：
   "ca": 1,
   "oa": 0,
   "apci": { "k": 12, "w": 8, "t0": 30, "t1": 15, "t2": 10, "t3": 20 },
+  "point_batch_window_ms": 20,
+  "point_max_asdu_bytes": 240,
+  "point_use_standard_limit": false,
+  "point_dedupe": true,
+  "point_with_time": false,
   "time_sync_tag": "__time_sync__"
 }
 ```
@@ -141,7 +157,7 @@ ctest --test-dir build -R iec104TcpSession_test --output-on-failure
 ```
 
 ## 未实现/后续计划
-- 协议类型：目前仅支持单点遥信 `M_SP_TB_1`、短浮点遥测 `M_ME_TF_1` 与总召 `C_IC_NA_1`；遥控/设点等未实现
+- 协议类型：目前支持单点遥信 `M_SP_TB_1`、短浮点遥测 `M_ME_TF_1`、总召 `C_IC_NA_1`、单点遥控 `C_SC_NA_1` 与短浮点设点 `C_SE_NC_1`；双点遥控/归一化设点等未实现
 - 链路层完善：已支持 `k/w` 与 `t0–t3`；未实现 I 帧重传策略与更细粒度链路统计
 - 报文打包：当前仅覆盖短浮点与单点遥信类型，其他类型未实现
 - 多主站/多会话：Server 模式当前同一 `conn_name` 只保留一个活动连接；多主站并发、会话级隔离策略未实现

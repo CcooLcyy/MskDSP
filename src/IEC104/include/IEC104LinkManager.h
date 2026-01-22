@@ -62,6 +62,9 @@ private:
 
     std::shared_ptr<grpc::ClientContext> dcTimeSyncContext;
     std::jthread dcTimeSyncThread;
+
+    std::shared_ptr<grpc::ClientContext> dcCommandContext;
+    std::jthread dcCommandThread;
   };
 
   static grpc::Status validateConnName(const std::string &connName);
@@ -84,8 +87,11 @@ private:
   void stopDataCenterSubscribeLocked(LinkRuntime *link);
   void startTimeSyncSubscribeLocked(const std::string &connName, LinkRuntime *link);
   void stopTimeSyncSubscribeLocked(LinkRuntime *link);
+  void startCommandSubscribeLocked(const std::string &connName, LinkRuntime *link);
+  void stopCommandSubscribeLocked(LinkRuntime *link);
 
   grpc::Status handleClientPointValue(const std::string &connName, const PointValue &pv);
+  grpc::Status handleCommandValue(const std::string &connName, const CommandValue &cv);
   grpc::Status handleTimeSyncCommand(const std::string &connName, int64_t tsMs);
   std::vector<PointValue> buildInterrogationSnapshot(const std::string &connName);
 

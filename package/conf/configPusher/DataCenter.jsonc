@@ -3,10 +3,11 @@
   "point_tables": [
     {
       "module_name": "IEC104",
-      "conn_name": "模拟主站",
+      "conn_name": "模拟从站",
       "replace": true,
       "tags": [
-        "1-A相电压"
+        "1-A相电压",
+        "1-总有功功率"
       ]
     },
     {
@@ -14,7 +15,8 @@
       "conn_name": "模拟Modbus主站",
       "replace": true,
       "tags": [
-        "A相电压"
+        "A相电压",
+        "总有功功率"
       ]
     }
   ],
@@ -29,8 +31,20 @@
         },
         "dst": {
           "module_name": "IEC104",
-          "conn_name": "模拟主站",
+          "conn_name": "模拟从站",
           "tag": "1-A相电压"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "模拟Modbus主站",
+          "tag": "总有功功率"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟从站",
+          "tag": "1-总有功功率"
         }
       }
     ]

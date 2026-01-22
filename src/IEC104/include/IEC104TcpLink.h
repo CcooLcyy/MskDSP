@@ -29,11 +29,19 @@ struct PointValue {
   int64_t tsMs = 0;
 };
 
+struct CommandValue {
+  uint32_t ioa = 0;
+  IEC104Proto::PointType type = IEC104Proto::POINT_TYPE_UNSPECIFIED;
+  bool boolValue = false;
+  double doubleValue = 0.0;
+};
+
 class TcpLink {
 public:
   using PointValueCallback = std::function<void(const PointValue&)>;
   using SnapshotProvider = std::function<std::vector<PointValue>()>;
   using TimeSyncCallback = std::function<void(int64_t)>;
+  using CommandCallback = std::function<void(const CommandValue&)>;
 
   explicit TcpLink(IEC104Proto::LinkConfig config);
   ~TcpLink();
@@ -47,9 +55,12 @@ public:
 
   void SendPointValue(const PointValue& value, uint8_t cause);
   void SendTimeSync(int64_t tsMs);
+  void SendSingleCommand(uint32_t ioa, bool value, bool useSelect);
+  void SendSetpointCommand(uint32_t ioa, double value);
   void SetPointValueCallback(PointValueCallback cb);
   void SetInterrogationSnapshotProvider(SnapshotProvider provider);
   void SetTimeSyncCallback(TimeSyncCallback cb);
+  void SetCommandCallback(CommandCallback cb);
 
 private:
   void run(std::stop_token st);
@@ -76,6 +87,7 @@ private:
   PointValueCallback onPointValue_;
   SnapshotProvider interrogationSnapshotProvider_;
   TimeSyncCallback onTimeSync_;
+  CommandCallback onCommand_;
 };
 
 }  // namespace IEC104

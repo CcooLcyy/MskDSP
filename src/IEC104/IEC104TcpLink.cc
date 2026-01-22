@@ -170,6 +170,22 @@ void TcpLink::SendTimeSync(int64_t tsMs) {
   s->SendTimeSync(tsMs);
 }
 
+void TcpLink::SendSingleCommand(uint32_t ioa, bool value, bool useSelect) {
+  auto s = session();
+  if (!s) {
+    return;
+  }
+  s->SendSingleCommand(ioa, value, useSelect);
+}
+
+void TcpLink::SendSetpointCommand(uint32_t ioa, double value) {
+  auto s = session();
+  if (!s) {
+    return;
+  }
+  s->SendSetpointCommand(ioa, value);
+}
+
 void TcpLink::SetPointValueCallback(PointValueCallback cb) {
   std::lock_guard<std::mutex> lock(mu_);
   onPointValue_ = std::move(cb);
@@ -191,6 +207,14 @@ void TcpLink::SetTimeSyncCallback(TimeSyncCallback cb) {
   onTimeSync_ = std::move(cb);
   if (session_) {
     session_->SetTimeSyncCallback(onTimeSync_);
+  }
+}
+
+void TcpLink::SetCommandCallback(CommandCallback cb) {
+  std::lock_guard<std::mutex> lock(mu_);
+  onCommand_ = std::move(cb);
+  if (session_) {
+    session_->SetCommandCallback(onCommand_);
   }
 }
 
@@ -256,6 +280,7 @@ void TcpLink::startAccept() {
       session_->SetPointValueCallback(onPointValue_);
       session_->SetInterrogationSnapshotProvider(interrogationSnapshotProvider_);
       session_->SetTimeSyncCallback(onTimeSync_);
+      session_->SetCommandCallback(onCommand_);
     }
     newSession->Start(std::move(socket));
 
@@ -324,6 +349,7 @@ void TcpLink::startConnect() {
       session_->SetPointValueCallback(onPointValue_);
       session_->SetInterrogationSnapshotProvider(interrogationSnapshotProvider_);
       session_->SetTimeSyncCallback(onTimeSync_);
+      session_->SetCommandCallback(onCommand_);
     }
       newSession->Start(std::move(*sock));
     });
