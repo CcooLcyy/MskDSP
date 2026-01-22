@@ -75,6 +75,7 @@ set(MSKDSP_MODULE_TARGETS
   IEC104
   DLT645
   ModbusRTU
+  MQTTManager
   AGC
   AVC
 )

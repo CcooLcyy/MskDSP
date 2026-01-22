@@ -5,6 +5,7 @@
     "boost-json",
     "boost-log",
     "gtest",
+    "lua",
     "paho-mqttpp3",
     "protobuf",
     {
