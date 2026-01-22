@@ -78,19 +78,6 @@ set(MSKDSP_MODULE_TARGETS
   AGC
   AVC
 )
-add_custom_target(mskdsp_stage_runtime_deps ALL
-  COMMAND ${CMAKE_COMMAND}
-          -DMSKDSP_PACKAGE_DIR=${packPath}
-          -DMSKDSP_MODULE_DIR=${modulePath}
-          -DMSKDSP_LIB_DIR=${libPath}
-          -DMSKDSP_VCPKG_INSTALLED_DIR=${VCPKG_INSTALLED_DIR}
-          -DMSKDSP_VCPKG_TRIPLET=${VCPKG_TARGET_TRIPLET}
-          -DMSKDSP_OBJDUMP=${CMAKE_OBJDUMP}
-          -P ${CMAKE_SOURCE_DIR}/cmake/StageRuntimeDeps.cmake
-  COMMENT "整理 vcpkg 动态库到 package/lib"
-  DEPENDS MskDSP dspProto moduleManager ${MSKDSP_MODULE_TARGETS}
-  VERBATIM
-)
 
 if(MSKDSP_BUILD_TESTS)
   enable_testing()

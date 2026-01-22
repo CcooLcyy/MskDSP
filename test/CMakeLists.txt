@@ -493,4 +493,4 @@ add_custom_target(coverage
     USES_TERMINAL
   )
 
-add_dependencies(coverage ${MSKDSP_TEST_TARGETS} mskdsp_stage_runtime_deps)
+add_dependencies(coverage ${MSKDSP_TEST_TARGETS})
