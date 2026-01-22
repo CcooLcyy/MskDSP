@@ -7,6 +7,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <exception>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -57,6 +59,31 @@ constexpr const char *kIec104ModuleName = "IEC104";
 constexpr const char *kModbusRtuModuleName = "ModbusRTU";
 constexpr const char *kComMockModuleName = "COMMock";
 constexpr auto kModuleStartTimeout = std::chrono::seconds(5);
+
+std::optional<std::filesystem::path> ResolveConfigPusherDir() {
+  try {
+    auto libPath = boost::dll::this_line_location();
+    std::filesystem::path modulePath(libPath.string());
+    auto confDir = (modulePath.parent_path() / ".." / "conf" / "configPusher").lexically_normal();
+    std::error_code ec;
+    if (!std::filesystem::exists(confDir, ec)) {
+      LOG_WARNING("ConfigPusher 未找到模块相对配置目录: {}，继续使用相对路径", confDir.string());
+      return std::nullopt;
+    }
+    return confDir;
+  } catch (const std::exception &ex) {
+    LOG_WARNING("ConfigPusher 获取模块路径失败，继续使用相对路径: {}", ex.what());
+    return std::nullopt;
+  }
+}
+
+std::filesystem::path ResolveConfigPath(const std::optional<std::filesystem::path> &configDir,
+                                        const char *fallbackPath) {
+  if (!configDir.has_value()) {
+    return std::filesystem::path(fallbackPath);
+  }
+  return *configDir / std::filesystem::path(fallbackPath).filename();
+}
 }  // namespace
 
 ConfigPusher::ConfigPusher() :
@@ -82,10 +109,15 @@ void ConfigPusher::start(std::stop_token stopToken) {
 }
 
 void ConfigPusher::applyConfig() {
-  auto comMockConfig = LoadConfigFile(kComMockConfigPath);
-  auto iec104Config = LoadConfigFile(kIec104ConfigPath);
-  auto modbusConfig = LoadConfigFile(kModbusRtuConfigPath);
-  auto dataCenterConfig = LoadDataCenterConfigFile(kDataCenterConfigPath);
+  auto configDir = ResolveConfigPusherDir();
+  if (configDir.has_value()) {
+    LOG_INFO("ConfigPusher 配置目录已解析: {}", configDir->string());
+  }
+
+  auto comMockConfig = LoadConfigFile(ResolveConfigPath(configDir, kComMockConfigPath));
+  auto iec104Config = LoadConfigFile(ResolveConfigPath(configDir, kIec104ConfigPath));
+  auto modbusConfig = LoadConfigFile(ResolveConfigPath(configDir, kModbusRtuConfigPath));
+  auto dataCenterConfig = LoadDataCenterConfigFile(ResolveConfigPath(configDir, kDataCenterConfigPath));
 
   const bool hasComMock = comMockConfig && comMockConfig->has_com_mock() && comMockConfig->com_mock().ports_size() > 0;
   const bool hasIec104 = iec104Config && iec104Config->has_iec104() && !iec104Config->iec104().links().empty();

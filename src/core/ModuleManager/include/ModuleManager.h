@@ -2,6 +2,7 @@
 
 #include <boost/dll.hpp>
 #include <boost/dll/runtime_symbol_info.hpp>
+#include <atomic>
 #include <memory>
 #include <stop_token>
 #include <string>
@@ -116,5 +117,6 @@ private:
   std::unordered_map<std::string, ModuleManagerProto::ModuleInfo> moduleInfoByName_;
   std::unordered_map<std::string, std::vector<std::string>> reverseDependencies_;
   bool moduleInfosReady_{false};
+  std::atomic_bool moduleInfosBuilding_{false};
 };
 }  // namespace ModuleManager

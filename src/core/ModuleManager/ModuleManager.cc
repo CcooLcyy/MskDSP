@@ -11,16 +11,19 @@
 
 #include <algorithm>
 #include <boost/dll/shared_library.hpp>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iomanip>
 #include <memory>
 #include <optional>
 #include <sstream>
 #include <stop_token>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -155,6 +158,49 @@ std::string joinNames(const std::vector<std::string> &names, std::string_view se
   }
   return oss.str();
 }
+
+std::string toHex(std::string_view text) {
+  std::ostringstream oss;
+  oss << std::hex << std::setfill('0');
+  for (unsigned char c : text) {
+    oss << std::setw(2) << static_cast<int>(c);
+  }
+  return oss.str();
+}
+
+uint64_t hashBytes(const uint8_t *data, size_t size) {
+  constexpr uint64_t kOffset = 14695981039346656037ull;
+  constexpr uint64_t kPrime = 1099511628211ull;
+  uint64_t hash = kOffset;
+  for (size_t i = 0; i < size; ++i) {
+    hash ^= data[i];
+    hash *= kPrime;
+  }
+  return hash;
+}
+
+class ModuleInfosBuildGuard {
+public:
+  ModuleInfosBuildGuard(std::atomic_bool &flag, std::string_view reason) : flag_(flag) {
+    bool expected = false;
+    acquired_ = flag_.compare_exchange_strong(expected, true);
+    if (!acquired_) {
+      LOG_WARNING("模块清单正在构建，检测到并发访问: {}", reason);
+    }
+  }
+  ~ModuleInfosBuildGuard() {
+    if (acquired_) {
+      flag_.store(false);
+    }
+  }
+  bool acquired() const {
+    return acquired_;
+  }
+
+private:
+  std::atomic_bool &flag_;
+  bool acquired_{false};
+};
 
 std::string extractModuleNameFromLibName(const std::string &libName) {
   auto soPos = libName.find(".so");
@@ -375,6 +421,26 @@ bool loadModuleManifest(const std::filesystem::path &libPath, ModuleManagerProto
       }
       return false;
     }
+    const uint64_t hashOnce = hashBytes(data, size);
+    const uint8_t *dataAgain = nullptr;
+    size_t sizeAgain = 0;
+    const bool againOk = fn(&dataAgain, &sizeAgain);
+    if (!againOk || dataAgain == nullptr || sizeAgain == 0) {
+      LOG_WARNING("模块 {} manifest 二次获取失败，可能存在不稳定返回值", libPath.filename().string());
+    } else if (dataAgain != data || sizeAgain != size) {
+      LOG_WARNING("模块 {} manifest 二次获取结果不一致: ptr {} -> {}, size {} -> {}",
+                  libPath.filename().string(),
+                  static_cast<const void *>(data),
+                  static_cast<const void *>(dataAgain),
+                  size,
+                  sizeAgain);
+    } else {
+      const uint64_t hashAgain = hashBytes(dataAgain, sizeAgain);
+      if (hashAgain != hashOnce) {
+        LOG_WARNING("模块 {} manifest 内容在二次获取时发生变化，可能存在内存破坏或返回缓冲区复用",
+                    libPath.filename().string());
+      }
+    }
     LOG_INFO("解析 manifest 数据: {} bytes ({})", size, libPath.filename().string());
     if (!manifest->ParseFromArray(data, static_cast<int>(size))) {
       if (error != nullptr) {
@@ -464,15 +530,40 @@ void ModuleManager::start(std::stop_token stopToken) {
   }
 }
 void ModuleManager::ensureModuleInfos() {
+  if (moduleInfosBuilding_.load()) {
+    LOG_WARNING("模块清单正在构建，确保模块清单时检测到并发访问");
+  }
   if (!moduleInfosReady_) {
     initModuleInfos();
   }
 }
 void ModuleManager::autoStartModulesFromConfig() {
   const std::filesystem::path configPath(kAutoStartConfigPath);
+  std::error_code cwdError;
+  auto currentPath = std::filesystem::current_path(cwdError);
+  if (cwdError) {
+    LOG_WARNING("获取当前工作目录失败: {}", cwdError.message());
+  } else {
+    LOG_INFO("当前工作目录: {}", currentPath.string());
+  }
+  std::error_code absError;
+  auto absConfigPath = std::filesystem::absolute(configPath, absError);
+  if (absError) {
+    LOG_WARNING("解析自动启动配置绝对路径失败: {}", absError.message());
+  } else {
+    LOG_INFO("自动启动配置绝对路径: {}", absConfigPath.string());
+  }
+  LOG_INFO("自动启动配置路径: {}", configPath.string());
   if (!std::filesystem::exists(configPath)) {
     LOG_INFO("未找到自动启动配置文件: {}", configPath.string());
     return;
+  }
+  std::error_code sizeError;
+  auto fileSize = std::filesystem::file_size(configPath, sizeError);
+  if (sizeError) {
+    LOG_WARNING("获取自动启动配置文件大小失败: {}", sizeError.message());
+  } else {
+    LOG_INFO("自动启动配置文件大小: {} 字节", fileSize);
   }
 
   std::string raw;
@@ -480,6 +571,9 @@ void ModuleManager::autoStartModulesFromConfig() {
     LOG_ERROR("读取自动启动配置失败: {}", configPath.string());
     return;
   }
+  LOG_INFO("自动启动配置读取完成，实际字节数: {}", raw.size());
+  LOG_INFO("自动启动配置原始文本包含 auto_start_modules: {}",
+           raw.find("auto_start_modules") != std::string::npos ? "是" : "否");
 
   auto json = stripJsonComments(raw);
   google::protobuf::Value config;
@@ -496,9 +590,30 @@ void ModuleManager::autoStartModulesFromConfig() {
   }
 
   const auto &fields = config.struct_value().fields();
+  std::vector<std::string> fieldNames;
+  fieldNames.reserve(fields.size());
+  for (const auto &entry : fields) {
+    fieldNames.push_back(entry.first);
+  }
+  LOG_INFO("自动启动配置字段: {}", joinNames(fieldNames, ","));
   auto fieldIt = fields.find("auto_start_modules");
   if (fieldIt == fields.end()) {
     LOG_INFO("自动启动配置未包含 auto_start_modules");
+    auto fallbackIt = std::find_if(fields.begin(), fields.end(), [](const auto &entry) {
+      return entry.first == "auto_start_modules";
+    });
+    if (fallbackIt != fields.end()) {
+      LOG_WARNING("自动启动配置字段查找异常，疑似内存破坏或 ABI 冲突");
+    }
+    if (fields.empty()) {
+      LOG_INFO("自动启动配置字段为空，无法解析任何字段");
+    } else {
+      for (const auto &entry : fields) {
+        const auto &name = entry.first;
+        LOG_INFO("自动启动配置字段明细: 名称='{}'，字节数={}，十六进制={}", name, name.size(),
+                 toHex(name));
+      }
+    }
     return;
   }
   if (fieldIt->second.kind_case() != google::protobuf::Value::kListValue) {
@@ -838,6 +953,7 @@ void ModuleManager::saveModuleStartConfig(ModuleManagerProto::ModuleInfos module
   }
 }
 void ModuleManager::initModuleInfos() {
+  ModuleInfosBuildGuard buildGuard(moduleInfosBuilding_, "initModuleInfos");
   moduleInfos_.Clear();
   moduleInfoByName_.clear();
   reverseDependencies_.clear();
