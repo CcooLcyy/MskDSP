@@ -15,6 +15,17 @@ if [[ $# -ne 1 ]]; then
   usage
 fi
 
+rm -rf ../build-arm64
+echo "清理旧的 build-arm64 目录"
+rm -rf ../package/module
+rm -rf ../package/lib
+echo "清理旧的 package/module 和 package/lib 目录"
+rm -rf ../package/log
+rm -rf ../package/socket
+echo "清理旧的 package/log 和 package/socket 目录"
+rm -rf ../package/debug
+echo "清理旧的 package/debug 目录"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OUTPUT_PATH="${PROJECT_ROOT}/images/mskdsp"

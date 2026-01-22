@@ -62,7 +62,16 @@ while IFS= read -r -d '' path; do
     continue
   fi
   "$strip_tool" --strip-unneeded "$path"
-  "$objcopy_tool" --add-gnu-debuglink="$debug_path" "$path"
+  if ! "$objcopy_tool" --add-gnu-debuglink="$debug_path" "$path"; then
+    echo "strip_debug: 添加 debuglink 失败，尝试移除旧 debuglink 后重试: ${rel}" >&2
+    if "$objcopy_tool" --remove-section .gnu_debuglink "$path"; then
+      "$objcopy_tool" --add-gnu-debuglink="$debug_path" "$path"
+    else
+      echo "strip_debug: 移除旧 debuglink 失败，跳过 ${rel}" >&2
+      skipped=$((skipped + 1))
+      continue
+    fi
+  fi
   count=$((count + 1))
 done < <(find "$package_dir" -type f ! -path "$debug_dir/*" -print0)
 

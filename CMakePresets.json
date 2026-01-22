@@ -63,5 +63,13 @@
             "displayName": "",
             "configurePreset": "x64"
         }
+    ],
+    "packagePresets": [
+        {
+            "name": "x64",
+            "description": "",
+            "displayName": "",
+            "configurePreset": "x64"
+        }
     ]
 }
