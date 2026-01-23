@@ -43,10 +43,8 @@ protected:
   void releasePort(std::string addr);
   void reservePort(std::string addr);
   MetaData metaData_;
-  std::unique_ptr<grpc::Server> innerServer_;
-  std::unique_ptr<grpc::Server> outerServer_;
-  std::jthread innerServerThread_;
-  std::jthread outerServerThread_;
+  std::unique_ptr<grpc::Server> server_;
+  std::jthread serverThread_;
 
   // 模块内部停止标志
   std::stop_source stopSource_;

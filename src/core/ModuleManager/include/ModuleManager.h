@@ -116,6 +116,7 @@ private:
   ModuleManagerProto::ModuleInfos moduleConfig_;
   std::unordered_map<std::string, ModuleManagerProto::ModuleInfo> moduleInfoByName_;
   std::unordered_map<std::string, std::vector<std::string>> reverseDependencies_;
+  std::unordered_map<std::string, boost::dll::shared_library> manifestLibs_;
   bool moduleInfosReady_{false};
   std::atomic_bool moduleInfosBuilding_{false};
 };

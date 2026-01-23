@@ -1,22 +1,180 @@
 #include "ModuleInterface.h"
 
-#include <grpcpp/ext/proto_server_reflection_plugin.h>
 #include <grpcpp/server.h>
 #include <grpcpp/server_builder.h>
 #include <grpcpp/support/server_interceptor.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <format>
+#include <functional>
+#include <iomanip>
 #include <memory>
 #include <random>
+#include <sstream>
+#include <string_view>
 #include <utility>
 #include <string>
 #include <thread>
 #include <vector>
+#include <boost/json.hpp>
 
 #include "Logger.h"
 
 namespace {
+std::string toHex(std::string_view text) {
+  std::ostringstream oss;
+  oss << std::hex << std::setfill('0');
+  for (unsigned char c : text) {
+    oss << std::setw(2) << static_cast<int>(c);
+  }
+  return oss.str();
+}
+
+void logJsonFieldDetails(std::string_view title,
+                         const boost::json::object &obj,
+                         std::string_view phase,
+                         std::string_view moduleName) {
+  LOG_INFO("{}字段数量={}，阶段: {}，模块: {}", title, obj.size(), phase, moduleName);
+  if (obj.empty()) {
+    return;
+  }
+  for (const auto &entry : obj) {
+    const auto &key = entry.key();
+    std::string keyText(key.data(), key.size());
+    LOG_INFO("{}字段明细: 名称='{}'，字节数={}，十六进制={}，阶段: {}，模块: {}",
+             title,
+             keyText,
+             keyText.size(),
+             toHex(keyText),
+             phase,
+             moduleName);
+  }
+}
+
+std::string sanitizeJsonSnippet(std::string_view text) {
+  std::string out;
+  out.reserve(text.size());
+  for (const char ch : text) {
+    switch (ch) {
+      case '\n':
+        out.append("\\n");
+        break;
+      case '\r':
+        out.append("\\r");
+        break;
+      case '\t':
+        out.append("\\t");
+        break;
+      default:
+        out.push_back(ch);
+        break;
+    }
+  }
+  return out;
+}
+
+void logJsonParseError(std::string_view title,
+                       std::string_view phase,
+                       std::string_view moduleName,
+                       std::string_view json,
+                       std::size_t offset,
+                       int errorValue,
+                       bool warnOnly) {
+  const std::size_t safeOffset = std::min(offset, json.size());
+  std::size_t line = 1;
+  std::size_t column = 1;
+  for (std::size_t i = 0; i < safeOffset; ++i) {
+    const char ch = json[i];
+    if (ch == '\n') {
+      ++line;
+      column = 1;
+    } else if (ch == '\r') {
+      ++line;
+      column = 1;
+      if (i + 1 < safeOffset && json[i + 1] == '\n') {
+        ++i;
+      }
+    } else {
+      ++column;
+    }
+  }
+  constexpr std::size_t kSnippetRadius = 20;
+  const std::size_t snippetStart = safeOffset > kSnippetRadius ? safeOffset - kSnippetRadius : 0;
+  const std::size_t snippetEnd = std::min(json.size(), safeOffset + kSnippetRadius);
+  const auto snippet = sanitizeJsonSnippet(json.substr(snippetStart, snippetEnd - snippetStart));
+  if (warnOnly) {
+    LOG_WARNING("{}解析失败: JSON 语法错误码={}，行={}，列={}，偏移={}，附近文本='{}'，阶段: {}，模块: {}",
+                title,
+                errorValue,
+                line,
+                column,
+                safeOffset,
+                snippet,
+                phase,
+                moduleName);
+  } else {
+    LOG_ERROR("{}解析失败: JSON 语法错误码={}，行={}，列={}，偏移={}，附近文本='{}'，阶段: {}，模块: {}",
+              title,
+              errorValue,
+              line,
+              column,
+              safeOffset,
+              snippet,
+              phase,
+              moduleName);
+  }
+}
+
+bool parseJsonValue(std::string_view json,
+                    boost::json::value *out,
+                    std::string_view title,
+                    std::string_view phase,
+                    std::string_view moduleName,
+                    bool warnOnly) {
+  if (out == nullptr) {
+    logJsonParseError(title, phase, moduleName, json, 0, -1, warnOnly);
+    return false;
+  }
+  boost::json::parser parser;
+  boost::system::error_code ec;
+  const std::size_t consumed = parser.write(json, ec);
+  if (ec) {
+    logJsonParseError(title, phase, moduleName, json, consumed, ec.value(), warnOnly);
+    return false;
+  }
+  *out = parser.release();
+  return true;
+}
+
+bool selfCheckGrpcConfig(std::string_view phase, std::string_view moduleName, bool logOnSuccess) {
+  static const std::string kSelfCheckJson = R"({"auto_start_modules":["ConfigPusher"]})";
+  boost::json::value parsed;
+  if (!parseJsonValue(kSelfCheckJson, &parsed, "gRPC 自检", phase, moduleName, true)) {
+    return false;
+  }
+  if (!parsed.is_object()) {
+    LOG_WARNING("gRPC 自检结果不是对象，阶段: {}，模块: {}", phase, moduleName);
+    return false;
+  }
+  const auto &obj = parsed.as_object();
+  auto fieldIt = obj.find("auto_start_modules");
+  if (fieldIt == obj.end()) {
+    LOG_WARNING("gRPC 自检未找到字段 auto_start_modules，阶段: {}，模块: {}", phase, moduleName);
+    logJsonFieldDetails("gRPC 自检", obj, phase, moduleName);
+    return false;
+  }
+  if (!fieldIt->value().is_array()) {
+    LOG_WARNING("gRPC 自检字段类型异常，阶段: {}，模块: {}", phase, moduleName);
+    logJsonFieldDetails("gRPC 自检", obj, phase, moduleName);
+    return false;
+  }
+  if (logOnSuccess) {
+    LOG_INFO("gRPC 自检通过，阶段: {}，模块: {}", phase, moduleName);
+  }
+  return true;
+}
+
 class ModuleLogInterceptor final : public grpc::experimental::Interceptor {
 public:
   explicit ModuleLogInterceptor(std::string moduleName) :
@@ -103,47 +261,55 @@ void ModuleInterface::initLibInfo(LibInfo libInfo) {
   metaData_.outerGRPCServer = std::format("0.0.0.0:{}", port);
 }
 void ModuleInterface::grpcServerBuilder(std::shared_ptr<grpc::Service> service) {
-  grpc::ServerBuilder innerServerbuilder;
-  innerServerbuilder.RegisterService(service.get());
-  grpc::reflection::InitProtoReflectionServerBuilderPlugin();
-  innerServerbuilder.experimental().SetInterceptorCreators(createInterceptorCreators(metaData_.name));
-  innerServerbuilder.AddListeningPort(metaData_.innerGRPCServer, grpc::InsecureServerCredentials());
-  std::unique_ptr<grpc::Server> innerTmpServer(innerServerbuilder.BuildAndStart());
-  innerServer_ = std::move(innerTmpServer);
-
-  grpc::ServerBuilder outerServerBuilder;
-  outerServerBuilder.RegisterService(service.get());
-  grpc::reflection::InitProtoReflectionServerBuilderPlugin();
-  outerServerBuilder.experimental().SetInterceptorCreators(createInterceptorCreators(metaData_.name));
-  outerServerBuilder.AddListeningPort(metaData_.outerGRPCServer, grpc::InsecureServerCredentials());
-  std::unique_ptr<grpc::Server> outerTmpServer(outerServerBuilder.BuildAndStart());
-  outerServer_ = std::move(outerTmpServer);
+  selfCheckGrpcConfig("gRPC 构建前", metaData_.name, true);
+  grpc::ServerBuilder serverBuilder;
+  serverBuilder.RegisterService(service.get());
+  LOG_INFO("gRPC 反射已移除，跳过反射初始化");
+  LOG_INFO("gRPC 使用单一服务监听内外端口");
+  serverBuilder.experimental().SetInterceptorCreators(createInterceptorCreators(metaData_.name));
+  int innerPort = 0;
+  int outerPort = 0;
+  serverBuilder.AddListeningPort(metaData_.innerGRPCServer, grpc::InsecureServerCredentials(), &innerPort);
+  serverBuilder.AddListeningPort(metaData_.outerGRPCServer, grpc::InsecureServerCredentials(), &outerPort);
+  std::unique_ptr<grpc::Server> serverTmp(serverBuilder.BuildAndStart());
+  server_ = std::move(serverTmp);
+  if (server_) {
+    bool innerReady = true;
+    if (metaData_.innerGRPCServer.rfind("unix:", 0) == 0) {
+      const auto sockPath = std::filesystem::path(metaData_.innerGRPCServer.substr(5));
+      innerReady = std::filesystem::exists(sockPath);
+    } else {
+      innerReady = innerPort != 0;
+    }
+    if (innerReady) {
+      LOG_INFO("gRPC 内部服务监听成功: {}", metaData_.innerGRPCServer);
+    } else {
+      LOG_WARNING("gRPC 内部服务监听失败: {}", metaData_.innerGRPCServer);
+    }
+    if (outerPort != 0) {
+      LOG_INFO("gRPC 对外服务监听成功: {}", metaData_.outerGRPCServer);
+    } else {
+      LOG_WARNING("gRPC 对外服务监听失败: {}", metaData_.outerGRPCServer);
+    }
+    selfCheckGrpcConfig("gRPC 服务启动后", metaData_.name, false);
+  } else {
+    LOG_ERROR("gRPC 服务启动失败，未绑定任何端口");
+  }
 
   LOG_INFO("模块信息:\n名称:\t\t{}\n库名:\t\t{}\n版本:\t\t{}\n内部服务:\t{}\n对外服务:\t{}", metaData_.name, metaData_.libName, metaData_.version.version, metaData_.innerGRPCServer, metaData_.outerGRPCServer);
 
-  innerServerThread_ = std::jthread([this]() {
-    if (innerServer_) {
-      innerServer_->Wait();
-    }
-  });
-  outerServerThread_ = std::jthread([this]() {
-    if (outerServer_) {
-      outerServer_->Wait();
+  serverThread_ = std::jthread([this]() {
+    if (server_) {
+      server_->Wait();
     }
   });
 }
 void ModuleInterface::shutdownServers() {
-  if (innerServer_) {
-    innerServer_->Shutdown();
+  if (server_) {
+    server_->Shutdown();
   }
-  if (outerServer_) {
-    outerServer_->Shutdown();
-  }
-  if (innerServerThread_.joinable()) {
-    innerServerThread_.join();
-  }
-  if (outerServerThread_.joinable()) {
-    outerServerThread_.join();
+  if (serverThread_.joinable()) {
+    serverThread_.join();
   }
   // 当模块卸载后需要将占用的端口释放
   releasePort(metaData_.outerGRPCServer);

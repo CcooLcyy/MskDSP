@@ -1,9 +1,7 @@
 #include "ModuleManager.h"
 
-#include <google/protobuf/struct.pb.h>
-#include <google/protobuf/util/json_util.h>
+#include <google/protobuf/stubs/common.h>
 #include <grpcpp/completion_queue.h>
-#include <grpcpp/ext/proto_server_reflection_plugin.h>
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/impl/service_type.h>
 #include <grpcpp/security/server_credentials.h>
@@ -11,9 +9,12 @@
 
 #include <algorithm>
 #include <boost/dll/shared_library.hpp>
+#include <boost/json.hpp>
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <dlfcn.h>
+#include <link.h>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -25,6 +26,8 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "Logger.h"
@@ -35,15 +38,6 @@
 
 namespace {
 constexpr const char *kAutoStartConfigPath = "./conf/module_manager.jsonc";
-
-void warmupGrpcClientSymbols() {
-  auto channel = grpc::CreateChannel("127.0.0.1:0", grpc::InsecureChannelCredentials());
-  if (channel) {
-    LOG_INFO("gRPC 客户端符号预加载完成");
-  } else {
-    LOG_WARNING("gRPC 客户端符号预加载失败");
-  }
-}
 
 std::string stripJsonComments(std::string_view input) {
   std::string out;
@@ -168,6 +162,122 @@ std::string toHex(std::string_view text) {
   return oss.str();
 }
 
+void logJsonFieldDetails(std::string_view title,
+                         const boost::json::object &obj,
+                         std::string_view phase,
+                         std::string_view moduleName) {
+  LOG_INFO("{}字段数量={}，阶段: {}，模块: {}", title, obj.size(), phase, moduleName);
+  if (obj.empty()) {
+    return;
+  }
+  for (const auto &entry : obj) {
+    const auto &key = entry.key();
+    std::string keyText(key.data(), key.size());
+    LOG_INFO("{}字段明细: 名称='{}'，字节数={}，十六进制={}，阶段: {}，模块: {}",
+             title,
+             keyText,
+             keyText.size(),
+             toHex(keyText),
+             phase,
+             moduleName);
+  }
+}
+
+std::string sanitizeJsonSnippet(std::string_view text) {
+  std::string out;
+  out.reserve(text.size());
+  for (const char ch : text) {
+    switch (ch) {
+      case '\n':
+        out.append("\\n");
+        break;
+      case '\r':
+        out.append("\\r");
+        break;
+      case '\t':
+        out.append("\\t");
+        break;
+      default:
+        out.push_back(ch);
+        break;
+    }
+  }
+  return out;
+}
+
+void logJsonParseError(std::string_view title,
+                       std::string_view phase,
+                       std::string_view moduleName,
+                       std::string_view json,
+                       std::size_t offset,
+                       int errorValue,
+                       bool warnOnly) {
+  const std::size_t safeOffset = std::min(offset, json.size());
+  std::size_t line = 1;
+  std::size_t column = 1;
+  for (std::size_t i = 0; i < safeOffset; ++i) {
+    const char ch = json[i];
+    if (ch == '\n') {
+      ++line;
+      column = 1;
+    } else if (ch == '\r') {
+      ++line;
+      column = 1;
+      if (i + 1 < safeOffset && json[i + 1] == '\n') {
+        ++i;
+      }
+    } else {
+      ++column;
+    }
+  }
+  constexpr std::size_t kSnippetRadius = 20;
+  const std::size_t snippetStart = safeOffset > kSnippetRadius ? safeOffset - kSnippetRadius : 0;
+  const std::size_t snippetEnd = std::min(json.size(), safeOffset + kSnippetRadius);
+  const auto snippet = sanitizeJsonSnippet(json.substr(snippetStart, snippetEnd - snippetStart));
+  if (warnOnly) {
+    LOG_WARNING("{}解析失败: JSON 语法错误码={}，行={}，列={}，偏移={}，附近文本='{}'，阶段: {}，模块: {}",
+                title,
+                errorValue,
+                line,
+                column,
+                safeOffset,
+                snippet,
+                phase,
+                moduleName);
+  } else {
+    LOG_ERROR("{}解析失败: JSON 语法错误码={}，行={}，列={}，偏移={}，附近文本='{}'，阶段: {}，模块: {}",
+              title,
+              errorValue,
+              line,
+              column,
+              safeOffset,
+              snippet,
+              phase,
+              moduleName);
+  }
+}
+
+bool parseJsonValue(std::string_view json,
+                    boost::json::value *out,
+                    std::string_view title,
+                    std::string_view phase,
+                    std::string_view moduleName,
+                    bool warnOnly) {
+  if (out == nullptr) {
+    logJsonParseError(title, phase, moduleName, json, 0, -1, warnOnly);
+    return false;
+  }
+  boost::json::parser parser;
+  boost::system::error_code ec;
+  const std::size_t consumed = parser.write(json, ec);
+  if (ec) {
+    logJsonParseError(title, phase, moduleName, json, consumed, ec.value(), warnOnly);
+    return false;
+  }
+  *out = parser.release();
+  return true;
+}
+
 uint64_t hashBytes(const uint8_t *data, size_t size) {
   constexpr uint64_t kOffset = 14695981039346656037ull;
   constexpr uint64_t kPrime = 1099511628211ull;
@@ -201,6 +311,129 @@ private:
   std::atomic_bool &flag_;
   bool acquired_{false};
 };
+
+bool isRuntimeLibName(std::string_view path) {
+  return path.find("libprotobuf") != std::string_view::npos ||
+      path.find("libgrpc++") != std::string_view::npos ||
+      path.find("libgrpc") != std::string_view::npos ||
+      path.find("libgpr") != std::string_view::npos ||
+      path.find("libabsl") != std::string_view::npos ||
+      path.find("libupb") != std::string_view::npos ||
+      path.find("libstdc++") != std::string_view::npos ||
+      path.find("libgcc_s") != std::string_view::npos ||
+      path.find("libatomic") != std::string_view::npos;
+}
+
+void logLoadedRuntimeLibs(std::string_view phase, std::string_view moduleName, bool force) {
+  struct LoadedLibs {
+    std::unordered_set<std::string> paths;
+  } data;
+
+  dl_iterate_phdr(
+      [](struct dl_phdr_info *info, size_t, void *userData) -> int {
+        if (info == nullptr || info->dlpi_name == nullptr) {
+          return 0;
+        }
+        std::string_view path(info->dlpi_name);
+        if (path.empty()) {
+          return 0;
+        }
+        if (!isRuntimeLibName(path)) {
+          return 0;
+        }
+        auto *loaded = static_cast<LoadedLibs *>(userData);
+        loaded->paths.emplace(path);
+        return 0;
+      },
+      &data);
+
+  static std::unordered_set<std::string> lastPaths;
+  std::vector<std::string> current(data.paths.begin(), data.paths.end());
+  std::sort(current.begin(), current.end());
+  if (force) {
+    LOG_INFO("已加载运行库列表，阶段: {}，模块: {}，数量: {}，明细: {}", phase, moduleName, current.size(),
+             joinNames(current, ", "));
+    lastPaths = std::move(data.paths);
+    return;
+  }
+  std::vector<std::string> added;
+  for (const auto &path : current) {
+    if (lastPaths.find(path) == lastPaths.end()) {
+      added.push_back(path);
+    }
+  }
+  if (!added.empty()) {
+    LOG_WARNING("检测到新增运行库，阶段: {}，模块: {}，明细: {}", phase, moduleName, joinNames(added, ", "));
+    lastPaths.insert(added.begin(), added.end());
+  }
+}
+
+std::string extractSoVersion(std::string_view path, std::string_view soName) {
+  const auto pos = path.rfind(soName);
+  if (pos == std::string_view::npos) {
+    return {};
+  }
+  const auto versionPos = pos + soName.size();
+  if (versionPos >= path.size()) {
+    return {};
+  }
+  return std::string(path.substr(versionPos));
+}
+
+std::string resolveProtobufRuntimePath() {
+  Dl_info info{};
+  if (dladdr(reinterpret_cast<const void *>(&google::protobuf::internal::VersionString), &info) != 0 &&
+      info.dli_fname != nullptr) {
+    return info.dli_fname;
+  }
+  return {};
+}
+
+void logProtobufVersionInfo() {
+  const auto compiledVersion = google::protobuf::internal::VersionString(GOOGLE_PROTOBUF_VERSION);
+  LOG_INFO("protobuf 编译期版本: {}{}", compiledVersion, GOOGLE_PROTOBUF_VERSION_SUFFIX);
+  LOG_INFO("protobuf 编译期版本号: {}", GOOGLE_PROTOBUF_VERSION);
+  const auto runtimePath = resolveProtobufRuntimePath();
+  if (runtimePath.empty()) {
+    LOG_WARNING("protobuf 运行时库路径解析失败");
+    return;
+  }
+  LOG_INFO("protobuf 运行时库路径: {}", runtimePath);
+  const auto runtimeVersion = extractSoVersion(runtimePath, "libprotobuf.so.");
+  if (runtimeVersion.empty()) {
+    LOG_WARNING("protobuf 运行时库版本解析失败");
+  } else {
+    LOG_INFO("protobuf 运行时库版本: {}", runtimeVersion);
+  }
+}
+
+bool selfCheckAutoStartConfig(std::string_view phase, std::string_view moduleName, bool logOnSuccess) {
+  static const std::string kSelfCheckJson = R"({"auto_start_modules":["ConfigPusher"]})";
+  boost::json::value parsed;
+  if (!parseJsonValue(kSelfCheckJson, &parsed, "自动启动配置自检", phase, moduleName, true)) {
+    return false;
+  }
+  if (!parsed.is_object()) {
+    LOG_WARNING("自动启动配置自检结果不是对象，阶段: {}，模块: {}", phase, moduleName);
+    return false;
+  }
+  const auto &obj = parsed.as_object();
+  auto fieldIt = obj.find("auto_start_modules");
+  if (fieldIt == obj.end()) {
+    LOG_WARNING("自动启动配置自检未找到字段 auto_start_modules，阶段: {}，模块: {}", phase, moduleName);
+    logJsonFieldDetails("自动启动配置自检", obj, phase, moduleName);
+    return false;
+  }
+  if (!fieldIt->value().is_array()) {
+    LOG_WARNING("自动启动配置自检字段类型异常，阶段: {}，模块: {}", phase, moduleName);
+    logJsonFieldDetails("自动启动配置自检", obj, phase, moduleName);
+    return false;
+  }
+  if (logOnSuccess) {
+    LOG_INFO("自动启动配置自检通过，阶段: {}，模块: {}", phase, moduleName);
+  }
+  return true;
+}
 
 std::string extractModuleNameFromLibName(const std::string &libName) {
   auto soPos = libName.find(".so");
@@ -386,27 +619,57 @@ bool isVersionSatisfied(const std::vector<int> &version, const std::vector<Versi
   return true;
 }
 
-bool loadModuleManifest(const std::filesystem::path &libPath, ModuleManagerProto::ModuleManifest *manifest, std::string *error) {
+bool loadModuleManifest(const std::filesystem::path &libPath,
+                        ModuleManagerProto::ModuleManifest *manifest,
+                        std::string *error,
+                        std::unordered_map<std::string, boost::dll::shared_library> *libCache) {
   if (manifest == nullptr) {
     return false;
   }
   LOG_INFO("读取模块 manifest 开始: {}", libPath.string());
+  selfCheckAutoStartConfig("加载模块库前", libPath.filename().string(), false);
   try {
-    boost::dll::shared_library lib;
-    LOG_INFO("加载模块库: {}", libPath.string());
-    lib.load(libPath.string(), boost::dll::load_mode::rtld_lazy);
+    const auto cacheKey = libPath.string();
+    boost::dll::shared_library localLib;
+    boost::dll::shared_library *lib = nullptr;
+    if (libCache != nullptr) {
+      auto cachedIt = libCache->find(cacheKey);
+      if (cachedIt != libCache->end() && cachedIt->second.is_loaded()) {
+        lib = &cachedIt->second;
+        LOG_INFO("模块库句柄已缓存，复用: {}", libPath.filename().string());
+      }
+    }
+    if (lib == nullptr) {
+      LOG_INFO("加载模块库: {}", libPath.string());
+      if (libCache != nullptr) {
+        auto [it, inserted] = libCache->try_emplace(cacheKey);
+        if (!it->second.is_loaded()) {
+          it->second.load(libPath.string(), boost::dll::load_mode::rtld_lazy);
+          LOG_INFO("已缓存模块库句柄，避免卸载引发异常: {}", libPath.filename().string());
+        } else if (!inserted) {
+          LOG_INFO("模块库句柄已缓存，跳过重复缓存: {}", libPath.filename().string());
+        }
+        lib = &it->second;
+      } else {
+        localLib.load(libPath.string(), boost::dll::load_mode::rtld_lazy);
+        lib = &localLib;
+      }
+    }
     LOG_INFO("模块库加载完成: {}", libPath.filename().string());
+    logLoadedRuntimeLibs("加载模块库后", libPath.filename().string(), false);
+    selfCheckAutoStartConfig("加载模块库后", libPath.filename().string(), false);
     LOG_INFO("检查 manifest 符号: {}", libPath.filename().string());
-    if (!lib.has("GetModuleManifestPb")) {
+    if (!lib->has("GetModuleManifestPb")) {
       if (error != nullptr) {
         *error = "未找到 manifest 符号 GetModuleManifestPb";
       }
       return false;
     }
     using ManifestFn = bool(const uint8_t **, size_t *);
-    auto &fn = lib.get<ManifestFn>("GetModuleManifestPb");
+    auto &fn = lib->get<ManifestFn>("GetModuleManifestPb");
     LOG_INFO("manifest 符号解析成功: {}", libPath.filename().string());
     LOG_INFO("调用 manifest 函数: {}", libPath.filename().string());
+    selfCheckAutoStartConfig("调用 manifest 前", libPath.filename().string(), false);
     const uint8_t *data = nullptr;
     size_t size = 0;
     if (!fn(&data, &size)) {
@@ -421,6 +684,8 @@ bool loadModuleManifest(const std::filesystem::path &libPath, ModuleManagerProto
       }
       return false;
     }
+    selfCheckAutoStartConfig("获取 manifest 后", libPath.filename().string(), false);
+    logLoadedRuntimeLibs("获取 manifest 后", libPath.filename().string(), false);
     const uint64_t hashOnce = hashBytes(data, size);
     const uint8_t *dataAgain = nullptr;
     size_t sizeAgain = 0;
@@ -520,11 +785,56 @@ ModuleManager::~ModuleManager() {}
 void ModuleManager::start(std::stop_token stopToken) {
   LogModuleScope moduleScope(metaData_.name);
   LOG_INFO("正在启动模块管理器");
-  warmupGrpcClientSymbols();
+  const auto startTime = std::chrono::steady_clock::now();
+  auto logElapsed = [&](std::string_view step) {
+    const auto now = std::chrono::steady_clock::now();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - startTime).count();
+    LOG_INFO("启动流程耗时: {} = {} ms", step, elapsed);
+  };
+  logElapsed("启动模块管理器入口");
+  logProtobufVersionInfo();
+  logElapsed("protobuf 版本信息输出完成");
+  auto selfCheckBegin = std::chrono::steady_clock::now();
+  LOG_INFO("开始自动启动配置自检，阶段: 启动 gRPC 前");
+  selfCheckAutoStartConfig("启动 gRPC 前", metaData_.name, true);
+  LOG_INFO("完成自动启动配置自检，阶段: 启动 gRPC 前，耗时: {} ms",
+           std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - selfCheckBegin)
+             .count());
+  logElapsed("启动 gRPC 前自检完成");
+  LOG_INFO("已跳过 gRPC 客户端符号预加载");
+  logElapsed("gRPC 客户端符号预加载阶段结束");
   moduleManagerService_->getModuleManager(this);
+  logElapsed("模块管理器注入到服务完成");
+  auto grpcBuildBegin = std::chrono::steady_clock::now();
+  LOG_INFO("开始构建 gRPC 服务");
   grpcServerBuilder(moduleManagerService_);
+  LOG_INFO("完成构建 gRPC 服务，耗时: {} ms",
+           std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - grpcBuildBegin)
+             .count());
+  logElapsed("gRPC 服务构建完成");
+  logLoadedRuntimeLibs("gRPC 服务启动后", metaData_.name, true);
+  logElapsed("gRPC 服务启动后运行库记录完成");
+  selfCheckBegin = std::chrono::steady_clock::now();
+  LOG_INFO("开始自动启动配置自检，阶段: 启动 gRPC 后");
+  selfCheckAutoStartConfig("启动 gRPC 后", metaData_.name, true);
+  LOG_INFO("完成自动启动配置自检，阶段: 启动 gRPC 后，耗时: {} ms",
+           std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - selfCheckBegin)
+             .count());
+  logElapsed("启动 gRPC 后自检完成");
+  auto moduleInfosBegin = std::chrono::steady_clock::now();
+  LOG_INFO("开始扫描模块清单");
   initModuleInfos();
+  LOG_INFO("完成扫描模块清单，耗时: {} ms",
+           std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - moduleInfosBegin)
+             .count());
+  logElapsed("模块清单扫描完成");
+  auto autoStartBegin = std::chrono::steady_clock::now();
+  LOG_INFO("开始解析自动启动配置并启动模块");
   autoStartModulesFromConfig();
+  LOG_INFO("完成解析自动启动配置并启动模块，耗时: {} ms",
+           std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - autoStartBegin)
+             .count());
+  logElapsed("自动启动流程完成");
   while (!stopToken.stop_requested()) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
@@ -576,65 +886,55 @@ void ModuleManager::autoStartModulesFromConfig() {
            raw.find("auto_start_modules") != std::string::npos ? "是" : "否");
 
   auto json = stripJsonComments(raw);
-  google::protobuf::Value config;
-  google::protobuf::util::JsonParseOptions options;
-  auto status = google::protobuf::util::JsonStringToMessage(json, &config, options);
-  if (!status.ok()) {
-    LOG_ERROR("解析自动启动配置失败: {}", status.ToString());
+  LOG_INFO("自动启动配置去注释后文本包含 auto_start_modules: {}",
+           json.find("auto_start_modules") != std::string::npos ? "是" : "否");
+  boost::json::value parsed;
+  if (!parseJsonValue(json, &parsed, "自动启动配置", "解析配置", metaData_.name, false)) {
     return;
   }
-
-  if (config.kind_case() != google::protobuf::Value::kStructValue) {
+  if (!parsed.is_object()) {
     LOG_ERROR("自动启动配置必须为对象");
     return;
   }
 
-  const auto &fields = config.struct_value().fields();
+  const auto &obj = parsed.as_object();
   std::vector<std::string> fieldNames;
-  fieldNames.reserve(fields.size());
-  for (const auto &entry : fields) {
-    fieldNames.push_back(entry.first);
+  fieldNames.reserve(obj.size());
+  for (const auto &entry : obj) {
+    const auto &key = entry.key();
+    fieldNames.emplace_back(key.data(), key.size());
   }
   LOG_INFO("自动启动配置字段: {}", joinNames(fieldNames, ","));
-  auto fieldIt = fields.find("auto_start_modules");
-  if (fieldIt == fields.end()) {
+  auto fieldIt = obj.find("auto_start_modules");
+  if (fieldIt == obj.end()) {
     LOG_INFO("自动启动配置未包含 auto_start_modules");
-    auto fallbackIt = std::find_if(fields.begin(), fields.end(), [](const auto &entry) {
-      return entry.first == "auto_start_modules";
-    });
-    if (fallbackIt != fields.end()) {
-      LOG_WARNING("自动启动配置字段查找异常，疑似内存破坏或 ABI 冲突");
-    }
-    if (fields.empty()) {
+    logJsonFieldDetails("自动启动配置", obj, "解析配置", metaData_.name);
+    if (obj.empty()) {
       LOG_INFO("自动启动配置字段为空，无法解析任何字段");
-    } else {
-      for (const auto &entry : fields) {
-        const auto &name = entry.first;
-        LOG_INFO("自动启动配置字段明细: 名称='{}'，字节数={}，十六进制={}", name, name.size(),
-                 toHex(name));
-      }
     }
     return;
   }
-  if (fieldIt->second.kind_case() != google::protobuf::Value::kListValue) {
+  if (!fieldIt->value().is_array()) {
     LOG_ERROR("自动启动配置的 auto_start_modules 必须为数组");
+    logJsonFieldDetails("自动启动配置", obj, "解析配置", metaData_.name);
     return;
   }
 
-  const auto &list = fieldIt->second.list_value();
-  if (list.values().empty()) {
+  const auto &list = fieldIt->value().as_array();
+  if (list.empty()) {
     LOG_INFO("自动启动配置的 auto_start_modules 为空");
     return;
   }
 
   ensureModuleInfos();
   int started = 0;
-  for (const auto &value : list.values()) {
-    if (value.kind_case() != google::protobuf::Value::kStringValue) {
+  for (const auto &value : list) {
+    if (!value.is_string()) {
       LOG_WARNING("自动启动模块条目不是字符串");
       continue;
     }
-    const auto &moduleName = value.string_value();
+    const auto &nameValue = value.as_string();
+    std::string moduleName(nameValue.c_str(), nameValue.size());
     if (moduleName.empty()) {
       LOG_WARNING("自动启动模块条目为空");
       continue;
@@ -954,6 +1254,7 @@ void ModuleManager::saveModuleStartConfig(ModuleManagerProto::ModuleInfos module
 }
 void ModuleManager::initModuleInfos() {
   ModuleInfosBuildGuard buildGuard(moduleInfosBuilding_, "initModuleInfos");
+  selfCheckAutoStartConfig("扫描模块前", metaData_.name, true);
   moduleInfos_.Clear();
   moduleInfoByName_.clear();
   reverseDependencies_.clear();
@@ -989,7 +1290,7 @@ void ModuleManager::initModuleInfos() {
 
     ModuleManagerProto::ModuleManifest manifest;
     std::string error;
-    if (!loadModuleManifest(entry.path(), &manifest, &error)) {
+    if (!loadModuleManifest(entry.path(), &manifest, &error, &manifestLibs_)) {
       moduleInfo->set_manifest_error(error);
       ++invalid;
       LOG_ERROR("模块 {} manifest 读取失败: {}", moduleName, error);
