@@ -12,6 +12,7 @@ target_include_directories(${LIB_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/includ
 target_link_libraries(${LIB_NAME} PUBLIC 
     Boost::dll
     Boost::iostreams
+    Boost::json
     Boost::log
     ZLIB::ZLIB
     dspProto

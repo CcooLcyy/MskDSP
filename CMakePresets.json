@@ -37,14 +37,13 @@
             "generator": "Ninja",
             "binaryDir": "${sourceDir}/build",
             "cacheVariables": {
-                "CMAKE_C_COMPILER": "/usr/bin/clang",
-                "CMAKE_CXX_COMPILER": "/usr/bin/clang++",
                 "CMAKE_C_COMPILER_LAUNCHER": "ccache",
                 "CMAKE_CXX_COMPILER_LAUNCHER": "ccache",
                 "CMAKE_CXX_SCAN_FOR_MODULES": "OFF",
                 "CMAKE_BUILD_TYPE": "Debug",
+                "MSKDSP_ENABLE_SANITIZERS": "OFF",
+                "MSKDSP_ENABLE_TSAN": "OFF",
                 "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
-                "VCPKG_CMAKE_CONFIGURE_OPTIONS": "-DCMAKE_C_COMPILER=/usr/bin/clang;-DCMAKE_CXX_COMPILER=/usr/bin/clang++",
                 "VCPKG_TARGET_TRIPLET": "x64-linux-dynamic",
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
             }
