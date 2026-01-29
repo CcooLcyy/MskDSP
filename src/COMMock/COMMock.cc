@@ -1,17 +1,17 @@
 #include "COMMock.h"
 
-#include <boost/dll.hpp>
-
-#include <array>
-#include <chrono>
-#include <cerrno>
-#include <cstring>
-#include <filesystem>
 #include <signal.h>
 #include <spawn.h>
+#include <sys/wait.h>
+
+#include <array>
+#include <boost/dll.hpp>
+#include <cerrno>
+#include <chrono>
+#include <cstring>
+#include <filesystem>
 #include <stop_token>
 #include <string>
-#include <sys/wait.h>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -155,8 +155,7 @@ grpc::Status COMMock::ApplyConfig(const COMMockProto::COMMockConfig &config) {
     }
     const auto &peer = it_peer->second;
     if (peer.peer_name != cfg.name) {
-      LOG_ERROR("COMMock 端口 peer_name 未互指: name={}, peer_name={}, peer_peer={}",
-                cfg.name, cfg.peer_name, peer.peer_name);
+      LOG_ERROR("COMMock 端口 peer_name 未互指: name={}, peer_name={}, peer_peer={}", cfg.name, cfg.peer_name, peer.peer_name);
       return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "peer_name 未互指");
     }
     visited.insert(cfg.name);
@@ -187,16 +186,12 @@ grpc::Status COMMock::ApplyConfig(const COMMockProto::COMMockConfig &config) {
   new_pairs.reserve(pair_configs.size());
   for (auto &pair : pair_configs) {
     if (!prepareDevPath(pair.left) || !prepareDevPath(pair.right)) {
-      LOG_ERROR("COMMock 准备 dev_path 失败，将终止本次配置: left={}, right={}",
-                makePortLabel(pair.left.name, pair.left.dev_path, pair.left.index),
-                makePortLabel(pair.right.name, pair.right.dev_path, pair.right.index));
+      LOG_ERROR("COMMock 准备 dev_path 失败，将终止本次配置: left={}, right={}", makePortLabel(pair.left.name, pair.left.dev_path, pair.left.index), makePortLabel(pair.right.name, pair.right.dev_path, pair.right.index));
       cleanupPairs(&new_pairs);
       return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "准备 dev_path 失败");
     }
     if (!startSocatPair(pair.left, pair.right, &pair)) {
-      LOG_ERROR("COMMock 启动 socat 失败，将终止本次配置: left={}, right={}",
-                makePortLabel(pair.left.name, pair.left.dev_path, pair.left.index),
-                makePortLabel(pair.right.name, pair.right.dev_path, pair.right.index));
+      LOG_ERROR("COMMock 启动 socat 失败，将终止本次配置: left={}, right={}", makePortLabel(pair.left.name, pair.left.dev_path, pair.left.index), makePortLabel(pair.right.name, pair.right.dev_path, pair.right.index));
       cleanupPairs(&new_pairs);
       return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "启动 socat 失败");
     }
@@ -276,10 +271,7 @@ bool COMMock::startSocatPair(const PortConfig &left, const PortConfig &right, Po
   const std::string left_arg = "pty,raw,echo=0,link=" + left.dev_path;
   const std::string right_arg = "pty,raw,echo=0,link=" + right.dev_path;
   std::array<std::string, 3> args = {"socat", left_arg, right_arg};
-  std::array<char *, 4> argv = {const_cast<char *>(args[0].c_str()),
-                                const_cast<char *>(args[1].c_str()),
-                                const_cast<char *>(args[2].c_str()),
-                                nullptr};
+  std::array<char *, 4> argv = {const_cast<char *>(args[0].c_str()), const_cast<char *>(args[1].c_str()), const_cast<char *>(args[2].c_str()), nullptr};
 
   pid_t pid = -1;
   const int rc = ::posix_spawnp(&pid, "socat", nullptr, nullptr, argv.data(), environ);
@@ -294,8 +286,7 @@ bool COMMock::startSocatPair(const PortConfig &left, const PortConfig &right, Po
 
   if (!waitForSymlink(left.dev_path, kSocatReadyTimeout) ||
       !waitForSymlink(right.dev_path, kSocatReadyTimeout)) {
-    LOG_ERROR("COMMock 等待 socat 创建 dev_path 超时: left={}, right={}, pid={}",
-              left_label, right_label, pid);
+    LOG_ERROR("COMMock 等待 socat 创建 dev_path 超时: left={}, right={}, pid={}", left_label, right_label, pid);
     PortPair temp;
     temp.left = left;
     temp.right = right;
@@ -337,8 +328,7 @@ void COMMock::cleanupDevPath(const PortConfig &config) {
   if (std::filesystem::is_symlink(config.dev_path, ec)) {
     if (!std::filesystem::remove(config.dev_path, ec)) {
       if (ec) {
-        LOG_ERROR("COMMock 移除 dev_path 失败: name={}, path={}, 错误={}",
-                  label, config.dev_path, ec.message());
+        LOG_ERROR("COMMock 移除 dev_path 失败: name={}, path={}, 错误={}", label, config.dev_path, ec.message());
       } else {
         LOG_INFO("COMMock dev_path 已不存在: name={}, path={}", label, config.dev_path);
       }
@@ -346,8 +336,7 @@ void COMMock::cleanupDevPath(const PortConfig &config) {
       LOG_INFO("COMMock 已移除 dev_path 软链: name={}, path={}", label, config.dev_path);
     }
   } else if (ec) {
-    LOG_ERROR("COMMock 检查 dev_path 失败: name={}, path={}, 错误={}",
-              label, config.dev_path, ec.message());
+    LOG_ERROR("COMMock 检查 dev_path 失败: name={}, path={}, 错误={}", label, config.dev_path, ec.message());
   } else {
     LOG_INFO("COMMock dev_path 非软链，跳过删除: name={}, path={}", label, config.dev_path);
   }
@@ -395,7 +384,7 @@ void COMMock::stopSocat(const PortPair &pair) {
 }
 }  // namespace COMMock
 
-extern "C" BOOST_SYMBOL_EXPORT ModuleInterface::ModuleInterface* create() {
+extern "C" BOOST_SYMBOL_EXPORT ModuleInterface::ModuleInterface *create() {
   return new COMMock::COMMock();
 }
 
