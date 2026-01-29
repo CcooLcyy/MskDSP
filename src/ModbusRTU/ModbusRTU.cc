@@ -42,7 +42,6 @@ ModbusRTU::ModbusRTU() :
 }
 ModbusRTU::~ModbusRTU() {}
 void ModbusRTU::start(std::stop_token stopToken) {
-  ModuleManager::LogModuleScope logScope(metaData_.name);
   LOG_INFO("ModbusRTU 模块启动");
   modbusRTUService_->setModbusRTU(this);
   LOG_INFO("ModbusRTU 服务实例绑定完成");

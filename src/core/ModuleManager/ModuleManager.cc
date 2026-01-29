@@ -783,7 +783,6 @@ ModuleManager::ModuleManager() :
 }
 ModuleManager::~ModuleManager() {}
 void ModuleManager::start(std::stop_token stopToken) {
-  LogModuleScope moduleScope(metaData_.name);
   LOG_INFO("正在启动模块管理器");
   const auto startTime = std::chrono::steady_clock::now();
   auto logElapsed = [&](std::string_view step) {

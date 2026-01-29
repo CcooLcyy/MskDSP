@@ -79,7 +79,6 @@ COMMock::~COMMock() {
 }
 
 void COMMock::start(std::stop_token stopToken) {
-  ModuleManager::LogModuleScope scope(metaData_.name);
   LOG_INFO("COMMock 模块启动");
   comMockService_->getCOMMock(this);
   grpcServerBuilder(comMockService_);
