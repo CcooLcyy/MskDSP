@@ -1,18 +1,16 @@
 #include "ModbusRTU.h"
 
 #include <boost/dll.hpp>
-#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <stop_token>
-#include <thread>
 
-#include "ModbusRTUGrpcService.h"
-#include "ModuleManager.pb.h"
-#include "ModbusRTULibInfo.h"
 #include "Logger.h"
+#include "ModbusRTUGrpcService.h"
+#include "ModbusRTULibInfo.h"
+#include "ModuleManager.pb.h"
 
 namespace {
 const std::string &GetSerializedManifest() {
@@ -44,6 +42,7 @@ ModbusRTU::ModbusRTU() :
 }
 ModbusRTU::~ModbusRTU() {}
 void ModbusRTU::start(std::stop_token stopToken) {
+  ModuleManager::LogModuleScope logScope(metaData_.name);
   LOG_INFO("ModbusRTU 模块启动");
   modbusRTUService_->setModbusRTU(this);
   LOG_INFO("ModbusRTU 服务实例绑定完成");
@@ -58,16 +57,16 @@ void ModbusRTU::start(std::stop_token stopToken) {
   LOG_INFO("ModbusRTU 模块停止");
 }
 
-LinkManager& ModbusRTU::linkManager() {
+LinkManager &ModbusRTU::linkManager() {
   return linkManager_;
 }
 
-const LinkManager& ModbusRTU::linkManager() const {
+const LinkManager &ModbusRTU::linkManager() const {
   return linkManager_;
 }
 }  // namespace ModbusRTU
 
-extern "C" BOOST_SYMBOL_EXPORT ModuleInterface::ModuleInterface* create() {
+extern "C" BOOST_SYMBOL_EXPORT ModuleInterface::ModuleInterface *create() {
   return new ModbusRTU::ModbusRTU();
 }
 
