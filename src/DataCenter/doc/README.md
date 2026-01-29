@@ -169,6 +169,10 @@ DataCenter 会将路由配置落盘到工作目录下的 `./conf/dataCenter/rout
 - 若主/备均不可用：以空路由启动，等待重新下发。
 - 若路由配置可解析但与已加载点表校验冲突：记录日志并不应用该路由配置。
 
+## 线程与日志
+- 模块内部线程统一使用 `ModuleManager::StartModuleThread(模块LibInfo.LIB_NAME, ...)` 创建，自动绑定日志模块名上下文。
+- 无需在入口手动创建 `ModuleManager::LogModuleScope`，统一规则见 `src/core/ModuleManager/doc/README.md`。
+
 ## 测试
 相关单元测试位于 `test/`：
 

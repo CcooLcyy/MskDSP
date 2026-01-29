@@ -139,6 +139,7 @@ DataCenter 路由配置示例（触发对时）：
 
 ## 日志
 - 日志前缀包含模块名 `[IEC104]`，便于与其他模块混合排查。
+- 模块内部线程统一使用 `ModuleManager::StartModuleThread(模块LibInfo.LIB_NAME, ...)` 创建，自动绑定日志模块名上下文。
 - 报文日志为 INFO 级别，逐帧输出完整 APDU（包含 `conn_name/角色/长度/数据`）。
 - 报文日志输出量大，生产环境需关注日志大小与磁盘占用。
 

@@ -107,8 +107,8 @@ ctest --test-dir build -R logger_test --output-on-failure
 - 日志格式增加 `[<模块名>]` 字段；当无法确定模块上下文时归入 `moduleManager`。
 - 模块名来源为 `ModuleInterface::initLibInfo(...)` 设置的 `LIB_NAME`（对应 `metaData_.name`），模块应在 `grpcServerBuilder(...)` 前完成初始化。
 - gRPC 自动标记：通过 `grpcServerBuilder(...)` 启动的 gRPC Server 会统一注入 server interceptor，在每个 RPC 处理线程中自动设置模块名上下文；RPC 处理函数里直接使用 `LOG_INFO/LOG_ERROR...` 即可。
-- 非 gRPC 线程：模块自行创建的后台线程需要在入口处手动创建 `ModuleManager::LogModuleScope scope(metaData_.name);`，否则该线程日志会归入 `moduleManager`。
-- 如模块绕过 `grpcServerBuilder(...)` 自行创建 gRPC Server，需要自行注入拦截器或手动设置 `LogModuleScope`。
+- 非 gRPC 线程：统一使用 `ModuleManager::StartModuleThread(模块LibInfo.LIB_NAME, ...)` 创建线程，封装内部会自动设置 `LogModuleScope`，无需在入口手动创建。
+- 如模块绕过 `grpcServerBuilder(...)` 自行创建 gRPC Server，需要自行注入拦截器或通过 `StartModuleThread` 包装线程入口。
 
 ## 日志（轮转与保留）
 - 日志文件：`./log/<模块名>/<模块名>.log`（追加写入，重启不会清空）

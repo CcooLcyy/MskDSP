@@ -79,6 +79,7 @@ ConfigPusher 点表示例（含 scale/offset/deadband，字段可省略，默认
 - 读出数据将发布到 DataCenter，点值类型分别映射为 bool/double（UINT16/UINT32 经 scale/offset）。
 
 ## 报文日志
+- 模块内部线程统一使用 `ModuleManager::StartModuleThread(模块LibInfo.LIB_NAME, ...)` 创建，自动绑定日志模块名上下文。
 - 报文日志为 INFO 级别，逐帧输出完整 RTU 帧（包含发送/接收、设备、长度、数据）。
 - 报文日志输出量大，生产环境需关注日志大小与磁盘占用。
 

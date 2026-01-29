@@ -128,3 +128,6 @@ bash script/strip_debug.sh <package_dir> <debug_dir> <strip_tool> <objcopy_tool>
 ### 依赖与注意事项
 - 依赖 `file`、`strip`、`objcopy` 工具。
 - `debug_dir` 会被创建（如不存在）。
+
+## 通用约定
+- 脚本本身不涉及线程创建；模块线程与日志的统一规则见 `src/core/ModuleManager/doc/README.md`。

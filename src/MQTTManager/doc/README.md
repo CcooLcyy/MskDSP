@@ -103,5 +103,9 @@ grpcurl -plaintext 127.0.0.1:7xxx \
   }'
 ```
 
+## 线程与日志
+- 模块内部线程统一使用 `ModuleManager::StartModuleThread(模块LibInfo.LIB_NAME, ...)` 创建，自动绑定日志模块名上下文。
+- 无需在入口手动创建 `ModuleManager::LogModuleScope`，统一规则见 `src/core/ModuleManager/doc/README.md`。
+
 ## 构建产物
 - 共享库：`package/module/libMQTTManager.so.<version>`（版本见 `src/MQTTManager/cmake/LibInfo.cmake`）
