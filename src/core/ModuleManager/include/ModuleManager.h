@@ -13,6 +13,7 @@
 #include "Logger.h"
 #include "ModuleInterface.h"
 #include "ModuleManager.pb.h"
+#include "ThreadUtil.hpp"
 
 namespace ModuleManager {
 class ModuleManagerServiceImpl;
@@ -50,10 +51,9 @@ public:
     auto create = module->lib.get<ModuleInterface::ModuleInterface *()>("create");
     module->instance = std::shared_ptr<ModuleInterface::ModuleInterface>((create()));
     module->metaData = module->instance->metaData();
-    module->thread = std::jthread([module]() {
-      LogModuleScope moduleScope(module->metaData.name);
-      module->instance->start(module->stopSource->get_token());
-    });
+    module->thread = StartModuleThread(
+        module->metaData.name,
+        [module](std::stop_token) { module->instance->start(module->stopSource->get_token()); });
     return module;
   }
   ModuleInterface::MetaData MetaData() {

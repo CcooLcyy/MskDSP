@@ -12,6 +12,7 @@
 
 #include "Logger.h"
 #include "IEC104LibInfo.h"
+#include "ThreadUtil.hpp"
 
 namespace IEC104 {
 namespace {
@@ -157,8 +158,9 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, Li
   link->dcSubscribeContext = std::make_shared<grpc::ClientContext>();
   auto ctx = link->dcSubscribeContext;
 
-  link->dcSubscribeThread = std::jthread([this, connName, ctx, connId, tags, metaByTag, transport](std::stop_token st) {
-    ModuleManager::LogModuleScope moduleScope(IEC104LibInfo.LIB_NAME);
+  link->dcSubscribeThread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [this, connName, ctx, connId, tags, metaByTag, transport](std::stop_token st) {
     std::stop_callback cb(st, [&ctx]() { ctx->TryCancel(); });
 
     auto reader = dataCenter_.Subscribe(ctx.get(), connId, tags, false);
@@ -272,8 +274,9 @@ void LinkManager::startTimeSyncSubscribeLocked(const std::string& connName, Link
   link->dcTimeSyncContext = std::make_shared<grpc::ClientContext>();
   auto ctx = link->dcTimeSyncContext;
 
-  link->dcTimeSyncThread = std::jthread([this, connName, ctx, connId, tags, transport](std::stop_token st) {
-    ModuleManager::LogModuleScope moduleScope(IEC104LibInfo.LIB_NAME);
+  link->dcTimeSyncThread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [this, connName, ctx, connId, tags, transport](std::stop_token st) {
     std::stop_callback cb(st, [&ctx]() { ctx->TryCancel(); });
 
     auto reader = dataCenter_.Subscribe(ctx.get(), connId, tags, false);
@@ -371,8 +374,9 @@ void LinkManager::startCommandSubscribeLocked(const std::string& connName, LinkR
   link->dcCommandContext = std::make_shared<grpc::ClientContext>();
   auto ctx = link->dcCommandContext;
 
-  link->dcCommandThread = std::jthread([this, connName, ctx, connId, tags, metaByTag, transport](std::stop_token st) {
-    ModuleManager::LogModuleScope moduleScope(IEC104LibInfo.LIB_NAME);
+  link->dcCommandThread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [this, connName, ctx, connId, tags, metaByTag, transport](std::stop_token st) {
     std::stop_callback cb(st, [&ctx]() { ctx->TryCancel(); });
 
     auto reader = dataCenter_.Subscribe(ctx.get(), connId, tags, false);

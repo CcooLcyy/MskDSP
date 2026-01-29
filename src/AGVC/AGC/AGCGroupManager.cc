@@ -9,7 +9,9 @@
 #include <utility>
 
 #include "AGCControl.h"
+#include "AGCLibInfo.h"
 #include "Logger.h"
+#include "ThreadUtil.hpp"
 
 namespace AGC {
 namespace {
@@ -230,7 +232,9 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
   g->dcSubscribeContext = std::make_shared<grpc::ClientContext>();
   auto ctx = g->dcSubscribeContext;
 
-  g->dcSubscribeThread = std::jthread([this, groupName, ctx, connId, tags](std::stop_token st) {
+  g->dcSubscribeThread = ModuleManager::StartModuleThread(
+      AGCLibInfo.LIB_NAME,
+      [this, groupName, ctx, connId, tags](std::stop_token st) {
     std::stop_callback cb(st, [&ctx]() { ctx->TryCancel(); });
 
     auto reader = dataCenter_.Subscribe(ctx.get(), connId, tags, true);
@@ -264,12 +268,14 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
     periodMs = 200;
   }
 
-  g->controlThread = std::jthread([this, groupName, periodMs](std::stop_token st) {
-    while (!st.stop_requested()) {
-      controlTick(groupName);
-      std::this_thread::sleep_for(std::chrono::milliseconds(periodMs));
-    }
-  });
+  g->controlThread = ModuleManager::StartModuleThread(
+      AGCLibInfo.LIB_NAME,
+      [this, groupName, periodMs](std::stop_token st) {
+        while (!st.stop_requested()) {
+          controlTick(groupName);
+          std::this_thread::sleep_for(std::chrono::milliseconds(periodMs));
+        }
+      });
 }
 
 grpc::Status GroupManager::StartGroup(const std::string &groupName) {

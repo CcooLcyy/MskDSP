@@ -5,6 +5,7 @@
 #include <grpcpp/support/server_interceptor.h>
 
 #include <algorithm>
+#include <boost/json.hpp>
 #include <filesystem>
 #include <format>
 #include <functional>
@@ -12,14 +13,14 @@
 #include <memory>
 #include <random>
 #include <sstream>
-#include <string_view>
-#include <utility>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
-#include <boost/json.hpp>
 
 #include "Logger.h"
+#include "ThreadUtil.hpp"
 
 namespace {
 std::string toHex(std::string_view text) {
@@ -31,10 +32,7 @@ std::string toHex(std::string_view text) {
   return oss.str();
 }
 
-void logJsonFieldDetails(std::string_view title,
-                         const boost::json::object &obj,
-                         std::string_view phase,
-                         std::string_view moduleName) {
+void logJsonFieldDetails(std::string_view title, const boost::json::object &obj, std::string_view phase, std::string_view moduleName) {
   LOG_INFO("{}字段数量={}，阶段: {}，模块: {}", title, obj.size(), phase, moduleName);
   if (obj.empty()) {
     return;
@@ -42,13 +40,7 @@ void logJsonFieldDetails(std::string_view title,
   for (const auto &entry : obj) {
     const auto &key = entry.key();
     std::string keyText(key.data(), key.size());
-    LOG_INFO("{}字段明细: 名称='{}'，字节数={}，十六进制={}，阶段: {}，模块: {}",
-             title,
-             keyText,
-             keyText.size(),
-             toHex(keyText),
-             phase,
-             moduleName);
+    LOG_INFO("{}字段明细: 名称='{}'，字节数={}，十六进制={}，阶段: {}，模块: {}", title, keyText, keyText.size(), toHex(keyText), phase, moduleName);
   }
 }
 
@@ -57,30 +49,24 @@ std::string sanitizeJsonSnippet(std::string_view text) {
   out.reserve(text.size());
   for (const char ch : text) {
     switch (ch) {
-      case '\n':
-        out.append("\\n");
-        break;
-      case '\r':
-        out.append("\\r");
-        break;
-      case '\t':
-        out.append("\\t");
-        break;
-      default:
-        out.push_back(ch);
-        break;
+    case '\n':
+      out.append("\\n");
+      break;
+    case '\r':
+      out.append("\\r");
+      break;
+    case '\t':
+      out.append("\\t");
+      break;
+    default:
+      out.push_back(ch);
+      break;
     }
   }
   return out;
 }
 
-void logJsonParseError(std::string_view title,
-                       std::string_view phase,
-                       std::string_view moduleName,
-                       std::string_view json,
-                       std::size_t offset,
-                       int errorValue,
-                       bool warnOnly) {
+void logJsonParseError(std::string_view title, std::string_view phase, std::string_view moduleName, std::string_view json, std::size_t offset, int errorValue, bool warnOnly) {
   const std::size_t safeOffset = std::min(offset, json.size());
   std::size_t line = 1;
   std::size_t column = 1;
@@ -104,34 +90,13 @@ void logJsonParseError(std::string_view title,
   const std::size_t snippetEnd = std::min(json.size(), safeOffset + kSnippetRadius);
   const auto snippet = sanitizeJsonSnippet(json.substr(snippetStart, snippetEnd - snippetStart));
   if (warnOnly) {
-    LOG_WARNING("{}解析失败: JSON 语法错误码={}，行={}，列={}，偏移={}，附近文本='{}'，阶段: {}，模块: {}",
-                title,
-                errorValue,
-                line,
-                column,
-                safeOffset,
-                snippet,
-                phase,
-                moduleName);
+    LOG_WARNING("{}解析失败: JSON 语法错误码={}，行={}，列={}，偏移={}，附近文本='{}'，阶段: {}，模块: {}", title, errorValue, line, column, safeOffset, snippet, phase, moduleName);
   } else {
-    LOG_ERROR("{}解析失败: JSON 语法错误码={}，行={}，列={}，偏移={}，附近文本='{}'，阶段: {}，模块: {}",
-              title,
-              errorValue,
-              line,
-              column,
-              safeOffset,
-              snippet,
-              phase,
-              moduleName);
+    LOG_ERROR("{}解析失败: JSON 语法错误码={}，行={}，列={}，偏移={}，附近文本='{}'，阶段: {}，模块: {}", title, errorValue, line, column, safeOffset, snippet, phase, moduleName);
   }
 }
 
-bool parseJsonValue(std::string_view json,
-                    boost::json::value *out,
-                    std::string_view title,
-                    std::string_view phase,
-                    std::string_view moduleName,
-                    bool warnOnly) {
+bool parseJsonValue(std::string_view json, boost::json::value *out, std::string_view title, std::string_view phase, std::string_view moduleName, bool warnOnly) {
   if (out == nullptr) {
     logJsonParseError(title, phase, moduleName, json, 0, -1, warnOnly);
     return false;
@@ -298,7 +263,7 @@ void ModuleInterface::grpcServerBuilder(std::shared_ptr<grpc::Service> service) 
 
   LOG_INFO("模块信息:\n名称:\t\t{}\n库名:\t\t{}\n版本:\t\t{}\n内部服务:\t{}\n对外服务:\t{}", metaData_.name, metaData_.libName, metaData_.version.version, metaData_.innerGRPCServer, metaData_.outerGRPCServer);
 
-  serverThread_ = std::jthread([this]() {
+  serverThread_ = ModuleManager::StartModuleThread(metaData_.name, [this]() {
     if (server_) {
       server_->Wait();
     }

@@ -15,6 +15,7 @@
 #include "IEC104TcpSession.h"
 #include "Logger.h"
 #include "IEC104LibInfo.h"
+#include "ThreadUtil.hpp"
 
 namespace IEC104 {
 namespace asio = boost::asio;
@@ -130,7 +131,9 @@ grpc::Status TcpLink::Start() {
     LOG_INFO("IEC104 开始监听: conn_name={}, 本地={}:{}", config_.conn_name(), endpoint.address().to_string(), endpoint.port());
   }
 
-  thread_ = std::jthread([this](std::stop_token st) { run(st); });
+  thread_ = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [this](std::stop_token st) { run(st); });
   return grpc::Status::OK;
 }
 
@@ -219,7 +222,6 @@ void TcpLink::SetCommandCallback(CommandCallback cb) {
 }
 
 void TcpLink::run(std::stop_token st) {
-  ModuleManager::LogModuleScope moduleScope(IEC104LibInfo.LIB_NAME);
   boost::asio::executor_work_guard<boost::asio::io_context::executor_type> guard(io_.get_executor());
   std::stop_callback cb(st, [this]() {
     boost::system::error_code ec;

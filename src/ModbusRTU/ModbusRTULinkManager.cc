@@ -12,6 +12,8 @@
 #include <vector>
 
 #include "Logger.h"
+#include "ModbusRTULibInfo.h"
+#include "ThreadUtil.hpp"
 
 namespace ModbusRTU {
 namespace {
@@ -279,9 +281,9 @@ grpc::Status LinkManager::startSlaveLink(const std::string& connName,
   slaveBus.linksBySlaveId.emplace(slaveId, std::move(snapshot));
 
   if (!slaveBus.worker.joinable()) {
-    slaveBus.worker = std::jthread([this, serialKey, bus](std::stop_token stopToken) {
-      slaveLoop(serialKey, bus, stopToken);
-    });
+    slaveBus.worker = ModuleManager::StartModuleThread(
+        ModbusRTULibInfo.LIB_NAME,
+        [this, serialKey, bus](std::stop_token stopToken) { slaveLoop(serialKey, bus, stopToken); });
   }
 
   it->second.bus = bus;
@@ -989,7 +991,8 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
     link.bus = bus;
     link.state = ModbusRTUProto::LINK_STATE_RUNNING;
     link.lastError.clear();
-    link.pollThread = std::jthread(
+    link.pollThread = ModuleManager::StartModuleThread(
+        ModbusRTULibInfo.LIB_NAME,
         [this, connName, connId, config, pointTable, bus](std::stop_token stopToken) {
           pollLoop(connName, connId, config, pointTable, bus, stopToken);
         });

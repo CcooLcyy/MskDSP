@@ -13,7 +13,9 @@
 #include <thread>
 #include <vector>
 
+#include "IEC104LibInfo.h"
 #include "IEC104TcpSession.h"
+#include "ThreadUtil.hpp"
 
 namespace {
 using tcp = boost::asio::ip::tcp;
@@ -157,11 +159,13 @@ SocketPair MakeConnectedSockets(boost::asio::io_context& session_io) {
 
   tcp::socket peer_socket(peer_io);
   std::promise<boost::system::error_code> accept_result;
-  std::thread accept_thread([&]() {
-    boost::system::error_code ec;
-    acceptor.accept(peer_socket, ec);
-    accept_result.set_value(ec);
-  });
+  std::jthread accept_thread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [&]() {
+        boost::system::error_code ec;
+        acceptor.accept(peer_socket, ec);
+        accept_result.set_value(ec);
+      });
 
   tcp::socket session_socket(session_io);
   session_socket.connect(tcp::endpoint(boost::asio::ip::address_v4::loopback(), port));
@@ -205,7 +209,9 @@ TEST(IEC104TcpSessionTest, ClientAutoInterrogationAfterStartDt) {
   auto session = std::make_shared<IEC104::TcpSession>(*io, config, true);
   session->Start(std::move(sockets.session_socket));
 
-  std::jthread session_thread([&]() { io->run(); });
+  std::jthread session_thread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [&]() { io->run(); });
 
   auto start_act = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "STARTDT_ACT");
   ASSERT_FALSE(start_act.empty());
@@ -236,7 +242,9 @@ TEST(IEC104TcpSessionTest, DelayedAckUsesT2Timer) {
   auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
   session->Start(std::move(sockets.session_socket));
 
-  std::jthread session_thread([&]() { io->run(); });
+  std::jthread session_thread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [&]() { io->run(); });
 
   auto start_act = BuildUFrame(kUStartDtAct);
   boost::asio::write(sockets.peer_socket, boost::asio::buffer(start_act));
@@ -273,7 +281,9 @@ TEST(IEC104TcpSessionTest, SingleCommandSelectExecute) {
   session->SetCommandCallback([&](const IEC104::CommandValue& cv) { cmdPromise.set_value(cv); });
   session->Start(std::move(sockets.session_socket));
 
-  std::jthread session_thread([&]() { io->run(); });
+  std::jthread session_thread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [&]() { io->run(); });
 
   auto start_act = BuildUFrame(kUStartDtAct);
   boost::asio::write(sockets.peer_socket, boost::asio::buffer(start_act));
@@ -332,7 +342,9 @@ TEST(IEC104TcpSessionTest, SingleCommandExecuteWithoutSelect) {
   session->SetCommandCallback([&](const IEC104::CommandValue&) { called = true; });
   session->Start(std::move(sockets.session_socket));
 
-  std::jthread session_thread([&]() { io->run(); });
+  std::jthread session_thread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [&]() { io->run(); });
 
   auto start_act = BuildUFrame(kUStartDtAct);
   boost::asio::write(sockets.peer_socket, boost::asio::buffer(start_act));
@@ -372,7 +384,9 @@ TEST(IEC104TcpSessionTest, PointWithoutTimeUsesNoTimestampTypes) {
   auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
   session->Start(std::move(sockets.session_socket));
 
-  std::jthread session_thread([&]() { io->run(); });
+  std::jthread session_thread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [&]() { io->run(); });
 
   auto start_act = BuildUFrame(kUStartDtAct);
   boost::asio::write(sockets.peer_socket, boost::asio::buffer(start_act));
@@ -423,7 +437,9 @@ TEST(IEC104TcpSessionTest, PointWithTimeUsesTimestampTypes) {
   auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
   session->Start(std::move(sockets.session_socket));
 
-  std::jthread session_thread([&]() { io->run(); });
+  std::jthread session_thread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [&]() { io->run(); });
 
   auto start_act = BuildUFrame(kUStartDtAct);
   boost::asio::write(sockets.peer_socket, boost::asio::buffer(start_act));
