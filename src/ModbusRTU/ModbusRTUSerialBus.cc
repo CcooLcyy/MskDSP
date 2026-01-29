@@ -19,6 +19,7 @@ constexpr uint8_t kFunctionReadHoldingRegisters = 0x03;
 constexpr uint8_t kFunctionWriteMultipleCoils = 0x0F;
 constexpr uint8_t kFunctionWriteMultipleRegisters = 0x10;
 constexpr char kHexDigits[] = "0123456789ABCDEF";
+constexpr size_t kMaxConsecutiveTimeouts = 3;
 
 std::string bytesToHex(const std::vector<uint8_t> &data) {
   if (data.empty()) {
@@ -188,13 +189,13 @@ grpc::Status SerialBus::ReadRequest(RtuRequest* out) {
 
   const auto timeout = std::chrono::milliseconds(config_.read_timeout_ms());
   std::array<uint8_t, 2> header{};
-  status = readExactLocked(header.data(), header.size(), timeout);
+  status = readExactLocked(header.data(), header.size(), timeout, false);
   if (!status.ok()) {
     return status;
   }
 
   std::array<uint8_t, 4> body{};
-  status = readExactLocked(body.data(), body.size(), timeout);
+  status = readExactLocked(body.data(), body.size(), timeout, false);
   if (!status.ok()) {
     return status;
   }
@@ -207,20 +208,20 @@ grpc::Status SerialBus::ReadRequest(RtuRequest* out) {
   const uint8_t function = header[1];
   if (function == kFunctionWriteMultipleCoils || function == kFunctionWriteMultipleRegisters) {
     uint8_t byteCount = 0;
-    status = readExactLocked(&byteCount, 1, timeout);
+    status = readExactLocked(&byteCount, 1, timeout, false);
     if (!status.ok()) {
       return status;
     }
     frame.push_back(byteCount);
     std::vector<uint8_t> tail(static_cast<size_t>(byteCount) + 2, 0);
-    status = readExactLocked(tail.data(), tail.size(), timeout);
+    status = readExactLocked(tail.data(), tail.size(), timeout, false);
     if (!status.ok()) {
       return status;
     }
     frame.insert(frame.end(), tail.begin(), tail.end());
   } else {
     std::array<uint8_t, 2> crcBytes{};
-    status = readExactLocked(crcBytes.data(), crcBytes.size(), timeout);
+    status = readExactLocked(crcBytes.data(), crcBytes.size(), timeout, false);
     if (!status.ok()) {
       return status;
     }
@@ -342,7 +343,10 @@ grpc::Status SerialBus::writeRequestLocked(const std::vector<uint8_t>& frame) {
   return grpc::Status::OK;
 }
 
-grpc::Status SerialBus::readExactLocked(uint8_t* data, size_t len, std::chrono::milliseconds timeout) {
+grpc::Status SerialBus::readExactLocked(uint8_t* data,
+                                        size_t len,
+                                        std::chrono::milliseconds timeout,
+                                        bool countTimeout) {
   if (len == 0) {
     return grpc::Status::OK;
   }
@@ -370,13 +374,40 @@ grpc::Status SerialBus::readExactLocked(uint8_t* data, size_t len, std::chrono::
   io_.run();
 
   if (timedOut) {
+    if (countTimeout) {
+      ++consecutiveTimeouts_;
+      if (consecutiveTimeouts_ >= kMaxConsecutiveTimeouts) {
+        LOG_WARNING("ModbusRTU 串口连续读取超时，准备重置: device={}, 连续超时次数={}, 超时={}ms",
+                    config_.device(),
+                    consecutiveTimeouts_,
+                    timeout.count());
+        boost::system::error_code ec;
+        port_.close(ec);
+        if (ec) {
+          LOG_WARNING("ModbusRTU 串口重置关闭失败: device={}, 原因={}", config_.device(), ec.message());
+        } else {
+          LOG_INFO("ModbusRTU 串口已重置: device={}", config_.device());
+        }
+        opened_ = false;
+        consecutiveTimeouts_ = 0;
+      }
+    }
     return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "串口读取超时");
   }
   if (readEc) {
+    if (countTimeout) {
+      consecutiveTimeouts_ = 0;
+    }
     return grpc::Status(grpc::StatusCode::UNAVAILABLE, std::format("串口读取失败: {}", readEc.message()));
   }
   if (bytesRead != len) {
+    if (countTimeout) {
+      consecutiveTimeouts_ = 0;
+    }
     return grpc::Status(grpc::StatusCode::UNAVAILABLE, "串口读取不完整");
+  }
+  if (countTimeout) {
+    consecutiveTimeouts_ = 0;
   }
   return grpc::Status::OK;
 }

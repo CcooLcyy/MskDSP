@@ -44,7 +44,10 @@ public:
 private:
   grpc::Status ensureOpenLocked();
   grpc::Status writeRequestLocked(const std::vector<uint8_t>& frame);
-  grpc::Status readExactLocked(uint8_t* data, size_t len, std::chrono::milliseconds timeout);
+  grpc::Status readExactLocked(uint8_t* data,
+                               size_t len,
+                               std::chrono::milliseconds timeout,
+                               bool countTimeout = true);
   grpc::Status readResponseLocked(
       uint8_t expectedSlaveId,
       uint8_t expectedFunction,
@@ -56,6 +59,7 @@ private:
   boost::asio::serial_port port_;
   std::mutex mu_;
   bool opened_ = false;
+  size_t consecutiveTimeouts_ = 0;
 };
 
 }  // namespace ModbusRTU
