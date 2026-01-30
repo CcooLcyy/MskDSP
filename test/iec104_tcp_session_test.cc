@@ -148,16 +148,17 @@ std::vector<uint8_t> BuildSingleCommandAsdu(uint32_t ioa, bool value, bool selec
 }
 
 struct SocketPair {
+  std::shared_ptr<boost::asio::io_context> peer_io;
   tcp::socket session_socket;
   tcp::socket peer_socket;
 };
 
 SocketPair MakeConnectedSockets(boost::asio::io_context& session_io) {
-  boost::asio::io_context peer_io;
-  tcp::acceptor acceptor(peer_io, tcp::endpoint(tcp::v4(), 0));
+  auto peer_io = std::make_shared<boost::asio::io_context>();
+  tcp::acceptor acceptor(*peer_io, tcp::endpoint(tcp::v4(), 0));
   auto port = acceptor.local_endpoint().port();
 
-  tcp::socket peer_socket(peer_io);
+  tcp::socket peer_socket(*peer_io);
   std::promise<boost::system::error_code> accept_result;
   std::jthread accept_thread = ModuleManager::StartModuleThread(
       IEC104LibInfo.LIB_NAME,
@@ -174,7 +175,7 @@ SocketPair MakeConnectedSockets(boost::asio::io_context& session_io) {
   accept_thread.join();
   EXPECT_EQ(ec.value(), 0);
 
-  return {std::move(session_socket), std::move(peer_socket)};
+  return {std::move(peer_io), std::move(session_socket), std::move(peer_socket)};
 }
 
 IEC104Proto::LinkConfig MakeConfig(const std::string& name,
