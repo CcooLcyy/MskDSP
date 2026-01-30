@@ -22,6 +22,15 @@ const std::string &GetSerializedManifest() {
     version->set_minor(DLT645LibInfo.VERSION_MINOR);
     version->set_patch(DLT645LibInfo.VERSION_PATCH);
     version->set_version(DLT645LibInfo.VERSION);
+
+    auto dependency = manifest.add_dependencies();
+    dependency->set_module_name("DataCenter");
+    dependency->set_version_range("=0.0.1");
+
+    auto mqttDependency = manifest.add_dependencies();
+    mqttDependency->set_module_name("MQTTManager");
+    mqttDependency->set_version_range("=0.0.1");
+
     return manifest.SerializeAsString();
   }();
   return kSerialized;
@@ -31,18 +40,29 @@ const std::string &GetSerializedManifest() {
 namespace DLT645 {
 DLT645::DLT645() :
   ModuleInterface(),
-  dlt645Service_(std::make_shared<DLT645GrpcServiceImpl>()) {
+  dlt645Service_(std::make_shared<DLT645GrpcServiceImpl>()),
+  linkManager_(DLT645LibInfo.LIB_NAME) {
   initLibInfo(DLT645LibInfo);
 }
 DLT645::~DLT645() {}
 void DLT645::start(std::stop_token stopToken) {
   LOG_INFO("DLT645 模块启动");
   dlt645Service_->getDLT645(this);
+  LOG_INFO("DLT645 服务实例绑定完成");
   grpcServerBuilder(dlt645Service_);
+  LOG_INFO("DLT645 gRPC 服务已启动");
   while (!stopToken.stop_requested()) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
   LOG_INFO("DLT645 模块停止");
+}
+
+LinkManager& DLT645::linkManager() {
+  return linkManager_;
+}
+
+const LinkManager& DLT645::linkManager() const {
+  return linkManager_;
 }
 }  // namespace DLT645
 
