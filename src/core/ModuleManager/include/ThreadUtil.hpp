@@ -1,6 +1,7 @@
 #pragma once
 
 #include <concepts>
+#include <exception>
 #include <functional>
 #include <string>
 #include <thread>
@@ -17,8 +18,15 @@ std::jthread StartModuleThread(std::string moduleName, F&& fn, Args&&... args) {
   return std::jthread(
       [name = std::move(moduleName),
        func = std::forward<F>(fn)](std::stop_token st, Args... innerArgs) mutable {
-        LogModuleScope scope(name);
-        std::invoke(func, st, std::move(innerArgs)...);
+        const std::string moduleNameCopy = name;
+        LogModuleScope scope(moduleNameCopy);
+        try {
+          std::invoke(func, st, std::move(innerArgs)...);
+        } catch (const std::exception& ex) {
+          LOG_ERROR("模块线程异常: 模块={}, 原因={}", moduleNameCopy, ex.what());
+        } catch (...) {
+          LOG_ERROR("模块线程异常: 模块={}, 原因=未知异常", moduleNameCopy);
+        }
       },
       std::forward<Args>(args)...);
 }
@@ -29,8 +37,15 @@ std::jthread StartModuleThread(std::string moduleName, F&& fn, Args&&... args) {
   return std::jthread(
       [name = std::move(moduleName),
        func = std::forward<F>(fn)](Args... innerArgs) mutable {
-        LogModuleScope scope(name);
-        std::invoke(func, std::move(innerArgs)...);
+        const std::string moduleNameCopy = name;
+        LogModuleScope scope(moduleNameCopy);
+        try {
+          std::invoke(func, std::move(innerArgs)...);
+        } catch (const std::exception& ex) {
+          LOG_ERROR("模块线程异常: 模块={}, 原因={}", moduleNameCopy, ex.what());
+        } catch (...) {
+          LOG_ERROR("模块线程异常: 模块={}, 原因=未知异常", moduleNameCopy);
+        }
       },
       std::forward<Args>(args)...);
 }
