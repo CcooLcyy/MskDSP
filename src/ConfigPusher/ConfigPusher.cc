@@ -18,6 +18,7 @@
 #include "COMMock.grpc.pb.h"
 #include "ConfigPusher.pb.h"
 #include "ConfigPusherApplyComMock.h"
+#include "ConfigPusherApplyDlt645.h"
 #include "ConfigPusherApplyIec104.h"
 #include "ConfigPusherApplyModbusRtu.h"
 #include "ConfigPusherConfigLoader.h"
@@ -25,6 +26,7 @@
 #include "ConfigPusherGrpcService.h"
 #include "ConfigPusherLibInfo.h"
 #include "ConfigPusherModuleManager.h"
+#include "DLT645.grpc.pb.h"
 #include "DataCenter.grpc.pb.h"
 #include "IEC104.grpc.pb.h"
 #include "Logger.h"
@@ -51,12 +53,15 @@ namespace ConfigPusher {
 namespace {
 constexpr const char *kIec104ConfigPath = "./conf/configPusher/iec104.jsonc";
 constexpr const char *kModbusRtuConfigPath = "./conf/configPusher/modbus_rtu.jsonc";
+constexpr const char *kDlt645ConfigPath = "./conf/configPusher/DLT645.jsonc";
 constexpr const char *kDataCenterConfigPath = "./conf/configPusher/DataCenter.jsonc";
 constexpr const char *kComMockConfigPath = "./conf/configPusher/COMMock.jsonc";
 constexpr const char *kModuleManagerAddress = "127.0.0.1:7000";
 constexpr const char *kDataCenterModuleName = "DataCenter";
 constexpr const char *kIec104ModuleName = "IEC104";
 constexpr const char *kModbusRtuModuleName = "ModbusRTU";
+constexpr const char *kDlt645ModuleName = "DLT645";
+constexpr const char *kMqttManagerModuleName = "MQTTManager";
 constexpr const char *kComMockModuleName = "COMMock";
 constexpr auto kModuleStartTimeout = std::chrono::seconds(5);
 
@@ -117,15 +122,17 @@ void ConfigPusher::applyConfig() {
   auto comMockConfig = LoadConfigFile(ResolveConfigPath(configDir, kComMockConfigPath));
   auto iec104Config = LoadConfigFile(ResolveConfigPath(configDir, kIec104ConfigPath));
   auto modbusConfig = LoadConfigFile(ResolveConfigPath(configDir, kModbusRtuConfigPath));
+  auto dlt645Config = LoadConfigFile(ResolveConfigPath(configDir, kDlt645ConfigPath));
   auto dataCenterConfig = LoadDataCenterConfigFile(ResolveConfigPath(configDir, kDataCenterConfigPath));
 
   const bool hasComMock = comMockConfig && comMockConfig->has_com_mock() && comMockConfig->com_mock().ports_size() > 0;
   const bool hasIec104 = iec104Config && iec104Config->has_iec104() && !iec104Config->iec104().links().empty();
   const bool hasModbus = modbusConfig && modbusConfig->has_modbus_rtu() && !modbusConfig->modbus_rtu().links().empty();
+  const bool hasDlt645 = dlt645Config && dlt645Config->has_dlt645() && !dlt645Config->dlt645().links().empty();
   const bool hasDataCenter = dataCenterConfig && (!dataCenterConfig->point_tables().empty() || (dataCenterConfig->has_routes() && dataCenterConfig->routes().routes_size() > 0));
-  const bool needsDataCenter = hasIec104 || hasModbus || hasDataCenter;
-  if (!hasComMock && !hasIec104 && !hasModbus && !hasDataCenter) {
-    LOG_INFO("配置中未包含 COMMock/IEC104/ModbusRTU/DataCenter 配置");
+  const bool needsDataCenter = hasIec104 || hasModbus || hasDlt645 || hasDataCenter;
+  if (!hasComMock && !hasIec104 && !hasModbus && !hasDlt645 && !hasDataCenter) {
+    LOG_INFO("配置中未包含 COMMock/IEC104/ModbusRTU/DLT645/DataCenter 配置");
     return;
   }
   LOG_INFO("ConfigPusher 配置解析完成，开始准备下发配置");
@@ -157,6 +164,20 @@ void ConfigPusher::applyConfig() {
     modbusInfo = findModuleInfo(moduleInfos, kModbusRtuModuleName);
     if (!modbusInfo) {
       LOG_ERROR("未找到模块: {}", kModbusRtuModuleName);
+      return;
+    }
+  }
+  std::optional<ModuleManagerProto::ModuleInfo> dlt645Info;
+  std::optional<ModuleManagerProto::ModuleInfo> mqttInfo;
+  if (hasDlt645) {
+    dlt645Info = findModuleInfo(moduleInfos, kDlt645ModuleName);
+    if (!dlt645Info) {
+      LOG_ERROR("未找到模块: {}", kDlt645ModuleName);
+      return;
+    }
+    mqttInfo = findModuleInfo(moduleInfos, kMqttManagerModuleName);
+    if (!mqttInfo) {
+      LOG_ERROR("未找到模块: {}", kMqttManagerModuleName);
       return;
     }
   }
@@ -231,6 +252,46 @@ void ConfigPusher::applyConfig() {
     }
   }
 
+  std::optional<ModuleManagerProto::ModuleRunningInfo> runningMqtt;
+  if (hasDlt645 && mqttInfo) {
+    runningMqtt = findRunningInfo(running, kMqttManagerModuleName);
+    if (!runningMqtt) {
+      LOG_INFO("MQTTManager 未运行，开始启动");
+      if (!startModule(moduleStub.get(), *mqttInfo)) {
+        LOG_ERROR("启动模块 {} 失败", kMqttManagerModuleName);
+        return;
+      }
+      runningMqtt = waitForModule(moduleStub.get(), kMqttManagerModuleName, kModuleStartTimeout);
+      if (!runningMqtt) {
+        LOG_ERROR("等待 MQTTManager 启动超时");
+        return;
+      }
+      LOG_INFO("MQTTManager 已启动");
+    } else {
+      LOG_INFO("MQTTManager 已在运行");
+    }
+  }
+
+  std::optional<ModuleManagerProto::ModuleRunningInfo> runningDlt645;
+  if (hasDlt645) {
+    runningDlt645 = findRunningInfo(running, kDlt645ModuleName);
+    if (!runningDlt645) {
+      LOG_INFO("DLT645 未运行，开始启动");
+      if (!startModule(moduleStub.get(), *dlt645Info)) {
+        LOG_ERROR("启动模块 {} 失败", kDlt645ModuleName);
+        return;
+      }
+      runningDlt645 = waitForModule(moduleStub.get(), kDlt645ModuleName, kModuleStartTimeout);
+      if (!runningDlt645) {
+        LOG_ERROR("等待 DLT645 启动超时");
+        return;
+      }
+      LOG_INFO("DLT645 已启动");
+    } else {
+      LOG_INFO("DLT645 已在运行");
+    }
+  }
+
   std::optional<ModuleManagerProto::ModuleRunningInfo> runningComMock;
   if (hasComMock && comMockInfo) {
     runningComMock = findRunningInfo(running, kComMockModuleName);
@@ -268,6 +329,16 @@ void ConfigPusher::applyConfig() {
       LOG_ERROR("ModbusRTU 配置下发存在错误");
     } else {
       LOG_INFO("ModbusRTU 配置下发完成");
+    }
+  }
+
+  if (hasDlt645 && runningDlt645) {
+    auto dltChannel = grpc::CreateChannel(runningDlt645->inner_grpc_server(), grpc::InsecureChannelCredentials());
+    auto dltStub = DLT645Proto::DLT645Service::NewStub(dltChannel);
+    if (!applyDlt645Config(dlt645Config->dlt645(), dltStub.get())) {
+      LOG_ERROR("DLT645 配置下发存在错误");
+    } else {
+      LOG_INFO("DLT645 配置下发完成");
     }
   }
 
