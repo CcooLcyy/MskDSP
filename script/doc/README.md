@@ -105,6 +105,10 @@ bash script/new_module.sh <ModuleName> [--lib-name <LibName>] [--no-proto] [--fo
 - 生成目录 `src/<ModuleName>/`，含 `include/`、`cmake/`、`doc/`。
 - 自动追加 `add_subdirectory(<ModuleName>)` 到 `src/CMakeLists.txt`。
 - 默认生成 `Ping(Empty)->Empty` RPC（开始实现业务 RPC 后应删除）。
+- 生成 `GetModuleManifestPb` 模板（含版本信息），依赖项默认留空。
+- 生成的 `.proto` 自带 `service/rpc` 注释，满足接口注释规范。
+- 生成的模块模板已包含中文日志（模块启动/停止、Ping 请求）。
+- 模块文档骨架包含“线程与日志”约定说明。
 
 ### 注意事项
 - `protobuf/` 是子模块时会提示影响子模块工作区。

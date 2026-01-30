@@ -43,6 +43,12 @@ bash script/new_module.sh <NewModule>
    - 在 `src/CMakeLists.txt` 中 `add_subdirectory(<NewModule>)` 参与构建。
 6. 构建后，将生成的 `.so` 放在运行时工作目录的 `./module`（默认即 `package/module/`），通过 gRPC 调用 `StartModule` 启动模块。
 
+脚手架补充内容说明（与当前规范保持一致）：
+- 自动生成 `GetModuleManifestPb` 模板与版本信息（依赖默认留空）。
+- `protobuf/*.proto` 生成 `service/rpc` 注释，便于对接与校验。
+- 模块模板内置中文日志（模块启动/停止、Ping 请求）。
+- 模块文档骨架包含“线程与日志”约定说明。
+
 ## 模块依赖与上位机使用
 ModuleManager 使用模块 manifest 构建依赖图，并自动处理依赖启动/级联停止。上位机侧建议遵循以下流程：
 - 先调用 `GetModuleInfo`，过滤 `manifest_error` 非空的模块（表示不可用或依赖配置错误）。

@@ -155,6 +155,10 @@ TODO：一句话说明模块职责/边界。
 ## 配置与数据
 - TODO：运行时配置项、文件位置、持久化数据目录等
 
+## 线程与日志
+- 模块内部线程统一使用 \`ModuleManager::StartModuleThread(模块LibInfo.LIB_NAME, ...)\` 创建，自动绑定日志模块名上下文。
+- 无需在入口手动创建 \`ModuleManager::LogModuleScope\`，统一规则见 \`src/core/ModuleManager/doc/README.md\`。
+
 ## 构建产物
 - 共享库：\`package/module/lib${LIB_NAME}.so.<version>\`（版本见 \`src/${MODULE_NAME}/cmake/LibInfo.cmake\`）
 EOF
@@ -231,11 +235,14 @@ cat > "${MODULE_DIR}/${MODULE_NAME}GrpcService.cc" <<EOF
 
 #include <grpcpp/support/status.h>
 
+#include "Logger.h"
+
 namespace ${MODULE_NAME} {
 void ${MODULE_NAME}GrpcServiceImpl::get${MODULE_NAME}(${MODULE_NAME}* module) {
   module_ = module;
 }
 grpc::Status ${MODULE_NAME}GrpcServiceImpl::Ping(grpc::ServerContext* context, const ${MODULE_NAME}Proto::Empty*, ${MODULE_NAME}Proto::Empty*) {
+  LOG_INFO("${MODULE_NAME} 收到 Ping 请求");
   return grpc::Status::OK;
 }
 }  // namespace ${MODULE_NAME}
@@ -252,6 +259,27 @@ cat > "${MODULE_DIR}/${MODULE_NAME}.cc" <<EOF
 
 #include "${MODULE_NAME}GrpcService.h"
 #include "${LIB_NAME}LibInfo.h"
+#include "Logger.h"
+#include "ModuleManager.pb.h"
+
+namespace {
+const std::string &GetSerializedManifest() {
+  static const std::string kSerialized = []() {
+    ModuleManagerProto::ModuleManifest manifest;
+    manifest.set_module_name(${LIB_NAME}LibInfo.LIB_NAME);
+    auto version = manifest.mutable_version();
+    version->set_major(${LIB_NAME}LibInfo.VERSION_MAJOR);
+    version->set_minor(${LIB_NAME}LibInfo.VERSION_MINOR);
+    version->set_patch(${LIB_NAME}LibInfo.VERSION_PATCH);
+    version->set_version(${LIB_NAME}LibInfo.VERSION);
+
+    // TODO：如需声明依赖，请在此追加 manifest.add_dependencies()。
+
+    return manifest.SerializeAsString();
+  }();
+  return kSerialized;
+}
+}  // namespace
 
 namespace ${MODULE_NAME} {
 ${MODULE_NAME}::${MODULE_NAME}() :
@@ -261,16 +289,30 @@ ${MODULE_NAME}::${MODULE_NAME}() :
 }
 ${MODULE_NAME}::~${MODULE_NAME}() {}
 void ${MODULE_NAME}::start(std::stop_token stopToken) {
+  LOG_INFO("${MODULE_NAME} 模块启动");
   ${VAR_PREFIX}Service_->get${MODULE_NAME}(this);
+  LOG_INFO("${MODULE_NAME} 服务实例绑定完成");
   grpcServerBuilder(${VAR_PREFIX}Service_);
+  LOG_INFO("${MODULE_NAME} gRPC 服务已启动");
   while (!stopToken.stop_requested()) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
+  LOG_INFO("${MODULE_NAME} 模块停止");
 }
 }  // namespace ${MODULE_NAME}
 
 extern "C" BOOST_SYMBOL_EXPORT ModuleInterface::ModuleInterface* create() {
   return new ${MODULE_NAME}::${MODULE_NAME}();
+}
+
+extern "C" BOOST_SYMBOL_EXPORT bool GetModuleManifestPb(const uint8_t **data, size_t *size) {
+  if (data == nullptr || size == nullptr) {
+    return false;
+  }
+  const auto &serialized = GetSerializedManifest();
+  *data = reinterpret_cast<const uint8_t *>(serialized.data());
+  *size = serialized.size();
+  return true;
 }
 EOF
 
@@ -282,7 +324,10 @@ package ${MODULE_NAME}Proto;
 
 message Empty {}
 
+// ${MODULE_NAME}Service：模块对外提供的 gRPC 服务（当前仅含连通性探测示例接口）。
 service ${MODULE_NAME}Service {
+  // Ping：用于上位机连通性探测；非 stream、幂等、无落盘/启停/清理缓存等副作用；
+  // 主要错误码：OK；边界条件：请求/响应均为空。
   rpc Ping(Empty) returns (Empty);
 }
 EOF
