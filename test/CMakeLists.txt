@@ -98,6 +98,23 @@ set_tests_properties(logger_test PROPERTIES
   WORKING_DIRECTORY "${MSKDSP_LOGGER_TEST_ENV_DIR}"
 )
 
+add_executable(mqtt_manager_test
+  mqtt_manager_test.cc
+  ${CMAKE_SOURCE_DIR}/src/MQTTManager/MQTTTopicMatcher.cc
+)
+
+target_include_directories(mqtt_manager_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/MQTTManager/include
+)
+
+target_link_libraries(mqtt_manager_test PRIVATE
+  GTest::gtest_main
+  dspProto
+  Boost::json
+)
+
+add_test(NAME mqtt_manager_test COMMAND mqtt_manager_test)
+
 add_executable(dataCenterCore_test
   data_center_core_test.cc
   ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCore.cc
@@ -403,6 +420,7 @@ set(MSKDSP_TEST_TARGETS
   moduleInterface_test
   commock_test
   logger_test
+  mqtt_manager_test
   dataCenterCore_test
   dataCenterPointTableStore_test
   dataCenterRouteStore_test

@@ -1,12 +1,13 @@
 # MQTTManager 模块
 
 ## 简介
-MQTTManager 负责管理 MQTT 连接与脚本编解码，通过 gRPC 提供发布/订阅与配置下发能力。
+MQTTManager 提供通用 MQTT 连接与请求-响应能力，业务模块通过 gRPC 调用完成发布、订阅与请求-响应交互。业务 payload 透传，不在模块内解析。
 
 ## 能力清单
-- 通过 gRPC 下发多配置项（连接参数 + Lua 脚本）
-- 业务模块通过 gRPC 发布/订阅 MQTT 消息（脚本负责编解码）
-- 支持内联脚本与脚本文件路径（内联优先）
+- 单实例多连接（每个连接一个线程）
+- 业务模块通过 gRPC 直接提供 broker 连接参数（host/port）
+- 请求-响应：payload 原样透传，按 JSON 字段匹配响应
+- 普通发布与订阅：payload 原样透传
 
 ## 接口与协议
 - Protobuf：`protobuf/MQTTManager.proto`
@@ -17,62 +18,69 @@ MQTTManager 负责管理 MQTT 连接与脚本编解码，通过 gRPC 提供发�
 - 内部 gRPC：`unix socket`：`./socket/MQTTManager.sock`
 - 运行时可通过管理器 `GetRunningModuleInfo` 查询实际地址
 
-## 配置与数据
-- 配置来源：由 ConfigPusher 通过 gRPC `UpdateConfig` 统一下发（上位机侧请通过 ConfigPusher 触发下发）
-- 脚本路径：`<可执行程序同目录>/conf/MQTTManager/script`（文件路径需相对该目录）
-- 示例配置：`package/conf/configPusher/MQTTManager.jsonc`（仅示例）
-- 脚本环境：当前仅启用基础库与字符串库
+## 连接与隔离规则
+- 连接唯一标识：`host:port`
+- 若同一 `host:port` 连接参数不一致，将返回错误（避免连接冲突）
+- 请求-响应通过 `match_field` 指定的 JSON 字段值做关联；同一 `response_topic + match_field + match_value` 只允许一个请求在途
 
-## 使用流程
-1) 启动 MQTTManager 模块
-2) 通过 ModuleManager 查询 MQTTManager 的 gRPC 地址
-3) 通过 ConfigPusher 下发配置（ConfigPusher 调用 `UpdateConfig`，含多配置项与脚本）
-4) 业务模块调用 `Publish`（仅发送/广播）或 `Subscribe`（仅接收/广播）
+## 连接复用与并发行为
+- 同一 `host:port` 连接在模块内复用；并发请求触发重复创建时会复用已有连接（日志会提示“连接已存在，丢弃重复创建”）。
+- 发布/订阅/重订阅在单连接内做串行化，避免并发操作导致 MQTT 客户端阻塞或超时。
+- 连接断开时可能出现短暂不可用；建议业务侧使用 QoS 1 并配合持久会话（`clean_session=false`）降低丢消息概率。
 
-说明：当前 `Publish/Subscribe` 尚未启用，调用会返回 `UNIMPLEMENTED`，仅用于接口对接与流程验证。
+## 断线与恢复建议
+- 断线后，如使用 `clean_session=true`，broker 不保留订阅；需要业务侧重新触发订阅（或重启/重配）。
+- 若发现请求偶发超时，请优先检查 `MQTTManager.log` 中的 `Disconnected`、`订阅失败/发布失败` 日志。
 
-## 脚本接口约定
-- 解码函数：`decode(topic, payload, props)`
-- 编码函数：`encode(topic, data, props)`
-- `data` 为 `map<string, string>`，仅支持字符串字段
+## 请求-响应模型
+1) 调用 `RequestAndWait`，指定 `match_field`（JSON 字段路径）  
+2) MQTTManager 将业务 payload 原样发布到请求 topic  
+3) MQTTManager 订阅响应 topic，解析响应 JSON 并提取 `match_field`  
+4) 当响应字段值与请求字段值一致时返回 payload
 
-示例：
-```lua
-function decode(topic, payload, props)
-  return { data = { topic = topic, payload = payload }, meta = {} }
-end
+注意：
+- payload 必须是 JSON 文本，`match_field` 必须在请求与响应中同时存在。
+- `match_field` 支持嵌套路径（如 `data.id`、`data.items[0].id`）。
+- 建议使用字符串/数值字段作为匹配值，避免复杂对象造成歧义。
+- 匹配规则为 JSON 值全等（类型和值一致），例如 `"1"` 与 `1` 不相等。
+- `request_id` 仅用于 gRPC 返回与日志，不参与 MQTT 匹配。
 
-function encode(topic, data, props)
-  return data["payload"] or ""
-end
+### 匹配字段路径说明
+- `.` 表示对象字段，`[index]` 表示数组下标（从 0 开始），支持根数组（如 `[0].id`）。
+- 字段名不支持包含 `.` 或 `[]` 字符；如需复杂字段名，请在业务层自行规避或映射。
+- 同一 `response_topic + match_field + match_value` 只允许一个请求在途，后续请求会返回 `ALREADY_EXISTS`。
+
+### 响应方示例
+响应方收到请求后，需在响应 JSON 中带回相同字段值：
+```
+{
+  "req": { "id": "req-1700000000000-1" },
+  "result": "ok",
+  "payload": { ...业务数据... }
+}
 ```
 
 ## gRPC 调用示例
 > 以下为示例，地址需以 ModuleManager 实际返回为准。
 
-1) 下发配置（UpdateConfig，主要供 ConfigPusher 调用）
+1) 请求-响应（RequestAndWait）
 ```bash
 grpcurl -plaintext 127.0.0.1:7xxx \
-  MQTTManagerProto.MQTTManagerService/UpdateConfig \
+  MQTTManagerProto.MQTTManagerService/RequestAndWait \
   -d '{
-    "profiles": [
-      {
-        "profile_id": "main",
-        "connection": {
-          "broker_uri": "tcp://127.0.0.1:1883",
-          "client_id": "mqtt_manager_main",
-          "username": "user",
-          "password": "pass",
-          "keepalive_sec": 30,
-          "clean_session": true
-        },
-        "script": {
-          "inline_script": "function decode(topic, payload, props)\\n  return { data = { topic = topic, payload = payload }, meta = {} }\\nend\\n\\nfunction encode(topic, data, props)\\n  return data[\\\"payload\\\"] or \\\"\\\"\\nend\\n",
-          "decode_entry": "decode",
-          "encode_entry": "encode"
-        }
-      }
-    ]
+    "connection": {
+      "host": "127.0.0.1",
+      "port": 1883,
+      "client_id": "modbus_client"
+    },
+    "request_topic": "uart/req",
+    "response_topic": "uart/resp",
+    "qos": 1,
+    "retain": false,
+    "timeout_ms": 3000,
+    "retry_times": 1,
+    "match_field": "req.id",
+    "payload": "eyJyZXEiOnsiaWQiOiJyZXEtMTcwMDAwMDAwMDAwMC0xIn0sImNtZCI6IndyaXRlIiwiaGV4IjoiMDEwMzAwMDAwMDAyQzQwQiJ9"
   }'
 ```
 
@@ -81,13 +89,15 @@ grpcurl -plaintext 127.0.0.1:7xxx \
 grpcurl -plaintext 127.0.0.1:7xxx \
   MQTTManagerProto.MQTTManagerService/Publish \
   -d '{
-    "profile_id": "main",
+    "connection": {
+      "host": "127.0.0.1",
+      "port": 1883,
+      "client_id": "modbus_client"
+    },
     "topic": "demo/topic",
     "qos": 1,
     "retain": false,
-    "data": {
-      "payload": "hello"
-    }
+    "payload": "aGVsbG8="
   }'
 ```
 
@@ -96,7 +106,11 @@ grpcurl -plaintext 127.0.0.1:7xxx \
 grpcurl -plaintext 127.0.0.1:7xxx \
   MQTTManagerProto.MQTTManagerService/Subscribe \
   -d '{
-    "profile_id": "main",
+    "connection": {
+      "host": "127.0.0.1",
+      "port": 1883,
+      "client_id": "modbus_client"
+    },
     "topics": [
       { "topic": "demo/#", "qos": 1 }
     ]
@@ -104,8 +118,8 @@ grpcurl -plaintext 127.0.0.1:7xxx \
 ```
 
 ## 线程与日志
-- 模块内部线程统一使用 `ModuleManager::StartModuleThread(模块LibInfo.LIB_NAME, ...)` 创建，自动绑定日志模块名上下文。
-- 无需在入口手动创建 `ModuleManager::LogModuleScope`，统一规则见 `src/core/ModuleManager/doc/README.md`。
+- 每个连接对应一个内部线程，负责消费 MQTT 消息。
+- 所有收发消息内容都会记录日志（中文）。
 
 ## 构建产物
 - 共享库：`package/module/libMQTTManager.so.<version>`（版本见 `src/MQTTManager/cmake/LibInfo.cmake`）

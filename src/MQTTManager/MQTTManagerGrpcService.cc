@@ -24,7 +24,7 @@ grpc::Status MQTTManagerGrpcServiceImpl::Publish(
 }
 
 grpc::Status MQTTManagerGrpcServiceImpl::Subscribe(
-    grpc::ServerContext*, const MQTTManagerProto::SubscribeRequest* request,
+    grpc::ServerContext* context, const MQTTManagerProto::SubscribeRequest* request,
     grpc::ServerWriter<MQTTManagerProto::SubscribeResponse>* writer) {
   if (module_ == nullptr) {
     LOG_ERROR("MQTTManager 服务未就绪");
@@ -34,33 +34,20 @@ grpc::Status MQTTManagerGrpcServiceImpl::Subscribe(
     LOG_ERROR("MQTTManager 订阅请求/响应为空");
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
   }
-  return module_->Subscribe(*request, writer);
+  return module_->Subscribe(*request, writer, context);
 }
 
-grpc::Status MQTTManagerGrpcServiceImpl::UpdateConfig(
-    grpc::ServerContext*, const MQTTManagerProto::UpdateConfigRequest* request,
-    MQTTManagerProto::UpdateConfigResponse* response) {
+grpc::Status MQTTManagerGrpcServiceImpl::RequestAndWait(
+    grpc::ServerContext*, const MQTTManagerProto::RequestAndWaitRequest* request,
+    MQTTManagerProto::RequestAndWaitResponse* response) {
   if (module_ == nullptr) {
     LOG_ERROR("MQTTManager 服务未就绪");
     return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
   }
   if (request == nullptr || response == nullptr) {
-    LOG_ERROR("MQTTManager 配置更新请求/响应为空");
+    LOG_ERROR("MQTTManager 请求响应请求/响应为空");
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
   }
-  return module_->UpdateConfig(*request, response);
-}
-
-grpc::Status MQTTManagerGrpcServiceImpl::GetStatus(
-    grpc::ServerContext*, const MQTTManagerProto::GetStatusRequest* request, MQTTManagerProto::GetStatusResponse* response) {
-  if (module_ == nullptr) {
-    LOG_ERROR("MQTTManager 服务未就绪");
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
-  }
-  if (request == nullptr || response == nullptr) {
-    LOG_ERROR("MQTTManager 状态查询请求/响应为空");
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
-  }
-  return module_->GetStatus(*request, response);
+  return module_->RequestAndWait(*request, response);
 }
 }  // namespace MQTTManager

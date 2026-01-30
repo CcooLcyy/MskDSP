@@ -3,12 +3,17 @@
 #include <grpcpp/support/status.h>
 #include <grpcpp/support/sync_stream.h>
 
+#include <atomic>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <stop_token>
 #include <string>
+#include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
+#include <grpcpp/server_context.h>
 #include "MQTTManager.pb.h"
 #include "ModuleInterface.h"
 
@@ -20,34 +25,37 @@ public:
   ~MQTTManager() override;
 
   void start(std::stop_token stopToken) override;
-  grpc::Status UpdateConfig(const MQTTManagerProto::UpdateConfigRequest& request,
-                            MQTTManagerProto::UpdateConfigResponse* response);
   grpc::Status Publish(const MQTTManagerProto::PublishRequest& request,
                        MQTTManagerProto::PublishResponse* response);
   grpc::Status Subscribe(const MQTTManagerProto::SubscribeRequest& request,
-                         grpc::ServerWriter<MQTTManagerProto::SubscribeResponse>* writer);
-  grpc::Status GetStatus(const MQTTManagerProto::GetStatusRequest& request,
-                         MQTTManagerProto::GetStatusResponse* response);
+                         grpc::ServerWriter<MQTTManagerProto::SubscribeResponse>* writer,
+                         grpc::ServerContext* context);
+  grpc::Status RequestAndWait(const MQTTManagerProto::RequestAndWaitRequest& request,
+                              MQTTManagerProto::RequestAndWaitResponse* response);
 
 private:
-  struct ScriptRuntime {
-    std::string source;
-    std::string script;
-    std::string decodeEntry;
-    std::string encodeEntry;
-    std::string lastError;
-  };
+  struct PendingResponse;
+  struct ConnectionContext;
+  struct Subscriber;
 
-  struct ProfileRuntime {
-    MQTTManagerProto::ProfileConfig config;
-    ScriptRuntime script;
-    bool ready{false};
-  };
+  std::shared_ptr<ConnectionContext> getOrCreateConnection(const MQTTManagerProto::ConnectionInfo& info,
+                                                           std::string* error);
+  std::string makeConnectionKey(const MQTTManagerProto::ConnectionInfo& info) const;
+  std::string generateRequestId();
+  void handleIncomingMessage(const std::string& connectionKey, const std::string& topic,
+                             const std::string& payload);
+  void dispatchToSubscribers(const std::string& connectionKey, const std::string& topic, const std::string& payload);
 
-  std::mutex configMutex_;
-  std::unordered_map<std::string, ProfileRuntime> profiles_;
-  std::string lastConfigMessage_;
-  bool hasConfig_{false};
+  std::mutex connectionMutex_;
+  std::unordered_map<std::string, std::shared_ptr<ConnectionContext>> connections_;
+
+  std::mutex pendingMutex_;
+  std::unordered_map<std::string, std::unordered_set<std::shared_ptr<PendingResponse>>> pendingByTopic_;
+  std::unordered_set<std::string> pendingMatchKeys_;
+  std::atomic<uint64_t> requestCounter_{0};
+
+  std::mutex subscriberMutex_;
+  std::unordered_map<std::string, std::unordered_set<std::shared_ptr<Subscriber>>> subscribers_;
 
   std::shared_ptr<MQTTManagerGrpcServiceImpl> mQTTManagerService_;
 };
