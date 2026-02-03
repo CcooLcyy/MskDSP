@@ -1,6 +1,8 @@
 #include "DLT645PointTable.h"
 
 #include <algorithm>
+#include <iomanip>
+#include <sstream>
 
 #include "Logger.h"
 
@@ -21,6 +23,15 @@ uint8_t hexValue(char ch) {
 
 bool requireDataLen(const DLT645Proto::Point& point, uint32_t expected) {
   return point.data_len() == expected;
+}
+
+std::string formatHex(const std::array<uint8_t, 4>& data) {
+  std::ostringstream oss;
+  oss << std::hex << std::setfill('0');
+  for (uint8_t b : data) {
+    oss << std::setw(2) << static_cast<int>(b);
+  }
+  return oss.str();
 }
 }  // namespace
 
@@ -164,6 +175,7 @@ grpc::Status PointTable::parseDi(const std::string& di, std::array<uint8_t, 4>* 
     }
     (*out)[i] = value;
   }
+  std::reverse(out->begin(), out->end());
   return grpc::Status::OK;
 }
 
@@ -201,7 +213,8 @@ grpc::Status PointTable::insertOrUpdatePoint(const DLT645Proto::Point& point) {
 
   byTag_[p.tag] = p;
   tagByDi_[p.diText] = p.tag;
-  LOG_DEBUG("DLT645 点表写入点位: tag={}, di={}, data_len={}", p.tag, p.diText, p.dataLen);
+  LOG_DEBUG("DLT645 点表写入点位: tag={}, 配置DI={}, 发送DI={}, data_len={}", p.tag, p.diText, formatHex(p.diBytes),
+            p.dataLen);
   return grpc::Status::OK;
 }
 

@@ -959,45 +959,62 @@ grpc::Status LinkManager::sendMonitorRequest(LinkRuntime* link, const std::strin
   LOG_INFO("DLT645 发送 MQTT 请求: conn_name={}, topic={}, response_topic={}, payload={}",
            link->config.conn_name(), requestTopic, responseTopic, json);
 
-  std::unique_lock<std::mutex> reqLock(link->requestMutex);
-  auto pending = std::make_shared<PendingResponse>();
-  bool tokenOk = false;
-  const auto tokenValue = toUint64(obj.at("token"), &tokenOk);
-  if (!tokenOk) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "token 非法");
-  }
-  {
-    std::lock_guard<std::mutex> lock(link->pendingMutex);
-    link->pending[tokenValue] = pending;
-  }
-
-  auto status = mqttClient_.Publish(requestTopic, json, &error);
-  if (!status.ok()) {
-    LOG_ERROR("DLT645 MQTT 发布失败: conn_name={}, topic={}, 原因={}",
-              link->config.conn_name(), requestTopic, error);
-    std::lock_guard<std::mutex> lock(link->pendingMutex);
-    link->pending.erase(tokenValue);
-    return grpc::Status(grpc::StatusCode::INTERNAL, error);
-  }
-  LOG_INFO("DLT645 MQTT 发布完成: conn_name={}, topic={}, 负载长度={}",
-           link->config.conn_name(), requestTopic, json.size());
-
+  std::string responsePayload;
   const auto waitMs = timeoutMs > 0 ? timeoutMs : kDefaultRequestTimeoutMs;
-  std::unique_lock<std::mutex> lock(pending->mutex);
-  if (!pending->cv.wait_for(lock, std::chrono::milliseconds(waitMs), [&pending]() { return pending->done; })) {
-    std::lock_guard<std::mutex> lockPending(link->pendingMutex);
-    link->pending.erase(tokenValue);
-    return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "等待响应超时");
+  auto status = mqttClient_.RequestAndWait(requestTopic, responseTopic, json, waitMs, 0, 0, "token",
+                                           &responsePayload, &error);
+  if (!status.ok()) {
+    LOG_ERROR("DLT645 MQTT 请求响应失败: conn_name={}, topic={}, 原因={}",
+              link->config.conn_name(), requestTopic, error);
+    return status;
   }
-  {
-    std::lock_guard<std::mutex> lockPending(link->pendingMutex);
-    link->pending.erase(tokenValue);
+  if (responsePayload.empty()) {
+    LOG_ERROR("DLT645 MQTT 响应为空: conn_name={}, topic={}", link->config.conn_name(), responseTopic);
+    return grpc::Status(grpc::StatusCode::INTERNAL, "MQTT 响应为空");
+  }
+  LOG_INFO("DLT645 收到 MQTT 响应: conn_name={}, topic={}, payload={}",
+           link->config.conn_name(), responseTopic, responsePayload);
+
+  boost::system::error_code ec;
+  auto parsed = boost::json::parse(responsePayload, ec);
+  if (ec || !parsed.is_object()) {
+    LOG_ERROR("DLT645 MQTT 响应解析失败: conn_name={}, topic={}, 原因={}",
+              link->config.conn_name(), responseTopic, ec.message());
+    return grpc::Status(grpc::StatusCode::INTERNAL, "MQTT 响应解析失败");
+  }
+  const auto& respObj = parsed.as_object();
+  int32_t statusCode = 0;
+  auto statusIt = respObj.find("status");
+  if (statusIt != respObj.end()) {
+    if (statusIt->value().is_int64()) {
+      statusCode = static_cast<int32_t>(statusIt->value().as_int64());
+    } else if (statusIt->value().is_uint64()) {
+      statusCode = static_cast<int32_t>(statusIt->value().as_uint64());
+    } else if (statusIt->value().is_string()) {
+      statusCode = std::atoi(statusIt->value().as_string().c_str());
+    } else {
+      LOG_WARNING("DLT645 MQTT 响应状态类型异常: conn_name={}, topic={}",
+                  link->config.conn_name(), responseTopic);
+    }
+  } else {
+    LOG_WARNING("DLT645 MQTT 响应缺少状态字段: conn_name={}, topic={}",
+                link->config.conn_name(), responseTopic);
   }
   if (outStatus != nullptr) {
-    *outStatus = pending->status;
+    *outStatus = statusCode;
+  }
+
+  std::string payloadBase64;
+  auto dataIt = respObj.find("data");
+  if (dataIt != respObj.end() && dataIt->value().is_string()) {
+    payloadBase64 = dataIt->value().as_string().c_str();
   }
   if (outPayloadBase64 != nullptr) {
-    *outPayloadBase64 = pending->payloadBase64;
+    *outPayloadBase64 = payloadBase64;
+  }
+  if (statusCode == 0 && payloadBase64.empty()) {
+    LOG_ERROR("DLT645 MQTT 响应缺少数据: conn_name={}, topic={}", link->config.conn_name(), responseTopic);
+    return grpc::Status(grpc::StatusCode::INTERNAL, "MQTT 响应缺少数据");
   }
   return grpc::Status::OK;
 }
@@ -1009,6 +1026,24 @@ grpc::Status LinkManager::decodeAndPublish(LinkRuntime* link, const PointTable::
   }
   if (payload.size() < point.dataLen) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应数据长度不足");
+  }
+  bool allFF = true;
+  for (size_t i = 0; i < point.dataLen; ++i) {
+    if (payload[i] != 0xFF) {
+      allFF = false;
+      break;
+    }
+  }
+  if (allFF) {
+    LOG_WARNING("DLT645 数据域全 FF，判定设备未接入: conn_name={}, tag={}, payload={}",
+                link->config.conn_name(), point.tag, formatHex(payload));
+    if (point.type == DLT645Proto::DATA_TYPE_BOOL) {
+      return dataCenter_.PublishBool(link->connId, point.tag, false, DataCenterProto::QUALITY_BAD, tsMs);
+    }
+    if (point.type == DLT645Proto::DATA_TYPE_STRING) {
+      return dataCenter_.PublishString(link->connId, point.tag, "", DataCenterProto::QUALITY_BAD, tsMs);
+    }
+    return dataCenter_.PublishDouble(link->connId, point.tag, 0.0, DataCenterProto::QUALITY_BAD, tsMs);
   }
 
   if (point.type == DLT645Proto::DATA_TYPE_BOOL) {
@@ -1508,10 +1543,39 @@ grpc::Status LinkManager::parseResponsePayload(const std::string& payloadBase64,
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Base64 解码失败");
   }
   LOG_INFO("DLT645 收到响应帧: {}", formatHex(raw));
-  if (!decodeFrame(raw, outFrame, error)) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, error ? *error : "帧解析失败");
+  std::string firstError;
+  if (decodeFrame(raw, outFrame, &firstError)) {
+    return grpc::Status::OK;
   }
-  return grpc::Status::OK;
+  LOG_WARNING("DLT645 响应帧解析失败，尝试从报文流中提取有效帧: 原因={}", firstError);
+  for (size_t i = 0; i + kMinFrameSize <= raw.size(); ++i) {
+    if (raw[i] != kFrameStart) {
+      continue;
+    }
+    if (i + 7 >= raw.size() || raw[i + 7] != kFrameStart) {
+      continue;
+    }
+    if (i + 9 >= raw.size()) {
+      continue;
+    }
+    const uint8_t len = raw[i + 9];
+    const size_t expected = 10 + len + 2;
+    if (i + expected > raw.size()) {
+      continue;
+    }
+    std::vector<uint8_t> candidate(raw.begin() + static_cast<std::vector<uint8_t>::difference_type>(i),
+                                   raw.begin() + static_cast<std::vector<uint8_t>::difference_type>(i + expected));
+    std::string candidateError;
+    if (!decodeFrame(candidate, outFrame, &candidateError)) {
+      continue;
+    }
+    LOG_INFO("DLT645 从报文流中提取到有效帧: offset={}, len={}, frame={}", i, candidate.size(), formatHex(candidate));
+    return grpc::Status::OK;
+  }
+  if (error != nullptr) {
+    *error = "帧解析失败且未找到有效帧";
+  }
+  return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "帧解析失败且未找到有效帧");
 }
 
 bool LinkManager::pointValueToDouble(const DataCenterProto::PointValue& value, double* out) {
