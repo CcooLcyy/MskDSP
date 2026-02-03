@@ -17,12 +17,12 @@
           "config": {
             "conn_name": "表计-01",
             "protocol_variant": "DLT645PCD",
-            "meter_addr": "123456789012",
+            "meter_addr": "202601200001",
             "device_no": "01",
             "transport_type": "TRANSPORT_MQTT_UART",
             "comm_mode": "COMM_MODE_LORA",
             "poll_interval_ms": 1000,
-            "request_timeout_ms": 3000
+            "request_timeout_ms": 300000
           }
         },
         "point_table": {
@@ -30,11 +30,11 @@
           "points": [
             {
               "tag": "A相电压",
-              "di": "00010000",
-              "data_len": 2,
-              "type": "DATA_TYPE_UINT16",
+              "di": "02010100",
+              "data_len": 3,
+              "type": "DATA_TYPE_BCD",
               "access": "ACCESS_READ_ONLY",
-              "scale": 1.0,
+              "scale": 0.01,
               "offset": 0.0,
               "deadband": 0.0
             }
