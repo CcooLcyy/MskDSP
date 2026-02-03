@@ -15,8 +15,6 @@ if [[ $# -ne 1 ]]; then
   usage
 fi
 
-rm -rf ../build-arm64
-echo "清理旧的 build-arm64 目录"
 rm -rf ../package/module
 rm -rf ../package/lib
 echo "清理旧的 package/module 和 package/lib 目录"
