@@ -24,3 +24,7 @@ IEC104/*
 
 .ccache
 images/*
+
+# Word 文档
+*.doc
+*.docx
