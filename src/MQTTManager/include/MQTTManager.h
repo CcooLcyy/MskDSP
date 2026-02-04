@@ -34,6 +34,7 @@ public:
                               MQTTManagerProto::RequestAndWaitResponse* response);
 
 private:
+  friend class MQTTManagerTestPeer;
   struct PendingResponse;
   struct ConnectionContext;
   struct Subscriber;

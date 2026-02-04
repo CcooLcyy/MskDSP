@@ -111,6 +111,7 @@ target_link_libraries(mqtt_manager_test PRIVATE
   GTest::gtest_main
   dspProto
   Boost::json
+  MQTTManager
 )
 
 add_test(NAME mqtt_manager_test COMMAND mqtt_manager_test)

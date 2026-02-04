@@ -2,7 +2,11 @@
 
 #include <boost/json.hpp>
 
+#include <string>
+
 #include "MQTTJsonPath.hpp"
+#include "MQTTManager.h"
+#include "MQTTManager.pb.h"
 #include "MQTTTopicMatcher.hpp"
 
 // 验证主题过滤匹配支持 + 与 # 通配符。
@@ -71,4 +75,87 @@ TEST(MqttJsonPathTest, MissingFieldReturnsFalse) {
 
   const boost::json::value* value = nullptr;
   EXPECT_FALSE(MQTTManager::JsonPath::extractValue(json, segments, &value, &error));
+}
+
+// 验证：Publish 参数校验分支。
+TEST(MqttManagerServiceTest, PublishRejectsInvalidArgs) {
+  MQTTManager::MQTTManager mgr;
+  MQTTManagerProto::PublishRequest req;
+  MQTTManagerProto::PublishResponse resp;
+  auto st = mgr.Publish(req, &resp);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  EXPECT_FALSE(resp.ok());
+}
+
+// 验证：Subscribe 空指针时返回错误。
+TEST(MqttManagerServiceTest, SubscribeRejectsNullWriter) {
+  MQTTManager::MQTTManager mgr;
+  MQTTManagerProto::SubscribeRequest req;
+  grpc::ServerContext ctx;
+  auto st = mgr.Subscribe(req, nullptr, &ctx);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+// 验证：RequestAndWait 入参校验分支。
+TEST(MqttManagerServiceTest, RequestAndWaitRejectsInvalidArgs) {
+  MQTTManager::MQTTManager mgr;
+  MQTTManagerProto::RequestAndWaitRequest req;
+  MQTTManagerProto::RequestAndWaitResponse resp;
+  auto st = mgr.RequestAndWait(req, &resp);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  EXPECT_FALSE(resp.ok());
+}
+
+// 验证：RequestAndWait 非法 JSON 负载返回错误。
+TEST(MqttManagerServiceTest, RequestAndWaitRejectsInvalidJson) {
+  MQTTManager::MQTTManager mgr;
+  MQTTManagerProto::RequestAndWaitRequest req;
+  auto *conn = req.mutable_connection();
+  conn->set_host("127.0.0.1");
+  conn->set_port(1883);
+  req.set_request_topic("req");
+  req.set_response_topic("resp");
+  req.set_payload("{bad_json");
+  req.set_match_field("id");
+
+  MQTTManagerProto::RequestAndWaitResponse resp;
+  auto st = mgr.RequestAndWait(req, &resp);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  EXPECT_FALSE(resp.ok());
+}
+
+// 验证：RequestAndWait 匹配字段路径无效时返回错误。
+TEST(MqttManagerServiceTest, RequestAndWaitRejectsInvalidMatchPath) {
+  MQTTManager::MQTTManager mgr;
+  MQTTManagerProto::RequestAndWaitRequest req;
+  auto *conn = req.mutable_connection();
+  conn->set_host("127.0.0.1");
+  conn->set_port(1883);
+  req.set_request_topic("req");
+  req.set_response_topic("resp");
+  req.set_payload(R"({"id":1})");
+  req.set_match_field("..id");
+
+  MQTTManagerProto::RequestAndWaitResponse resp;
+  auto st = mgr.RequestAndWait(req, &resp);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  EXPECT_FALSE(resp.ok());
+}
+
+// 验证：RequestAndWait 缺少匹配字段时返回错误。
+TEST(MqttManagerServiceTest, RequestAndWaitRejectsMissingMatchField) {
+  MQTTManager::MQTTManager mgr;
+  MQTTManagerProto::RequestAndWaitRequest req;
+  auto *conn = req.mutable_connection();
+  conn->set_host("127.0.0.1");
+  conn->set_port(1883);
+  req.set_request_topic("req");
+  req.set_response_topic("resp");
+  req.set_payload(R"({"other":1})");
+  req.set_match_field("id");
+
+  MQTTManagerProto::RequestAndWaitResponse resp;
+  auto st = mgr.RequestAndWait(req, &resp);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  EXPECT_FALSE(resp.ok());
 }
