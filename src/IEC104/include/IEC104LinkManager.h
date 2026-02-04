@@ -38,6 +38,7 @@ public:
   grpc::Status GetPointTable(const std::string &connName, IEC104Proto::PointTable *out) const;
 
 private:
+  friend class IEC104LinkManagerTestPeer;
   struct ListenEndpoint {
     // ROLE_SERVER 的规范化监听地址。
     // - any=true 表示绑定到 0.0.0.0:<port>（local.ip 为空或为 "0.0.0.0"）。

@@ -8,6 +8,7 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
 ## 能力清单
 - 传输角色 `role`：Server / Client（决定 TCP 监听/连接）
 - 站点角色 `station_role`：Master / Slave（决定业务语义）
+- 启动帧：`STARTDT_ACT` 由主站发送，与 `role` 解耦；从站不主动发送
 - 连接名：`conn_name` 由上位机指定（模块内唯一，用于人类识别/配置归属）
 - `conn_id` 分配：IEC104 在配置连接时通过 DataCenter `GetOrCreateConnection` 取/建，并回传给上位机
 - 点表下发：上位机通过 IEC104 gRPC 下发 `tag <-> IOA` 映射（支持短浮点与单点遥信；BOOL 忽略 scale/offset/deadband）

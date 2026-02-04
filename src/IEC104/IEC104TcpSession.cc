@@ -153,9 +153,11 @@ void TcpSession::Start(boost::asio::ip::tcp::socket socket) {
   startT0();
   restartT3();
   handleRead();
-  if (isClient_) {
-    LOG_INFO("IEC104 发送 STARTDT_ACT: conn_name={}", config_.conn_name());
+  if (isMasterStation()) {
+    LOG_INFO("IEC104 主站发送 STARTDT_ACT: conn_name={}", config_.conn_name());
     sendUFrame(UFrameType::STARTDT_ACT);
+  } else {
+    LOG_DEBUG("IEC104 非主站不发送 STARTDT_ACT: conn_name={}", config_.conn_name());
   }
 }
 

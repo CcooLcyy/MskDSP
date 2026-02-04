@@ -337,8 +337,26 @@ target_link_libraries(dlt645GrpcService_test PRIVATE
 
 add_test(NAME dlt645GrpcService_test COMMAND dlt645GrpcService_test)
 
+add_executable(iec104GrpcService_test
+  iec104_grpc_service_test.cc
+)
+
+target_include_directories(iec104GrpcService_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC104/include
+)
+
+target_link_libraries(iec104GrpcService_test PRIVATE
+  GTest::gtest_main
+  GTest::gmock
+  dspProto
+  IEC104
+)
+
+add_test(NAME iec104GrpcService_test COMMAND iec104GrpcService_test)
+
 add_executable(iec104LinkManager_test
   iec104_link_manager_test.cc
+  iec104_link_manager_helper_test.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104DataCenterClient.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104LinkManager.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104LinkManagerDataCenter.cc
@@ -526,6 +544,7 @@ set(MSKDSP_TEST_TARGETS
   dlt645MqttClient_test
   dlt645DataCenterClient_test
   dlt645GrpcService_test
+  iec104GrpcService_test
   iec104LinkManager_test
   modbusRtuLinkManager_test
   iec104TcpSession_test

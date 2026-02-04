@@ -22,6 +22,6 @@ public:
   grpc::Status SendTimeSync(grpc::ServerContext *context, const IEC104Proto::SendTimeSyncRequest *request, IEC104Proto::Empty *) override;
 
 private:
-  IEC104 *iec104_;
+  IEC104 *iec104_{nullptr};
 };
 }  // namespace IEC104

@@ -481,3 +481,46 @@ TEST(IEC104TcpSessionTest, PointWithTimeUsesTimestampTypes) {
   session->Stop();
   io->stop();
 }
+
+// 验证主站角色在服务端模式下也会发送启动帧。
+TEST(IEC104TcpSessionTest, MasterRoleSendsStartDtWhenServerRole) {
+  auto io = std::make_shared<boost::asio::io_context>();
+  auto sockets = MakeConnectedSockets(*io);
+
+  auto config = MakeConfig("startdt-master-server", IEC104Proto::ROLE_SERVER, 5, 2, 1, 5, 8);
+  config.set_station_role(IEC104Proto::STATION_ROLE_MASTER);
+  auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
+  session->Start(std::move(sockets.session_socket));
+
+  std::jthread session_thread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [&]() { io->run(); });
+
+  auto start_act = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "STARTDT_ACT");
+  ASSERT_FALSE(start_act.empty());
+  EXPECT_EQ(FrameTypeOf(start_act), FrameType::U);
+  EXPECT_EQ(start_act[2], kUStartDtAct);
+
+  session->Stop();
+  io->stop();
+}
+
+// 验证从站角色在客户端模式下不会发送启动帧。
+TEST(IEC104TcpSessionTest, SlaveRoleDoesNotSendStartDtWhenClientRole) {
+  auto io = std::make_shared<boost::asio::io_context>();
+  auto sockets = MakeConnectedSockets(*io);
+
+  auto config = MakeConfig("startdt-slave-client", IEC104Proto::ROLE_CLIENT, 5, 2, 1, 5, 8);
+  config.set_station_role(IEC104Proto::STATION_ROLE_SLAVE);
+  auto session = std::make_shared<IEC104::TcpSession>(*io, config, true);
+  session->Start(std::move(sockets.session_socket));
+
+  std::jthread session_thread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [&]() { io->run(); });
+
+  EXPECT_FALSE(WaitReadable(sockets.peer_socket, std::chrono::milliseconds(300)));
+
+  session->Stop();
+  io->stop();
+}

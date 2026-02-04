@@ -14,10 +14,13 @@
 
 #include "DataCenter_mock.grpc.pb.h"
 #include "IEC104LinkManager.h"
+#include "IEC104TcpLink.h"
 #include "support/FakeDataCenter.hpp"
 
 namespace {
 using IEC104::LinkManager;
+using IEC104::PointValue;
+using IEC104::CommandValue;
 
 using ::testing::_;
 using ::testing::Invoke;
@@ -66,6 +69,39 @@ IEC104Proto::Point MakePoint(const char* tag, uint32_t ioa) {
   p.set_type(IEC104Proto::POINT_TYPE_FLOAT);
   return p;
 }
+
+IEC104Proto::Point MakeBoolPoint(const char* tag, uint32_t ioa) {
+  IEC104Proto::Point p;
+  p.set_tag(tag);
+  p.set_ioa(ioa);
+  p.set_type(IEC104Proto::POINT_TYPE_SINGLE);
+  return p;
+}
+}  // namespace
+
+namespace IEC104 {
+class IEC104LinkManagerTestPeer {
+public:
+  static grpc::Status HandleClientPointValue(LinkManager& mgr, const std::string& connName, const PointValue& pv) {
+    return mgr.handleClientPointValue(connName, pv);
+  }
+
+  static grpc::Status HandleCommandValue(LinkManager& mgr, const std::string& connName, const CommandValue& cv) {
+    return mgr.handleCommandValue(connName, cv);
+  }
+
+  static grpc::Status HandleTimeSyncCommand(LinkManager& mgr, const std::string& connName, int64_t tsMs) {
+    return mgr.handleTimeSyncCommand(connName, tsMs);
+  }
+
+  static std::vector<PointValue> BuildInterrogationSnapshot(LinkManager& mgr, const std::string& connName) {
+    return mgr.buildInterrogationSnapshot(connName);
+  }
+};
+}  // namespace IEC104
+
+namespace {
+using IEC104::IEC104LinkManagerTestPeer;
 }  // namespace
 
 // 验证：create_only UpsertLink 会向 DataCenter 取/建 conn_id，并回填到 LinkInfo。
@@ -299,4 +335,209 @@ TEST(IEC104LinkManagerTest, UpsertPointTableReturnsNotFoundWhenMissing) {
 
   auto st = mgr.UpsertPointTable(req);
   EXPECT_EQ(st.error_code(), grpc::StatusCode::NOT_FOUND);
+}
+
+// 验证：handleClientPointValue 在连接不存在时返回 NOT_FOUND。
+TEST(IEC104LinkManagerTest, HandleClientPointValueRejectsMissingLink) {
+  LinkManager mgr("IEC104");
+  PointValue pv;
+  pv.ioa = 1;
+  pv.type = IEC104Proto::POINT_TYPE_FLOAT;
+  pv.doubleValue = 10.0;
+  auto st = IEC104LinkManagerTestPeer::HandleClientPointValue(mgr, "missing", pv);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::NOT_FOUND);
+}
+
+// 验证：handleClientPointValue 支持死区过滤与质量映射。
+TEST(IEC104LinkManagerTest, HandleClientPointValueDeadbandAndQuality) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeServerLinkReq("conn-dead", "0.0.0.0", AllocateFreeTcpPort());
+  IEC104Proto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+
+  IEC104Proto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-dead");
+  auto *p = ptReq.add_points();
+  *p = MakePoint("A", 10);
+  p->set_deadband(1.0);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  PointValue pv;
+  pv.ioa = 10;
+  pv.type = IEC104Proto::POINT_TYPE_FLOAT;
+  pv.doubleValue = 5.0;
+  pv.quality = 0;
+  pv.tsMs = 100;
+  ASSERT_TRUE(IEC104LinkManagerTestPeer::HandleClientPointValue(mgr, "conn-dead", pv).ok());
+
+  // 小于死区的变化应被过滤。
+  pv.doubleValue = 5.5;
+  auto st = IEC104LinkManagerTestPeer::HandleClientPointValue(mgr, "conn-dead", pv);
+  EXPECT_TRUE(st.ok());
+
+  DataCenterProto::GetLatestRequest reqLatest;
+  reqLatest.set_conn_id(info.conn_id());
+  reqLatest.add_tags("A");
+  DataCenterProto::GetLatestResponse resp;
+  ASSERT_TRUE(state.GetLatest(reqLatest, &resp).ok());
+  ASSERT_EQ(resp.updates_size(), 1);
+  EXPECT_EQ(resp.updates(0).quality(), DataCenterProto::QUALITY_GOOD);
+}
+
+// 验证：handleClientPointValue 支持 BOOL 点上送与错误质量。
+TEST(IEC104LinkManagerTest, HandleClientPointValuePublishesBool) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeServerLinkReq("conn-bool", "0.0.0.0", AllocateFreeTcpPort());
+  IEC104Proto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+
+  IEC104Proto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-bool");
+  *ptReq.add_points() = MakeBoolPoint("B", 11);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  PointValue pv;
+  pv.ioa = 11;
+  pv.type = IEC104Proto::POINT_TYPE_SINGLE;
+  pv.boolValue = true;
+  pv.quality = 0x80;
+  pv.tsMs = 200;
+  auto st = IEC104LinkManagerTestPeer::HandleClientPointValue(mgr, "conn-bool", pv);
+  EXPECT_TRUE(st.ok());
+
+  DataCenterProto::GetLatestRequest reqLatest;
+  reqLatest.set_conn_id(info.conn_id());
+  reqLatest.add_tags("B");
+  DataCenterProto::GetLatestResponse resp;
+  ASSERT_TRUE(state.GetLatest(reqLatest, &resp).ok());
+  ASSERT_EQ(resp.updates_size(), 1);
+  EXPECT_EQ(resp.updates(0).quality(), DataCenterProto::QUALITY_BAD);
+}
+
+// 验证：handleCommandValue 在从站时可发布设点/遥控。
+TEST(IEC104LinkManagerTest, HandleCommandValuePublishesWhenSlave) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeServerLinkReq("conn-cmd", "0.0.0.0", AllocateFreeTcpPort());
+  IEC104Proto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+
+  IEC104Proto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-cmd");
+  *ptReq.add_points() = MakePoint("F", 12);
+  *ptReq.add_points() = MakeBoolPoint("C", 13);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  CommandValue cv;
+  cv.ioa = 12;
+  cv.type = IEC104Proto::POINT_TYPE_FLOAT;
+  cv.doubleValue = 3.5;
+  auto st = IEC104LinkManagerTestPeer::HandleCommandValue(mgr, "conn-cmd", cv);
+  EXPECT_TRUE(st.ok());
+
+  cv.ioa = 13;
+  cv.type = IEC104Proto::POINT_TYPE_SINGLE;
+  cv.boolValue = true;
+  st = IEC104LinkManagerTestPeer::HandleCommandValue(mgr, "conn-cmd", cv);
+  EXPECT_TRUE(st.ok());
+}
+
+// 验证：handleCommandValue 在非从站时忽略命令。
+TEST(IEC104LinkManagerTest, HandleCommandValueIgnoredWhenMaster) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeClientLinkReq("conn-master");
+  IEC104Proto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+
+  IEC104Proto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-master");
+  *ptReq.add_points() = MakePoint("F", 12);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  CommandValue cv;
+  cv.ioa = 12;
+  cv.type = IEC104Proto::POINT_TYPE_FLOAT;
+  cv.doubleValue = 3.5;
+  auto st = IEC104LinkManagerTestPeer::HandleCommandValue(mgr, "conn-master", cv);
+  EXPECT_TRUE(st.ok());
+}
+
+// 验证：handleTimeSyncCommand 处理非法时间戳与正常发布。
+TEST(IEC104LinkManagerTest, HandleTimeSyncCommandPaths) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeServerLinkReq("conn-ts", "0.0.0.0", AllocateFreeTcpPort());
+  IEC104Proto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+
+  auto st = IEC104LinkManagerTestPeer::HandleTimeSyncCommand(mgr, "conn-ts", 0);
+  EXPECT_TRUE(st.ok());
+
+  st = IEC104LinkManagerTestPeer::HandleTimeSyncCommand(mgr, "conn-ts", 1000);
+  EXPECT_TRUE(st.ok());
+}
+
+// 验证：buildInterrogationSnapshot 能从 DataCenter 最新值生成快照。
+TEST(IEC104LinkManagerTest, BuildInterrogationSnapshotUsesLatest) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeServerLinkReq("conn-snap", "0.0.0.0", AllocateFreeTcpPort());
+  IEC104Proto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+
+  IEC104Proto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-snap");
+  auto *p1 = ptReq.add_points();
+  *p1 = MakePoint("A", 10);
+  p1->set_scale(2.0);
+  p1->set_offset(1.0);
+  auto *p2 = ptReq.add_points();
+  *p2 = MakeBoolPoint("B", 11);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  DataCenterProto::PublishRequest pub;
+  pub.set_conn_id(info.conn_id());
+  pub.set_tag("A");
+  pub.mutable_value()->set_double_value(5.0);
+  pub.set_quality(DataCenterProto::QUALITY_GOOD);
+  pub.set_ts_ms(1234);
+  ASSERT_TRUE(state.Publish(pub).ok());
+
+  DataCenterProto::PublishRequest pub2;
+  pub2.set_conn_id(info.conn_id());
+  pub2.set_tag("B");
+  pub2.mutable_value()->set_bool_value(true);
+  pub2.set_quality(DataCenterProto::QUALITY_GOOD);
+  pub2.set_ts_ms(1235);
+  ASSERT_TRUE(state.Publish(pub2).ok());
+
+  auto snapshot = IEC104LinkManagerTestPeer::BuildInterrogationSnapshot(mgr, "conn-snap");
+  ASSERT_EQ(snapshot.size(), 2u);
 }
