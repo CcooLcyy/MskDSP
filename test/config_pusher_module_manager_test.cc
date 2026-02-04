@@ -252,3 +252,43 @@ TEST(ConfigPusherModuleManagerTest, WaitForModuleReturnsRunningInfo) {
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(result->module_name(), "IEC104");
 }
+
+// 验证：fetchModuleInfos 入参为空时返回 false。
+TEST(ConfigPusherModuleManagerTest, FetchModuleInfosRejectsNull) {
+  InitLoggerOnce();
+  EXPECT_FALSE(ConfigPusher::fetchModuleInfos(nullptr, nullptr));
+}
+
+// 验证：fetchRunningModuleInfos 入参为空时返回 false。
+TEST(ConfigPusherModuleManagerTest, FetchRunningModuleInfosRejectsNull) {
+  InitLoggerOnce();
+  EXPECT_FALSE(ConfigPusher::fetchRunningModuleInfos(nullptr, nullptr));
+}
+
+// 验证：startModule 为空 stub 时返回 false。
+TEST(ConfigPusherModuleManagerTest, StartModuleRejectsNullStub) {
+  InitLoggerOnce();
+  ModuleManagerProto::ModuleInfo info;
+  info.set_module_name("IEC104");
+  EXPECT_FALSE(ConfigPusher::startModule(nullptr, info));
+}
+
+// 验证：waitForModule 超时时返回空。
+TEST(ConfigPusherModuleManagerTest, WaitForModuleTimeoutReturnsNullopt) {
+  InitLoggerOnce();
+  FakeModuleManagerStub stub;
+  stub.SetRunningInfosSequence({});
+
+  auto result = ConfigPusher::waitForModule(&stub, "IEC104", std::chrono::milliseconds(0));
+  EXPECT_FALSE(result.has_value());
+}
+
+// 验证：waitForModule 运行信息获取失败时返回空。
+TEST(ConfigPusherModuleManagerTest, WaitForModuleStopsOnFetchFailure) {
+  InitLoggerOnce();
+  FakeModuleManagerStub stub;
+  stub.SetGetRunningInfoStatus(grpc::Status(grpc::StatusCode::UNAVAILABLE, "服务不可用"));
+
+  auto result = ConfigPusher::waitForModule(&stub, "IEC104", std::chrono::milliseconds(1));
+  EXPECT_FALSE(result.has_value());
+}

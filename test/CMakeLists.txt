@@ -354,6 +354,23 @@ target_link_libraries(iec104GrpcService_test PRIVATE
 
 add_test(NAME iec104GrpcService_test COMMAND iec104GrpcService_test)
 
+add_executable(configPusherApplyConfig_test
+  config_pusher_apply_config_test.cc
+)
+
+target_include_directories(configPusherApplyConfig_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/ConfigPusher/include
+)
+
+target_link_libraries(configPusherApplyConfig_test PRIVATE
+  GTest::gtest_main
+  GTest::gmock
+  dspProto
+  ConfigPusher
+)
+
+add_test(NAME configPusherApplyConfig_test COMMAND configPusherApplyConfig_test)
+
 add_executable(iec104LinkManager_test
   iec104_link_manager_test.cc
   iec104_link_manager_helper_test.cc
@@ -554,6 +571,7 @@ set(MSKDSP_TEST_TARGETS
   configPusherDataCenter_test
   configPusherConfigLoader_test
   configPusherModuleManager_test
+  configPusherApplyConfig_test
 )
 
 # Allow overriding via -DGCOVR_EXECUTABLE=/path/to/gcovr (cache variable).

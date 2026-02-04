@@ -113,8 +113,22 @@ void ConfigPusher::start(std::stop_token stopToken) {
   LOG_INFO("ConfigPusher 模块停止");
 }
 
+void ConfigPusher::setModuleManagerStub(std::shared_ptr<ModuleManagerProto::ModuleManage::StubInterface> stub) {
+  moduleManagerStub_ = std::move(stub);
+  LOG_INFO("ConfigPusher 已设置 ModuleManager Stub");
+}
+
+void ConfigPusher::setConfigDirForTest(std::optional<std::filesystem::path> dir) {
+  configDirOverride_ = std::move(dir);
+  if (configDirOverride_.has_value()) {
+    LOG_INFO("ConfigPusher 使用测试配置目录: {}", configDirOverride_->string());
+  } else {
+    LOG_INFO("ConfigPusher 清理测试配置目录");
+  }
+}
+
 void ConfigPusher::applyConfig() {
-  auto configDir = ResolveConfigPusherDir();
+  auto configDir = configDirOverride_.has_value() ? configDirOverride_ : ResolveConfigPusherDir();
   if (configDir.has_value()) {
     LOG_INFO("ConfigPusher 配置目录已解析: {}", configDir->string());
   }
@@ -137,8 +151,14 @@ void ConfigPusher::applyConfig() {
   }
   LOG_INFO("ConfigPusher 配置解析完成，开始准备下发配置");
 
-  auto channel = grpc::CreateChannel(kModuleManagerAddress, grpc::InsecureChannelCredentials());
-  auto moduleStub = ModuleManagerProto::ModuleManage::NewStub(channel);
+  std::shared_ptr<ModuleManagerProto::ModuleManage::StubInterface> moduleStub;
+  if (moduleManagerStub_) {
+    moduleStub = moduleManagerStub_;
+  } else {
+    auto channel = grpc::CreateChannel(kModuleManagerAddress, grpc::InsecureChannelCredentials());
+    moduleStub = std::shared_ptr<ModuleManagerProto::ModuleManage::StubInterface>(
+        ModuleManagerProto::ModuleManage::NewStub(channel).release());
+  }
 
   ModuleManagerProto::ModuleInfos moduleInfos;
   if (!fetchModuleInfos(moduleStub.get(), &moduleInfos)) {
