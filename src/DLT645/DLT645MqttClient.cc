@@ -27,6 +27,13 @@ void MqttClient::setConfig(const DLT645Proto::MqttConfig& config) {
   stub_.reset();
 }
 
+void MqttClient::setStub(std::shared_ptr<MQTTManagerProto::MQTTManagerService::StubInterface> stub) {
+  std::lock_guard<std::mutex> lock(mu_);
+  stub_ = std::move(stub);
+  channel_.reset();
+  LOG_INFO("DLT645 MQTT Stub 已设置");
+}
+
 bool MqttClient::hasConfig() const {
   std::lock_guard<std::mutex> lock(mu_);
   return hasConfig_;

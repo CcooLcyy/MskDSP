@@ -170,11 +170,13 @@ grpc::Status DLT645GrpcServiceImpl::UpsertPointTable(grpc::ServerContext*,
   }
   auto status = module_->linkManager().UpsertPointTable(*request);
   if (!status.ok()) {
-    LOG_ERROR("DLT645 点表更新失败: conn_name={}, 点数={}, replace={}, 原因={}",
-              request->conn_name(), request->points_size(), request->replace(), status.error_message());
+    LOG_ERROR("DLT645 点表更新失败: conn_name={}, 点数={}, 数据块数={}, replace={}, 原因={}",
+              request->conn_name(), request->points_size(), request->blocks_size(),
+              request->replace(), status.error_message());
   } else {
-    LOG_INFO("DLT645 点表更新成功: conn_name={}, 点数={}, replace={}",
-             request->conn_name(), request->points_size(), request->replace());
+    LOG_INFO("DLT645 点表更新成功: conn_name={}, 点数={}, 数据块数={}, replace={}",
+             request->conn_name(), request->points_size(), request->blocks_size(),
+             request->replace());
   }
   return status;
 }

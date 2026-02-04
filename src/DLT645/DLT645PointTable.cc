@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <iomanip>
 #include <sstream>
+#include <unordered_set>
 
 #include "Logger.h"
 
@@ -21,8 +22,8 @@ uint8_t hexValue(char ch) {
   return static_cast<uint8_t>(ch - 'A' + 10);
 }
 
-bool requireDataLen(const DLT645Proto::Point& point, uint32_t expected) {
-  return point.data_len() == expected;
+bool requireDataLen(uint32_t dataLen, uint32_t expected) {
+  return dataLen == expected;
 }
 
 std::string formatHex(const std::array<uint8_t, 4>& data) {
@@ -37,10 +38,16 @@ std::string formatHex(const std::array<uint8_t, 4>& data) {
 
 namespace DLT645 {
 
-grpc::Status PointTable::Upsert(const google::protobuf::RepeatedPtrField<DLT645Proto::Point>& points, bool replace) {
+grpc::Status PointTable::Upsert(const google::protobuf::RepeatedPtrField<DLT645Proto::Point>& points,
+                                const google::protobuf::RepeatedPtrField<DLT645Proto::Block>& blocks,
+                                bool replace) {
   if (replace) {
     byTag_.clear();
     tagByDi_.clear();
+    blocks_.clear();
+    blockDiSet_.clear();
+    blockItemByTag_.clear();
+    blockTags_.clear();
   }
 
   for (const auto& point : points) {
@@ -49,9 +56,21 @@ grpc::Status PointTable::Upsert(const google::protobuf::RepeatedPtrField<DLT645P
       return status;
     }
   }
+  for (const auto& block : blocks) {
+    auto status = validateBlock(block);
+    if (!status.ok()) {
+      return status;
+    }
+  }
 
   for (const auto& point : points) {
     auto status = insertOrUpdatePoint(point);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  for (const auto& block : blocks) {
+    auto status = insertOrUpdateBlock(block);
     if (!status.ok()) {
       return status;
     }
@@ -78,14 +97,30 @@ std::vector<PointTable::Point> PointTable::Points() const {
   return points;
 }
 
+const std::vector<PointTable::Block>& PointTable::Blocks() const {
+  return blocks_;
+}
+
 std::vector<std::string> PointTable::Tags() const {
-  std::vector<std::string> tags;
-  tags.reserve(byTag_.size());
+  std::unordered_set<std::string> unique;
+  unique.reserve(byTag_.size() + blockTags_.size());
   for (const auto& item : byTag_) {
-    tags.push_back(item.first);
+    unique.insert(item.first);
+  }
+  for (const auto& tag : blockTags_) {
+    unique.insert(tag);
+  }
+  std::vector<std::string> tags;
+  tags.reserve(unique.size());
+  for (const auto& tag : unique) {
+    tags.push_back(tag);
   }
   std::sort(tags.begin(), tags.end());
   return tags;
+}
+
+const std::unordered_set<std::string>& PointTable::BlockTags() const {
+  return blockTags_;
 }
 
 void PointTable::ToProto(const std::string& connName, DLT645Proto::PointTable* out) const {
@@ -106,6 +141,31 @@ void PointTable::ToProto(const std::string& connName, DLT645Proto::PointTable* o
     outPoint->set_offset(point.offset);
     outPoint->set_deadband(point.deadband);
   }
+  for (const auto& block : blocks_) {
+    auto* outBlock = out->add_blocks();
+    outBlock->set_block_di(block.diText);
+    outBlock->set_block_data_len(block.dataLen);
+    for (const auto& item : block.items) {
+      const auto& point = item.point;
+      auto* outItem = outBlock->add_items();
+      outItem->set_tag(point.tag);
+      outItem->set_data_len(point.dataLen);
+      outItem->set_type(point.type);
+      outItem->set_access(point.access);
+      outItem->set_scale(point.scale);
+      outItem->set_offset(point.offset);
+      outItem->set_deadband(point.deadband);
+      outItem->set_trim_right_space(item.trimRightSpace);
+    }
+  }
+}
+
+bool PointTable::isSameDefinition(const Point& lhs, const Point& rhs) {
+  return lhs.dataLen == rhs.dataLen &&
+      lhs.type == rhs.type &&
+      lhs.scale == rhs.scale &&
+      lhs.offset == rhs.offset &&
+      lhs.deadband == rhs.deadband;
 }
 
 grpc::Status PointTable::validatePoint(const DLT645Proto::Point& point) {
@@ -135,17 +195,80 @@ grpc::Status PointTable::validatePoint(const DLT645Proto::Point& point) {
   if (point.deadband() < 0) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "deadband 不能为负数");
   }
-  if (point.type() == DLT645Proto::DATA_TYPE_BOOL && !requireDataLen(point, 1)) {
+  if (point.type() == DLT645Proto::DATA_TYPE_BOOL && !requireDataLen(point.data_len(), 1)) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "BOOL 点位 data_len 必须为 1");
   }
-  if (point.type() == DLT645Proto::DATA_TYPE_UINT16 && !requireDataLen(point, 2)) {
+  if (point.type() == DLT645Proto::DATA_TYPE_UINT16 && !requireDataLen(point.data_len(), 2)) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "UINT16 点位 data_len 必须为 2");
   }
-  if (point.type() == DLT645Proto::DATA_TYPE_UINT32 && !requireDataLen(point, 4)) {
+  if (point.type() == DLT645Proto::DATA_TYPE_UINT32 && !requireDataLen(point.data_len(), 4)) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "UINT32 点位 data_len 必须为 4");
   }
-  if (point.type() == DLT645Proto::DATA_TYPE_FLOAT && !requireDataLen(point, 4)) {
+  if (point.type() == DLT645Proto::DATA_TYPE_FLOAT && !requireDataLen(point.data_len(), 4)) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "FLOAT 点位 data_len 必须为 4");
+  }
+  return grpc::Status::OK;
+}
+
+grpc::Status PointTable::validateBlockItem(const DLT645Proto::BlockItem& item) {
+  if (item.tag().empty()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "数据块子项 tag 不能为空");
+  }
+  if (item.data_len() == 0) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "数据块子项 data_len 不能为空");
+  }
+  if (item.type() == DLT645Proto::DATA_TYPE_UNSPECIFIED) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "数据块子项 type 不能为空");
+  }
+  if (item.access() == DLT645Proto::ACCESS_UNSPECIFIED) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "数据块子项 access 不能为空");
+  }
+  if (item.deadband() < 0) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "数据块子项 deadband 不能为负数");
+  }
+  if (item.type() == DLT645Proto::DATA_TYPE_BOOL && !requireDataLen(item.data_len(), 1)) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "数据块 BOOL 子项 data_len 必须为 1");
+  }
+  if (item.type() == DLT645Proto::DATA_TYPE_UINT16 && !requireDataLen(item.data_len(), 2)) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "数据块 UINT16 子项 data_len 必须为 2");
+  }
+  if (item.type() == DLT645Proto::DATA_TYPE_UINT32 && !requireDataLen(item.data_len(), 4)) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "数据块 UINT32 子项 data_len 必须为 4");
+  }
+  if (item.type() == DLT645Proto::DATA_TYPE_FLOAT && !requireDataLen(item.data_len(), 4)) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "数据块 FLOAT 子项 data_len 必须为 4");
+  }
+  return grpc::Status::OK;
+}
+
+grpc::Status PointTable::validateBlock(const DLT645Proto::Block& block) {
+  if (block.block_di().empty()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "block_di 不能为空");
+  }
+  if (block.block_di().size() != 8) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "block_di 必须为 8 位十六进制字符串");
+  }
+  for (char ch : block.block_di()) {
+    if (!isHexChar(ch)) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "block_di 必须为十六进制字符串");
+    }
+  }
+  if (block.block_data_len() == 0) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "block_data_len 不能为空");
+  }
+  if (block.items_size() == 0) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "数据块 items 不能为空");
+  }
+  uint32_t totalLen = 0;
+  for (const auto& item : block.items()) {
+    auto status = validateBlockItem(item);
+    if (!status.ok()) {
+      return status;
+    }
+    totalLen += item.data_len();
+  }
+  if (totalLen != block.block_data_len()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "数据块长度与子项长度之和不一致");
   }
   return grpc::Status::OK;
 }
@@ -211,10 +334,97 @@ grpc::Status PointTable::insertOrUpdatePoint(const DLT645Proto::Point& point) {
   p.offset = point.offset();
   p.deadband = point.deadband();
 
+  auto blockIt = blockItemByTag_.find(p.tag);
+  if (blockIt != blockItemByTag_.end()) {
+    if (!isSameDefinition(blockIt->second.point, p)) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "数据块与单点定义不一致");
+    }
+    LOG_WARNING("DLT645 点表存在读块写点冲突: tag={}, 读使用数据块, 写使用单点", p.tag);
+  }
+
   byTag_[p.tag] = p;
   tagByDi_[p.diText] = p.tag;
   LOG_DEBUG("DLT645 点表写入点位: tag={}, 配置DI={}, 发送DI={}, data_len={}", p.tag, p.diText, formatHex(p.diBytes),
             p.dataLen);
+  return grpc::Status::OK;
+}
+
+grpc::Status PointTable::insertOrUpdateBlock(const DLT645Proto::Block& block) {
+  if (blockDiSet_.find(block.block_di()) != blockDiSet_.end()) {
+    return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "block_di 已存在");
+  }
+
+  std::array<uint8_t, 4> di{};
+  auto status = parseDi(block.block_di(), &di);
+  if (!status.ok()) {
+    return status;
+  }
+
+  Block blockDef;
+  blockDef.diText = block.block_di();
+  blockDef.diBytes = di;
+  blockDef.dataLen = block.block_data_len();
+  blockDef.items.reserve(block.items_size());
+
+  std::unordered_set<std::string> localTags;
+  localTags.reserve(static_cast<size_t>(block.items_size()));
+
+  uint32_t offset = 0;
+  for (const auto& item : block.items()) {
+    if (localTags.find(item.tag()) != localTags.end()) {
+      return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "数据块内 tag 重复");
+    }
+    if (blockItemByTag_.find(item.tag()) != blockItemByTag_.end()) {
+      return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "tag 已在其他数据块中定义");
+    }
+    localTags.insert(item.tag());
+
+    Point p;
+    p.tag = item.tag();
+    p.dataLen = item.data_len();
+    p.type = item.type();
+    p.access = item.access();
+    p.scale = item.scale();
+    if (p.scale == 0.0) {
+      p.scale = 1.0;
+    }
+    p.offset = item.offset();
+    p.deadband = item.deadband();
+
+    auto pointIt = byTag_.find(p.tag);
+    if (pointIt != byTag_.end()) {
+      if (!isSameDefinition(pointIt->second, p)) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "数据块与单点定义不一致");
+      }
+    }
+
+    BlockItem blockItem;
+    blockItem.point = p;
+    blockItem.offset = offset;
+    blockItem.trimRightSpace = item.has_trim_right_space() ? item.trim_right_space() : true;
+
+    blockDef.items.push_back(blockItem);
+    offset += p.dataLen;
+  }
+
+  if (offset != blockDef.dataLen) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "数据块长度与子项长度之和不一致");
+  }
+
+  blocks_.push_back(blockDef);
+  blockDiSet_.insert(blockDef.diText);
+  for (const auto& item : blockDef.items) {
+    blockItemByTag_[item.point.tag] = item;
+    blockTags_.insert(item.point.tag);
+    auto pointIt = byTag_.find(item.point.tag);
+    if (pointIt != byTag_.end()) {
+      LOG_WARNING("DLT645 点表存在读块写点冲突: tag={}, 读使用数据块, 写使用单点", item.point.tag);
+    }
+    LOG_DEBUG("DLT645 数据块写入子项: block_di={}, tag={}, offset={}, data_len={}", blockDef.diText, item.point.tag,
+              item.offset, item.point.dataLen);
+  }
+  LOG_INFO("DLT645 点表写入数据块: block_di={}, 发送DI={}, data_len={}, item_count={}",
+           blockDef.diText, formatHex(blockDef.diBytes), blockDef.dataLen, blockDef.items.size());
   return grpc::Status::OK;
 }
 

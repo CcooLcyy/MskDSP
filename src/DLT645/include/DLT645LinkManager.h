@@ -39,8 +39,10 @@ public:
 
   void setDataCenterServerAddress(std::string address);
   void setDataCenterStub(std::shared_ptr<DataCenterProto::DataCenterService::StubInterface> stub);
+  void setMqttStub(std::shared_ptr<MQTTManagerProto::MQTTManagerService::StubInterface> stub);
 
 private:
+  friend class DLT645LinkManagerTestPeer;
   struct PendingResponse {
     std::mutex mutex;
     std::condition_variable cv;
@@ -102,7 +104,7 @@ private:
                                   std::string* outPayloadBase64);
 
   grpc::Status decodeAndPublish(LinkRuntime* link, const PointTable::Point& point, const std::vector<uint8_t>& payload,
-                                int64_t tsMs);
+                                int64_t tsMs, bool trimRightSpace);
 
   static std::string makeMonitorRequestTopic(DLT645Proto::CommMode mode);
   static std::string makeMonitorResponseTopic(DLT645Proto::CommMode mode);
@@ -118,6 +120,8 @@ private:
   static bool decodeHexString(const std::string& text, std::vector<uint8_t>* out);
   static std::vector<uint8_t> encodeBcd(const std::string& digits);
   static std::vector<uint8_t> encodeAddress(const std::string& addr);
+  static std::vector<uint8_t> encodeDiBytes(const std::array<uint8_t, 4>& diBytes,
+                                            const DLT645Proto::LinkConfig& config);
   static std::vector<uint8_t> encodeDi(const PointTable::Point& point, const DLT645Proto::LinkConfig& config);
   static std::vector<uint8_t> encodeData(const PointTable::Point& point, const DataCenterProto::PointValue& value,
                                          std::string* error);
@@ -128,6 +132,8 @@ private:
   static void subOffset33(std::vector<uint8_t>* data);
 
   grpc::Status handleMonitorResponse(LinkRuntime* link, const std::string& payloadBase64, const PointTable::Point& point,
+                                     std::string* error);
+  grpc::Status handleMonitorResponse(LinkRuntime* link, const std::string& payloadBase64, const PointTable::Block& block,
                                      std::string* error);
 
   grpc::Status parseResponsePayload(const std::string& payloadBase64, Frame* outFrame, std::string* error);

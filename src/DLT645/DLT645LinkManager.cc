@@ -174,6 +174,11 @@ void LinkManager::setDataCenterStub(std::shared_ptr<DataCenterProto::DataCenterS
   dataCenter_.setStub(std::move(stub));
 }
 
+void LinkManager::setMqttStub(std::shared_ptr<MQTTManagerProto::MQTTManagerService::StubInterface> stub) {
+  mqttClient_.setStub(std::move(stub));
+  LOG_INFO("DLT645 已设置 MQTT Stub");
+}
+
 grpc::Status LinkManager::UpdateConfig(const DLT645Proto::UpdateConfigRequest& request,
                                        DLT645Proto::UpdateConfigResponse* response) {
   if (response == nullptr) {
@@ -386,7 +391,7 @@ grpc::Status LinkManager::UpsertPointTable(const DLT645Proto::UpsertPointTableRe
   }
 
   PointTable next = current;
-  status = next.Upsert(request.points(), request.replace());
+  status = next.Upsert(request.points(), request.blocks(), request.replace());
   if (!status.ok()) {
     return status;
   }
@@ -496,12 +501,53 @@ void LinkManager::startPollingLocked(const std::string& connName, const std::sha
       moduleName_,
       [this, connName, link, interval](std::stop_token st) {
         while (!st.stop_requested()) {
+          const auto& blocks = link->pointTable.Blocks();
+          for (const auto& block : blocks) {
+            if (st.stop_requested()) {
+              break;
+            }
+            std::vector<uint8_t> di = encodeDiBytes(block.diBytes, link->config);
+            std::vector<uint8_t> data = di;
+            addOffset33(&data);
+            auto frame = buildFrame(encodeAddress(link->config.meter_addr()), kReadControl, data);
+            LOG_INFO("DLT645 发送数据块读请求: conn_name={}, block_di={}, frame={}",
+                     connName, block.diText, formatHex(frame));
+
+            std::string payloadBase64;
+            int32_t status = 0;
+            auto sendStatus = sendMonitorRequest(link.get(), frame, &payloadBase64, &status);
+            if (!sendStatus.ok()) {
+              LOG_WARNING("DLT645 数据块读请求失败: conn_name={}, block_di={}, 原因={}",
+                          connName, block.diText, sendStatus.error_message());
+              continue;
+            }
+            if (status != 0) {
+              LOG_WARNING("DLT645 数据块读请求返回失败: conn_name={}, block_di={}, 状态码={}",
+                          connName, block.diText, status);
+              continue;
+            }
+            std::string error;
+            sendStatus = handleMonitorResponse(link.get(), payloadBase64, block, &error);
+            if (!sendStatus.ok()) {
+              LOG_WARNING("DLT645 数据块解析响应失败: conn_name={}, block_di={}, 原因={}",
+                          connName, block.diText, error);
+              continue;
+            }
+          }
+
+          if (st.stop_requested()) {
+            break;
+          }
           const auto points = link->pointTable.Points();
+          const auto& blockTags = link->pointTable.BlockTags();
           for (const auto& point : points) {
             if (st.stop_requested()) {
               break;
             }
             if (point.access == DLT645Proto::ACCESS_WRITE_ONLY) {
+              continue;
+            }
+            if (blockTags.find(point.tag) != blockTags.end()) {
               continue;
             }
             std::vector<uint8_t> di = encodeDi(point, link->config);
@@ -1020,7 +1066,8 @@ grpc::Status LinkManager::sendMonitorRequest(LinkRuntime* link, const std::strin
 }
 
 grpc::Status LinkManager::decodeAndPublish(LinkRuntime* link, const PointTable::Point& point,
-                                           const std::vector<uint8_t>& payload, int64_t tsMs) {
+                                           const std::vector<uint8_t>& payload, int64_t tsMs,
+                                           bool trimRightSpace) {
   if (link == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "链路为空");
   }
@@ -1053,6 +1100,11 @@ grpc::Status LinkManager::decodeAndPublish(LinkRuntime* link, const PointTable::
 
   if (point.type == DLT645Proto::DATA_TYPE_STRING) {
     std::string text(payload.begin(), payload.begin() + point.dataLen);
+    if (trimRightSpace) {
+      while (!text.empty() && text.back() == ' ') {
+        text.pop_back();
+      }
+    }
     return dataCenter_.PublishString(link->connId, point.tag, text, DataCenterProto::QUALITY_GOOD, tsMs);
   }
 
@@ -1261,14 +1313,19 @@ std::vector<uint8_t> LinkManager::encodeAddress(const std::string& addr) {
   return out;
 }
 
-std::vector<uint8_t> LinkManager::encodeDi(const PointTable::Point& point, const DLT645Proto::LinkConfig& config) {
-  std::vector<uint8_t> out(point.diBytes.begin(), point.diBytes.end());
+std::vector<uint8_t> LinkManager::encodeDiBytes(const std::array<uint8_t, 4>& diBytes,
+                                                 const DLT645Proto::LinkConfig& config) {
+  std::vector<uint8_t> out(diBytes.begin(), diBytes.end());
   if (config.protocol_variant() == DLT645Proto::PROTOCOL_VARIANT_DLT645_PCD) {
     uint8_t deviceNo = 0;
     parseHexByte(config.device_no(), &deviceNo);
     out.push_back(deviceNo);
   }
   return out;
+}
+
+std::vector<uint8_t> LinkManager::encodeDi(const PointTable::Point& point, const DLT645Proto::LinkConfig& config) {
+  return encodeDiBytes(point.diBytes, config);
 }
 
 std::vector<uint8_t> LinkManager::encodeData(const PointTable::Point& point,
@@ -1531,7 +1588,97 @@ grpc::Status LinkManager::handleMonitorResponse(LinkRuntime* link, const std::st
   }
   std::vector<uint8_t> payload(frame.data.begin() + diLen, frame.data.begin() + diLen + point.dataLen);
   LOG_INFO("DLT645 收到响应: conn_name={}, tag={}, payload={}", link->config.conn_name(), point.tag, formatHex(payload));
-  return decodeAndPublish(link, point, payload, nowMs());
+  return decodeAndPublish(link, point, payload, nowMs(), false);
+}
+
+grpc::Status LinkManager::handleMonitorResponse(LinkRuntime* link, const std::string& payloadBase64,
+                                                const PointTable::Block& block, std::string* error) {
+  Frame frame;
+  auto status = parseResponsePayload(payloadBase64, &frame, error);
+  if (!status.ok()) {
+    return status;
+  }
+  const auto expectedAddr = encodeAddress(link->config.meter_addr());
+  if (frame.address != expectedAddr) {
+    if (error != nullptr) {
+      *error = "地址不匹配";
+    }
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "地址不匹配");
+  }
+  if ((frame.control & 0x40) != 0) {
+    if (error != nullptr) {
+      *error = "响应返回异常状态";
+    }
+    return grpc::Status(grpc::StatusCode::INTERNAL, "响应返回异常状态");
+  }
+  if ((frame.control & 0x80) == 0) {
+    if (error != nullptr) {
+      *error = "响应控制码异常";
+    }
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应控制码异常");
+  }
+  subOffset33(&frame.data);
+
+  const size_t diLen = link->config.protocol_variant() == DLT645Proto::PROTOCOL_VARIANT_DLT645_PCD ? 5 : 4;
+  if (frame.data.size() < diLen + block.dataLen) {
+    if (error != nullptr) {
+      *error = "响应数据长度不足";
+    }
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应数据长度不足");
+  }
+  for (size_t i = 0; i < 4; ++i) {
+    if (frame.data[i] != block.diBytes[i]) {
+      if (error != nullptr) {
+        *error = "DI 不匹配";
+      }
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "DI 不匹配");
+    }
+  }
+  if (diLen == 5) {
+    uint8_t deviceNo = 0;
+    parseHexByte(link->config.device_no(), &deviceNo);
+    if (frame.data[4] != deviceNo) {
+      if (error != nullptr) {
+        *error = "设备序号不匹配";
+      }
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "设备序号不匹配");
+    }
+  }
+  std::vector<uint8_t> payload(frame.data.begin() + diLen, frame.data.begin() + diLen + block.dataLen);
+  LOG_INFO("DLT645 收到数据块响应: conn_name={}, block_di={}, payload={}",
+           link->config.conn_name(), block.diText, formatHex(payload));
+
+  const auto tsMs = nowMs();
+  bool hasError = false;
+  std::string lastError;
+  for (const auto& item : block.items) {
+    if (item.point.access == DLT645Proto::ACCESS_WRITE_ONLY) {
+      continue;
+    }
+    if (item.offset + item.point.dataLen > payload.size()) {
+      hasError = true;
+      lastError = "数据块子项超出范围";
+      LOG_WARNING("DLT645 数据块子项超出范围: conn_name={}, block_di={}, tag={}, offset={}, data_len={}",
+                  link->config.conn_name(), block.diText, item.point.tag, item.offset, item.point.dataLen);
+      continue;
+    }
+    std::vector<uint8_t> itemPayload(payload.begin() + item.offset,
+                                     payload.begin() + item.offset + item.point.dataLen);
+    auto itemStatus = decodeAndPublish(link, item.point, itemPayload, tsMs, item.trimRightSpace);
+    if (!itemStatus.ok()) {
+      hasError = true;
+      lastError = itemStatus.error_message();
+      LOG_WARNING("DLT645 数据块子项解析失败: conn_name={}, block_di={}, tag={}, 原因={}",
+                  link->config.conn_name(), block.diText, item.point.tag, itemStatus.error_message());
+    }
+  }
+  if (hasError) {
+    if (error != nullptr) {
+      *error = lastError.empty() ? "数据块子项解析失败" : lastError;
+    }
+    return grpc::Status(grpc::StatusCode::INTERNAL, "数据块子项解析失败");
+  }
+  return grpc::Status::OK;
 }
 
 grpc::Status LinkManager::parseResponsePayload(const std::string& payloadBase64, Frame* outFrame, std::string* error) {

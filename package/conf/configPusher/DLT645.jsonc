@@ -33,10 +33,47 @@
               "di": "02010100",
               "data_len": 3,
               "type": "DATA_TYPE_BCD",
-              "access": "ACCESS_READ_ONLY",
+              // 读优先走数据块；写仍可使用单点
+              "access": "ACCESS_READ_WRITE",
               "scale": 0.01,
               "offset": 0.0,
               "deadband": 0.0
+            }
+          ],
+          "blocks": [
+            {
+              // 电压数据块：DI=0201FF00，总长度 9（A/B/C 三相各 3 字节 BCD）
+              "block_di": "0201FF00",
+              "block_data_len": 9,
+              "items": [
+                {
+                  "tag": "A相电压",
+                  "data_len": 3,
+                  "type": "DATA_TYPE_BCD",
+                  "access": "ACCESS_READ_ONLY",
+                  "scale": 0.01,
+                  "offset": 0.0,
+                  "deadband": 0.0
+                },
+                {
+                  "tag": "B相电压",
+                  "data_len": 3,
+                  "type": "DATA_TYPE_BCD",
+                  "access": "ACCESS_READ_ONLY",
+                  "scale": 0.01,
+                  "offset": 0.0,
+                  "deadband": 0.0
+                },
+                {
+                  "tag": "C相电压",
+                  "data_len": 3,
+                  "type": "DATA_TYPE_BCD",
+                  "access": "ACCESS_READ_ONLY",
+                  "scale": 0.01,
+                  "offset": 0.0,
+                  "deadband": 0.0
+                }
+              ]
             }
           ]
         },

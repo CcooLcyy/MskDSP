@@ -6,6 +6,7 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
 ## 能力清单
 - 设备级协议变体选择：DLT645std / DLT645PCD。
 - 设备级点表配置：tag/di/data_len/type/access/scale/offset/deadband。
+- 支持数据块读取：按数据块 DI 读整块数据并拆分发布子点位。
 - 传输方式类型标识（默认 MQTT_UART，串口后续补充）。
 - 点表下发时同步 DataCenter 连接与标签。
 
@@ -40,6 +41,7 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
 - `point_table`
   - `replace`：是否全量替换点表。
   - `points[]`：点位定义。
+  - `blocks[]`：数据块定义（按 items 顺序拼接）。
 
 ### 点表字段说明
 - `tag`：与 DataCenter 对应的点名。
@@ -49,6 +51,18 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
 - `access`：读写属性（`ACCESS_READ_ONLY/ACCESS_WRITE_ONLY/ACCESS_READ_WRITE`）。
 - `scale/offset`：工程量换算 `value = raw * scale + offset`（`scale=0` 视为 1）。
 - `deadband`：工程量单位，`<=0` 不过滤；BOOL 忽略 `scale/offset/deadband`。
+
+### 数据块字段说明
+- `block_di`：数据块 DI，8 位十六进制字符串；配置为人读顺序（高字节在前），模块发送时按字节逆序（低字节在前）。
+- `block_data_len`：数据块数据域总长度（不包含 DI 或设备序号）。
+- `items[]`：子项定义，按表格顺序拼接；`data_len` 之和必须等于 `block_data_len`。
+- `trim_right_space`：ASCII 字段右侧空格裁剪（未配置默认裁剪）。
+
+### 读块写点规则
+- 同一 `tag` 同时出现在 `points` 与 `blocks.items` 时：
+  - 读：优先使用数据块（单点读会被跳过）。
+  - 写：仍允许使用单点配置（需 `ACCESS_WRITE_ONLY/ACCESS_READ_WRITE`）。
+  - 要求：`data_len/type/scale/offset/deadband` 必须一致，否则拒绝配置。
 
 ### 配置示例
 ```jsonc
@@ -91,6 +105,42 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
               "offset": 0.0,
               "deadband": 0.0
             }
+          ],
+          "blocks": [
+            {
+              // 电压数据块：DI=0201FF00，总长度 9（A/B/C 三相各 3 字节 BCD）
+              "block_di": "0201FF00",
+              "block_data_len": 9,
+              "items": [
+                {
+                  "tag": "A相电压",
+                  "data_len": 3,
+                  "type": "DATA_TYPE_BCD",
+                  "access": "ACCESS_READ_ONLY",
+                  "scale": 0.01,
+                  "offset": 0.0,
+                  "deadband": 0.0
+                },
+                {
+                  "tag": "B相电压",
+                  "data_len": 3,
+                  "type": "DATA_TYPE_BCD",
+                  "access": "ACCESS_READ_ONLY",
+                  "scale": 0.01,
+                  "offset": 0.0,
+                  "deadband": 0.0
+                },
+                {
+                  "tag": "C相电压",
+                  "data_len": 3,
+                  "type": "DATA_TYPE_BCD",
+                  "access": "ACCESS_READ_ONLY",
+                  "scale": 0.01,
+                  "offset": 0.0,
+                  "deadband": 0.0
+                }
+              ]
+            }
           ]
         },
         "start": true
@@ -132,6 +182,9 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
 ### 常见问题排查
 - 启动连接失败且日志显示 `Deadline Exceeded`：通常为 MQTT 短暂断连或订阅/发布阻塞导致；检查 `MQTTManager.log` 是否有 `Disconnected/订阅失败/发布失败`。
 - 订阅端偶尔收不到：请确认订阅时机、broker 地址是否一致，并建议使用 QoS 1 + 持久会话。
+
+### 变更记录
+- 2026-02-03：新增数据块配置（blocks/items/trim_right_space）及读块写点规则说明。
 
 ## 线程与日志
 - 模块内部线程统一使用 `ModuleManager::StartModuleThread(模块LibInfo.LIB_NAME, ...)` 创建，自动绑定日志模块名上下文。
