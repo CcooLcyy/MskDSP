@@ -243,6 +243,100 @@ target_link_libraries(modbusRtuPointTable_test PRIVATE
 
 add_test(NAME modbusRtuPointTable_test COMMAND modbusRtuPointTable_test)
 
+add_executable(dlt645PointTable_test
+  dlt645_point_table_test.cc
+  ${CMAKE_SOURCE_DIR}/src/DLT645/DLT645PointTable.cc
+)
+
+target_include_directories(dlt645PointTable_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/DLT645/include
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+)
+
+target_link_libraries(dlt645PointTable_test PRIVATE
+  GTest::gtest_main
+  dspProto
+  moduleManager
+)
+
+add_test(NAME dlt645PointTable_test COMMAND dlt645PointTable_test)
+
+add_executable(dlt645LinkManager_test
+  dlt645_link_manager_test.cc
+  ${CMAKE_SOURCE_DIR}/src/DLT645/DLT645LinkManager.cc
+  ${CMAKE_SOURCE_DIR}/src/DLT645/DLT645DataCenterClient.cc
+  ${CMAKE_SOURCE_DIR}/src/DLT645/DLT645MqttClient.cc
+  ${CMAKE_SOURCE_DIR}/src/DLT645/DLT645PointTable.cc
+)
+
+target_include_directories(dlt645LinkManager_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/DLT645/include
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+)
+
+target_link_libraries(dlt645LinkManager_test PRIVATE
+  GTest::gtest_main
+  GTest::gmock
+  dspProto
+  Boost::json
+  moduleManager
+)
+
+add_test(NAME dlt645LinkManager_test COMMAND dlt645LinkManager_test)
+
+add_executable(dlt645MqttClient_test
+  dlt645_mqtt_client_test.cc
+  ${CMAKE_SOURCE_DIR}/src/DLT645/DLT645MqttClient.cc
+)
+
+target_include_directories(dlt645MqttClient_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/DLT645/include
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+)
+
+target_link_libraries(dlt645MqttClient_test PRIVATE
+  GTest::gtest_main
+  GTest::gmock
+  dspProto
+  moduleManager
+)
+
+add_test(NAME dlt645MqttClient_test COMMAND dlt645MqttClient_test)
+
+add_executable(dlt645DataCenterClient_test
+  dlt645_data_center_client_test.cc
+  ${CMAKE_SOURCE_DIR}/src/DLT645/DLT645DataCenterClient.cc
+)
+
+target_include_directories(dlt645DataCenterClient_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/DLT645/include
+)
+
+target_link_libraries(dlt645DataCenterClient_test PRIVATE
+  GTest::gtest_main
+  GTest::gmock
+  dspProto
+)
+
+add_test(NAME dlt645DataCenterClient_test COMMAND dlt645DataCenterClient_test)
+
+add_executable(dlt645GrpcService_test
+  dlt645_grpc_service_test.cc
+)
+
+target_include_directories(dlt645GrpcService_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/DLT645/include
+)
+
+target_link_libraries(dlt645GrpcService_test PRIVATE
+  GTest::gtest_main
+  GTest::gmock
+  dspProto
+  DLT645
+)
+
+add_test(NAME dlt645GrpcService_test COMMAND dlt645GrpcService_test)
+
 add_executable(iec104LinkManager_test
   iec104_link_manager_test.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104DataCenterClient.cc
@@ -428,6 +522,10 @@ set(MSKDSP_TEST_TARGETS
   dataCenterGrpcService_test
   iec104PointTable_test
   modbusRtuPointTable_test
+  dlt645LinkManager_test
+  dlt645MqttClient_test
+  dlt645DataCenterClient_test
+  dlt645GrpcService_test
   iec104LinkManager_test
   modbusRtuLinkManager_test
   iec104TcpSession_test

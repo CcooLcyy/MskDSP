@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include <grpcpp/client_context.h>
 #include <grpcpp/support/status.h>
@@ -32,6 +33,43 @@ struct ConnKeyHash {
 
 class FakeDataCenterState {
 public:
+  class FakePointUpdateReader : public grpc::ClientReaderInterface<DataCenterProto::PointUpdate> {
+  public:
+    explicit FakePointUpdateReader(std::vector<DataCenterProto::PointUpdate> updates)
+        : updates_(std::move(updates)) {}
+
+    bool Read(DataCenterProto::PointUpdate* msg) override {
+      if (msg == nullptr) {
+        return false;
+      }
+      if (index_ >= updates_.size()) {
+        return false;
+      }
+      *msg = updates_[index_++];
+      return true;
+    }
+
+    bool NextMessageSize(uint32_t* sz) override {
+      if (sz == nullptr) {
+        return false;
+      }
+      if (index_ >= updates_.size()) {
+        *sz = 0;
+        return false;
+      }
+      *sz = static_cast<uint32_t>(updates_[index_].ByteSizeLong());
+      return true;
+    }
+
+    void WaitForInitialMetadata() override {}
+
+    grpc::Status Finish() override { return grpc::Status::OK; }
+
+  private:
+    std::vector<DataCenterProto::PointUpdate> updates_;
+    size_t index_{0};
+  };
+
   void AddConnection(uint32_t connId, std::string module, std::string conn) {
     std::lock_guard<std::mutex> lock(mu_);
     ConnKey key{.module = std::move(module), .conn = std::move(conn)};
@@ -50,6 +88,16 @@ public:
   void FailDeleteForConnName(std::string connName) {
     std::lock_guard<std::mutex> lock(mu_);
     failDeleteConnNames_.emplace(std::move(connName));
+  }
+
+  void FailPublishForTag(std::string tag) {
+    std::lock_guard<std::mutex> lock(mu_);
+    failPublishTags_.emplace(std::move(tag));
+  }
+
+  void FailGetLatestForConn(uint32_t connId) {
+    std::lock_guard<std::mutex> lock(mu_);
+    failGetLatestConnIds_.emplace(connId);
   }
 
   bool HasConnection(const std::string& module, const std::string& conn) const {
@@ -130,11 +178,104 @@ public:
     return grpc::Status::OK;
   }
 
+  grpc::Status Publish(const DataCenterProto::PublishRequest& request) {
+    if (request.conn_id() == 0) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id 不能为空");
+    }
+    if (request.tag().empty()) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tag 不能为空");
+    }
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      if (failPublishTags_.contains(request.tag())) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "强制发布失败");
+      }
+    }
+
+    DataCenterProto::PointUpdate update;
+    update.set_src_conn_id(request.conn_id());
+    update.set_dst_conn_id(request.conn_id());
+    update.set_src_tag(request.tag());
+    update.set_dst_tag(request.tag());
+    update.mutable_value()->CopyFrom(request.value());
+    update.set_ts_ms(request.ts_ms());
+    update.set_quality(request.quality());
+
+    std::lock_guard<std::mutex> lock(mu_);
+    latestByConnId_[request.conn_id()][request.tag()] = update;
+    return grpc::Status::OK;
+  }
+
+  grpc::Status GetLatest(const DataCenterProto::GetLatestRequest& request,
+                         DataCenterProto::GetLatestResponse* response) const {
+    if (response == nullptr) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "response 为空");
+    }
+    if (request.conn_id() == 0) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id 不能为空");
+    }
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      if (failGetLatestConnIds_.contains(request.conn_id())) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "强制获取最新值失败");
+      }
+    }
+    response->Clear();
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = latestByConnId_.find(request.conn_id());
+    if (it == latestByConnId_.end()) {
+      return grpc::Status::OK;
+    }
+    if (request.tags().empty()) {
+      for (const auto& [_, update] : it->second) {
+        *response->add_updates() = update;
+      }
+      return grpc::Status::OK;
+    }
+    for (const auto& tag : request.tags()) {
+      auto tagIt = it->second.find(tag);
+      if (tagIt != it->second.end()) {
+        *response->add_updates() = tagIt->second;
+      }
+    }
+    return grpc::Status::OK;
+  }
+
+  std::unique_ptr<grpc::ClientReaderInterface<DataCenterProto::PointUpdate>> Subscribe(
+      const DataCenterProto::SubscribeRequest& request) const {
+    if (request.conn_id() == 0) {
+      return nullptr;
+    }
+    std::vector<DataCenterProto::PointUpdate> updates;
+    if (request.snapshot()) {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = latestByConnId_.find(request.conn_id());
+      if (it != latestByConnId_.end()) {
+        if (request.tags().empty()) {
+          for (const auto& [_, update] : it->second) {
+            updates.push_back(update);
+          }
+        } else {
+          for (const auto& tag : request.tags()) {
+            auto tagIt = it->second.find(tag);
+            if (tagIt != it->second.end()) {
+              updates.push_back(tagIt->second);
+            }
+          }
+        }
+      }
+    }
+    return std::make_unique<FakePointUpdateReader>(std::move(updates));
+  }
+
 private:
   mutable std::mutex mu_;
   uint32_t nextConnId_ = 1;
   std::unordered_map<ConnKey, DataCenterProto::ConnectionInfo, ConnKeyHash> conns_;
   std::unordered_set<std::string> failDeleteConnNames_;
+  std::unordered_set<std::string> failPublishTags_;
+  std::unordered_set<uint32_t> failGetLatestConnIds_;
+  std::unordered_map<uint32_t, std::unordered_map<std::string, DataCenterProto::PointUpdate>> latestByConnId_;
 };
 
 inline std::shared_ptr<DataCenterProto::MockDataCenterServiceStub> MakeStub(FakeDataCenterState* state) {
@@ -171,6 +312,21 @@ inline std::shared_ptr<DataCenterProto::MockDataCenterServiceStub> MakeStub(Fake
   ON_CALL(*stub, UpsertRoutes(::testing::_, ::testing::_, ::testing::_))
       .WillByDefault(::testing::Invoke([state](grpc::ClientContext*, const DataCenterProto::UpsertRoutesRequest& req, DataCenterProto::Empty*) {
         return state->UpsertRoutes(req);
+      }));
+
+  ON_CALL(*stub, Publish(::testing::_, ::testing::_, ::testing::_))
+      .WillByDefault(::testing::Invoke([state](grpc::ClientContext*, const DataCenterProto::PublishRequest& req, DataCenterProto::Empty*) {
+        return state->Publish(req);
+      }));
+
+  ON_CALL(*stub, GetLatest(::testing::_, ::testing::_, ::testing::_))
+      .WillByDefault(::testing::Invoke([state](grpc::ClientContext*, const DataCenterProto::GetLatestRequest& req, DataCenterProto::GetLatestResponse* resp) {
+        return state->GetLatest(req, resp);
+      }));
+
+  ON_CALL(*stub, SubscribeRaw(::testing::_, ::testing::_))
+      .WillByDefault(::testing::Invoke([state](grpc::ClientContext*, const DataCenterProto::SubscribeRequest& req) {
+        return state->Subscribe(req).release();
       }));
 
   return stub;
