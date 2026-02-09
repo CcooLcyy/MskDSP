@@ -67,7 +67,14 @@
             "slave_id": 1,
             "poll_interval_ms": 1000,
             "address_base": "ADDRESS_BASE_ZERO",
-            "mode": "LINK_MODE_MASTER" // 从站模式使用 LINK_MODE_SLAVE
+            "mode": "LINK_MODE_MASTER", // 从站模式使用 LINK_MODE_SLAVE
+            "read_plan": {
+              "mode": "READ_PLAN_MODE_EXPLICIT", // 显式区间抄读
+              "blocks": [
+                { "function": "0x03", "start": 0, "quantity": 1 },  // 覆盖 address=0
+                { "function": "0x03", "start": 10, "quantity": 2 }  // 覆盖 address=10/11（UINT32）
+              ]
+            }
           }
         },
         "point_table": {

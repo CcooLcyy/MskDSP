@@ -22,7 +22,7 @@ ModbusRTU 主站/从站模块：主站基于串口轮询从站点表并发布到
 
 ## 配置与数据
 - 配置入口：ConfigPusher `./conf/configPusher/modbus_rtu.jsonc`
-- 关键配置：serial.device/baud_rate/data_bits/parity/stop_bits/read_timeout_ms、slave_id、poll_interval_ms、address_base、mode
+- 关键配置：serial.device/baud_rate/data_bits/parity/stop_bits/read_timeout_ms、slave_id、poll_interval_ms、address_base、mode、read_plan（可选）
 - 点表字段：tag/function/address/type、reg_count/word_order/byte_order、scale/offset/deadband、default_value（从站兜底）
 - function 字段支持枚举名/数字/十六进制字符串（`0x01`/`0x03`）
 
@@ -67,6 +67,28 @@ ConfigPusher 点表示例（含 scale/offset/deadband，字段可省略，默认
 - `scale/offset`：工程量换算 `value = raw * scale + offset`（`scale=0` 视为 1）；仅对 UINT16/UINT32 生效。
 - `deadband`：工程量单位，仅对 UINT16/UINT32 生效；`|value - last_reported| < deadband` 时不上报，<=0 表示不过滤。
 - `deadband` 仅对主站轮询发布生效，从站响应不受 deadband 影响。
+
+## 主站显式抄读方案
+当 `mode=LINK_MODE_MASTER` 且配置 `read_plan.mode=READ_PLAN_MODE_EXPLICIT` 时，主站按配置区间抄读寄存器。
+未配置 `read_plan` 或 `read_plan.mode=READ_PLAN_MODE_POINT` 时，保持原有逐点抄读逻辑。
+
+示例（显式区间抄读）：
+```jsonc
+{
+  "read_plan": {
+    "mode": "READ_PLAN_MODE_EXPLICIT",
+    "blocks": [
+      { "function": "0x03", "start": 0, "quantity": 10 },
+      { "function": "0x03", "start": 100, "quantity": 20 }
+    ]
+  }
+}
+```
+
+注意事项：
+- `blocks` 的 `start/quantity` 遵循 `address_base`；区间范围为 `[start, start + quantity - 1]`。
+- 当前仅支持功能码 `0x03`（读保持寄存器）；单次最大数量为 125。
+- `UINT32` 点位需要覆盖连续 2 个寄存器；区间未覆盖的点不会被抄读，会在日志中提示。
 
 ## 从站说明
 - `mode=LINK_MODE_SLAVE` 时，模块作为从站响应请求（支持 0x01/0x03）。
