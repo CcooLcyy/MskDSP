@@ -5,16 +5,7 @@
 #include <google/protobuf/message.h>
 
 #include "Logger.h"
-
-namespace {
-std::string formatProtoForLog(const google::protobuf::Message& message) {
-  auto text = message.ShortDebugString();
-  if (text.empty()) {
-    return "空";
-  }
-  return text;
-}
-}  // namespace
+#include "ProtoLogUtil.hpp"
 
 namespace DLT645 {
 void DLT645GrpcServiceImpl::getDLT645(DLT645* module) {

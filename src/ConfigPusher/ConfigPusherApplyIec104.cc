@@ -5,17 +5,9 @@
 #include <string>
 
 #include "Logger.h"
+#include "ProtoLogUtil.hpp"
 
 namespace ConfigPusher {
-namespace {
-std::string formatProtoForLog(const google::protobuf::Message &message) {
-  auto text = message.ShortDebugString();
-  if (text.empty()) {
-    return "空";
-  }
-  return text;
-}
-}  // namespace
 
 bool applyIec104Config(const ConfigPusherProto::Iec104Config &config,
                        IEC104Proto::IEC104Service::StubInterface *stub) {

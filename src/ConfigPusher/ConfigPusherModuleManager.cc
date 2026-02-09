@@ -8,22 +8,11 @@
 #include <thread>
 
 #include "Logger.h"
+#include "ProtoLogUtil.hpp"
 
 namespace ConfigPusher {
 namespace {
 constexpr auto kModulePollInterval = std::chrono::milliseconds(200);
-
-std::string formatProtoForLog(const google::protobuf::Message &message) {
-#ifdef MSKDSP_TEST_DISABLE_PROTO_LOG
-  return "测试环境跳过报文内容";
-#else
-  auto text = message.ShortDebugString();
-  if (text.empty()) {
-    return "空";
-  }
-  return text;
-#endif
-}
 }  // namespace
 
 std::optional<ModuleManagerProto::ModuleInfo> findModuleInfo(

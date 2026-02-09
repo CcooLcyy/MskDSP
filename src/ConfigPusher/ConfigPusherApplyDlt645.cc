@@ -5,17 +5,9 @@
 #include <string>
 
 #include "Logger.h"
+#include "ProtoLogUtil.hpp"
 
 namespace ConfigPusher {
-namespace {
-std::string formatProtoForLog(const google::protobuf::Message& message) {
-  auto text = message.ShortDebugString();
-  if (text.empty()) {
-    return "空";
-  }
-  return text;
-}
-}  // namespace
 
 bool applyDlt645Config(const ConfigPusherProto::Dlt645Config& config,
                        DLT645Proto::DLT645Service::StubInterface* stub) {

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "Logger.h"
+#include "ProtoLogUtil.hpp"
 
 namespace ConfigPusher {
 namespace {
@@ -27,14 +28,6 @@ struct ConnKeyHash {
     return h(k.module) ^ (h(k.conn) << 1);
   }
 };
-
-std::string formatProtoForLog(const google::protobuf::Message &message) {
-  auto text = message.ShortDebugString();
-  if (text.empty()) {
-    return "空";
-  }
-  return text;
-}
 
 bool HasDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config) {
   if (!config.point_tables().empty()) {
