@@ -13,6 +13,7 @@
 #include <boost/log/trivial.hpp>
 #include <boost/log/utility/setup/common_attributes.hpp>
 #include <boost/log/utility/setup/console.hpp>
+#include <boost/log/utility/formatting_ostream.hpp>
 #include <boost/make_shared.hpp>
 #include <chrono>
 #include <cctype>
@@ -25,6 +26,7 @@
 #include <unordered_set>
 #include <string>
 #include <string_view>
+#include <unistd.h>
 #include <utility>
 
 namespace ModuleManager {
@@ -76,6 +78,10 @@ std::string moduleNameAttributeValue() {
   return NormalizeModuleName(currentLogModuleName);
 }
 
+bool IsConsoleColorEnabled() {
+  return ::isatty(STDERR_FILENO) != 0;
+}
+
 boost::log::formatter BuildLogFormatter() {
   namespace logging = boost::log;
   namespace expr = boost::log::expressions;
@@ -84,6 +90,61 @@ boost::log::formatter BuildLogFormatter() {
       << " [" << logging::trivial::severity << "] "
       << " [" << expr::if_(expr::has_attr<std::string>(kLogTagModule))[expr::stream << expr::attr<std::string>(kLogTagModule)].else_[expr::stream << kDefaultModuleName] << "] "
       << expr::smessage;
+}
+
+const char *ConsoleColorForSeverity(boost::log::trivial::severity_level level) {
+  switch (level) {
+    case boost::log::trivial::fatal:
+      return "\033[1;31m";
+    case boost::log::trivial::error:
+      return "\033[31m";
+    case boost::log::trivial::warning:
+      return "\033[33m";
+    case boost::log::trivial::info:
+      return "\033[32m";
+    case boost::log::trivial::debug:
+    case boost::log::trivial::trace:
+      return "\033[90m";
+    default:
+      return "";
+  }
+}
+
+boost::log::formatter BuildConsoleLogFormatter(bool enableColor) {
+  namespace logging = boost::log;
+  if (!enableColor) {
+    return BuildLogFormatter();
+  }
+  auto base_formatter = BuildLogFormatter();
+  return [base_formatter](const logging::record_view &rec, logging::formatting_ostream &strm) {
+    std::string buffer;
+    logging::formatting_ostream temp_stream(buffer);
+    base_formatter(rec, temp_stream);
+    auto severity = rec[logging::trivial::severity];
+    if (!severity) {
+      strm << buffer;
+      return;
+    }
+    const char *color = ConsoleColorForSeverity(severity.get());
+    if (color[0] == '\0') {
+      strm << buffer;
+      return;
+    }
+    const char *severity_text = boost::log::trivial::to_string(severity.get());
+    if (severity_text == nullptr) {
+      strm << buffer;
+      return;
+    }
+    std::string token = std::string("[") + severity_text + "]";
+    auto pos = buffer.find(token);
+    if (pos == std::string::npos) {
+      strm << buffer;
+      return;
+    }
+    strm << buffer.substr(0, pos);
+    strm << color << token << "\033[0m";
+    strm << buffer.substr(pos + token.size());
+  };
 }
 
 std::chrono::sys_days CurrentLocalDay() {
@@ -342,7 +403,8 @@ void Logger::init(const std::string &logDir, const std::string &fileName) {
     logging::add_common_attributes();
     logging::core::get()->add_global_attribute(kLogTagModule, logging::attributes::make_function(&moduleNameAttributeValue));
 
-    logging::add_console_log(std::clog, keywords::format = BuildLogFormatter());
+    bool enableConsoleColor = IsConsoleColorEnabled();
+    logging::add_console_log(std::clog, keywords::format = BuildConsoleLogFormatter(enableConsoleColor));
     logging::core::get()->set_filter(logging::trivial::severity >= logging::trivial::info);
 
     {
@@ -357,6 +419,15 @@ void Logger::init(const std::string &logDir, const std::string &fileName) {
         << "模块日志输出已启用: module=" << kDefaultModuleName
         << ", dir=" << module_dir.string()
         << ", file=" << (module_dir / (std::string(kDefaultModuleName) + logExtension)).string();
+    if (enableConsoleColor) {
+      BOOST_LOG_STREAM_SEV(loggerInstance(), boost::log::trivial::info)
+          << "终端日志颜色已启用";
+      BOOST_LOG_STREAM_SEV(loggerInstance(), boost::log::trivial::info)
+          << "终端日志颜色仅作用于等级字段";
+    } else {
+      BOOST_LOG_STREAM_SEV(loggerInstance(), boost::log::trivial::info)
+          << "终端日志颜色未启用";
+    }
 
 #ifndef NDEBUG
     BOOST_LOG_STREAM_SEV(loggerInstance(), boost::log::trivial::info)
