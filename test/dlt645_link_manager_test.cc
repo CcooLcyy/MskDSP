@@ -1,9 +1,14 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <future>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -118,6 +123,9 @@ DLT645Proto::LinkConfig MakeValidLinkConfig(const char *connName, DLT645Proto::C
   cfg.set_comm_mode(mode);
   cfg.set_transport_type(DLT645Proto::TRANSPORT_UNSPECIFIED);
   cfg.set_meter_addr("123456789012");
+  if (mode == DLT645Proto::COMM_MODE_SERIAL) {
+    cfg.set_serial_port("RS485-1");
+  }
   return cfg;
 }
 
@@ -248,6 +256,55 @@ TEST(Dlt645LinkManagerTest, UpsertLinkValidatesConfigFields) {
   EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
 }
 
+// 验证：串口模式缺少 serial_port 时 UpsertLink 拒绝配置。
+TEST(Dlt645LinkManagerTest, UpsertLinkSerialRejectsMissingPort) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(stub);
+
+  DLT645Proto::UpsertLinkRequest req;
+  auto *cfg = req.mutable_config();
+  cfg->set_conn_name("conn-serial-no-port");
+  cfg->set_protocol_variant(DLT645Proto::PROTOCOL_VARIANT_DLT645_STD);
+  cfg->set_comm_mode(DLT645Proto::COMM_MODE_SERIAL);
+  cfg->set_transport_type(DLT645Proto::TRANSPORT_UNSPECIFIED);
+  cfg->set_meter_addr("123456789012");
+
+  DLT645Proto::LinkInfo out;
+  auto st = mgr.UpsertLink(req, &out);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+// 验证：串口模式 UpsertLink 会补齐默认串口参数。
+TEST(Dlt645LinkManagerTest, UpsertLinkSerialFillsDefaultParams) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(stub);
+
+  DLT645Proto::UpsertLinkRequest req;
+  auto *cfg = req.mutable_config();
+  cfg->set_conn_name("conn-serial-default");
+  cfg->set_protocol_variant(DLT645Proto::PROTOCOL_VARIANT_DLT645_STD);
+  cfg->set_comm_mode(DLT645Proto::COMM_MODE_SERIAL);
+  cfg->set_transport_type(DLT645Proto::TRANSPORT_UNSPECIFIED);
+  cfg->set_meter_addr("123456789012");
+  cfg->set_serial_port("RS485-1");
+
+  DLT645Proto::LinkInfo out;
+  ASSERT_TRUE(mgr.UpsertLink(req, &out).ok());
+  EXPECT_EQ(out.config().serial_baud_rate(), 9600);
+  EXPECT_EQ(out.config().serial_data_bits(), 8);
+  EXPECT_EQ(out.config().serial_parity(), DLT645Proto::SERIAL_PARITY_NONE);
+  EXPECT_EQ(out.config().serial_stop_bits(), DLT645Proto::SERIAL_STOP_BITS_ONE);
+  EXPECT_EQ(out.config().serial_byte_timeout_ms(), 100);
+  EXPECT_EQ(out.config().serial_frame_timeout_ms(), 100);
+  EXPECT_EQ(out.config().serial_est_size(), 256);
+}
+
 // 验证：create_only 重复创建时返回 ALREADY_EXISTS。
 TEST(Dlt645LinkManagerTest, UpsertLinkCreateOnlyRejectsDuplicate) {
   FakeDataCenterState state;
@@ -369,8 +426,8 @@ TEST(Dlt645LinkManagerTest, StartLinkRejectsWhenRunningOrPendingDelete) {
   EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
 }
 
-// 验证：StartLink 串口模式返回未实现。
-TEST(Dlt645LinkManagerTest, StartLinkSerialModeUnimplemented) {
+// 验证：StartLink 串口模式可启动通信任务。
+TEST(Dlt645LinkManagerTest, StartLinkSerialModeStartsSuccessfully) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
@@ -387,7 +444,149 @@ TEST(Dlt645LinkManagerTest, StartLinkSerialModeUnimplemented) {
   ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
 
   auto st = mgr.StartLink("conn-serial");
-  EXPECT_EQ(st.error_code(), grpc::StatusCode::UNIMPLEMENTED);
+  EXPECT_TRUE(st.ok());
+  DLT645Proto::LinkInfo got;
+  ASSERT_TRUE(mgr.GetLink("conn-serial", &got).ok());
+  EXPECT_EQ(got.state(), DLT645Proto::LINK_STATE_RUNNING);
+}
+
+// 验证：Lora 链路启动连接功能阻塞时，不会阻塞 UART 链路启动连接功能。
+TEST(Dlt645LinkManagerTest, StartLinkLoraBlockedDoesNotBlockUart) {
+  FakeDataCenterState state;
+  auto dcStub = MakeStub(&state);
+  auto mqttStub = std::make_shared<MQTTManagerProto::MockMQTTManagerServiceStub>();
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(dcStub);
+  mgr.setMqttStub(mqttStub);
+
+  auto updateReq = MakeMqttUpdateRequest("127.0.0.1", 1883, "c2");
+  DLT645Proto::UpdateConfigResponse updateResp;
+  ASSERT_TRUE(mgr.UpdateConfig(updateReq, &updateResp).ok());
+
+  DLT645Proto::UpsertLinkRequest loraReq;
+  *loraReq.mutable_config() = MakeValidLinkConfig("conn-lora", DLT645Proto::COMM_MODE_LORA);
+  DLT645Proto::LinkInfo loraInfo;
+  ASSERT_TRUE(mgr.UpsertLink(loraReq, &loraInfo).ok());
+
+  DLT645Proto::UpsertLinkRequest uartReq;
+  *uartReq.mutable_config() = MakeValidLinkConfig("conn-uart", DLT645Proto::COMM_MODE_SERIAL);
+  DLT645Proto::LinkInfo uartInfo;
+  ASSERT_TRUE(mgr.UpsertLink(uartReq, &uartInfo).ok());
+
+  std::mutex gateMu;
+  std::condition_variable gateCv;
+  bool loraEntered = false;
+  bool releaseLora = false;
+  ON_CALL(*mqttStub, RequestAndWait(_, _, _))
+      .WillByDefault(::testing::Invoke([&gateMu, &gateCv, &loraEntered, &releaseLora](
+                                           grpc::ClientContext*,
+                                           const MQTTManagerProto::RequestAndWaitRequest& req,
+                                           MQTTManagerProto::RequestAndWaitResponse* resp) {
+        if (resp == nullptr) {
+          return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
+        }
+        resp->set_ok(true);
+        resp->set_message("OK");
+        if (req.request_topic().find("addslaveNode") != std::string::npos) {
+          {
+            std::lock_guard<std::mutex> lock(gateMu);
+            loraEntered = true;
+          }
+          gateCv.notify_all();
+          std::unique_lock<std::mutex> lock(gateMu);
+          gateCv.wait_for(lock, std::chrono::seconds(3), [&releaseLora]() { return releaseLora; });
+          resp->set_payload("{\"status\":0}");
+          return grpc::Status::OK;
+        }
+        resp->set_payload("{\"status\":1}");
+        return grpc::Status::OK;
+      }));
+
+  auto loraFuture = std::async(std::launch::async, [&mgr]() { return mgr.StartLink("conn-lora"); });
+  {
+    std::unique_lock<std::mutex> lock(gateMu);
+    ASSERT_TRUE(gateCv.wait_for(lock, std::chrono::seconds(2), [&loraEntered]() { return loraEntered; }));
+  }
+
+  const auto uartStartBegin = std::chrono::steady_clock::now();
+  auto uartStatus = mgr.StartLink("conn-uart");
+  const auto uartCostMs =
+      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - uartStartBegin).count();
+  EXPECT_TRUE(uartStatus.ok());
+  EXPECT_LT(uartCostMs, 1000);
+
+  {
+    std::lock_guard<std::mutex> lock(gateMu);
+    releaseLora = true;
+  }
+  gateCv.notify_all();
+  auto loraStatus = loraFuture.get();
+  EXPECT_TRUE(loraStatus.ok());
+
+  DLT645Proto::LinkInfo loraGot;
+  DLT645Proto::LinkInfo uartGot;
+  ASSERT_TRUE(mgr.GetLink("conn-lora", &loraGot).ok());
+  ASSERT_TRUE(mgr.GetLink("conn-uart", &uartGot).ok());
+  EXPECT_EQ(loraGot.state(), DLT645Proto::LINK_STATE_RUNNING);
+  EXPECT_EQ(uartGot.state(), DLT645Proto::LINK_STATE_RUNNING);
+}
+
+// 验证：同一 Lora 地址的多个连接仅在首启/末停时各执行一次档案增删。
+TEST(Dlt645LinkManagerTest, StartStopLoraSameAddrSharesArchiveLifecycle) {
+  FakeDataCenterState state;
+  auto dcStub = MakeStub(&state);
+  auto mqttStub = std::make_shared<MQTTManagerProto::MockMQTTManagerServiceStub>();
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(dcStub);
+  mgr.setMqttStub(mqttStub);
+
+  auto updateReq = MakeMqttUpdateRequest("127.0.0.1", 1883, "c-share");
+  DLT645Proto::UpdateConfigResponse updateResp;
+  ASSERT_TRUE(mgr.UpdateConfig(updateReq, &updateResp).ok());
+
+  DLT645Proto::UpsertLinkRequest reqA;
+  *reqA.mutable_config() = MakeValidLinkConfig("conn-share-a", DLT645Proto::COMM_MODE_LORA);
+  DLT645Proto::LinkInfo infoA;
+  ASSERT_TRUE(mgr.UpsertLink(reqA, &infoA).ok());
+
+  DLT645Proto::UpsertLinkRequest reqB;
+  *reqB.mutable_config() = MakeValidLinkConfig("conn-share-b", DLT645Proto::COMM_MODE_LORA);
+  DLT645Proto::LinkInfo infoB;
+  ASSERT_TRUE(mgr.UpsertLink(reqB, &infoB).ok());
+
+  std::atomic<int> addCount{0};
+  std::atomic<int> delCount{0};
+  ON_CALL(*mqttStub, RequestAndWait(_, _, _))
+      .WillByDefault(::testing::Invoke([&addCount, &delCount](
+                                           grpc::ClientContext*,
+                                           const MQTTManagerProto::RequestAndWaitRequest& req,
+                                           MQTTManagerProto::RequestAndWaitResponse* resp) {
+        if (resp == nullptr) {
+          return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
+        }
+        resp->set_ok(true);
+        resp->set_message("成功");
+        if (req.request_topic().find("addslaveNode") != std::string::npos) {
+          addCount.fetch_add(1);
+        }
+        if (req.request_topic().find("delslaveNode") != std::string::npos) {
+          delCount.fetch_add(1);
+        }
+        resp->set_payload("{\"status\":0}");
+        return grpc::Status::OK;
+      }));
+
+  ASSERT_TRUE(mgr.StartLink("conn-share-a").ok());
+  ASSERT_TRUE(mgr.StartLink("conn-share-b").ok());
+  EXPECT_EQ(addCount.load(), 1);
+
+  ASSERT_TRUE(mgr.StopLink("conn-share-a").ok());
+  EXPECT_EQ(delCount.load(), 0);
+
+  ASSERT_TRUE(mgr.StopLink("conn-share-b").ok());
+  EXPECT_EQ(delCount.load(), 1);
 }
 
 // 验证：UpsertPointTable 在运行中/待删除时拒绝更新。

@@ -3,6 +3,7 @@
 #include <boost/json.hpp>
 #include <boost/system/error_code.hpp>
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -32,7 +33,21 @@ constexpr uint32_t kDefaultRequestTimeoutMs = 3000;
 constexpr const char* kAppName = "AGVC";
 constexpr const char* kAppTypeLora = "loraManager";
 constexpr const char* kAppTypeCarrier = "ccoRouter";
+constexpr const char* kAppTypeUart = "uartManager";
 constexpr size_t kMinFrameSize = 12;
+constexpr uint32_t kDefaultSerialBaudRate = 9600;
+constexpr uint32_t kDefaultSerialDataBits = 8;
+constexpr uint32_t kDefaultSerialByteTimeoutMs = 100;
+constexpr uint32_t kDefaultSerialFrameTimeoutMs = 100;
+constexpr uint32_t kDefaultSerialEstSize = 256;
+
+bool useArchiveManagement(DLT645Proto::CommMode mode) {
+  return mode == DLT645Proto::COMM_MODE_LORA || mode == DLT645Proto::COMM_MODE_CARRIER;
+}
+
+std::string makeArchiveKey(const DLT645Proto::LinkConfig& config) {
+  return std::format("{}|{}", static_cast<int>(config.comm_mode()), config.meter_addr());
+}
 
 uint64_t toUint64(const boost::json::value& value, bool* ok) {
   if (ok != nullptr) {
@@ -157,6 +172,138 @@ bool isHex(const std::string& text) {
   }
   return true;
 }
+
+std::string toLowerAscii(std::string text) {
+  for (char& ch : text) {
+    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  }
+  return text;
+}
+
+std::string trimAscii(std::string text) {
+  auto isSpace = [](char ch) {
+    return std::isspace(static_cast<unsigned char>(ch)) != 0;
+  };
+  while (!text.empty() && isSpace(text.front())) {
+    text.erase(text.begin());
+  }
+  while (!text.empty() && isSpace(text.back())) {
+    text.pop_back();
+  }
+  return text;
+}
+
+bool parseInt32Text(const std::string& text, int32_t* out) {
+  if (out == nullptr || text.empty()) {
+    return false;
+  }
+  char* end = nullptr;
+  const auto value = std::strtol(text.c_str(), &end, 10);
+  if (end == nullptr || *end != '\0') {
+    return false;
+  }
+  *out = static_cast<int32_t>(value);
+  return true;
+}
+
+int32_t parseStatusCode(const boost::json::value& value, bool* ok) {
+  if (ok != nullptr) {
+    *ok = false;
+  }
+  if (value.is_int64()) {
+    if (ok != nullptr) {
+      *ok = true;
+    }
+    return static_cast<int32_t>(value.as_int64());
+  }
+  if (value.is_uint64()) {
+    if (ok != nullptr) {
+      *ok = true;
+    }
+    return static_cast<int32_t>(value.as_uint64());
+  }
+  if (!value.is_string()) {
+    return 0;
+  }
+  std::string text = value.as_string().c_str();
+  text = trimAscii(std::move(text));
+  if (text.empty()) {
+    return 0;
+  }
+  int32_t parsed = 0;
+  if (parseInt32Text(text, &parsed)) {
+    if (ok != nullptr) {
+      *ok = true;
+    }
+    return parsed;
+  }
+
+  auto lower = toLowerAscii(text);
+  if (lower == "ok" || lower == "success") {
+    if (ok != nullptr) {
+      *ok = true;
+    }
+    return 0;
+  }
+  if (lower == "fail") {
+    if (ok != nullptr) {
+      *ok = true;
+    }
+    return 1;
+  }
+  if (lower == "frametimeout") {
+    if (ok != nullptr) {
+      *ok = true;
+    }
+    return 2;
+  }
+  if (lower == "porterror") {
+    if (ok != nullptr) {
+      *ok = true;
+    }
+    return 3;
+  }
+  if (lower == "buffull") {
+    if (ok != nullptr) {
+      *ok = true;
+    }
+    return 4;
+  }
+  if (lower == "formaterror") {
+    if (ok != nullptr) {
+      *ok = true;
+    }
+    return 5;
+  }
+  if (ok != nullptr) {
+    *ok = true;
+  }
+  return 1;
+}
+
+std::string serialParityToText(DLT645Proto::SerialParity parity) {
+  switch (parity) {
+    case DLT645Proto::SERIAL_PARITY_ODD:
+      return "odd";
+    case DLT645Proto::SERIAL_PARITY_EVEN:
+      return "even";
+    case DLT645Proto::SERIAL_PARITY_NONE:
+    case DLT645Proto::SERIAL_PARITY_UNSPECIFIED:
+    default:
+      return "none";
+  }
+}
+
+uint32_t serialStopBitsToNumber(DLT645Proto::SerialStopBits stopBits) {
+  switch (stopBits) {
+    case DLT645Proto::SERIAL_STOP_BITS_TWO:
+      return 2;
+    case DLT645Proto::SERIAL_STOP_BITS_ONE:
+    case DLT645Proto::SERIAL_STOP_BITS_UNSPECIFIED:
+    default:
+      return 1;
+  }
+}
 }  // namespace
 
 namespace DLT645 {
@@ -275,38 +422,186 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
   if (!status.ok()) {
     return status;
   }
+  LOG_INFO("DLT645 开始启动连接功能: conn_name={}", connName);
   if (!mqttClient_.hasConfig()) {
     return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "MQTT 连接参数未配置");
   }
 
-  std::lock_guard<std::mutex> lock(mu_);
-  auto it = linksByName_.find(connName);
-  if (it == linksByName_.end()) {
+  std::shared_ptr<LinkRuntime> link;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = linksByName_.find(connName);
+    if (it == linksByName_.end()) {
+      return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接不存在");
+    }
+    link = it->second;
+  }
+  if (!link) {
     return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接不存在");
   }
-  auto link = it->second;
-  if (link->state == DLT645Proto::LINK_STATE_RUNNING) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "连接已在运行");
-  }
-  if (link->state == DLT645Proto::LINK_STATE_PENDING_DELETE) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "连接处于待删除状态");
-  }
 
-  startMqttSubscribeLocked(connName, link);
-  if (link->config.comm_mode() == DLT645Proto::COMM_MODE_LORA ||
-      link->config.comm_mode() == DLT645Proto::COMM_MODE_CARRIER) {
-    status = sendAddSlaveNode(link.get());
-    if (!status.ok()) {
-      link->lastError = status.error_message();
-      return status;
+  std::unique_lock<std::mutex> reqLock(link->requestMutex);
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = linksByName_.find(connName);
+    if (it == linksByName_.end() || it->second.get() != link.get()) {
+      return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接不存在");
     }
-  } else if (link->config.comm_mode() == DLT645Proto::COMM_MODE_SERIAL) {
-    return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "暂不支持串口通信方式");
+    if (link->state == DLT645Proto::LINK_STATE_RUNNING) {
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "连接已在运行");
+    }
+    if (link->state == DLT645Proto::LINK_STATE_PENDING_DELETE) {
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "连接处于待删除状态");
+    }
   }
 
-  startPollingLocked(connName, link);
-  startDataCenterSubscribeLocked(connName, link);
-  link->state = DLT645Proto::LINK_STATE_RUNNING;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    startMqttSubscribeLocked(connName, link);
+  }
+
+  const bool useArchive = useArchiveManagement(link->config.comm_mode());
+  const std::string archiveKey = useArchive ? makeArchiveKey(link->config) : std::string();
+  bool holdArchiveRef = false;
+  bool needAddArchive = false;
+  auto releaseArchiveRefOnStartFailure = [this, &connName, &link, &archiveKey]() {
+    bool needDeleteArchive = false;
+    {
+      std::unique_lock<std::mutex> lock(mu_);
+      while (true) {
+        archiveStateCv_.wait(lock, [this, &archiveKey]() {
+          return archiveAddInFlightByKey_.count(archiveKey) == 0 &&
+                 archiveDelInFlightByKey_.count(archiveKey) == 0;
+        });
+        auto it = archiveRefCountByKey_.find(archiveKey);
+        if (it == archiveRefCountByKey_.end()) {
+          LOG_WARNING("DLT645 启动连接功能回滚未找到档案引用: conn_name={}, meter_addr={}",
+                      connName, link->config.meter_addr());
+          break;
+        }
+        if (it->second > 1) {
+          it->second -= 1;
+          LOG_INFO("DLT645 启动连接功能回滚已归还档案引用: conn_name={}, meter_addr={}, 剩余引用计数={}",
+                   connName, link->config.meter_addr(), it->second);
+          break;
+        }
+        archiveDelInFlightByKey_.insert(archiveKey);
+        needDeleteArchive = true;
+        LOG_INFO("DLT645 启动连接功能回滚进入档案删除阶段: conn_name={}, meter_addr={}",
+                 connName, link->config.meter_addr());
+        break;
+      }
+    }
+    if (!needDeleteArchive) {
+      return;
+    }
+
+    auto delStatus = sendDelSlaveNode(link.get());
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      archiveDelInFlightByKey_.erase(archiveKey);
+      auto it = archiveRefCountByKey_.find(archiveKey);
+      if (it != archiveRefCountByKey_.end()) {
+        if (it->second > 0) {
+          it->second -= 1;
+        }
+        const uint32_t leftRef = it->second;
+        if (leftRef == 0) {
+          archiveRefCountByKey_.erase(it);
+        }
+        LOG_INFO("DLT645 启动连接功能回滚更新档案引用状态: conn_name={}, meter_addr={}, 剩余引用计数={}",
+                 connName, link->config.meter_addr(), leftRef);
+      } else {
+        LOG_WARNING("DLT645 启动连接功能回滚未找到档案引用状态: conn_name={}, meter_addr={}",
+                    connName, link->config.meter_addr());
+      }
+    }
+    archiveStateCv_.notify_all();
+    if (!delStatus.ok()) {
+      LOG_WARNING("DLT645 启动连接功能回滚档案删除失败: conn_name={}, 原因={}",
+                  connName, delStatus.error_message());
+    }
+  };
+
+  if (useArchive) {
+    {
+      std::unique_lock<std::mutex> lock(mu_);
+      while (true) {
+        archiveStateCv_.wait(lock, [this, &archiveKey]() {
+          return archiveAddInFlightByKey_.count(archiveKey) == 0 &&
+                 archiveDelInFlightByKey_.count(archiveKey) == 0;
+        });
+        auto it = archiveRefCountByKey_.find(archiveKey);
+        if (it != archiveRefCountByKey_.end() && it->second > 0) {
+          it->second += 1;
+          holdArchiveRef = true;
+          LOG_INFO("DLT645 启动连接功能复用档案引用: conn_name={}, meter_addr={}, 引用计数={}",
+                   connName, link->config.meter_addr(), it->second);
+          break;
+        }
+        archiveAddInFlightByKey_.insert(archiveKey);
+        needAddArchive = true;
+        LOG_INFO("DLT645 启动连接功能获取档案添加资格: conn_name={}, meter_addr={}",
+                 connName, link->config.meter_addr());
+        break;
+      }
+    }
+
+    if (needAddArchive) {
+      LOG_INFO("DLT645 启动连接功能进入档案添加阶段: conn_name={}, comm_mode={}",
+               connName, DLT645Proto::CommMode_Name(link->config.comm_mode()));
+      status = sendAddSlaveNode(link.get());
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        archiveAddInFlightByKey_.erase(archiveKey);
+        if (status.ok()) {
+          archiveRefCountByKey_[archiveKey] = 1;
+          holdArchiveRef = true;
+          LOG_INFO("DLT645 启动连接功能档案引用建立成功: conn_name={}, meter_addr={}, 引用计数=1",
+                   connName, link->config.meter_addr());
+        } else {
+          archiveRefCountByKey_.erase(archiveKey);
+        }
+      }
+      archiveStateCv_.notify_all();
+      if (!status.ok()) {
+        LOG_ERROR("DLT645 启动连接功能档案添加失败: conn_name={}, 原因={}",
+                  connName, status.error_message());
+        std::lock_guard<std::mutex> lock(mu_);
+        link->lastError = status.error_message();
+        return status;
+      }
+      LOG_INFO("DLT645 启动连接功能档案添加成功: conn_name={}", connName);
+    } else {
+      LOG_INFO("DLT645 启动连接功能跳过档案添加: conn_name={}, meter_addr={}, 原因=同地址档案已存在",
+               connName, link->config.meter_addr());
+    }
+  } else {
+    LOG_INFO("DLT645 启动连接功能跳过档案管理: conn_name={}, comm_mode={}",
+             connName, DLT645Proto::CommMode_Name(link->config.comm_mode()));
+  }
+
+  bool linkMissing = false;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = linksByName_.find(connName);
+    if (it == linksByName_.end() || it->second.get() != link.get()) {
+      stopMqttSubscribeLocked(link.get());
+      linkMissing = true;
+    } else {
+      startPollingLocked(connName, link);
+      startDataCenterSubscribeLocked(connName, link);
+      link->state = DLT645Proto::LINK_STATE_RUNNING;
+      link->lastError.clear();
+    }
+  }
+  if (linkMissing) {
+    if (useArchive && holdArchiveRef) {
+      releaseArchiveRefOnStartFailure();
+    }
+    return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接不存在");
+  }
+  LOG_INFO("DLT645 启动连接功能完成: conn_name={}", connName);
   return grpc::Status::OK;
 }
 
@@ -315,27 +610,123 @@ grpc::Status LinkManager::StopLink(const std::string& connName) {
   if (!status.ok()) {
     return status;
   }
-  std::lock_guard<std::mutex> lock(mu_);
-  auto it = linksByName_.find(connName);
-  if (it == linksByName_.end()) {
+  LOG_INFO("DLT645 开始停止连接功能: conn_name={}", connName);
+  std::shared_ptr<LinkRuntime> link;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = linksByName_.find(connName);
+    if (it == linksByName_.end()) {
+      return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接不存在");
+    }
+    link = it->second;
+  }
+  if (!link) {
     return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接不存在");
   }
-  auto link = it->second;
-  if (link->state == DLT645Proto::LINK_STATE_STOPPED) {
-    return grpc::Status::OK;
+
+  std::unique_lock<std::mutex> reqLock(link->requestMutex);
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = linksByName_.find(connName);
+    if (it == linksByName_.end() || it->second.get() != link.get()) {
+      return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接不存在");
+    }
+    if (link->state == DLT645Proto::LINK_STATE_STOPPED) {
+      LOG_INFO("DLT645 停止连接功能跳过: conn_name={}, 原因=连接已停止", connName);
+      return grpc::Status::OK;
+    }
+
+    stopPollingLocked(link.get());
+    stopDataCenterSubscribeLocked(link.get());
   }
 
-  stopPollingLocked(link.get());
-  stopDataCenterSubscribeLocked(link.get());
-  if (link->config.comm_mode() == DLT645Proto::COMM_MODE_LORA ||
-      link->config.comm_mode() == DLT645Proto::COMM_MODE_CARRIER) {
-    auto delStatus = sendDelSlaveNode(link.get());
-    if (!delStatus.ok()) {
-      link->lastError = delStatus.error_message();
+  const bool useArchive = useArchiveManagement(link->config.comm_mode());
+  const std::string archiveKey = useArchive ? makeArchiveKey(link->config) : std::string();
+  bool needDeleteArchive = false;
+  if (useArchive) {
+    {
+      std::unique_lock<std::mutex> lock(mu_);
+      while (true) {
+        archiveStateCv_.wait(lock, [this, &archiveKey]() {
+          return archiveAddInFlightByKey_.count(archiveKey) == 0 &&
+                 archiveDelInFlightByKey_.count(archiveKey) == 0;
+        });
+        auto it = archiveRefCountByKey_.find(archiveKey);
+        if (it == archiveRefCountByKey_.end()) {
+          LOG_WARNING("DLT645 停止连接功能未找到档案引用，跳过档案删除: conn_name={}, meter_addr={}",
+                      connName, link->config.meter_addr());
+          break;
+        }
+        if (it->second == 0) {
+          LOG_WARNING("DLT645 停止连接功能发现档案引用计数异常(0)，跳过档案删除: conn_name={}, meter_addr={}",
+                      connName, link->config.meter_addr());
+          archiveRefCountByKey_.erase(it);
+          break;
+        }
+        if (it->second > 1) {
+          it->second -= 1;
+          LOG_INFO("DLT645 停止连接功能复用档案引用，跳过档案删除: conn_name={}, meter_addr={}, 剩余引用计数={}",
+                   connName, link->config.meter_addr(), it->second);
+          break;
+        }
+        archiveDelInFlightByKey_.insert(archiveKey);
+        needDeleteArchive = true;
+        LOG_INFO("DLT645 停止连接功能获取档案删除资格: conn_name={}, meter_addr={}",
+                 connName, link->config.meter_addr());
+        break;
+      }
     }
+
+    if (needDeleteArchive) {
+      LOG_INFO("DLT645 停止连接功能进入档案删除阶段: conn_name={}, comm_mode={}",
+               connName, DLT645Proto::CommMode_Name(link->config.comm_mode()));
+      auto delStatus = sendDelSlaveNode(link.get());
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        archiveDelInFlightByKey_.erase(archiveKey);
+        auto it = archiveRefCountByKey_.find(archiveKey);
+        if (it != archiveRefCountByKey_.end()) {
+          if (it->second > 0) {
+            it->second -= 1;
+          }
+          const uint32_t leftRef = it->second;
+          if (leftRef == 0) {
+            archiveRefCountByKey_.erase(it);
+          }
+          LOG_INFO("DLT645 停止连接功能更新档案引用状态: conn_name={}, meter_addr={}, 剩余引用计数={}",
+                   connName, link->config.meter_addr(), leftRef);
+        } else {
+          LOG_WARNING("DLT645 停止连接功能未找到档案引用状态: conn_name={}, meter_addr={}",
+                      connName, link->config.meter_addr());
+        }
+      }
+      archiveStateCv_.notify_all();
+      if (!delStatus.ok()) {
+        LOG_WARNING("DLT645 停止连接功能档案删除失败: conn_name={}, 原因={}",
+                    connName, delStatus.error_message());
+        std::lock_guard<std::mutex> lock(mu_);
+        link->lastError = delStatus.error_message();
+      } else {
+        LOG_INFO("DLT645 停止连接功能档案删除成功: conn_name={}", connName);
+      }
+    } else {
+      LOG_INFO("DLT645 停止连接功能跳过档案删除: conn_name={}, meter_addr={}, 原因=同地址仍有运行连接或无档案引用",
+               connName, link->config.meter_addr());
+    }
+  } else {
+    LOG_INFO("DLT645 停止连接功能跳过档案管理: conn_name={}, comm_mode={}",
+             connName, DLT645Proto::CommMode_Name(link->config.comm_mode()));
   }
-  stopMqttSubscribeLocked(link.get());
-  link->state = DLT645Proto::LINK_STATE_STOPPED;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = linksByName_.find(connName);
+    if (it == linksByName_.end() || it->second.get() != link.get()) {
+      return grpc::Status::OK;
+    }
+    stopMqttSubscribeLocked(link.get());
+    link->state = DLT645Proto::LINK_STATE_STOPPED;
+  }
+  LOG_INFO("DLT645 停止连接功能完成: conn_name={}", connName);
   return grpc::Status::OK;
 }
 
@@ -474,6 +865,39 @@ grpc::Status LinkManager::normalizeLinkConfig(const DLT645Proto::LinkConfig& con
     if (out->request_timeout_ms() == 0) {
       out->set_request_timeout_ms(kDefaultRequestTimeoutMs);
     }
+    if (out->comm_mode() == DLT645Proto::COMM_MODE_SERIAL) {
+      if (out->serial_port().empty()) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "串口模式 serial_port 不能为空");
+      }
+      if (out->serial_baud_rate() == 0) {
+        out->set_serial_baud_rate(kDefaultSerialBaudRate);
+      }
+      if (out->serial_data_bits() == 0) {
+        out->set_serial_data_bits(kDefaultSerialDataBits);
+      }
+      if (out->serial_data_bits() < 5 || out->serial_data_bits() > 8) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "serial_data_bits 仅支持 5..8");
+      }
+      if (out->serial_parity() == DLT645Proto::SERIAL_PARITY_UNSPECIFIED) {
+        out->set_serial_parity(DLT645Proto::SERIAL_PARITY_NONE);
+      }
+      if (out->serial_stop_bits() == DLT645Proto::SERIAL_STOP_BITS_UNSPECIFIED) {
+        out->set_serial_stop_bits(DLT645Proto::SERIAL_STOP_BITS_ONE);
+      }
+      if (out->serial_stop_bits() != DLT645Proto::SERIAL_STOP_BITS_ONE &&
+          out->serial_stop_bits() != DLT645Proto::SERIAL_STOP_BITS_TWO) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "serial_stop_bits 仅支持 1 或 2");
+      }
+      if (out->serial_byte_timeout_ms() == 0) {
+        out->set_serial_byte_timeout_ms(kDefaultSerialByteTimeoutMs);
+      }
+      if (out->serial_frame_timeout_ms() == 0) {
+        out->set_serial_frame_timeout_ms(kDefaultSerialFrameTimeoutMs);
+      }
+      if (out->serial_est_size() == 0) {
+        out->set_serial_est_size(kDefaultSerialEstSize);
+      }
+    }
     return grpc::Status::OK;
   }
   return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "暂不支持该传输类型");
@@ -599,7 +1023,7 @@ void LinkManager::startMqttSubscribeLocked(const std::string& connName, const st
   stopMqttSubscribeLocked(link.get());
 
   std::vector<MQTTManagerProto::TopicFilter> topics;
-  const auto monitorResp = makeMonitorResponseTopic(link->config.comm_mode());
+  const auto monitorResp = makeMonitorResponseTopic(link->config);
   if (!monitorResp.empty()) {
     MQTTManagerProto::TopicFilter filter;
     filter.set_topic(monitorResp);
@@ -862,13 +1286,9 @@ grpc::Status LinkManager::sendAddSlaveNode(LinkRuntime* link) {
   int32_t status = 0;
   auto statusIt = respObj.find("status");
   if (statusIt != respObj.end()) {
-    if (statusIt->value().is_int64()) {
-      status = static_cast<int32_t>(statusIt->value().as_int64());
-    } else if (statusIt->value().is_uint64()) {
-      status = static_cast<int32_t>(statusIt->value().as_uint64());
-    } else if (statusIt->value().is_string()) {
-      status = std::atoi(statusIt->value().as_string().c_str());
-    } else {
+    bool parsedStatus = false;
+    status = parseStatusCode(statusIt->value(), &parsedStatus);
+    if (!parsedStatus) {
       LOG_WARNING("DLT645 档案添加响应状态类型异常: conn_name={}, topic={}",
                   link->config.conn_name(), respTopic);
     }
@@ -930,13 +1350,9 @@ grpc::Status LinkManager::sendDelSlaveNode(LinkRuntime* link) {
   int32_t status = 0;
   auto statusIt = respObj.find("status");
   if (statusIt != respObj.end()) {
-    if (statusIt->value().is_int64()) {
-      status = static_cast<int32_t>(statusIt->value().as_int64());
-    } else if (statusIt->value().is_uint64()) {
-      status = static_cast<int32_t>(statusIt->value().as_uint64());
-    } else if (statusIt->value().is_string()) {
-      status = std::atoi(statusIt->value().as_string().c_str());
-    } else {
+    bool parsedStatus = false;
+    status = parseStatusCode(statusIt->value(), &parsedStatus);
+    if (!parsedStatus) {
       LOG_WARNING("DLT645 档案删除响应状态类型异常: conn_name={}, topic={}",
                   link->config.conn_name(), respTopic);
     }
@@ -955,8 +1371,8 @@ grpc::Status LinkManager::sendMonitorRequest(LinkRuntime* link, const std::vecto
   if (link == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "链路为空");
   }
-  const auto topic = makeMonitorRequestTopic(link->config.comm_mode());
-  const auto respTopic = makeMonitorResponseTopic(link->config.comm_mode());
+  const auto topic = makeMonitorRequestTopic(link->config);
+  const auto respTopic = makeMonitorResponseTopic(link->config);
   if (topic.empty() || respTopic.empty()) {
     return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "当前通信方式不支持点抄");
   }
@@ -965,8 +1381,23 @@ grpc::Status LinkManager::sendMonitorRequest(LinkRuntime* link, const std::vecto
   obj["token"] = nextToken();
   obj["timestamp"] = formatTimestamp();
   obj["prio"] = 1;
-  obj["acqAddr"] = link->config.meter_addr();
   obj["data"] = base64Encode(frame);
+  if (link->config.comm_mode() == DLT645Proto::COMM_MODE_SERIAL) {
+    obj["port"] = link->config.serial_port();
+    obj["prm"] = 1;
+    obj["byteTimeout"] = link->config.serial_byte_timeout_ms();
+    obj["frameTimeout"] = link->config.serial_frame_timeout_ms();
+    obj["taskTimeout"] = link->config.request_timeout_ms();
+    obj["estSize"] = link->config.serial_est_size();
+    boost::json::object param;
+    param["baudRate"] = link->config.serial_baud_rate();
+    param["byteSize"] = link->config.serial_data_bits();
+    param["parity"] = serialParityToText(link->config.serial_parity());
+    param["stopBits"] = serialStopBitsToNumber(link->config.serial_stop_bits());
+    obj["param"] = std::move(param);
+  } else {
+    obj["acqAddr"] = link->config.meter_addr();
+  }
 
   return sendMonitorRequest(link, topic, respTopic, obj, link->config.request_timeout_ms(), outStatus, outPayloadBase64);
 }
@@ -1032,13 +1463,9 @@ grpc::Status LinkManager::sendMonitorRequest(LinkRuntime* link, const std::strin
   int32_t statusCode = 0;
   auto statusIt = respObj.find("status");
   if (statusIt != respObj.end()) {
-    if (statusIt->value().is_int64()) {
-      statusCode = static_cast<int32_t>(statusIt->value().as_int64());
-    } else if (statusIt->value().is_uint64()) {
-      statusCode = static_cast<int32_t>(statusIt->value().as_uint64());
-    } else if (statusIt->value().is_string()) {
-      statusCode = std::atoi(statusIt->value().as_string().c_str());
-    } else {
+    bool parsedStatus = false;
+    statusCode = parseStatusCode(statusIt->value(), &parsedStatus);
+    if (!parsedStatus) {
       LOG_WARNING("DLT645 MQTT 响应状态类型异常: conn_name={}, topic={}",
                   link->config.conn_name(), responseTopic);
     }
@@ -1165,22 +1592,30 @@ grpc::Status LinkManager::decodeAndPublish(LinkRuntime* link, const PointTable::
   return status;
 }
 
-std::string LinkManager::makeMonitorRequestTopic(DLT645Proto::CommMode mode) {
+std::string LinkManager::makeMonitorRequestTopic(const DLT645Proto::LinkConfig& config) {
+  const auto mode = config.comm_mode();
   if (mode == DLT645Proto::COMM_MODE_LORA) {
     return std::string(kAppName) + "/" + kAppTypeLora + "/JSON/action/request/monitorNode";
   }
   if (mode == DLT645Proto::COMM_MODE_CARRIER) {
     return std::string(kAppName) + "/" + kAppTypeCarrier + "/JSON/action/request/monitorNode";
   }
+  if (mode == DLT645Proto::COMM_MODE_SERIAL && !config.serial_port().empty()) {
+    return std::format("{}/{}/JSON/transparant/notification/{}/data", kAppName, kAppTypeUart, config.serial_port());
+  }
   return "";
 }
 
-std::string LinkManager::makeMonitorResponseTopic(DLT645Proto::CommMode mode) {
+std::string LinkManager::makeMonitorResponseTopic(const DLT645Proto::LinkConfig& config) {
+  const auto mode = config.comm_mode();
   if (mode == DLT645Proto::COMM_MODE_LORA) {
     return std::string(kAppTypeLora) + "/" + kAppName + "/JSON/action/response/monitorNode";
   }
   if (mode == DLT645Proto::COMM_MODE_CARRIER) {
     return std::string(kAppTypeCarrier) + "/" + kAppName + "/JSON/action/response/monitorNode";
+  }
+  if (mode == DLT645Proto::COMM_MODE_SERIAL && !config.serial_port().empty()) {
+    return std::format("{}/{}/JSON/transparant/notification/{}/data", kAppTypeUart, kAppName, config.serial_port());
   }
   return "";
 }

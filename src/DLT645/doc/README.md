@@ -7,7 +7,7 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
 - 设备级协议变体选择：DLT645std / DLT645PCD。
 - 设备级点表配置：tag/di/data_len/type/access/scale/offset/deadband。
 - 支持数据块读取：按数据块 DI 读整块数据并拆分发布子点位。
-- 传输方式类型标识（默认 MQTT_UART，串口后续补充）。
+- 支持通过 MQTTManager 对接 Lora/载波/串口（uartManager）。
 - 点表下发时同步 DataCenter 连接与标签。
 
 ## 接口与协议
@@ -38,6 +38,14 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
   - `comm_mode`：通信方式：`COMM_MODE_LORA`/`COMM_MODE_CARRIER`/`COMM_MODE_SERIAL`。
   - `poll_interval_ms`：轮询周期（毫秒，0 使用默认值）。
   - `request_timeout_ms`：请求超时（毫秒，0 使用默认值）。
+  - `serial_port`：串口标识（`COMM_MODE_SERIAL` 必填，例如 `RS485-1`）。
+  - `serial_baud_rate`：串口波特率（`COMM_MODE_SERIAL`，0 使用默认值 `9600`）。
+  - `serial_data_bits`：串口数据位（`COMM_MODE_SERIAL`，0 使用默认值 `8`，仅支持 `5..8`）。
+  - `serial_parity`：串口校验（`COMM_MODE_SERIAL`，默认 `SERIAL_PARITY_NONE`）。
+  - `serial_stop_bits`：串口停止位（`COMM_MODE_SERIAL`，默认 `SERIAL_STOP_BITS_ONE`）。
+  - `serial_byte_timeout_ms`：串口字节超时（`COMM_MODE_SERIAL`，默认 `100ms`）。
+  - `serial_frame_timeout_ms`：串口帧超时（`COMM_MODE_SERIAL`，默认 `100ms`）。
+  - `serial_est_size`：预估最大接收字节（`COMM_MODE_SERIAL`，默认 `256`）。
 - `point_table`
   - `replace`：是否全量替换点表。
   - `points[]`：点位定义。
@@ -161,23 +169,50 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
 - `device_no` 用于区分协议转换器下的设备，响应帧与请求一致。
 - PCD 的设备序号视作 DI 第 5 字节，按 0x33 编解码规则处理。
 
-## MQTT 对接说明（Lora/载波）
-- 通信方式为 `COMM_MODE_LORA` 或 `COMM_MODE_CARRIER` 时，DLT645 通过 MQTTManager 与对下通信 APP 交互。
+## MQTT 对接说明（Lora/载波/串口）
+- DLT645 统一通过 MQTTManager 与对下通信 APP 交互。
 - 请求主题：
   - Lora：`AGVC/loraManager/JSON/action/request/monitorNode`
   - 载波：`AGVC/ccoRouter/JSON/action/request/monitorNode`
+  - 串口：`AGVC/uartManager/JSON/transparant/notification/{serial_port}/data`
 - 响应主题：
   - Lora：`loraManager/AGVC/JSON/action/response/monitorNode`
   - 载波：`ccoRouter/AGVC/JSON/action/response/monitorNode`
-- 请求 JSON 字段：`token/timestamp/prio/acqAddr/data(base64)`。
-- 响应 JSON 字段：`token/timestamp/prio/acqAddr/data(base64)/status`（`status=0` 表示成功）。
-- 档案管理（仅 Lora/载波）：启动时发送 `addslaveNode`，停止时发送 `delslaveNode`。
-- 串口方式（`COMM_MODE_SERIAL`）后续再补充。
+  - 串口：`uartManager/AGVC/JSON/transparant/notification/{serial_port}/data`
+- 请求 JSON 字段：
+  - Lora/载波：`token/timestamp/prio/acqAddr/data(base64)`。
+  - 串口：`token/timestamp/port/prio/prm/byteTimeout/frameTimeout/taskTimeout/param/data(base64)`。
+- 响应 JSON 字段：
+  - Lora/载波：`token/timestamp/prio/acqAddr/data(base64)/status`。
+  - 串口：`token/timestamp/port/prm/status/data(base64)`。
+- `status` 语义：`0/ok/success` 为成功；`Fail/Frametimeout/Porterror/Buffull/Formaterror` 会被识别为失败。
+- 档案管理（仅 Lora/载波）：按 `(comm_mode, meter_addr)` 做地址级引用计数；首个连接启动连接功能时发送 `addslaveNode`，最后一个连接停止连接功能时发送 `delslaveNode`。
+
+### 同地址档案生命周期去重说明（Lora/载波）
+- 适用对象：`COMM_MODE_LORA` 与 `COMM_MODE_CARRIER`。
+- 去重键：`(comm_mode, meter_addr)`。
+- 行为规则：
+  - 若同地址第一个连接启动连接功能：执行档案添加。
+  - 若同地址已有运行连接，再次启动连接功能：跳过档案添加，仅增加引用计数。
+  - 若同地址仍有其他运行连接，停止其中一个连接功能：跳过档案删除，仅减少引用计数。
+  - 仅当同地址最后一个连接停止连接功能：执行档案删除。
+- 目的：降低重复档案调用次数，避免同地址重复 add/del 导致的无效开销与噪声日志。
+
+### 上位机接入建议（同地址多设备）
+- 当上位机通过 ConfigPusher `device_nos` 展开多连接时，可将这些连接视为“同一采集地址下的多个逻辑设备”。
+- 运维侧建议按 `meter_addr` 聚合展示连接状态，并保留每个 `device_no` 的逻辑连接状态。
+- 如需排查档案问题，建议优先按 `meter_addr` 检索 DLT645 日志中的“档案添加/档案删除/引用计数”关键字。
+- 上位机在展示“启动/停止”操作时，建议明确为“启动连接功能/停止连接功能”，避免与“启动模块”混淆。
+
+### 上位机接入建议（串口）
+- 建议在上位机保存每条串口链路的 `serial_port` 与串口参数，并在配置页与运维页直接展示。
+- 若现场串口参数不确定，优先按 `9600/8/N/1` 下发；失败后按设备手册调整。
+- 建议在上位机对串口返回的字符串状态（`Frametimeout/Porterror/Buffull/Formaterror`）做中文映射，直接提示运维原因。
 
 ### 发送时机与可靠性说明
-- `addslaveNode` 在 `StartLink` 时触发发送（仅一次）；消息默认不保留（retain=false）。
+- `addslaveNode` 在同地址首个连接启动连接功能时触发发送（按地址生命周期一次）；消息默认不保留（retain=false）。
 - 如订阅端在发送之后才订阅，可能错过该消息；建议订阅端使用 QoS 1 + 持久会话（`clean_session=false`）。
-- 若需要再次发送，可通过重新启动该连接（StopLink/StartLink）触发。
+- 若需要再次发送，需先让该地址全部连接停止连接功能，再重新启动任一连接功能触发。
 
 ### 常见问题排查
 - 启动连接失败且日志显示 `Deadline Exceeded`：通常为 MQTT 短暂断连或订阅/发布阻塞导致；检查 `MQTTManager.log` 是否有 `Disconnected/订阅失败/发布失败`。
@@ -185,6 +220,8 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
 
 ### 变更记录
 - 2026-02-03：新增数据块配置（blocks/items/trim_right_space）及读块写点规则说明。
+- 2026-03-04：新增 `COMM_MODE_SERIAL` 串口通道实现，支持 uartManager 主题与串口参数下发。
+- 2026-03-05：Lora/载波同地址档案管理改为地址级去重（首启添加、末停删除），支持同一协议转换器下多逻辑连接共用档案生命周期。
 
 ## 线程与日志
 - 模块内部线程统一使用 `ModuleManager::StartModuleThread(模块LibInfo.LIB_NAME, ...)` 创建，自动绑定日志模块名上下文。

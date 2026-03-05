@@ -106,8 +106,8 @@ private:
   grpc::Status decodeAndPublish(LinkRuntime* link, const PointTable::Point& point, const std::vector<uint8_t>& payload,
                                 int64_t tsMs, bool trimRightSpace);
 
-  static std::string makeMonitorRequestTopic(DLT645Proto::CommMode mode);
-  static std::string makeMonitorResponseTopic(DLT645Proto::CommMode mode);
+  static std::string makeMonitorRequestTopic(const DLT645Proto::LinkConfig& config);
+  static std::string makeMonitorResponseTopic(const DLT645Proto::LinkConfig& config);
   static std::string makeAddSlaveRequestTopic(DLT645Proto::CommMode mode);
   static std::string makeAddSlaveResponseTopic(DLT645Proto::CommMode mode);
   static std::string makeDelSlaveRequestTopic(DLT645Proto::CommMode mode);
@@ -147,6 +147,10 @@ private:
 
   mutable std::mutex mu_;
   std::unordered_map<std::string, std::shared_ptr<LinkRuntime>> linksByName_;
+  std::unordered_map<std::string, uint32_t> archiveRefCountByKey_;
+  std::unordered_set<std::string> archiveAddInFlightByKey_;
+  std::unordered_set<std::string> archiveDelInFlightByKey_;
+  std::condition_variable archiveStateCv_;
   std::unordered_set<std::string> pendingCreateByName_;
   DataCenterClient dataCenter_;
   MqttClient mqttClient_;
