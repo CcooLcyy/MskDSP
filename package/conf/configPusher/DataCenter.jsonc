@@ -3,48 +3,234 @@
   "point_tables": [
     {
       "module_name": "IEC104",
-      "conn_name": "模拟从站",
+      "conn_name": "模拟IEC104从站",
       "replace": true,
       "tags": [
-        "1-A相电压",
-        "1-总有功功率"
+        // 遥测
+        "a",
+        "DLT645-B相电压",
+        "DLT645-C相电压",
+        "AGC-1号逆变器当前功率",
+        "AGC-2号逆变器当前功率",
+        "AGC-当前逆变器总功率",
+        "AGC-总逆变器功率目标值",
+        "AGC-总逆变器功率距离目标值偏差",
+        // 遥调
+        "AGC遥调控制点",
+        "DLT645-有功功率设定值"
       ]
     },
     {
-      "module_name": "ModbusRTU",
-      "conn_name": "模拟Modbus主站",
+      "module_name": "DLT645",
+      "conn_name": "模拟DLT645_LORA主站_01",
       "replace": true,
       "tags": [
         "A相电压",
-        "总有功功率"
+        "B相电压",
+        "C相电压",
+        "有功功率设定值",
+        "有功功率实际值"
+      ]
+    },
+    {
+      "module_name": "DLT645",
+      "conn_name": "模拟DLT645_LORA主站_02",
+      "replace": true,
+      "tags": [
+        "A相电压",
+        "B相电压",
+        "C相电压",
+        "有功功率设定值",
+        "有功功率实际值"
+      ]
+    },
+    {
+      "module_name": "AGC",
+      "conn_name": "1号AGC控制组",
+      "replace": true,
+      "tags": [
+        "P_CMD",
+        "INV1_P_MEAS",
+        "INV1_P_SET",
+        "INV2_P_MEAS",
+        "INV2_P_SET",
+        "P_TOTAL_MEAS",
+        "P_TOTAL_TARGET",
+        "P_TOTAL_ERROR"
       ]
     }
   ],
   "routes": {
     "replace": true,
     "routes": [
+      // AGC路由
       {
         "src": {
-          "module_name": "ModbusRTU",
-          "conn_name": "模拟Modbus主站",
-          "tag": "A相电压"
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "AGC遥调控制点"
         },
         "dst": {
-          "module_name": "IEC104",
-          "conn_name": "模拟从站",
-          "tag": "1-A相电压"
+          "module_name": "AGC",
+          "conn_name": "1号AGC控制组",
+          "tag": "P_CMD"
         }
       },
       {
         "src": {
-          "module_name": "ModbusRTU",
-          "conn_name": "模拟Modbus主站",
-          "tag": "总有功功率"
+          "module_name": "AGC",
+          "conn_name": "1号AGC控制组",
+          "tag": "INV1_P_MEAS"
         },
         "dst": {
           "module_name": "IEC104",
-          "conn_name": "模拟从站",
-          "tag": "1-总有功功率"
+          "conn_name": "模拟IEC104从站",
+          "tag": "AGC-1号逆变器当前功率"
+        }
+      },
+      {
+        "src": {
+          "module_name": "AGC",
+          "conn_name": "1号AGC控制组",
+          "tag": "INV2_P_MEAS"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "AGC-2号逆变器当前功率"
+        }
+      },
+      {
+        "src": {
+          "module_name": "AGC",
+          "conn_name": "1号AGC控制组",
+          "tag": "P_TOTAL_MEAS"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "AGC-当前逆变器总功率"
+        }
+      },
+      {
+        "src": {
+          "module_name": "AGC",
+          "conn_name": "1号AGC控制组",
+          "tag": "P_TOTAL_TARGET"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "AGC-总逆变器功率目标值"
+        }
+      },
+      {
+        "src": {
+          "module_name": "AGC",
+          "conn_name": "1号AGC控制组",
+          "tag": "P_TOTAL_ERROR"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "AGC-总逆变器功率距离目标值偏差"
+        }
+      },
+      {
+        "src": {
+          "module_name": "DLT645",
+          "conn_name": "模拟DLT645_LORA主站_01",
+          "tag": "有功功率实际值"
+        },
+        "dst": {
+          "module_name": "AGC",
+          "conn_name": "1号AGC控制组",
+          "tag": "INV1_P_MEAS"
+        }
+      },
+      {
+        "src": {
+          "module_name": "DLT645",
+          "conn_name": "模拟DLT645_LORA主站_02",
+          "tag": "有功功率实际值"
+        },
+        "dst": {
+          "module_name": "AGC",
+          "conn_name": "1号AGC控制组",
+          "tag": "INV2_P_MEAS"
+        }
+      },
+      {
+        "src": {
+          "module_name": "AGC",
+          "conn_name": "1号AGC控制组",
+          "tag": "INV1_P_SET"
+        },
+        "dst": {
+          "module_name": "DLT645",
+          "conn_name": "模拟DLT645_LORA主站_01",
+          "tag": "有功功率设定值"
+        }
+      },
+      {
+        "src": {
+          "module_name": "AGC",
+          "conn_name": "1号AGC控制组",
+          "tag": "INV2_P_SET"
+        },
+        "dst": {
+          "module_name": "DLT645",
+          "conn_name": "模拟DLT645_LORA主站_02",
+          "tag": "有功功率设定值"
+        }
+      },
+      //
+      {
+        "src": {
+          "module_name": "DLT645",
+          "conn_name": "模拟DLT645_LORA主站",
+          "tag": "A相电压"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "a"
+        }
+      },
+      {
+        "src": {
+          "module_name": "DLT645",
+          "conn_name": "模拟DLT645_LORA主站",
+          "tag": "B相电压"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "DLT645-B相电压"
+        }
+      },
+      {
+        "src": {
+          "module_name": "DLT645",
+          "conn_name": "模拟DLT645_LORA主站",
+          "tag": "C相电压"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "DLT645-C相电压"
+        }
+      },
+      {
+        "src": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "DLT645-有功功率设定值"
+        },
+        "dst": {
+          "module_name": "DLT645",
+          "conn_name": "模拟DLT645_LORA主站",
+          "tag": "有功功率设定值"
         }
       }
     ]

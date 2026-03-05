@@ -5,6 +5,7 @@
 #include <fstream>
 #include <string>
 
+#include "AGC.pb.h"
 #include "ConfigPusherConfigLoader.h"
 #include "Logger.h"
 #include "ModbusRTU.pb.h"
@@ -125,4 +126,99 @@ TEST(ConfigPusherConfigLoaderTest, LoadDataCenterConfigWithComments) {
   const auto &route = routes.routes(0);
   EXPECT_EQ(route.src().module_name(), "IEC104");
   EXPECT_EQ(route.dst().module_name(), "AGC");
+}
+
+// 验证：加载 AGC 配置时可解析控制组任务与 UpsertGroup 字段。
+TEST(ConfigPusherConfigLoaderTest, LoadAgcConfigFile) {
+  InitLoggerOnce();
+  ScopedTempDir dir;
+  const auto path = dir.path() / "agc.jsonc";
+  const std::string content = R"json(
+{
+  "agc": {
+    "groups": [
+      {
+        "upsert": {
+          "create_only": false,
+          "config": {
+            "group_name": "g-1",
+            "p_cmd": {
+              "signal": { "tag": "P_CMD", "unit": "kW" },
+              "mode": "VALUE_MODE_ABSOLUTE"
+            },
+            "members": [
+              {
+                "member_name": "inv-1",
+                "controllable": true,
+                "p_meas": { "tag": "INV1_P_MEAS", "unit": "kW" },
+                "p_set": { "signal": { "tag": "INV1_P_SET", "unit": "kW" }, "mode": "VALUE_MODE_ABSOLUTE" }
+              }
+            ]
+          }
+        },
+        "start": true
+      }
+    ]
+  }
+}
+)json";
+  WriteFile(path, content);
+
+  auto loaded = ConfigPusher::LoadConfigFile(path);
+  ASSERT_TRUE(loaded.has_value());
+  ASSERT_TRUE(loaded->has_agc());
+  ASSERT_EQ(loaded->agc().groups_size(), 1);
+  const auto &task = loaded->agc().groups(0);
+  ASSERT_TRUE(task.has_upsert());
+  EXPECT_FALSE(task.upsert().create_only());
+  ASSERT_TRUE(task.upsert().has_config());
+  EXPECT_EQ(task.upsert().config().group_name(), "g-1");
+  ASSERT_TRUE(task.upsert().config().has_p_cmd());
+  EXPECT_EQ(task.upsert().config().p_cmd().signal().tag(), "P_CMD");
+  EXPECT_EQ(task.upsert().config().p_cmd().mode(), AGCProto::VALUE_MODE_ABSOLUTE);
+  ASSERT_EQ(task.upsert().config().members_size(), 1);
+  EXPECT_TRUE(task.start());
+}
+
+// 验证：加载 DLT645 配置时支持解析 device_nos 批量设备序号字段。
+TEST(ConfigPusherConfigLoaderTest, LoadDlt645ConfigWithDeviceNos) {
+  InitLoggerOnce();
+  ScopedTempDir dir;
+  const auto path = dir.path() / "DLT645.jsonc";
+  const std::string content = R"json(
+{
+  "dlt645": {
+    "mqtt": {
+      "host": "127.0.0.1",
+      "port": 1883,
+      "client_id": "dlt645"
+    },
+    "links": [
+      {
+        "link": {
+          "config": {
+            "conn_name": "conv_{device_no}",
+            "protocol_variant": "DLT645PCD",
+            "meter_addr": "202601200001",
+            "comm_mode": "COMM_MODE_LORA"
+          }
+        },
+        "device_nos": ["01", "0A"],
+        "start": false
+      }
+    ]
+  }
+}
+)json";
+  WriteFile(path, content);
+
+  auto loaded = ConfigPusher::LoadConfigFile(path);
+  ASSERT_TRUE(loaded.has_value());
+  ASSERT_TRUE(loaded->has_dlt645());
+  ASSERT_EQ(loaded->dlt645().links_size(), 1);
+  const auto &task = loaded->dlt645().links(0);
+  ASSERT_EQ(task.device_nos_size(), 2);
+  EXPECT_EQ(task.device_nos(0), "01");
+  EXPECT_EQ(task.device_nos(1), "0A");
+  EXPECT_EQ(task.link().config().conn_name(), "conv_{device_no}");
 }

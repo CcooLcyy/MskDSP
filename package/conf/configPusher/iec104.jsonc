@@ -5,13 +5,13 @@
       {
         "link": {
           "config": {
-            "conn_name": "模拟从站",
+            "conn_name": "模拟IEC104从站",
             "role": "ROLE_SERVER",
             // 站点角色：主站/从站（决定业务语义）
             "station_role": "STATION_ROLE_SLAVE",
             "local": {
               "ip": "0.0.0.0",
-              "port": 2405
+              "port": 2404
             },
             "remote": {
               "ip": "",
@@ -29,7 +29,7 @@
               "t3": 20
             },
             // 点值上送参数（影响自发上送与总召应答）
-            "point_batch_window_ms": 20,
+            "point_batch_window_ms": 500,
             // ASDU 单帧最大字节数（<=249），use_standard_limit=true 时忽略
             "point_max_asdu_bytes": 240,
             // true: 强制使用 IEC104 标准上限（249 字节）
@@ -46,8 +46,9 @@
         "point_table": {
           "replace": true,
           "points": [
+            // 遥调点表开始 
             {
-              "tag": "1-A相电压",
+              "tag": "a",
               "ioa": 16385,
               "type": "POINT_TYPE_FLOAT",
               "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
@@ -55,8 +56,73 @@
               "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
             },
             {
-              "tag": "1-总有功功率",
+              "tag": "DLT645-B相电压",
               "ioa": 16386,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
+              "offset": 0.0, // 偏移
+              "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
+            },
+            {
+              "tag": "DLT645-C相电压",
+              "ioa": 16387,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
+              "offset": 0.0, // 偏移
+              "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
+            },
+            {
+              "tag": "AGC-1号逆变器当前功率",
+              "ioa": 16388,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
+              "offset": 0.0, // 偏移
+              "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
+            },
+            {
+              "tag": "AGC-2号逆变器当前功率",
+              "ioa": 16389,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
+              "offset": 0.0, // 偏移
+              "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
+            },
+            {
+              "tag": "AGC-当前逆变器总功率",
+              "ioa": 16390,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
+              "offset": 0.0, // 偏移
+              "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
+            },
+            {
+              "tag": "AGC-总逆变器功率目标值",
+              "ioa": 16391,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
+              "offset": 0.0, // 偏移
+              "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
+            },
+            {
+              "tag": "AGC-总逆变器功率距离目标值偏差",
+              "ioa": 16392,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
+              "offset": 0.0, // 偏移
+              "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
+            },
+            // 遥调点表结束 ================
+            {
+              "tag": "AGC遥调控制点",
+              "ioa": 25089,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
+              "offset": 0.0, // 偏移
+              "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
+            },
+            {
+              "tag": "DLT645-有功功率设定值",
+              "ioa": 25095,
               "type": "POINT_TYPE_FLOAT",
               "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
               "offset": 0.0, // 偏移

@@ -372,6 +372,40 @@ target_link_libraries(configPusherApplyConfig_test PRIVATE
 
 add_test(NAME configPusherApplyConfig_test COMMAND configPusherApplyConfig_test)
 
+add_executable(configPusherApplyAgc_test
+  config_pusher_apply_agc_test.cc
+)
+
+target_include_directories(configPusherApplyAgc_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/ConfigPusher/include
+)
+
+target_link_libraries(configPusherApplyAgc_test PRIVATE
+  GTest::gtest_main
+  GTest::gmock
+  dspProto
+  ConfigPusher
+)
+
+add_test(NAME configPusherApplyAgc_test COMMAND configPusherApplyAgc_test)
+
+add_executable(configPusherApplyDlt645_test
+  config_pusher_apply_dlt645_test.cc
+)
+
+target_include_directories(configPusherApplyDlt645_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/ConfigPusher/include
+)
+
+target_link_libraries(configPusherApplyDlt645_test PRIVATE
+  GTest::gtest_main
+  GTest::gmock
+  dspProto
+  ConfigPusher
+)
+
+add_test(NAME configPusherApplyDlt645_test COMMAND configPusherApplyDlt645_test)
+
 add_executable(iec104LinkManager_test
   iec104_link_manager_test.cc
   iec104_link_manager_helper_test.cc
@@ -573,6 +607,7 @@ set(MSKDSP_TEST_TARGETS
   configPusherConfigLoader_test
   configPusherModuleManager_test
   configPusherApplyConfig_test
+  configPusherApplyAgc_test
 )
 
 # Allow overriding via -DGCOVR_EXECUTABLE=/path/to/gcovr (cache variable).

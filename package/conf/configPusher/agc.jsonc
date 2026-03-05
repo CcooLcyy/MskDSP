@@ -1,0 +1,104 @@
+{
+  "agc": {
+    "groups": [
+      {
+        "upsert": {
+          "create_only": false,
+          "config": {
+            "group_name": "1号AGC控制组",
+            "p_cmd": {
+              "signal": {
+                "tag": "P_CMD",
+                "unit": "kW",
+                "scale": 1.0,
+                "offset": 0.0
+              },
+              "mode": "VALUE_MODE_ABSOLUTE",
+              "delta_base": "DELTA_BASE_UNSPECIFIED"
+            },
+            "loop": {
+              "period_ms": 1000,
+              "deadband_kw": 2.0,
+              "max_step_kw": 20.0,
+              "kp": 1.0
+            },
+            "strategy": {
+              "weighted": {}
+            },
+            "members": [
+              {
+                "member_name": "inv-1",
+                "controllable": true,
+                "capacity_kw": 600.0,
+                "weight": 600,
+                "min_kw": 0.0,
+                "max_kw": 500.0,
+                "p_meas": {
+                  "tag": "INV1_P_MEAS",
+                  "unit": "kW",
+                  "scale": 1.0,
+                  "offset": 0.0
+                },
+                "p_set": {
+                  "signal": {
+                    "tag": "INV1_P_SET",
+                    "unit": "kW",
+                    "scale": 1.0,
+                    "offset": 0.0
+                  },
+                  "mode": "VALUE_MODE_ABSOLUTE",
+                  "delta_base": "DELTA_BASE_UNSPECIFIED"
+                }
+              },
+              {
+                "member_name": "inv-2",
+                "controllable": true,
+                "capacity_kw": 200.0,
+                "weight": 200.0,
+                "min_kw": 0.0,
+                "max_kw": 500.0,
+                "p_meas": {
+                  "tag": "INV2_P_MEAS",
+                  "unit": "kW",
+                  "scale": 1.0,
+                  "offset": 0.0
+                },
+                "p_set": {
+                  "signal": {
+                    "tag": "INV2_P_SET",
+                    "unit": "kW",
+                    "scale": 1.0,
+                    "offset": 0.0
+                  },
+                  "mode": "VALUE_MODE_ABSOLUTE",
+                  "delta_base": "DELTA_BASE_UNSPECIFIED"
+                }
+              }
+            ],
+            "outputs": {
+              "p_total_meas": {
+                "tag": "P_TOTAL_MEAS",
+                "unit": "kW",
+                "scale": 1.0,
+                "offset": 0.0
+              },
+              "p_total_target": {
+                "tag": "P_TOTAL_TARGET",
+                "unit": "kW",
+                "scale": 1.0,
+                "offset": 0.0
+              },
+              "p_total_error": {
+                "tag": "P_TOTAL_ERROR",
+                "unit": "kW",
+                "scale": 1.0,
+                "offset": 0.0
+              }
+            }
+          }
+        },
+        "start": true
+      }
+    ]
+  }
+}
