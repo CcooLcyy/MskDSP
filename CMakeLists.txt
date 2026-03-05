@@ -19,6 +19,7 @@ option(MSKDSP_BUILD_TESTS "Build tests (enables coverage & auto report)" ${MSKDS
 option(MSKDSP_STRIP_DEBUG "Strip binaries and keep separate debug info under package/debug." OFF)
 option(MSKDSP_ENABLE_SANITIZERS "开启 ASAN/UBSAN 运行时诊断" OFF)
 option(MSKDSP_ENABLE_TSAN "开启 TSAN 运行时诊断" OFF)
+option(MSKDSP_BUILD_TOOLS "构建集成测试辅助工具" OFF)
 
 if(MSKDSP_ENABLE_SANITIZERS AND MSKDSP_ENABLE_TSAN)
   message(FATAL_ERROR "ASAN/UBSAN 与 TSAN 不能同时开启")
@@ -106,6 +107,9 @@ endif()
 
 add_subdirectory(protobuf)
 add_subdirectory(src)
+if(MSKDSP_BUILD_TOOLS)
+  add_subdirectory(tools)
+endif()
 
 set(MSKDSP_MODULE_TARGETS
   ConfigPusher

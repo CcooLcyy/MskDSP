@@ -155,3 +155,4 @@ cmake --build build-cov --parallel
 
 ## 相关文档
 - [模块管理器说明](./src/core/ModuleManager/doc/README.md)
+- [集成测试工具说明](./tools/README.md)
