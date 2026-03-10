@@ -3,101 +3,101 @@
     "groups": [
       {
         "upsert": {
-          "create_only": false,
+          "create_only": false, // false: 组存在则覆盖更新; true: 仅允许首次创建
           "config": {
-            "group_name": "1号AGC控制组",
-            "p_cmd": {
-              "signal": {
-                "tag": "P_CMD",
-                "unit": "kW",
-                "scale": 1.0,
-                "offset": 0.0
+            "group_name": "1号AGC控制组", // 控制组名称(组内唯一)
+            "p_cmd": { // 总控制输入点(通常来自 104 主站)
+              "signal": { // 工程量换算配置
+                "tag": "P_CMD", // AGC 订阅的总指令 tag
+                "unit": "kW", // 工程单位
+                "scale": 1.0, // ABS: phys=raw*scale+offset; DELTA: phys=raw*scale
+                "offset": 0.0 // 仅 ABS 生效
               },
-              "mode": "VALUE_MODE_ABSOLUTE",
-              "delta_base": "DELTA_BASE_UNSPECIFIED"
+              "mode": "VALUE_MODE_ABSOLUTE", // ABS: 目标总功率值; DELTA: 相对基准的增量
+              "delta_base": "DELTA_BASE_UNSPECIFIED" // 仅 DELTA 生效; ABS 下可忽略
             },
-            "loop": {
-              "period_ms": 1000,
-              "deadband_kw": 2.0,
-              "max_step_kw": 20.0,
-              "kp": 1.0
+            "loop": { // 闭环控制参数
+              "period_ms": 1000, // 控制周期(ms)
+              "deadband_kw": 2.0, // 死区: |误差|<=该值时本轮步长=0
+              "max_step_kw": 20.0, // 每轮最大调整步长(kW)
+              "kp": 1.0 // 比例系数: 步长=kp*误差(再受 max_step_kw 限幅)
             },
-            "strategy": {
-              "weighted": {}
+            "strategy": { // 分配策略
+              "weighted": {} // 按成员 weight 分配可调总功率
             },
-            "members": [
+            "members": [ // 成员设备(例如逆变器)列表
               {
-                "member_name": "inv-1",
-                "controllable": true,
-                "capacity_kw": 600.0,
-                "weight": 600,
-                "min_kw": 0.0,
-                "max_kw": 500.0,
-                "p_meas": {
-                  "tag": "INV1_P_MEAS",
-                  "unit": "kW",
-                  "scale": 1.0,
-                  "offset": 0.0
+                "member_name": "inv-1", // 成员名称
+                "controllable": true, // true: 参与分配并下发 p_set; false: 仅参与总量测
+                "capacity_kw": 600.0, // 成员容量(kW)，用于默认权重/上限参考
+                "weight": 600, // 分配权重(加权分配)
+                "min_kw": 0.0, // 成员最小目标(kW)
+                "max_kw": 500.0, // 成员最大目标(kW)
+                "p_meas": { // 成员量测输入点
+                  "tag": "INV1_P_MEAS", // 来自 DataCenter 的成员实时有功 tag
+                  "unit": "kW", // 工程单位
+                  "scale": 1.0, // ABS 量测换算系数
+                  "offset": 0.0 // ABS 量测换算偏移
                 },
-                "p_set": {
+                "p_set": { // 成员设定输出点(AGC 下发到下游)
                   "signal": {
-                    "tag": "INV1_P_SET",
-                    "unit": "kW",
-                    "scale": 1.0,
-                    "offset": 0.0
+                    "tag": "INV1_P_SET", // 下发给该成员的目标 tag
+                    "unit": "kW", // 工程单位
+                    "scale": 1.0, // 设定值换算系数
+                    "offset": 0.0 // ABS 设定值偏移
                   },
-                  "mode": "VALUE_MODE_ABSOLUTE",
-                  "delta_base": "DELTA_BASE_UNSPECIFIED"
+                  "mode": "VALUE_MODE_ABSOLUTE", // ABS: 下发绝对设定值; DELTA: 下发增量
+                  "delta_base": "DELTA_BASE_UNSPECIFIED" // 仅 DELTA 生效; ABS 下可忽略
                 }
               },
               {
-                "member_name": "inv-2",
-                "controllable": true,
-                "capacity_kw": 200.0,
-                "weight": 200.0,
-                "min_kw": 0.0,
-                "max_kw": 500.0,
-                "p_meas": {
-                  "tag": "INV2_P_MEAS",
-                  "unit": "kW",
-                  "scale": 1.0,
-                  "offset": 0.0
+                "member_name": "inv-2", // 成员名称
+                "controllable": true, // true: 参与分配并下发 p_set; false: 仅参与总量测
+                "capacity_kw": 200.0, // 成员容量(kW)
+                "weight": 200.0, // 分配权重
+                "min_kw": 0.0, // 成员最小目标(kW)
+                "max_kw": 500.0, // 成员最大目标(kW)
+                "p_meas": { // 成员量测输入点
+                  "tag": "INV2_P_MEAS", // 来自 DataCenter 的成员实时有功 tag
+                  "unit": "kW", // 工程单位
+                  "scale": 1.0, // ABS 量测换算系数
+                  "offset": 0.0 // ABS 量测换算偏移
                 },
-                "p_set": {
+                "p_set": { // 成员设定输出点
                   "signal": {
-                    "tag": "INV2_P_SET",
-                    "unit": "kW",
-                    "scale": 1.0,
-                    "offset": 0.0
+                    "tag": "INV2_P_SET", // 下发给该成员的目标 tag
+                    "unit": "kW", // 工程单位
+                    "scale": 1.0, // 设定值换算系数
+                    "offset": 0.0 // ABS 设定值偏移
                   },
-                  "mode": "VALUE_MODE_ABSOLUTE",
-                  "delta_base": "DELTA_BASE_UNSPECIFIED"
+                  "mode": "VALUE_MODE_ABSOLUTE", // ABS: 下发绝对设定值; DELTA: 下发增量
+                  "delta_base": "DELTA_BASE_UNSPECIFIED" // 仅 DELTA 生效; ABS 下可忽略
                 }
               }
             ],
-            "outputs": {
+            "outputs": { // AGC 派生输出(用于监视/上送)
               "p_total_meas": {
-                "tag": "P_TOTAL_MEAS",
-                "unit": "kW",
-                "scale": 1.0,
-                "offset": 0.0
+                "tag": "P_TOTAL_MEAS", // 总实时有功
+                "unit": "kW", // 工程单位
+                "scale": 1.0, // 输出换算系数
+                "offset": 0.0 // 输出换算偏移
               },
               "p_total_target": {
-                "tag": "P_TOTAL_TARGET",
-                "unit": "kW",
-                "scale": 1.0,
-                "offset": 0.0
+                "tag": "P_TOTAL_TARGET", // AGC 计算得到的总目标值
+                "unit": "kW", // 工程单位
+                "scale": 1.0, // 输出换算系数
+                "offset": 0.0 // 输出换算偏移
               },
               "p_total_error": {
-                "tag": "P_TOTAL_ERROR",
-                "unit": "kW",
-                "scale": 1.0,
-                "offset": 0.0
+                "tag": "P_TOTAL_ERROR", // 总偏差=desired_total-total_meas
+                "unit": "kW", // 工程单位
+                "scale": 1.0, // 输出换算系数
+                "offset": 0.0 // 输出换算偏移
               }
             }
           }
         },
-        "start": true
+        "start": true // true: 配置完成后立即启动该控制组
       }
     ]
   }

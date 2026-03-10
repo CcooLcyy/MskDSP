@@ -183,55 +183,6 @@
           "conn_name": "模拟DLT645_LORA主站_02",
           "tag": "有功功率设定值"
         }
-      },
-      //
-      {
-        "src": {
-          "module_name": "DLT645",
-          "conn_name": "模拟DLT645_LORA主站",
-          "tag": "A相电压"
-        },
-        "dst": {
-          "module_name": "IEC104",
-          "conn_name": "模拟IEC104从站",
-          "tag": "a"
-        }
-      },
-      {
-        "src": {
-          "module_name": "DLT645",
-          "conn_name": "模拟DLT645_LORA主站",
-          "tag": "B相电压"
-        },
-        "dst": {
-          "module_name": "IEC104",
-          "conn_name": "模拟IEC104从站",
-          "tag": "DLT645-B相电压"
-        }
-      },
-      {
-        "src": {
-          "module_name": "DLT645",
-          "conn_name": "模拟DLT645_LORA主站",
-          "tag": "C相电压"
-        },
-        "dst": {
-          "module_name": "IEC104",
-          "conn_name": "模拟IEC104从站",
-          "tag": "DLT645-C相电压"
-        }
-      },
-      {
-        "src": {
-          "module_name": "IEC104",
-          "conn_name": "模拟IEC104从站",
-          "tag": "DLT645-有功功率设定值"
-        },
-        "dst": {
-          "module_name": "DLT645",
-          "conn_name": "模拟DLT645_LORA主站",
-          "tag": "有功功率设定值"
-        }
       }
     ]
   }
