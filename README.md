@@ -56,15 +56,6 @@ ModuleManager 使用模块 manifest 构建依赖图，并自动处理依赖启�
 - 若 `StartModule` 返回错误，展示返回的错误信息（依赖缺失/循环/版本不满足等）。
 - 获取运行时地址时使用 `GetRunningModuleInfo`，如连接失败应重新刷新地址。
 
-## 需求（持续更新）
-该部分用于沉淀/迭代项目需求（你可以在此持续补充）。
-
-- TODO：一句话描述项目要解决的问题
-- TODO：核心功能清单
-- TODO：运行环境与部署形态（Linux/Windows、容器/裸机等）
-- TODO：对外接口（gRPC/IEC104/其他）
-- TODO：性能与稳定性指标
-
 ## 目录结构
 - `src/`：核心与模块源码（`core/ModuleManager`、`DataCenter`、`IEC104` 等）
 - `protobuf/`：Protobuf/gRPC 协议定义与生成代码（通过 `dspProto` 目标链接）
