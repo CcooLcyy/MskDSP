@@ -28,3 +28,6 @@ images/*
 # Word 文档
 *.doc
 *.docx
+
+# PDF 文档
+*.pdf
