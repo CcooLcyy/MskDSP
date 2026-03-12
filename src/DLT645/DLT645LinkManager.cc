@@ -49,36 +49,12 @@ std::string makeArchiveKey(const DLT645Proto::LinkConfig& config) {
   return std::format("{}|{}", static_cast<int>(config.comm_mode()), config.meter_addr());
 }
 
-uint64_t toUint64(const boost::json::value& value, bool* ok) {
-  if (ok != nullptr) {
-    *ok = false;
+bool parseTokenString(const boost::json::value& value, std::string* out) {
+  if (out == nullptr || !value.is_string()) {
+    return false;
   }
-  if (value.is_uint64()) {
-    if (ok != nullptr) {
-      *ok = true;
-    }
-    return value.as_uint64();
-  }
-  if (value.is_int64() && value.as_int64() >= 0) {
-    if (ok != nullptr) {
-      *ok = true;
-    }
-    return static_cast<uint64_t>(value.as_int64());
-  }
-  if (value.is_string()) {
-    std::string text = value.as_string().c_str();
-    if (!text.empty()) {
-      char* end = nullptr;
-      const auto parsed = std::strtoull(text.c_str(), &end, 10);
-      if (end != nullptr && *end == '\0') {
-        if (ok != nullptr) {
-          *ok = true;
-        }
-        return parsed;
-      }
-    }
-  }
-  return 0;
+  *out = value.as_string().c_str();
+  return !out->empty();
 }
 
 std::string base64Encode(const std::vector<uint8_t>& data) {
@@ -1079,10 +1055,10 @@ void LinkManager::startMqttSubscribeLocked(const std::string& connName, const st
             LOG_WARNING("DLT645 MQTT 响应缺少 token: conn_name={}, topic={}", connName, response.topic());
             continue;
           }
-          bool okToken = false;
-          const auto token = toUint64(it->value(), &okToken);
-          if (!okToken) {
-            LOG_WARNING("DLT645 MQTT 响应 token 非法: conn_name={}, topic={}", connName, response.topic());
+          std::string token;
+          if (!parseTokenString(it->value(), &token)) {
+            LOG_WARNING("DLT645 MQTT 响应 token 非法，要求为非空字符串: conn_name={}, topic={}",
+                        connName, response.topic());
             continue;
           }
 
@@ -2210,8 +2186,10 @@ bool LinkManager::reverseScale(double value, double scale, double offset, double
   return true;
 }
 
-uint64_t LinkManager::nextToken() {
-  return tokenCounter_.fetch_add(1) + 1;
+std::string LinkManager::nextToken() {
+  const auto token = std::to_string(tokenCounter_.fetch_add(1) + 1);
+  LOG_DEBUG("DLT645 生成 MQTT token 字符串: token={}", token);
+  return token;
 }
 
 }  // namespace DLT645

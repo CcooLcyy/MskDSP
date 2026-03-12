@@ -69,7 +69,7 @@ private:
     std::jthread pollThread;
     std::mutex requestMutex;
     std::mutex pendingMutex;
-    std::unordered_map<uint64_t, std::shared_ptr<PendingResponse>> pending;
+    std::unordered_map<std::string, std::shared_ptr<PendingResponse>> pending;
     std::unordered_map<std::string, double> lastReportedByTag;
   };
 
@@ -143,7 +143,7 @@ private:
   static bool pointValueToString(const DataCenterProto::PointValue& value, std::string* out);
   static bool reverseScale(double value, double scale, double offset, double* out);
 
-  uint64_t nextToken();
+  std::string nextToken();
 
   mutable std::mutex mu_;
   std::unordered_map<std::string, std::shared_ptr<LinkRuntime>> linksByName_;

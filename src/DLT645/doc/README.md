@@ -185,6 +185,8 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
 - 响应 JSON 字段：
   - Lora/载波：`token/timestamp/prio/acqAddr/data(base64)/status`。
   - 串口：`token/timestamp/port/prm/status/data(base64)`。
+- `token` 约束：统一使用字符串类型；DLT645 请求中发送的 `token` 为自增字符串，对端响应必须原样回传相同字符串，不能改成数字类型。
+- 对接建议：下游程序与上位机侧若需透传 `token`，应按字符串处理并保持原值，避免做数值化转换导致请求响应无法匹配。
 - `status` 语义：`0/ok/success` 为成功；`Fail/Frametimeout/Porterror/Buffull/Formaterror` 会被识别为失败。
 - 档案管理（仅 Lora/载波）：按 `(comm_mode, meter_addr)` 做地址级引用计数；首个连接启动连接功能时发送 `addslaveNode`，最后一个连接停止连接功能时发送 `delslaveNode`。
 
