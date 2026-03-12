@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 <image-tar|version>" >&2
+  echo "用法: $0 [镜像tar包路径|版本号]" >&2
   exit 1
 }
 
@@ -11,7 +11,34 @@ die() {
   exit 1
 }
 
-if [[ $# -ne 1 ]]; then
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+INPUT_ARG=""
+if [[ $# -eq 0 ]]; then
+  VERSION_FILE="${PROJECT_ROOT}/VERSION"
+  if [[ ! -f "${VERSION_FILE}" ]]; then
+    die "未找到版本文件: ${VERSION_FILE}"
+  fi
+  INPUT_ARG="$(
+    awk '
+      {
+        sub(/\r$/, "")
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+        if ($0 != "") {
+          print $0
+          exit
+        }
+      }
+    ' "${VERSION_FILE}"
+  )"
+  if [[ -z "${INPUT_ARG}" ]]; then
+    die "版本文件内容为空: ${VERSION_FILE}"
+  fi
+  echo "未传入参数，默认使用版本文件 ${VERSION_FILE} 中的版本: ${INPUT_ARG}"
+elif [[ $# -eq 1 ]]; then
+  INPUT_ARG="$1"
+else
   usage
 fi
 
@@ -24,11 +51,8 @@ echo "清理旧的 package/log 和 package/socket 目录"
 rm -rf ../package/debug
 echo "清理旧的 package/debug 目录"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OUTPUT_PATH="${PROJECT_ROOT}/images/mskdsp"
 
-INPUT_ARG="$1"
 INPUT_TAR=""
 if [[ -f "${INPUT_ARG}" ]]; then
   INPUT_TAR="${INPUT_ARG}"

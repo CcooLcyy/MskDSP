@@ -5,17 +5,44 @@ log() {
   echo "[make_image] $*"
 }
 
-VERSION="${1:-${MSKDSP_VERSION:-}}"
-if [[ -z "${VERSION}" ]]; then
-  echo "Usage: $0 <version>" >&2
-  echo "Or set MSKDSP_VERSION environment variable." >&2
-  exit 1
-fi
-
 CONTAINER_NAME="x64"
 WORKDIR="/data/code/mskdsp"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+VERSION_FILE="${PROJECT_ROOT}/VERSION"
+
+VERSION="${1:-${MSKDSP_VERSION:-}}"
+VERSION_SOURCE=""
+if [[ -n "${1:-}" ]]; then
+  VERSION_SOURCE="命令行参数"
+elif [[ -n "${MSKDSP_VERSION:-}" ]]; then
+  VERSION_SOURCE="环境变量 MSKDSP_VERSION"
+else
+  if [[ ! -f "${VERSION_FILE}" ]]; then
+    echo "用法: $0 [版本号]" >&2
+    echo "未传入版本号时，可通过环境变量 MSKDSP_VERSION 或根目录 VERSION 文件提供版本。" >&2
+    exit 1
+  fi
+  VERSION="$(
+    awk '
+      {
+        sub(/\r$/, "")
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+        if ($0 != "") {
+          print $0
+          exit
+        }
+      }
+    ' "${VERSION_FILE}"
+  )"
+  if [[ -z "${VERSION}" ]]; then
+    echo "版本文件内容为空: ${VERSION_FILE}" >&2
+    exit 1
+  fi
+  VERSION_SOURCE="版本文件 ${VERSION_FILE}"
+fi
+log "版本来源: ${VERSION_SOURCE}，版本号: ${VERSION}"
+
 IMAGE_TAG="mskdsp:${VERSION}"
 OUTPUT_DIR="${PROJECT_ROOT}/images"
 OUTPUT_TAR="${OUTPUT_DIR}/mskdsp-${VERSION}.tar"
