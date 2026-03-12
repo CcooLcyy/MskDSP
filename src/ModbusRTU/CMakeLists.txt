@@ -12,6 +12,7 @@ target_include_directories(${LIB_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/includ
 target_link_libraries(${LIB_NAME} PUBLIC
     moduleManager
     Boost::asio
+    Boost::json
 )
 set_target_properties(${LIB_NAME} PROPERTIES
     VERSION ${VERSION}

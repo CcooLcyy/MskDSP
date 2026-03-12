@@ -9,6 +9,25 @@ namespace ModbusRTU {
 void ModbusRTUGrpcServiceImpl::setModbusRTU(ModbusRTU* module) {
   module_ = module;
 }
+grpc::Status ModbusRTUGrpcServiceImpl::UpdateConfig(
+    grpc::ServerContext*, const ModbusRTUProto::UpdateConfigRequest* request, ModbusRTUProto::UpdateConfigResponse* response) {
+  if (module_ == nullptr) {
+    LOG_ERROR("ModbusRTU 服务未就绪");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
+  }
+  if (request == nullptr || response == nullptr) {
+    LOG_ERROR("ModbusRTU UpdateConfig 请求/响应为空");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
+  }
+  auto status = module_->linkManager().UpdateConfig(*request, response);
+  if (!status.ok()) {
+    LOG_ERROR("ModbusRTU 更新 MQTT 配置失败: 原因={}", status.error_message());
+  } else {
+    LOG_INFO("ModbusRTU MQTT 配置更新完成: ok={}, message={}", response->ok(), response->message());
+  }
+  return status;
+}
+
 grpc::Status ModbusRTUGrpcServiceImpl::UpsertLink(
     grpc::ServerContext*, const ModbusRTUProto::UpsertLinkRequest* request, ModbusRTUProto::LinkInfo* response) {
   if (module_ == nullptr) {

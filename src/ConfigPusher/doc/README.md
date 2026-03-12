@@ -7,7 +7,7 @@ ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRT
 - 自动通过 ModuleManager 启动 DataCenter 与 IEC104/ModbusRTU/DLT645/AGC
 - 解析 JSONC（支持 `//` 与 `/* */` 注释）
 - 下发 IEC104 配置：UpsertLink / UpsertPointTable / StartLink
-- 下发 ModbusRTU 配置：UpsertLink / UpsertPointTable / StartLink
+- 下发 ModbusRTU 配置：UpdateConfig / UpsertLink / UpsertPointTable / StartLink
 - 下发 DLT645 配置：UpdateConfig / UpsertLink / UpsertPointTable / StartLink
 - 下发 AGC 配置：UpsertGroup / StartGroup
 - 下发 COMMock 配置：ApplyConfig（仅对已运行 COMMock 模块生效）
@@ -54,7 +54,88 @@ ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRT
 - DataCenter 配置要求连接已存在（由模块或上位机创建）；若 `point_tables/routes` 引用连接不存在，则该次 DataCenter 配置不下发
 - `replace=true` 表示覆盖配置；`replace=false` 表示增量追加
 - COMMock 配置不触发模块启动，仅在 COMMock 模块已运行时下发
+- ModbusRTU 支持双传输并存：`TRANSPORT_SERIAL` 保留本地串口直连；`TRANSPORT_MQTT_UART` 通过 `MQTTManager + uartManager` 做串口透传
+- `modbus_rtu.mqtt` 为 ModbusRTU 的 MQTT 全局连接参数，字段为 `host/port/client_id/username/password/keepalive_sec/clean_session/connect_timeout_ms`
+- 当 `modbus_rtu.links[].link.config.transport_type=TRANSPORT_MQTT_UART` 时，`modbus_rtu.mqtt` 必填；ConfigPusher 会先调用 `ModbusRTU.UpdateConfig`，再继续下发链路与点表
+- `TRANSPORT_MQTT_UART` 链路要求配置 `serial_port/request_timeout_ms/serial_byte_timeout_ms/serial_frame_timeout_ms/serial_est_size`
+- `TRANSPORT_MQTT_UART` 路径当前仅支持主站；如需从站，请继续使用 `TRANSPORT_SERIAL`
+- 当 DLT645 或 ModbusRTU 需要 MQTT 时，ConfigPusher 会按需启动 `MQTTManager`
 - DLT645 配置会启动 DLT645 与 MQTTManager，并先下发 MQTT 全局参数
+
+### ModbusRTU MQTT 串口透传配置
+- 适用场景：需要通过远端 `uartManager` 操作串口，但同时保留本地串口直连能力。
+- 顶层 MQTT 参数位置：`modbus_rtu.mqtt`
+- 链路传输类型：`modbus_rtu.links[].link.config.transport_type = TRANSPORT_MQTT_UART`
+- 远端串口标识：`serial_port`，例如 `RS485-1`
+- 远端串口参数仍写在 `serial` 中，但此时 `serial.device` 会被忽略
+- 下发顺序固定为：
+  1. `UpdateConfig`
+  2. `UpsertLink`
+  3. `UpsertPointTable`
+  4. `StartLink`（当 `start=true`）
+
+ModbusRTU MQTT 配置示例：
+```jsonc
+{
+  "modbus_rtu": {
+    "mqtt": {
+      "host": "127.0.0.1",
+      "port": 1883,
+      "client_id": "dlt645",
+      "username": "",
+      "password": "",
+      "keepalive_sec": 30,
+      "clean_session": true,
+      "connect_timeout_ms": 3000
+    },
+    "links": [
+      {
+        "link": {
+          "config": {
+            "conn_name": "modbus-remote-1",
+            "transport_type": "TRANSPORT_MQTT_UART",
+            "serial": {
+              "baud_rate": 9600,
+              "data_bits": 8,
+              "parity": "PARITY_NONE",
+              "stop_bits": "STOP_BITS_ONE"
+            },
+            "serial_port": "RS485-1",
+            "request_timeout_ms": 3000,
+            "serial_byte_timeout_ms": 100,
+            "serial_frame_timeout_ms": 100,
+            "serial_est_size": 256,
+            "slave_id": 1,
+            "poll_interval_ms": 1000,
+            "mode": "LINK_MODE_MASTER"
+          }
+        },
+        "point_table": {
+          "replace": true,
+          "points": [
+            {
+              "tag": "Ua",
+              "function": "0x03",
+              "address": 0,
+              "type": "DATA_TYPE_UINT16"
+            }
+          ]
+        },
+        "start": true
+      }
+    ]
+  }
+}
+```
+
+### 上位机对接建议（ModbusRTU MQTT）
+- 在界面上将 `transport_type` 作为显式选项，避免把本地串口与远端串口透传混为一类。
+- 当用户选择 `TRANSPORT_MQTT_UART` 时，直接联动显示顶层 `mqtt` 配置区与链路级 `serial_port` 配置区。
+- 在配置校验阶段直接提示：
+  - 缺少 `modbus_rtu.mqtt`
+  - 缺少 `serial_port`
+  - `TRANSPORT_MQTT_UART` 当前仅支持主站
+- 启停文案建议写成“启动连接功能/停止连接功能”，避免与“启动模块”混淆。
 
 ### DLT645 批量设备下发（device_nos）
 - 适用场景：一个协议转换器（同一 `meter_addr`）下挂多台逆变器，仅 `device_no` 不同。

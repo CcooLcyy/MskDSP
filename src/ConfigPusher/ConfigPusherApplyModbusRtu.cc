@@ -16,6 +16,38 @@ bool applyModbusRtuConfig(const ConfigPusherProto::ModbusRtuConfig &config,
     return false;
   }
 
+  bool needsMqttConfig = false;
+  for (const auto &task : config.links()) {
+    if (task.has_link() && task.link().has_config() &&
+        task.link().config().transport_type() == ModbusRTUProto::TRANSPORT_MQTT_UART) {
+      needsMqttConfig = true;
+      break;
+    }
+  }
+
+  if (config.has_mqtt()) {
+    ModbusRTUProto::UpdateConfigRequest req;
+    *req.mutable_mqtt() = config.mqtt();
+    ModbusRTUProto::UpdateConfigResponse resp;
+    LOG_INFO("发送 ModbusRTU MQTT 配置请求报文: {}", formatProtoForLog(req));
+    grpc::ClientContext ctx;
+    auto status = stub->UpdateConfig(&ctx, req, &resp);
+    if (!status.ok() || !resp.ok()) {
+      LOG_ERROR("ModbusRTU MQTT 配置下发失败: 请求={}, 原因={}",
+                formatProtoForLog(req),
+                status.ok() ? resp.message() : status.error_message());
+      if (needsMqttConfig) {
+        return false;
+      }
+    } else {
+      LOG_INFO("收到 ModbusRTU MQTT 配置响应报文: {}", formatProtoForLog(resp));
+      LOG_INFO("ModbusRTU MQTT 配置下发成功");
+    }
+  } else if (needsMqttConfig) {
+    LOG_ERROR("ModbusRTU 存在 MQTT 链路，但缺少 mqtt 顶层配置");
+    return false;
+  }
+
   LOG_INFO("开始下发 ModbusRTU 配置: 任务数={}", config.links_size());
   bool ok = true;
   for (const auto &task : config.links()) {

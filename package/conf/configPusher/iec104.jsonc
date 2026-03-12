@@ -111,6 +111,22 @@
               "offset": 0.0, // 偏移
               "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
             },
+            {
+              "tag": "Modbus-本地主站-A相电压",
+              "ioa": 16393,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
+              "offset": 0.0, // 偏移
+              "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
+            },
+            {
+              "tag": "Modbus-本地主站-A相电流",
+              "ioa": 16394,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
+              "offset": 0.0, // 偏移
+              "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
+            },
             // 遥调点表结束 ================
             {
               "tag": "AGC遥调控制点",

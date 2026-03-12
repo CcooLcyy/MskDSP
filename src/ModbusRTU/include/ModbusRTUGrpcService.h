@@ -12,6 +12,9 @@ namespace ModbusRTU {
 class ModbusRTUGrpcServiceImpl : public ModbusRTUProto::ModbusRTUService::Service {
 public:
   void setModbusRTU(ModbusRTU* module);
+  grpc::Status UpdateConfig(grpc::ServerContext* context,
+                            const ModbusRTUProto::UpdateConfigRequest* request,
+                            ModbusRTUProto::UpdateConfigResponse* response) override;
   grpc::Status UpsertLink(grpc::ServerContext* context, const ModbusRTUProto::UpsertLinkRequest* request, ModbusRTUProto::LinkInfo* response) override;
   grpc::Status GetLink(grpc::ServerContext* context, const ModbusRTUProto::GetLinkRequest* request, ModbusRTUProto::LinkInfo* response) override;
   grpc::Status ListLinks(grpc::ServerContext* context, const ModbusRTUProto::Empty*, ModbusRTUProto::ListLinksResponse* response) override;

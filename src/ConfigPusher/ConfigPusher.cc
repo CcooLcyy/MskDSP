@@ -93,6 +93,23 @@ std::filesystem::path ResolveConfigPath(const std::optional<std::filesystem::pat
   }
   return *configDir / std::filesystem::path(fallbackPath).filename();
 }
+
+bool modbusNeedsMqtt(const ConfigPusherProto::Config &config) {
+  if (!config.has_modbus_rtu()) {
+    return false;
+  }
+  const auto &modbus = config.modbus_rtu();
+  if (modbus.has_mqtt()) {
+    return true;
+  }
+  for (const auto &task : modbus.links()) {
+    if (task.has_link() && task.link().has_config() &&
+        task.link().config().transport_type() == ModbusRTUProto::TRANSPORT_MQTT_UART) {
+      return true;
+    }
+  }
+  return false;
+}
 }  // namespace
 
 ConfigPusher::ConfigPusher() :
@@ -147,6 +164,7 @@ void ConfigPusher::applyConfig() {
   const bool hasComMock = comMockConfig && comMockConfig->has_com_mock() && comMockConfig->com_mock().ports_size() > 0;
   const bool hasIec104 = iec104Config && iec104Config->has_iec104() && !iec104Config->iec104().links().empty();
   const bool hasModbus = modbusConfig && modbusConfig->has_modbus_rtu() && !modbusConfig->modbus_rtu().links().empty();
+  const bool hasModbusMqtt = modbusConfig && modbusNeedsMqtt(*modbusConfig);
   const bool hasDlt645 = dlt645Config && dlt645Config->has_dlt645() && !dlt645Config->dlt645().links().empty();
   const bool hasAgc = agcConfig && agcConfig->has_agc() && agcConfig->agc().groups_size() > 0;
   const bool hasDataCenter = dataCenterConfig && (!dataCenterConfig->point_tables().empty() || (dataCenterConfig->has_routes() && dataCenterConfig->routes().routes_size() > 0));
@@ -201,6 +219,8 @@ void ConfigPusher::applyConfig() {
       LOG_ERROR("未找到模块: {}", kDlt645ModuleName);
       return;
     }
+  }
+  if (hasDlt645 || hasModbusMqtt) {
     mqttInfo = findModuleInfo(moduleInfos, kMqttManagerModuleName);
     if (!mqttInfo) {
       LOG_ERROR("未找到模块: {}", kMqttManagerModuleName);
@@ -287,7 +307,7 @@ void ConfigPusher::applyConfig() {
   }
 
   std::optional<ModuleManagerProto::ModuleRunningInfo> runningMqtt;
-  if (hasDlt645 && mqttInfo) {
+  if ((hasDlt645 || hasModbusMqtt) && mqttInfo) {
     runningMqtt = findRunningInfo(running, kMqttManagerModuleName);
     if (!runningMqtt) {
       LOG_INFO("MQTTManager 未运行，开始启动");

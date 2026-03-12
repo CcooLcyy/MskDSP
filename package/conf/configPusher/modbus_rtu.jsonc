@@ -1,11 +1,23 @@
 {
-  // ModbusRTU 配置下发示例
+  // ModbusRTU 配置下发示例（仅供 configPusher 下发/示例使用）
   "modbus_rtu": {
+    // 仅当存在 TRANSPORT_MQTT_UART 链路时才需要 mqtt 顶层配置。
+    "mqtt": {
+      "host": "127.0.0.1",
+      "port": 1883,
+      "client_id": "modbus_rtu_client_001",
+      "username": "",
+      "password": "",
+      "keepalive_sec": 30,
+      "clean_session": true,
+      "connect_timeout_ms": 3000
+    },
     "links": [
       {
         "link": {
           "config": {
-            "conn_name": "模拟Modbus从站",
+            "conn_name": "本地Modbus主站",
+            "transport_type": "TRANSPORT_MQTT_UART",
             "serial": {
               "device": "/dev/COMMock0",
               "baud_rate": 9600,
@@ -14,65 +26,19 @@
               "stop_bits": "STOP_BITS_ONE",
               "read_timeout_ms": 1000
             },
+            "serial_port": "RS485-5",
             "slave_id": 1,
             "poll_interval_ms": 1000,
             "address_base": "ADDRESS_BASE_ZERO",
-            "mode": "LINK_MODE_SLAVE" // 从站模式使用 LINK_MODE_SLAVE
-          }
-        },
-        "point_table": {
-          "replace": true,
-          "points": [
-            {
-              "tag": "1号逆变器-A相电压",
-              "function": "0x03", // 读保持寄存器
-              "address": 0,
-              "type": "DATA_TYPE_UINT16",
-              "reg_count": 1,
-              "byte_order": "AB",
-              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1；仅 UINT16/UINT32 生效）
-              "offset": 0.0, // 偏移：仅 UINT16/UINT32 生效
-              "deadband": 0.0, // 死区：工程量单位，<=0 不过滤（仅 UINT16/UINT32 生效）
-              "default_uint16": 2200 // 从站模式下的默认值
-            },
-            {
-              "tag": "1号逆变器-总有功功率",
-              "function": "0x03", // 读保持寄存器
-              "address": 10,
-              "type": "DATA_TYPE_UINT32",
-              "reg_count": 2,
-              "word_order": "HL",
-              "byte_order": "AB",
-              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1；仅 UINT16/UINT32 生效）
-              "offset": 0.0, // 偏移：仅 UINT16/UINT32 生效
-              "deadband": 0.0, // 死区：工程量单位，<=0 不过滤（仅 UINT16/UINT32 生效）
-              "default_uint32": 123456789 // 从站模式下的默认值
-            }
-          ]
-        },
-        "start": false
-      },
-      {
-        "link": {
-          "config": {
-            "conn_name": "模拟Modbus主站",
-            "serial": {
-              "device": "/dev/COMMock1",
-              "baud_rate": 9600,
-              "data_bits": 8,
-              "parity": "PARITY_NONE",
-              "stop_bits": "STOP_BITS_ONE",
-              "read_timeout_ms": 1000
-            },
-            "slave_id": 1,
-            "poll_interval_ms": 1000,
-            "address_base": "ADDRESS_BASE_ZERO",
-            "mode": "LINK_MODE_MASTER", // 从站模式使用 LINK_MODE_SLAVE
+            "mode": "LINK_MODE_MASTER",
             "read_plan": {
-              "mode": "READ_PLAN_MODE_EXPLICIT", // 显式区间抄读
+              "mode": "READ_PLAN_MODE_EXPLICIT",
               "blocks": [
-                { "function": "0x03", "start": 0, "quantity": 1 },  // 覆盖 address=0
-                { "function": "0x03", "start": 10, "quantity": 2 }  // 覆盖 address=10/11（UINT32）
+                {
+                  "function": "0x03",
+                  "start": 3009,
+                  "quantity": 2
+                }
               ]
             }
           }
@@ -81,30 +47,101 @@
           "replace": true,
           "points": [
             {
-              "tag": "A相电压",
-              "function": "0x03", // 读保持寄存器
+              "tag": "本地主站-A相电压",
+              "function": "0x03",
+              "address": 3009,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.0001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "本地主站-A相电流",
+              "function": "0x03",
+              "address": 3012,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.0001,
+              "offset": 0.0,
+              "deadband": 0.0
+            }
+          ]
+        },
+        // start 表示启动该连接的通信功能
+        "start": true
+      },
+      {
+        "link": {
+          "config": {
+            "conn_name": "远端Modbus主站",
+            "transport_type": "TRANSPORT_MQTT_UART",
+            // MQTT 透传场景下，serial.device 忽略；这里只保留远端串口参数。
+            "serial": {
+              "baud_rate": 9600,
+              "data_bits": 8,
+              "parity": "PARITY_NONE",
+              "stop_bits": "STOP_BITS_ONE"
+            },
+            "serial_port": "RS485-1",
+            "request_timeout_ms": 3000,
+            "serial_byte_timeout_ms": 100,
+            "serial_frame_timeout_ms": 100,
+            "serial_est_size": 256,
+            "slave_id": 1,
+            "poll_interval_ms": 1000,
+            "address_base": "ADDRESS_BASE_ZERO",
+            "mode": "LINK_MODE_MASTER",
+            "read_plan": {
+              "mode": "READ_PLAN_MODE_EXPLICIT",
+              "blocks": [
+                {
+                  "function": "0x03",
+                  "start": 0,
+                  "quantity": 1
+                },
+                {
+                  "function": "0x03",
+                  "start": 10,
+                  "quantity": 2
+                }
+              ]
+            }
+          }
+        },
+        "point_table": {
+          "replace": true,
+          "points": [
+            {
+              "tag": "远端主站-A相电压",
+              "function": "0x03",
               "address": 0,
               "type": "DATA_TYPE_UINT16",
               "reg_count": 1,
               "byte_order": "AB",
-              "scale": 0.1, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1；仅 UINT16/UINT32 生效）
-              "offset": 0.0, // 偏移：仅 UINT16/UINT32 生效
-              "deadband": 0 // 死区：工程量单位，<=0 不过滤（仅 UINT16/UINT32 生效）
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
             },
             {
-              "tag": "总有功功率",
-              "function": "0x03", // 读保持寄存器
+              "tag": "远端主站-总有功功率",
+              "function": "0x03",
               "address": 10,
               "type": "DATA_TYPE_UINT32",
               "reg_count": 2,
               "word_order": "HL",
               "byte_order": "AB",
-              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1；仅 UINT16/UINT32 生效）
-              "offset": 0.0, // 偏移：仅 UINT16/UINT32 生效
-              "deadband": 0 // 死区：工程量单位，<=0 不过滤（仅 UINT16/UINT32 生效）
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
             }
           ]
         },
+        // start 表示启动该连接的通信功能
         "start": false
       }
     ]

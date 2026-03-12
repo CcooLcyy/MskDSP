@@ -53,6 +53,33 @@ ModbusRTUProto::UpsertLinkRequest MakeMinimalLinkReq(const char* connName, const
   return req;
 }
 
+ModbusRTUProto::UpsertLinkRequest MakeMqttLinkReq(const char* connName, const char* serialPort, uint32_t slaveId) {
+  ModbusRTUProto::UpsertLinkRequest req;
+  auto* cfg = req.mutable_config();
+  cfg->set_conn_name(connName);
+  cfg->set_transport_type(ModbusRTUProto::TRANSPORT_MQTT_UART);
+  cfg->set_serial_port(serialPort);
+  auto* serial = cfg->mutable_serial();
+  serial->set_baud_rate(9600);
+  serial->set_data_bits(8);
+  serial->set_parity(ModbusRTUProto::PARITY_NONE);
+  serial->set_stop_bits(ModbusRTUProto::STOP_BITS_ONE);
+  cfg->set_slave_id(slaveId);
+  return req;
+}
+
+ModbusRTUProto::UpdateConfigRequest MakeMqttUpdateRequest(const char* host, uint32_t port, const char* clientId) {
+  ModbusRTUProto::UpdateConfigRequest req;
+  auto* mqtt = req.mutable_mqtt();
+  mqtt->set_host(host);
+  mqtt->set_port(port);
+  mqtt->set_client_id(clientId);
+  mqtt->set_keepalive_sec(30);
+  mqtt->set_clean_session(true);
+  mqtt->set_connect_timeout_ms(3000);
+  return req;
+}
+
 ModbusRTUProto::Point MakeCoilPoint(const char* tag, uint32_t address) {
   ModbusRTUProto::Point p;
   p.set_tag(tag);
@@ -527,6 +554,82 @@ TEST(ModbusRtuLinkManagerTest, UpsertLinkNormalizesDefaults) {
   EXPECT_EQ(cfg.poll_interval_ms(), 1000u);
   EXPECT_EQ(cfg.address_base(), ModbusRTUProto::ADDRESS_BASE_ZERO);
   EXPECT_EQ(cfg.mode(), ModbusRTUProto::LINK_MODE_MASTER);
+}
+
+// 验证：UpdateConfig 缺少 MQTT 配置时返回参数错误。
+TEST(ModbusRtuLinkManagerTest, UpdateConfigRejectsMissingMqtt) {
+  LinkManager mgr("ModbusRTU");
+
+  ModbusRTUProto::UpdateConfigRequest req;
+  ModbusRTUProto::UpdateConfigResponse resp;
+  auto st = mgr.UpdateConfig(req, &resp);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  EXPECT_FALSE(resp.ok());
+}
+
+// 验证：UpdateConfig 参数完整时返回成功。
+TEST(ModbusRtuLinkManagerTest, UpdateConfigAcceptsValidMqtt) {
+  LinkManager mgr("ModbusRTU");
+
+  auto req = MakeMqttUpdateRequest("127.0.0.1", 1883, "modbus-rtu-test");
+  ModbusRTUProto::UpdateConfigResponse resp;
+  auto st = mgr.UpdateConfig(req, &resp);
+  EXPECT_TRUE(st.ok());
+  EXPECT_TRUE(resp.ok());
+}
+
+// 验证：MQTT UART 链路会补齐默认远端串口超时参数。
+TEST(ModbusRtuLinkManagerTest, UpsertLinkNormalizesMqttDefaults) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("ModbusRTU");
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeMqttLinkReq("conn-mqtt-defaults", "RS485-1", 1);
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+
+  const auto& cfg = info.config();
+  EXPECT_EQ(cfg.transport_type(), ModbusRTUProto::TRANSPORT_MQTT_UART);
+  EXPECT_EQ(cfg.serial_port(), "RS485-1");
+  EXPECT_EQ(cfg.request_timeout_ms(), 3000u);
+  EXPECT_EQ(cfg.serial_byte_timeout_ms(), 100u);
+  EXPECT_EQ(cfg.serial_frame_timeout_ms(), 100u);
+  EXPECT_EQ(cfg.serial_est_size(), 256u);
+  EXPECT_EQ(cfg.mode(), ModbusRTUProto::LINK_MODE_MASTER);
+}
+
+// 验证：MQTT UART 链路当前仅支持主站模式。
+TEST(ModbusRtuLinkManagerTest, UpsertLinkRejectsMqttSlaveMode) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("ModbusRTU");
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeMqttLinkReq("conn-mqtt-slave", "RS485-1", 1);
+  req.mutable_config()->set_mode(ModbusRTUProto::LINK_MODE_SLAVE);
+
+  ModbusRTUProto::LinkInfo info;
+  auto st = mgr.UpsertLink(req, &info);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::UNIMPLEMENTED);
+}
+
+// 验证：未下发 MQTT 全局参数时，MQTT UART 链路不能启动连接功能。
+TEST(ModbusRtuLinkManagerTest, StartLinkRejectsMqttWithoutUpdateConfig) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("ModbusRTU");
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeMqttLinkReq("conn-mqtt-start", "RS485-1", 1);
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+
+  auto st = mgr.StartLink("conn-mqtt-start");
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
 }
 
 // 验证：串口 data_bits 越界时 UpsertLink 拒绝。

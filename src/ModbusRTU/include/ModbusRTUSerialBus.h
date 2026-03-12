@@ -10,11 +10,12 @@
 #include <boost/asio/serial_port.hpp>
 #include <grpcpp/support/status.h>
 
+#include "ModbusRTUBus.h"
 #include "ModbusRTU.pb.h"
 
 namespace ModbusRTU {
 
-class SerialBus {
+class SerialBus : public Bus {
 public:
   struct RtuRequest {
     uint8_t slaveId = 0;
@@ -26,12 +27,12 @@ public:
 
   explicit SerialBus(ModbusRTUProto::SerialConfig config);
 
-  grpc::Status Open();
-  void Close();
+  grpc::Status Open() override;
+  void Close() override;
 
-  grpc::Status ReadCoil(uint8_t slaveId, uint16_t address, bool* out);
-  grpc::Status ReadHoldingRegister(uint8_t slaveId, uint16_t address, uint16_t* out);
-  grpc::Status ReadHoldingRegisters(uint8_t slaveId, uint16_t address, uint16_t quantity, std::vector<uint16_t>* out);
+  grpc::Status ReadCoil(uint8_t slaveId, uint16_t address, bool* out) override;
+  grpc::Status ReadHoldingRegister(uint8_t slaveId, uint16_t address, uint16_t* out) override;
+  grpc::Status ReadHoldingRegisters(uint8_t slaveId, uint16_t address, uint16_t quantity, std::vector<uint16_t>* out) override;
 
   grpc::Status ReadRequest(RtuRequest* out);
   grpc::Status WriteFrame(const std::vector<uint8_t>& frame);

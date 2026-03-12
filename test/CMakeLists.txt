@@ -438,6 +438,8 @@ add_executable(modbusRtuLinkManager_test
   modbus_rtu_serial_bus_test.cc
   ${CMAKE_SOURCE_DIR}/src/ModbusRTU/ModbusRTUDataCenterClient.cc
   ${CMAKE_SOURCE_DIR}/src/ModbusRTU/ModbusRTULinkManager.cc
+  ${CMAKE_SOURCE_DIR}/src/ModbusRTU/ModbusRTUMqttBus.cc
+  ${CMAKE_SOURCE_DIR}/src/ModbusRTU/ModbusRTUMqttClient.cc
   ${CMAKE_SOURCE_DIR}/src/ModbusRTU/ModbusRTUPointTable.cc
   ${CMAKE_SOURCE_DIR}/src/ModbusRTU/ModbusRTUSerialBus.cc
 )
@@ -452,10 +454,28 @@ target_link_libraries(modbusRtuLinkManager_test PRIVATE
   GTest::gmock
   dspProto
   Boost::asio
+  Boost::json
   moduleManager
 )
 
 add_test(NAME modbusRtuLinkManager_test COMMAND modbusRtuLinkManager_test)
+
+add_executable(configPusherApplyModbusRtu_test
+  config_pusher_apply_modbus_rtu_test.cc
+)
+
+target_include_directories(configPusherApplyModbusRtu_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/ConfigPusher/include
+)
+
+target_link_libraries(configPusherApplyModbusRtu_test PRIVATE
+  GTest::gtest_main
+  GTest::gmock
+  dspProto
+  ConfigPusher
+)
+
+add_test(NAME configPusherApplyModbusRtu_test COMMAND configPusherApplyModbusRtu_test)
 
 add_executable(iec104TcpSession_test
   iec104_tcp_session_test.cc
