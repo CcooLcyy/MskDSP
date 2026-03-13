@@ -110,6 +110,8 @@ private:
     PointTable pointTable;
     std::shared_ptr<Bus> bus;
     std::jthread pollThread;
+    std::shared_ptr<grpc::ClientContext> dcCommandContext;
+    std::jthread dcCommandThread;
   };
 
   struct SlaveLinkSnapshot {
@@ -152,6 +154,13 @@ private:
                              const ModbusRTUProto::LinkConfig& config,
                              const SerialKey& serialKey,
                              std::shared_ptr<SerialBus> bus);
+  void startCommandSubscribeLocked(const std::string& connName, LinkRuntime* link);
+  void stopCommandSubscribeLocked(LinkRuntime* link);
+  grpc::Status executeWriteCommand(const std::string& connName,
+                                   const ModbusRTUProto::LinkConfig& config,
+                                   const PointTable::Point& point,
+                                   std::shared_ptr<Bus> bus,
+                                   const DataCenterProto::PointUpdate& update);
   void slaveLoop(SerialKey serialKey, std::shared_ptr<SerialBus> bus, std::stop_token stopToken);
 
   void pollLoop(std::string connName,

@@ -1,11 +1,22 @@
 {
-  // ModbusRTU 配置下发示例（仅供 configPusher 下发/示例使用）
+  // 锦浪 Solis 逆变器 ModbusRTU 配置示例（通过 MQTT UART 透传到 RS485-6）
+  // 说明：
+  // 1. 本文件仅供 configPusher 下发/示例使用。
+  // 2. 用户提供的 iec104.signalIndex/telemetryIndex/aggregation/outputScale 不属于 ModbusRTU 配置；
+  //    如需接入 IEC104，请在 iec104.jsonc 与 DataCenter.jsonc 中单独配置。
+  // 3. 当前 ModbusRTU 主站 0x03/0x04 已支持 INT16/INT32；
+  //    因此本文件已写入输入寄存器中的有符号点：无功功率、功率因数。
+  // 4. holdingRegisters 中 3000/3001/3002 地址存在重叠；
+  //    按“保留前一个占用区间、删除后续冲突起始点”的规则，已删除 3001 起始的“无功功率限值”读回/命令点。
+  // 5. 以下 holdingRegisters 点拆成“读回/命令”两套 tag：
+  //    - “xx-读回” 走 0x03 轮询；
+  //    - “xx-命令” 走 0x06/0x10，通过 DataCenter 路由触发写寄存器。
   "modbus_rtu": {
-    // 仅当存在 TRANSPORT_MQTT_UART 链路时才需要 mqtt 顶层配置。
+    // 存在 TRANSPORT_MQTT_UART 链路时需要 mqtt 顶层配置。
     "mqtt": {
       "host": "127.0.0.1",
       "port": 1883,
-      "client_id": "modbus_rtu_client_001",
+      "client_id": "modbus_rtu_solis_rs485_6",
       "username": "",
       "password": "",
       "keepalive_sec": 30,
@@ -16,28 +27,46 @@
       {
         "link": {
           "config": {
-            "conn_name": "本地Modbus主站",
+            "conn_name": "锦浪Solis-RS485-6",
             "transport_type": "TRANSPORT_MQTT_UART",
+            // MQTT UART 场景下，serial.device 忽略；这里只保留远端串口参数。
             "serial": {
-              "device": "/dev/COMMock0",
               "baud_rate": 9600,
               "data_bits": 8,
               "parity": "PARITY_NONE",
-              "stop_bits": "STOP_BITS_ONE",
-              "read_timeout_ms": 1000
+              "stop_bits": "STOP_BITS_ONE"
             },
-            "serial_port": "RS485-5",
+            "serial_port": "RS485-6",
+            "request_timeout_ms": 1000,
+            "serial_byte_timeout_ms": 100,
+            "serial_frame_timeout_ms": 100,
+            "serial_est_size": 256,
             "slave_id": 1,
-            "poll_interval_ms": 1000,
+            "poll_interval_ms": 3000,
             "address_base": "ADDRESS_BASE_ZERO",
             "mode": "LINK_MODE_MASTER",
             "read_plan": {
               "mode": "READ_PLAN_MODE_EXPLICIT",
               "blocks": [
                 {
-                  "function": "0x03",
-                  "start": 3009,
+                  "function": "0x04",
+                  "start": 3000,
                   "quantity": 2
+                },
+                {
+                  "function": "0x04",
+                  "start": 3009,
+                  "quantity": 20
+                },
+                {
+                  "function": "0x03",
+                  "start": 3000,
+                  "quantity": 5
+                },
+                {
+                  "function": "0x03",
+                  "start": 3062,
+                  "quantity": 1
                 }
               ]
             }
@@ -47,26 +76,277 @@
           "replace": true,
           "points": [
             {
-              "tag": "本地主站-A相电压",
-              "function": "0x03",
-              "address": 3009,
-              "type": "DATA_TYPE_UINT32",
-              "reg_count": 2,
-              "word_order": "HL",
+              "tag": "锦浪Solis-运行状态",
+              "function": "0x04",
+              "address": 3000,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
               "byte_order": "AB",
-              "scale": 0.0001,
+              "scale": 1.0,
               "offset": 0.0,
               "deadband": 0.0
             },
             {
-              "tag": "本地主站-A相电流",
-              "function": "0x03",
+              "tag": "锦浪Solis-故障状态",
+              "function": "0x04",
+              "address": 3001,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-A相电压",
+              "function": "0x04",
+              "address": 3009,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-B相电压",
+              "function": "0x04",
+              "address": 3010,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-C相电压",
+              "function": "0x04",
+              "address": 3011,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-A相电流",
+              "function": "0x04",
               "address": 3012,
               "type": "DATA_TYPE_UINT32",
               "reg_count": 2,
               "word_order": "HL",
               "byte_order": "AB",
-              "scale": 0.0001,
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-B相电流",
+              "function": "0x04",
+              "address": 3014,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-C相电流",
+              "function": "0x04",
+              "address": 3016,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-频率",
+              "function": "0x04",
+              "address": 3019,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.01,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-有功功率",
+              "function": "0x04",
+              "address": 3020,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-无功功率",
+              "function": "0x04",
+              "address": 3022,
+              "type": "DATA_TYPE_INT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-功率因数",
+              "function": "0x04",
+              "address": 3024,
+              "type": "DATA_TYPE_INT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-日发电量",
+              "function": "0x04",
+              "address": 3025,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.01,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-总发电量",
+              "function": "0x04",
+              "address": 3027,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            // 以下保持寄存器点拆成“读回/命令”两套 tag。
+            // 说明：已按“保留前一个占用区间、删除后续冲突起始点”的规则删除冲突点。
+            {
+              "tag": "锦浪Solis-有功功率限值-读回",
+              "function": "0x03",
+              "address": 3000,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-有功功率百分比-读回",
+              "function": "0x03",
+              "address": 3002,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-无功功率百分比-读回",
+              "function": "0x03",
+              "address": 3003,
+              "type": "DATA_TYPE_INT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-功率控制使能-读回",
+              "function": "0x03",
+              "address": 3004,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-开关机控制-读回",
+              "function": "0x03",
+              "address": 3062,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-有功功率限值-命令",
+              "function": "0x10",
+              "address": 3000,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-有功功率百分比-命令",
+              "function": "0x06",
+              "address": 3002,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-无功功率百分比-命令",
+              "function": "0x06",
+              "address": 3003,
+              "type": "DATA_TYPE_INT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-功率控制使能-命令",
+              "function": "0x06",
+              "address": 3004,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-开关机控制-命令",
+              "function": "0x06",
+              "address": 3062,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 1.0,
               "offset": 0.0,
               "deadband": 0.0
             }
@@ -78,36 +358,46 @@
       {
         "link": {
           "config": {
-            "conn_name": "远端Modbus主站",
+            "conn_name": "锦浪Solis-RS485-6-2号地址",
             "transport_type": "TRANSPORT_MQTT_UART",
-            // MQTT 透传场景下，serial.device 忽略；这里只保留远端串口参数。
+            // MQTT UART 场景下，serial.device 忽略；这里只保留远端串口参数。
             "serial": {
               "baud_rate": 9600,
               "data_bits": 8,
               "parity": "PARITY_NONE",
               "stop_bits": "STOP_BITS_ONE"
             },
-            "serial_port": "RS485-1",
-            "request_timeout_ms": 3000,
+            "serial_port": "RS485-6",
+            "request_timeout_ms": 1000,
             "serial_byte_timeout_ms": 100,
             "serial_frame_timeout_ms": 100,
             "serial_est_size": 256,
-            "slave_id": 1,
-            "poll_interval_ms": 1000,
+            "slave_id": 2,
+            "poll_interval_ms": 3000,
             "address_base": "ADDRESS_BASE_ZERO",
             "mode": "LINK_MODE_MASTER",
             "read_plan": {
               "mode": "READ_PLAN_MODE_EXPLICIT",
               "blocks": [
                 {
-                  "function": "0x03",
-                  "start": 0,
-                  "quantity": 1
+                  "function": "0x04",
+                  "start": 3000,
+                  "quantity": 2
+                },
+                {
+                  "function": "0x04",
+                  "start": 3009,
+                  "quantity": 20
                 },
                 {
                   "function": "0x03",
-                  "start": 10,
-                  "quantity": 2
+                  "start": 3000,
+                  "quantity": 5
+                },
+                {
+                  "function": "0x03",
+                  "start": 3062,
+                  "quantity": 1
                 }
               ]
             }
@@ -117,9 +407,31 @@
           "replace": true,
           "points": [
             {
-              "tag": "远端主站-A相电压",
-              "function": "0x03",
-              "address": 0,
+              "tag": "锦浪Solis-运行状态",
+              "function": "0x04",
+              "address": 3000,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-故障状态",
+              "function": "0x04",
+              "address": 3001,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-A相电压",
+              "function": "0x04",
+              "address": 3009,
               "type": "DATA_TYPE_UINT16",
               "reg_count": 1,
               "byte_order": "AB",
@@ -128,12 +440,242 @@
               "deadband": 0.0
             },
             {
-              "tag": "远端主站-总有功功率",
-              "function": "0x03",
-              "address": 10,
+              "tag": "锦浪Solis-B相电压",
+              "function": "0x04",
+              "address": 3010,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-C相电压",
+              "function": "0x04",
+              "address": 3011,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-A相电流",
+              "function": "0x04",
+              "address": 3012,
               "type": "DATA_TYPE_UINT32",
               "reg_count": 2,
               "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-B相电流",
+              "function": "0x04",
+              "address": 3014,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-C相电流",
+              "function": "0x04",
+              "address": 3016,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-频率",
+              "function": "0x04",
+              "address": 3019,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.01,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-有功功率",
+              "function": "0x04",
+              "address": 3020,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-无功功率",
+              "function": "0x04",
+              "address": 3022,
+              "type": "DATA_TYPE_INT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-功率因数",
+              "function": "0x04",
+              "address": 3024,
+              "type": "DATA_TYPE_INT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-日发电量",
+              "function": "0x04",
+              "address": 3025,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.01,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-总发电量",
+              "function": "0x04",
+              "address": 3027,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            // 以下保持寄存器点拆成“读回/命令”两套 tag。
+            // 说明：已按“保留前一个占用区间、删除后续冲突起始点”的规则删除冲突点。
+            {
+              "tag": "锦浪Solis-有功功率限值-读回",
+              "function": "0x03",
+              "address": 3000,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-有功功率百分比-读回",
+              "function": "0x03",
+              "address": 3002,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-无功功率百分比-读回",
+              "function": "0x03",
+              "address": 3003,
+              "type": "DATA_TYPE_INT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-功率控制使能-读回",
+              "function": "0x03",
+              "address": 3004,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-开关机控制-读回",
+              "function": "0x03",
+              "address": 3062,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-有功功率限值-命令",
+              "function": "0x10",
+              "address": 3000,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-有功功率百分比-命令",
+              "function": "0x06",
+              "address": 3002,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-无功功率百分比-命令",
+              "function": "0x06",
+              "address": 3003,
+              "type": "DATA_TYPE_INT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-功率控制使能-命令",
+              "function": "0x06",
+              "address": 3004,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-开关机控制-命令",
+              "function": "0x06",
+              "address": 3062,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
               "byte_order": "AB",
               "scale": 1.0,
               "offset": 0.0,
@@ -142,7 +684,669 @@
           ]
         },
         // start 表示启动该连接的通信功能
-        "start": false
+        "start": true
+      },
+      {
+        "link": {
+          "config": {
+            "conn_name": "锦浪Solis-RS485-5-1号地址",
+            "transport_type": "TRANSPORT_MQTT_UART",
+            // MQTT UART 场景下，serial.device 忽略；这里只保留远端串口参数。
+            "serial": {
+              "baud_rate": 9600,
+              "data_bits": 8,
+              "parity": "PARITY_NONE",
+              "stop_bits": "STOP_BITS_ONE"
+            },
+            "serial_port": "RS485-5",
+            "request_timeout_ms": 1000,
+            "serial_byte_timeout_ms": 100,
+            "serial_frame_timeout_ms": 100,
+            "serial_est_size": 256,
+            "slave_id": 1,
+            "poll_interval_ms": 3000,
+            "address_base": "ADDRESS_BASE_ZERO",
+            "mode": "LINK_MODE_MASTER",
+            "read_plan": {
+              "mode": "READ_PLAN_MODE_EXPLICIT",
+              "blocks": [
+                {
+                  "function": "0x04",
+                  "start": 3000,
+                  "quantity": 2
+                },
+                {
+                  "function": "0x04",
+                  "start": 3009,
+                  "quantity": 20
+                },
+                {
+                  "function": "0x03",
+                  "start": 3000,
+                  "quantity": 5
+                },
+                {
+                  "function": "0x03",
+                  "start": 3062,
+                  "quantity": 1
+                }
+              ]
+            }
+          }
+        },
+        "point_table": {
+          "replace": true,
+          "points": [
+            {
+              "tag": "锦浪Solis-运行状态",
+              "function": "0x04",
+              "address": 3000,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-故障状态",
+              "function": "0x04",
+              "address": 3001,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-A相电压",
+              "function": "0x04",
+              "address": 3009,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-B相电压",
+              "function": "0x04",
+              "address": 3010,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-C相电压",
+              "function": "0x04",
+              "address": 3011,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-A相电流",
+              "function": "0x04",
+              "address": 3012,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-B相电流",
+              "function": "0x04",
+              "address": 3014,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-C相电流",
+              "function": "0x04",
+              "address": 3016,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-频率",
+              "function": "0x04",
+              "address": 3019,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.01,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-有功功率",
+              "function": "0x04",
+              "address": 3020,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-无功功率",
+              "function": "0x04",
+              "address": 3022,
+              "type": "DATA_TYPE_INT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-功率因数",
+              "function": "0x04",
+              "address": 3024,
+              "type": "DATA_TYPE_INT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-日发电量",
+              "function": "0x04",
+              "address": 3025,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.01,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-总发电量",
+              "function": "0x04",
+              "address": 3027,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            // 以下保持寄存器点拆成“读回/命令”两套 tag。
+            // 说明：已按“保留前一个占用区间、删除后续冲突起始点”的规则删除冲突点。
+            {
+              "tag": "锦浪Solis-有功功率限值-读回",
+              "function": "0x03",
+              "address": 3000,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-有功功率百分比-读回",
+              "function": "0x03",
+              "address": 3002,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-无功功率百分比-读回",
+              "function": "0x03",
+              "address": 3003,
+              "type": "DATA_TYPE_INT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-功率控制使能-读回",
+              "function": "0x03",
+              "address": 3004,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-开关机控制-读回",
+              "function": "0x03",
+              "address": 3062,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-有功功率限值-命令",
+              "function": "0x10",
+              "address": 3000,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-有功功率百分比-命令",
+              "function": "0x06",
+              "address": 3002,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-无功功率百分比-命令",
+              "function": "0x06",
+              "address": 3003,
+              "type": "DATA_TYPE_INT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-功率控制使能-命令",
+              "function": "0x06",
+              "address": 3004,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-开关机控制-命令",
+              "function": "0x06",
+              "address": 3062,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            }
+          ]
+        },
+        // start 表示启动该连接的通信功能
+        "start": true
+      },
+      {
+        "link": {
+          "config": {
+            "conn_name": "锦浪Solis-RS485-5-2号地址",
+            "transport_type": "TRANSPORT_MQTT_UART",
+            // MQTT UART 场景下，serial.device 忽略；这里只保留远端串口参数。
+            "serial": {
+              "baud_rate": 9600,
+              "data_bits": 8,
+              "parity": "PARITY_NONE",
+              "stop_bits": "STOP_BITS_ONE"
+            },
+            "serial_port": "RS485-5",
+            "request_timeout_ms": 1000,
+            "serial_byte_timeout_ms": 100,
+            "serial_frame_timeout_ms": 100,
+            "serial_est_size": 256,
+            "slave_id": 2,
+            "poll_interval_ms": 3000,
+            "address_base": "ADDRESS_BASE_ZERO",
+            "mode": "LINK_MODE_MASTER",
+            "read_plan": {
+              "mode": "READ_PLAN_MODE_EXPLICIT",
+              "blocks": [
+                {
+                  "function": "0x04",
+                  "start": 3000,
+                  "quantity": 2
+                },
+                {
+                  "function": "0x04",
+                  "start": 3009,
+                  "quantity": 20
+                },
+                {
+                  "function": "0x03",
+                  "start": 3000,
+                  "quantity": 5
+                },
+                {
+                  "function": "0x03",
+                  "start": 3062,
+                  "quantity": 1
+                }
+              ]
+            }
+          }
+        },
+        "point_table": {
+          "replace": true,
+          "points": [
+            {
+              "tag": "锦浪Solis-运行状态",
+              "function": "0x04",
+              "address": 3000,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-故障状态",
+              "function": "0x04",
+              "address": 3001,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-A相电压",
+              "function": "0x04",
+              "address": 3009,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-B相电压",
+              "function": "0x04",
+              "address": 3010,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-C相电压",
+              "function": "0x04",
+              "address": 3011,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-A相电流",
+              "function": "0x04",
+              "address": 3012,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-B相电流",
+              "function": "0x04",
+              "address": 3014,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-C相电流",
+              "function": "0x04",
+              "address": 3016,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-频率",
+              "function": "0x04",
+              "address": 3019,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.01,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-有功功率",
+              "function": "0x04",
+              "address": 3020,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-无功功率",
+              "function": "0x04",
+              "address": 3022,
+              "type": "DATA_TYPE_INT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-功率因数",
+              "function": "0x04",
+              "address": 3024,
+              "type": "DATA_TYPE_INT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-日发电量",
+              "function": "0x04",
+              "address": 3025,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.01,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-总发电量",
+              "function": "0x04",
+              "address": 3027,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            // 以下保持寄存器点拆成“读回/命令”两套 tag。
+            // 说明：已按“保留前一个占用区间、删除后续冲突起始点”的规则删除冲突点。
+            {
+              "tag": "锦浪Solis-有功功率限值-读回",
+              "function": "0x03",
+              "address": 3000,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-有功功率百分比-读回",
+              "function": "0x03",
+              "address": 3002,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-无功功率百分比-读回",
+              "function": "0x03",
+              "address": 3003,
+              "type": "DATA_TYPE_INT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-功率控制使能-读回",
+              "function": "0x03",
+              "address": 3004,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-开关机控制-读回",
+              "function": "0x03",
+              "address": 3062,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-有功功率限值-命令",
+              "function": "0x10",
+              "address": 3000,
+              "type": "DATA_TYPE_UINT32",
+              "reg_count": 2,
+              "word_order": "HL",
+              "byte_order": "AB",
+              "scale": 0.001,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-有功功率百分比-命令",
+              "function": "0x06",
+              "address": 3002,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-无功功率百分比-命令",
+              "function": "0x06",
+              "address": 3003,
+              "type": "DATA_TYPE_INT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 0.1,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-功率控制使能-命令",
+              "function": "0x06",
+              "address": 3004,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "锦浪Solis-开关机控制-命令",
+              "function": "0x06",
+              "address": 3062,
+              "type": "DATA_TYPE_UINT16",
+              "reg_count": 1,
+              "byte_order": "AB",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            }
+          ]
+        },
+        // start 表示启动该连接的通信功能
+        "start": true
       }
     ]
   }

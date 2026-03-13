@@ -98,6 +98,27 @@ ModbusRTUProto::Point MakeRegisterPoint(const char* tag, uint32_t address) {
   return p;
 }
 
+ModbusRTUProto::Point MakeInputRegisterPoint(const char* tag, uint32_t address) {
+  ModbusRTUProto::Point p;
+  p.set_tag(tag);
+  p.set_function(ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS);
+  p.set_address(address);
+  p.set_type(ModbusRTUProto::DATA_TYPE_UINT16);
+  return p;
+}
+
+ModbusRTUProto::Point MakeSignedRegisterPoint(const char* tag, uint32_t address, ModbusRTUProto::DataType type) {
+  ModbusRTUProto::Point p;
+  p.set_tag(tag);
+  p.set_function(ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS);
+  p.set_address(address);
+  p.set_type(type);
+  if (type == ModbusRTUProto::DATA_TYPE_INT32) {
+    p.set_reg_count(2);
+  }
+  return p;
+}
+
 struct PtyPair {
   int master_fd = -1;
   std::string slave_path;
@@ -446,6 +467,67 @@ TEST(ModbusRtuLinkManagerTest, SlaveHoldingRegistersReturnsExceptionOnMissingVal
   CloseFd(&pair.master_fd);
 }
 
+// 验证：从站 0x04 在 DataCenter 无值时使用 default_uint16 兜底返回。
+TEST(ModbusRtuLinkManagerTest, SlaveInputRegistersUsesDefaultWhenDataCenterEmpty) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  EXPECT_CALL(*stub, GetLatest(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext*,
+                          const DataCenterProto::GetLatestRequest& req,
+                          DataCenterProto::GetLatestResponse* resp) {
+        EXPECT_GT(req.conn_id(), 0u);
+        EXPECT_EQ(req.tags_size(), 1);
+        if (req.tags_size() > 0) {
+          EXPECT_EQ(req.tags(0), "input-reg-1");
+        }
+        resp->Clear();
+        return grpc::Status::OK;
+      }));
+
+  LinkManager mgr("ModbusRTU");
+  mgr.setDataCenterStub(stub);
+
+  auto pair = CreatePtyPair();
+  ASSERT_GE(pair.master_fd, 0);
+  ASSERT_FALSE(pair.slave_path.empty());
+
+  auto linkReq = MakeLinkReq("slave-input-1", pair.slave_path.c_str(), 9600, 1);
+  linkReq.mutable_config()->set_mode(ModbusRTUProto::LINK_MODE_SLAVE);
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(linkReq, &info).ok());
+
+  ModbusRTUProto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("slave-input-1");
+  auto* point = ptReq.add_points();
+  *point = MakeInputRegisterPoint("input-reg-1", 0);
+  point->set_default_uint16(0x4321);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  ASSERT_TRUE(mgr.StartLink("slave-input-1").ok());
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  std::vector<uint8_t> reqFrame = {0x01, 0x04, 0x00, 0x00, 0x00, 0x01};
+  SerialBus::appendCrc(&reqFrame);
+  ASSERT_TRUE(WriteAll(pair.master_fd, reqFrame));
+
+  std::array<uint8_t, 7> resp{};
+  ASSERT_TRUE(ReadExact(pair.master_fd, resp.data(), resp.size(), std::chrono::milliseconds(500)));
+
+  EXPECT_EQ(resp[0], 0x01);
+  EXPECT_EQ(resp[1], 0x04);
+  EXPECT_EQ(resp[2], 0x02);
+  const uint16_t value = static_cast<uint16_t>((static_cast<uint16_t>(resp[3]) << 8) | resp[4]);
+  EXPECT_EQ(value, 0x4321);
+  const uint16_t expectCrc = SerialBus::computeCrc(resp.data(), resp.size() - 2);
+  const uint16_t gotCrc = static_cast<uint16_t>(resp[5]) | (static_cast<uint16_t>(resp[6]) << 8);
+  EXPECT_EQ(gotCrc, expectCrc);
+
+  EXPECT_TRUE(mgr.StopLink("slave-input-1").ok());
+  CloseFd(&pair.master_fd);
+}
+
 // 验证：当 DataCenter 删除失败时，DeleteLink 标记 PENDING_DELETE 且保留本地配置以便重试。
 TEST(ModbusRtuLinkManagerTest, DeleteLinkFailureMarksPendingDeleteAndKeepsLocal) {
   FakeDataCenterState state;
@@ -530,6 +612,60 @@ TEST(ModbusRtuLinkManagerTest, UpsertLinkRejectsMixedModesOnSameSerial) {
   ModbusRTUProto::LinkInfo info2;
   auto st = mgr.UpsertLink(req2, &info2);
   EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+}
+
+// 验证：从站链路点表不允许配置 INT16/INT32 点位。
+TEST(ModbusRtuLinkManagerTest, UpsertPointTableRejectsSignedRegistersForSlaveMode) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("ModbusRTU");
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeLinkReq("conn-slave-signed", "/dev/ttyUSB0", 9600, 1);
+  req.mutable_config()->set_mode(ModbusRTUProto::LINK_MODE_SLAVE);
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+
+  ModbusRTUProto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-slave-signed");
+  *ptReq.add_points() = MakeSignedRegisterPoint("reg-s16", 0, ModbusRTUProto::DATA_TYPE_INT16);
+  ptReq.set_replace(true);
+
+  auto st = mgr.UpsertPointTable(ptReq);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::UNIMPLEMENTED);
+
+  ModbusRTUProto::PointTable out;
+  ASSERT_TRUE(mgr.GetPointTable("conn-slave-signed", &out).ok());
+  EXPECT_EQ(out.points_size(), 0);
+}
+
+// 验证：带 signed 点表的主站链路不能直接切换为从站模式。
+TEST(ModbusRtuLinkManagerTest, UpsertLinkRejectsSwitchingSignedPointTableToSlaveMode) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("ModbusRTU");
+  mgr.setDataCenterStub(stub);
+
+  auto createReq = MakeLinkReq("conn-signed-master", "/dev/ttyUSB0", 9600, 1);
+  createReq.mutable_config()->set_mode(ModbusRTUProto::LINK_MODE_MASTER);
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(createReq, &info).ok());
+
+  ModbusRTUProto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-signed-master");
+  *ptReq.add_points() = MakeSignedRegisterPoint("reg-s32", 10, ModbusRTUProto::DATA_TYPE_INT32);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  auto updateReq = MakeLinkReq("conn-signed-master", "/dev/ttyUSB0", 9600, 1);
+  updateReq.set_create_only(false);
+  updateReq.mutable_config()->set_mode(ModbusRTUProto::LINK_MODE_SLAVE);
+
+  ModbusRTUProto::LinkInfo updated;
+  auto st = mgr.UpsertLink(updateReq, &updated);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::UNIMPLEMENTED);
 }
 
 // 验证：UpsertLink 会补齐默认串口与轮询参数。

@@ -5,8 +5,33 @@
 #include "Logger.h"
 
 namespace {
+bool is16BitRegisterType(ModbusRTUProto::DataType type) {
+  return type == ModbusRTUProto::DATA_TYPE_UINT16 || type == ModbusRTUProto::DATA_TYPE_INT16;
+}
+
+bool is32BitRegisterType(ModbusRTUProto::DataType type) {
+  return type == ModbusRTUProto::DATA_TYPE_UINT32 || type == ModbusRTUProto::DATA_TYPE_INT32;
+}
+
+bool isWriteSingleRegisterFunction(ModbusRTUProto::FunctionCode function) {
+  return function == ModbusRTUProto::FUNCTION_WRITE_SINGLE_REGISTER;
+}
+
+bool isWriteMultipleRegistersFunction(ModbusRTUProto::FunctionCode function) {
+  return function == ModbusRTUProto::FUNCTION_WRITE_MULTIPLE_REGISTERS;
+}
+
+bool isWriteRegisterFunction(ModbusRTUProto::FunctionCode function) {
+  return isWriteSingleRegisterFunction(function) || isWriteMultipleRegistersFunction(function);
+}
+
+bool isReadRegisterFunction(ModbusRTUProto::FunctionCode function) {
+  return function == ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS ||
+      function == ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS;
+}
+
 uint32_t defaultRegCount(ModbusRTUProto::DataType type) {
-  return type == ModbusRTUProto::DATA_TYPE_UINT32 ? 2u : 1u;
+  return is32BitRegisterType(type) ? 2u : 1u;
 }
 
 bool isValidWordOrder(ModbusRTUProto::WordOrder order) {
@@ -105,16 +130,26 @@ grpc::Status PointTable::validatePoint(const ModbusRTUProto::Point &point) const
   if (point.function() == ModbusRTUProto::FUNCTION_READ_COILS && regCount != 1) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "线圈点位 reg_count 只能为 1");
   }
-  if (point.function() == ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS &&
-      point.type() != ModbusRTUProto::DATA_TYPE_UINT16 &&
-      point.type() != ModbusRTUProto::DATA_TYPE_UINT32) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "保持寄存器点位需要 UINT16 或 UINT32 类型");
+  if ((isReadRegisterFunction(point.function()) || isWriteRegisterFunction(point.function())) &&
+      !is16BitRegisterType(point.type()) &&
+      !is32BitRegisterType(point.type())) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "寄存器点位需要 UINT16、UINT32、INT16 或 INT32 类型");
   }
-  if (point.type() == ModbusRTUProto::DATA_TYPE_UINT16 && regCount != 1) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "UINT16 点位 reg_count 只能为 1");
+  if (is16BitRegisterType(point.type()) && regCount != 1) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "16 位寄存器点位 reg_count 只能为 1");
   }
-  if (point.type() == ModbusRTUProto::DATA_TYPE_UINT32 && regCount != 2) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "UINT32 点位 reg_count 只能为 2");
+  if (is32BitRegisterType(point.type()) && regCount != 2) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "32 位寄存器点位 reg_count 只能为 2");
+  }
+  if (isWriteSingleRegisterFunction(point.function()) && !is16BitRegisterType(point.type())) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "写单寄存器点位需要 UINT16 或 INT16 类型");
+  }
+  if (isWriteSingleRegisterFunction(point.function()) && regCount != 1) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "写单寄存器点位 reg_count 只能为 1");
+  }
+  if (isWriteMultipleRegistersFunction(point.function()) && !is16BitRegisterType(point.type()) &&
+      !is32BitRegisterType(point.type())) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "写多寄存器点位需要 UINT16、UINT32、INT16 或 INT32 类型");
   }
   if (point.deadband() < 0) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "死区不能为负");
@@ -189,7 +224,11 @@ grpc::Status PointTable::insertOrUpdatePoint(const ModbusRTUProto::Point &point)
   for (uint32_t i = 0; i < p.regCount; ++i) {
     tagByKey_[keys[i]] = AddressEntry{p.tag, i};
   }
-  LOG_DEBUG("ModbusRTU 点表写入点位: tag={}, address={}, reg_count={}", p.tag, p.address, p.regCount);
+  LOG_DEBUG("ModbusRTU 点表写入点位: tag={}, function={}, address={}, reg_count={}",
+            p.tag,
+            static_cast<int>(p.function),
+            p.address,
+            p.regCount);
   return grpc::Status::OK;
 }
 
@@ -260,10 +299,10 @@ void PointTable::ToProto(const std::string &connName, ModbusRTUProto::PointTable
     dst->set_function(point.function);
     dst->set_address(point.address);
     dst->set_type(point.type);
-    if (point.type == ModbusRTUProto::DATA_TYPE_UINT16) {
+    if (is16BitRegisterType(point.type)) {
       dst->set_reg_count(point.regCount);
       dst->set_byte_order(point.byteOrder);
-    } else if (point.type == ModbusRTUProto::DATA_TYPE_UINT32) {
+    } else if (is32BitRegisterType(point.type)) {
       dst->set_reg_count(point.regCount);
       dst->set_word_order(point.wordOrder);
       dst->set_byte_order(point.byteOrder);

@@ -38,7 +38,7 @@ ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRT
   - `./conf/configPusher/iec104.jsonc`
   - `./conf/configPusher/modbus_rtu.jsonc`
 - 使用 Protobuf JSON 映射：枚举需写全名（例如 `ROLE_SERVER`、`POINT_TYPE_FLOAT`、`FUNCTION_READ_COILS`）
-- `modbus_rtu.jsonc` 的 `function` 支持十六进制字符串（`0x01`/`0x03`），解析时会自动转换为枚举值
+- `modbus_rtu.jsonc` 的 `function` 支持十六进制字符串（`0x01`/`0x03`/`0x04`/`0x06`/`0x10`），解析时会自动转换为枚举值
 - `point_table.conn_name` 可省略（默认使用 `link.config.conn_name`）
 - DLT645 支持 `device_nos` 批量设备序号展开：一条任务可展开为多条链路下发
 - DLT645 `device_nos` 展开规则：

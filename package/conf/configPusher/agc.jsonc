@@ -3,101 +3,152 @@
     "groups": [
       {
         "upsert": {
-          "create_only": false, // false: 组存在则覆盖更新; true: 仅允许首次创建
+          "create_only": false,
           "config": {
-            "group_name": "1号AGC控制组", // 控制组名称(组内唯一)
-            "p_cmd": { // 总控制输入点(通常来自 104 主站)
-              "signal": { // 工程量换算配置
-                "tag": "P_CMD", // AGC 订阅的总指令 tag
-                "unit": "kW", // 工程单位
-                "scale": 1.0, // ABS: phys=raw*scale+offset; DELTA: phys=raw*scale
-                "offset": 0.0 // 仅 ABS 生效
+            "group_name": "1号AGC控制组",
+            // 104 下发的总有功给定。
+            "p_cmd": {
+              "signal": {
+                "tag": "AGC总有功给定输入",
+                "unit": "kW",
+                "scale": 1.0,
+                "offset": 0.0
               },
-              "mode": "VALUE_MODE_ABSOLUTE", // ABS: 目标总功率值; DELTA: 相对基准的增量
-              "delta_base": "DELTA_BASE_UNSPECIFIED" // 仅 DELTA 生效; ABS 下可忽略
+              "mode": "VALUE_MODE_ABSOLUTE",
+              "delta_base": "DELTA_BASE_UNSPECIFIED"
             },
-            "loop": { // 闭环控制参数
-              "period_ms": 1000, // 控制周期(ms)
-              "deadband_kw": 2.0, // 死区: |误差|<=该值时本轮步长=0
-              "max_step_kw": 20.0, // 每轮最大调整步长(kW)
-              "kp": 1.0 // 比例系数: 步长=kp*误差(再受 max_step_kw 限幅)
+            // 当前按 1s 周期做简单闭环；如现场希望动作更快，可适当减小 period_ms。
+            "loop": {
+              "period_ms": 1000,
+              "deadband_kw": 2.0,
+              "max_step_kw": 20.0,
+              "kp": 1.0
             },
-            "strategy": { // 分配策略
-              "weighted": {} // 按成员 weight 分配可调总功率
+            "strategy": {
+              "weighted": {}
             },
-            "members": [ // 成员设备(例如逆变器)列表
+            "members": [
               {
-                "member_name": "inv-1", // 成员名称
-                "controllable": true, // true: 参与分配并下发 p_set; false: 仅参与总量测
-                "capacity_kw": 600.0, // 成员容量(kW)，用于默认权重/上限参考
-                "weight": 600, // 分配权重(加权分配)
-                "min_kw": 0.0, // 成员最小目标(kW)
-                "max_kw": 500.0, // 成员最大目标(kW)
-                "p_meas": { // 成员量测输入点
-                  "tag": "INV1_P_MEAS", // 来自 DataCenter 的成员实时有功 tag
-                  "unit": "kW", // 工程单位
-                  "scale": 1.0, // ABS 量测换算系数
-                  "offset": 0.0 // ABS 量测换算偏移
+                "member_name": "RS485-6-1号逆变器",
+                "controllable": true,
+                "capacity_kw": 50.0,
+                "weight": 50.0,
+                "min_kw": 0.0,
+                "max_kw": 50.0,
+                "p_meas": {
+                  "tag": "RS485-6-1号逆变器有功功率量测",
+                  "unit": "kW",
+                  "scale": 1.0,
+                  "offset": 0.0
                 },
-                "p_set": { // 成员设定输出点(AGC 下发到下游)
+                "p_set": {
                   "signal": {
-                    "tag": "INV1_P_SET", // 下发给该成员的目标 tag
-                    "unit": "kW", // 工程单位
-                    "scale": 1.0, // 设定值换算系数
-                    "offset": 0.0 // ABS 设定值偏移
+                    "tag": "RS485-6-1号逆变器有功功率设定",
+                    "unit": "kW",
+                    "scale": 1.0,
+                    "offset": 0.0
                   },
-                  "mode": "VALUE_MODE_ABSOLUTE", // ABS: 下发绝对设定值; DELTA: 下发增量
-                  "delta_base": "DELTA_BASE_UNSPECIFIED" // 仅 DELTA 生效; ABS 下可忽略
+                  "mode": "VALUE_MODE_ABSOLUTE",
+                  "delta_base": "DELTA_BASE_UNSPECIFIED"
                 }
               },
               {
-                "member_name": "inv-2", // 成员名称
-                "controllable": true, // true: 参与分配并下发 p_set; false: 仅参与总量测
-                "capacity_kw": 200.0, // 成员容量(kW)
-                "weight": 200.0, // 分配权重
-                "min_kw": 0.0, // 成员最小目标(kW)
-                "max_kw": 500.0, // 成员最大目标(kW)
-                "p_meas": { // 成员量测输入点
-                  "tag": "INV2_P_MEAS", // 来自 DataCenter 的成员实时有功 tag
-                  "unit": "kW", // 工程单位
-                  "scale": 1.0, // ABS 量测换算系数
-                  "offset": 0.0 // ABS 量测换算偏移
+                "member_name": "RS485-6-2号逆变器",
+                "controllable": true,
+                "capacity_kw": 50.0,
+                "weight": 50.0,
+                "min_kw": 0.0,
+                "max_kw": 50.0,
+                "p_meas": {
+                  "tag": "RS485-6-2号逆变器有功功率量测",
+                  "unit": "kW",
+                  "scale": 1.0,
+                  "offset": 0.0
                 },
-                "p_set": { // 成员设定输出点
+                "p_set": {
                   "signal": {
-                    "tag": "INV2_P_SET", // 下发给该成员的目标 tag
-                    "unit": "kW", // 工程单位
-                    "scale": 1.0, // 设定值换算系数
-                    "offset": 0.0 // ABS 设定值偏移
+                    "tag": "RS485-6-2号逆变器有功功率设定",
+                    "unit": "kW",
+                    "scale": 1.0,
+                    "offset": 0.0
                   },
-                  "mode": "VALUE_MODE_ABSOLUTE", // ABS: 下发绝对设定值; DELTA: 下发增量
-                  "delta_base": "DELTA_BASE_UNSPECIFIED" // 仅 DELTA 生效; ABS 下可忽略
+                  "mode": "VALUE_MODE_ABSOLUTE",
+                  "delta_base": "DELTA_BASE_UNSPECIFIED"
+                }
+              },
+              {
+                "member_name": "RS485-5-1号逆变器",
+                "controllable": true,
+                "capacity_kw": 100.0,
+                "weight": 100.0,
+                "min_kw": 0.0,
+                "max_kw": 100.0,
+                "p_meas": {
+                  "tag": "RS485-5-1号逆变器有功功率量测",
+                  "unit": "kW",
+                  "scale": 1.0,
+                  "offset": 0.0
+                },
+                "p_set": {
+                  "signal": {
+                    "tag": "RS485-5-1号逆变器有功功率设定",
+                    "unit": "kW",
+                    "scale": 1.0,
+                    "offset": 0.0
+                  },
+                  "mode": "VALUE_MODE_ABSOLUTE",
+                  "delta_base": "DELTA_BASE_UNSPECIFIED"
+                }
+              },
+              {
+                "member_name": "RS485-5-2号逆变器",
+                "controllable": true,
+                "capacity_kw": 100.0,
+                "weight": 100.0,
+                "min_kw": 0.0,
+                "max_kw": 100.0,
+                "p_meas": {
+                  "tag": "RS485-5-2号逆变器有功功率量测",
+                  "unit": "kW",
+                  "scale": 1.0,
+                  "offset": 0.0
+                },
+                "p_set": {
+                  "signal": {
+                    "tag": "RS485-5-2号逆变器有功功率设定",
+                    "unit": "kW",
+                    "scale": 1.0,
+                    "offset": 0.0
+                  },
+                  "mode": "VALUE_MODE_ABSOLUTE",
+                  "delta_base": "DELTA_BASE_UNSPECIFIED"
                 }
               }
             ],
-            "outputs": { // AGC 派生输出(用于监视/上送)
+            "outputs": {
               "p_total_meas": {
-                "tag": "P_TOTAL_MEAS", // 总实时有功
-                "unit": "kW", // 工程单位
-                "scale": 1.0, // 输出换算系数
-                "offset": 0.0 // 输出换算偏移
+                "tag": "AGC总有功实时值",
+                "unit": "kW",
+                "scale": 1.0,
+                "offset": 0.0
               },
               "p_total_target": {
-                "tag": "P_TOTAL_TARGET", // AGC 计算得到的总目标值
-                "unit": "kW", // 工程单位
-                "scale": 1.0, // 输出换算系数
-                "offset": 0.0 // 输出换算偏移
+                "tag": "AGC总有功目标值",
+                "unit": "kW",
+                "scale": 1.0,
+                "offset": 0.0
               },
               "p_total_error": {
-                "tag": "P_TOTAL_ERROR", // 总偏差=desired_total-total_meas
-                "unit": "kW", // 工程单位
-                "scale": 1.0, // 输出换算系数
-                "offset": 0.0 // 输出换算偏移
+                "tag": "AGC总有功偏差",
+                "unit": "kW",
+                "scale": 1.0,
+                "offset": 0.0
               }
             }
           }
         },
-        "start": true // true: 配置完成后立即启动该控制组
+        // true 表示下发后启动控制组内控制环功能。
+        "start": true
       }
     ]
   }

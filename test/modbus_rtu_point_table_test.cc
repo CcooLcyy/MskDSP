@@ -35,6 +35,10 @@ ModbusRTUProto::Point MakeRegisterPointWithDefault32(const char* tag, uint32_t a
   p.set_default_uint32(value);
   return p;
 }
+
+ModbusRTUProto::Point MakeInputRegisterPoint(const char* tag, uint32_t address, ModbusRTUProto::DataType type) {
+  return MakePoint(tag, ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS, address, type);
+}
 }  // namespace
 
 // 验证：点表 replace 更新与 tag 查询、ToProto 输出排序。
@@ -99,6 +103,12 @@ TEST(ModbusRtuPointTableTest, RejectsInvalidPoint) {
   *req6.add_points() = MakePoint("A", ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS, 1, ModbusRTUProto::DATA_TYPE_BOOL);
   req6.set_replace(true);
   st = table.Upsert(req6.points(), req6.replace());
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+
+  ModbusRTUProto::UpsertPointTableRequest req7;
+  *req7.add_points() = MakeInputRegisterPoint("C", 3, ModbusRTUProto::DATA_TYPE_BOOL);
+  req7.set_replace(true);
+  st = table.Upsert(req7.points(), req7.replace());
   EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
 }
 
@@ -326,6 +336,93 @@ TEST(ModbusRtuPointTableTest, AcceptsUint32PointAndRegisterLookup) {
   EXPECT_EQ(out.points(0).byte_order(), ModbusRTUProto::BYTE_ORDER_BA);
   EXPECT_EQ(out.points(0).default_value_case(), ModbusRTUProto::Point::kDefaultUint32);
   EXPECT_EQ(out.points(0).default_uint32(), 0x12345678u);
+}
+
+// 验证：输入寄存器点位支持 UINT16/UINT32，并按独立功能码地址查找。
+TEST(ModbusRtuPointTableTest, AcceptsInputRegisterPoints) {
+  PointTable table;
+
+  ModbusRTUProto::UpsertPointTableRequest req;
+  auto p16 = MakeInputRegisterPoint("IR16", 400, ModbusRTUProto::DATA_TYPE_UINT16);
+  p16.set_default_uint16(321);
+  *req.add_points() = p16;
+
+  auto p32 = MakeInputRegisterPoint("IR32", 500, ModbusRTUProto::DATA_TYPE_UINT32);
+  p32.set_reg_count(2);
+  p32.set_default_uint32(0x12345678u);
+  *req.add_points() = p32;
+  req.set_replace(true);
+
+  ASSERT_TRUE(table.Upsert(req.points(), req.replace()).ok());
+
+  auto p16Stored = table.FindByAddress(ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS, 400);
+  ASSERT_TRUE(p16Stored.has_value());
+  EXPECT_EQ(p16Stored->tag, "IR16");
+  ASSERT_TRUE(p16Stored->defaultUInt16.has_value());
+  EXPECT_EQ(p16Stored->defaultUInt16.value(), 321);
+
+  auto p32First = table.FindRegisterByAddress(ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS, 500);
+  ASSERT_TRUE(p32First.has_value());
+  EXPECT_EQ(p32First->point.tag, "IR32");
+  EXPECT_EQ(p32First->wordIndex, 0u);
+
+  auto p32Second = table.FindRegisterByAddress(ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS, 501);
+  ASSERT_TRUE(p32Second.has_value());
+  EXPECT_EQ(p32Second->point.tag, "IR32");
+  EXPECT_EQ(p32Second->wordIndex, 1u);
+}
+
+// 验证：主站寄存器点位支持 INT16/INT32，并保留寄存器配置参数。
+TEST(ModbusRtuPointTableTest, AcceptsSignedRegisterPoints) {
+  PointTable table;
+
+  ModbusRTUProto::UpsertPointTableRequest req;
+  auto p16 = MakePoint("S16", ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS, 600, ModbusRTUProto::DATA_TYPE_INT16);
+  p16.set_byte_order(ModbusRTUProto::BYTE_ORDER_BA);
+  *req.add_points() = p16;
+
+  auto p32 = MakePoint("S32", ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS, 700, ModbusRTUProto::DATA_TYPE_INT32);
+  p32.set_reg_count(2);
+  p32.set_word_order(ModbusRTUProto::WORD_ORDER_LH);
+  p32.set_byte_order(ModbusRTUProto::BYTE_ORDER_BA);
+  *req.add_points() = p32;
+  req.set_replace(true);
+
+  ASSERT_TRUE(table.Upsert(req.points(), req.replace()).ok());
+
+  auto stored16 = table.FindByTag("S16");
+  ASSERT_TRUE(stored16.has_value());
+  EXPECT_EQ(stored16->type, ModbusRTUProto::DATA_TYPE_INT16);
+  EXPECT_EQ(stored16->regCount, 1u);
+  EXPECT_EQ(stored16->byteOrder, ModbusRTUProto::BYTE_ORDER_BA);
+
+  auto stored32 = table.FindByTag("S32");
+  ASSERT_TRUE(stored32.has_value());
+  EXPECT_EQ(stored32->type, ModbusRTUProto::DATA_TYPE_INT32);
+  EXPECT_EQ(stored32->regCount, 2u);
+  EXPECT_EQ(stored32->wordOrder, ModbusRTUProto::WORD_ORDER_LH);
+  EXPECT_EQ(stored32->byteOrder, ModbusRTUProto::BYTE_ORDER_BA);
+
+  auto first = table.FindRegisterByAddress(ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS, 700);
+  ASSERT_TRUE(first.has_value());
+  EXPECT_EQ(first->point.tag, "S32");
+  EXPECT_EQ(first->wordIndex, 0u);
+
+  auto second = table.FindRegisterByAddress(ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS, 701);
+  ASSERT_TRUE(second.has_value());
+  EXPECT_EQ(second->point.tag, "S32");
+  EXPECT_EQ(second->wordIndex, 1u);
+
+  ModbusRTUProto::PointTable out;
+  table.ToProto("conn-signed", &out);
+  ASSERT_EQ(out.points_size(), 2);
+  EXPECT_EQ(out.points(0).type(), ModbusRTUProto::DATA_TYPE_INT16);
+  EXPECT_EQ(out.points(0).reg_count(), 1u);
+  EXPECT_EQ(out.points(0).byte_order(), ModbusRTUProto::BYTE_ORDER_BA);
+  EXPECT_EQ(out.points(1).type(), ModbusRTUProto::DATA_TYPE_INT32);
+  EXPECT_EQ(out.points(1).reg_count(), 2u);
+  EXPECT_EQ(out.points(1).word_order(), ModbusRTUProto::WORD_ORDER_LH);
+  EXPECT_EQ(out.points(1).byte_order(), ModbusRTUProto::BYTE_ORDER_BA);
 }
 
 // 验证：UINT16/UINT32 默认 reg_count 与字节/字序能被规范化。

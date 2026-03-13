@@ -16,10 +16,13 @@ namespace ModbusRTU {
 namespace {
 constexpr uint8_t kFunctionReadCoils = 0x01;
 constexpr uint8_t kFunctionReadHoldingRegisters = 0x03;
+constexpr uint8_t kFunctionReadInputRegisters = 0x04;
+constexpr uint8_t kFunctionWriteSingleRegister = 0x06;
 constexpr uint8_t kFunctionWriteMultipleCoils = 0x0F;
 constexpr uint8_t kFunctionWriteMultipleRegisters = 0x10;
 constexpr char kHexDigits[] = "0123456789ABCDEF";
 constexpr size_t kMaxConsecutiveTimeouts = 3;
+constexpr size_t kMaxWriteMultipleRegistersQuantity = 123;
 
 std::string bytesToHex(const std::vector<uint8_t> &data) {
   if (data.empty()) {
@@ -174,6 +177,141 @@ grpc::Status SerialBus::ReadHoldingRegisters(uint8_t slaveId,
             quantity,
             bytesToHex(data));
   return grpc::Status::OK;
+}
+
+grpc::Status SerialBus::ReadInputRegister(uint8_t slaveId, uint16_t address, uint16_t* out) {
+  if (out == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
+  }
+  std::vector<uint16_t> values;
+  auto status = ReadInputRegisters(slaveId, address, 1, &values);
+  if (!status.ok()) {
+    return status;
+  }
+  if (values.size() != 1) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "输入寄存器响应数量异常");
+  }
+  *out = values.front();
+  return grpc::Status::OK;
+}
+
+grpc::Status SerialBus::ReadInputRegisters(uint8_t slaveId,
+                                           uint16_t address,
+                                           uint16_t quantity,
+                                           std::vector<uint16_t>* out) {
+  if (out == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
+  }
+  if (quantity == 0) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "quantity 不能为空");
+  }
+
+  std::lock_guard<std::mutex> lock(mu_);
+  auto status = ensureOpenLocked();
+  if (!status.ok()) {
+    return status;
+  }
+
+  std::vector<uint8_t> frame;
+  frame.reserve(8);
+  frame.push_back(slaveId);
+  frame.push_back(kFunctionReadInputRegisters);
+  frame.push_back(static_cast<uint8_t>((address >> 8) & 0xFF));
+  frame.push_back(static_cast<uint8_t>(address & 0xFF));
+  frame.push_back(static_cast<uint8_t>((quantity >> 8) & 0xFF));
+  frame.push_back(static_cast<uint8_t>(quantity & 0xFF));
+  appendCrc(&frame);
+
+  status = writeRequestLocked(frame);
+  if (!status.ok()) {
+    return status;
+  }
+
+  std::vector<uint8_t> data;
+  status = readResponseLocked(slaveId, kFunctionReadInputRegisters, quantity, &data);
+  if (!status.ok()) {
+    return status;
+  }
+  if (data.size() != static_cast<size_t>(quantity) * 2) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "输入寄存器响应长度异常");
+  }
+
+  out->clear();
+  out->reserve(quantity);
+  for (uint16_t i = 0; i < quantity; ++i) {
+    const size_t offset = static_cast<size_t>(i) * 2;
+    const uint16_t value = static_cast<uint16_t>((static_cast<uint16_t>(data[offset]) << 8) | data[offset + 1]);
+    out->push_back(value);
+  }
+  LOG_DEBUG("ModbusRTU 输入寄存器响应解析完成: device={}, address={}, quantity={}, 数据={}",
+            config_.device(),
+            address,
+            quantity,
+            bytesToHex(data));
+  return grpc::Status::OK;
+}
+
+grpc::Status SerialBus::WriteSingleRegister(uint8_t slaveId, uint16_t address, uint16_t value) {
+  std::lock_guard<std::mutex> lock(mu_);
+  auto status = ensureOpenLocked();
+  if (!status.ok()) {
+    return status;
+  }
+
+  std::vector<uint8_t> frame;
+  frame.reserve(8);
+  frame.push_back(slaveId);
+  frame.push_back(kFunctionWriteSingleRegister);
+  frame.push_back(static_cast<uint8_t>((address >> 8) & 0xFF));
+  frame.push_back(static_cast<uint8_t>(address & 0xFF));
+  frame.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
+  frame.push_back(static_cast<uint8_t>(value & 0xFF));
+  appendCrc(&frame);
+
+  status = writeRequestLocked(frame);
+  if (!status.ok()) {
+    return status;
+  }
+  return readWriteSingleRegisterResponseLocked(slaveId, address, value);
+}
+
+grpc::Status SerialBus::WriteMultipleRegisters(uint8_t slaveId,
+                                               uint16_t address,
+                                               const std::vector<uint16_t>& values) {
+  if (values.empty()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "values 不能为空");
+  }
+  if (values.size() > kMaxWriteMultipleRegistersQuantity) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "写多寄存器数量不能超过 123");
+  }
+
+  std::lock_guard<std::mutex> lock(mu_);
+  auto status = ensureOpenLocked();
+  if (!status.ok()) {
+    return status;
+  }
+  const auto quantity = static_cast<uint16_t>(values.size());
+
+  std::vector<uint8_t> frame;
+  frame.reserve(9 + values.size() * 2);
+  frame.push_back(slaveId);
+  frame.push_back(kFunctionWriteMultipleRegisters);
+  frame.push_back(static_cast<uint8_t>((address >> 8) & 0xFF));
+  frame.push_back(static_cast<uint8_t>(address & 0xFF));
+  frame.push_back(static_cast<uint8_t>((quantity >> 8) & 0xFF));
+  frame.push_back(static_cast<uint8_t>(quantity & 0xFF));
+  frame.push_back(static_cast<uint8_t>(quantity * 2));
+  for (const auto value : values) {
+    frame.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
+    frame.push_back(static_cast<uint8_t>(value & 0xFF));
+  }
+  appendCrc(&frame);
+
+  status = writeRequestLocked(frame);
+  if (!status.ok()) {
+    return status;
+  }
+  return readWriteMultipleRegistersResponseLocked(slaveId, address, quantity);
 }
 
 grpc::Status SerialBus::ReadRequest(RtuRequest* out) {
@@ -490,6 +628,146 @@ grpc::Status SerialBus::readResponseLocked(
   }
 
   outData->assign(body.begin(), body.begin() + byteCount);
+  return grpc::Status::OK;
+}
+
+grpc::Status SerialBus::readWriteSingleRegisterResponseLocked(
+    uint8_t expectedSlaveId,
+    uint16_t expectedAddress,
+    uint16_t expectedValue) {
+  const auto timeout = std::chrono::milliseconds(config_.read_timeout_ms());
+  std::array<uint8_t, 2> header{};
+  auto status = readExactLocked(header.data(), header.size(), timeout);
+  if (!status.ok()) {
+    return status;
+  }
+
+  if (header[1] == static_cast<uint8_t>(kFunctionWriteSingleRegister | 0x80)) {
+    std::array<uint8_t, 3> body{};
+    status = readExactLocked(body.data(), body.size(), timeout);
+    if (!status.ok()) {
+      return status;
+    }
+    std::vector<uint8_t> frame;
+    frame.reserve(header.size() + body.size());
+    frame.insert(frame.end(), header.begin(), header.end());
+    frame.insert(frame.end(), body.begin(), body.end());
+    LOG_INFO("ModbusRTU 报文接收: 设备={}, 长度={}, 数据={}",
+             config_.device(),
+             frame.size(),
+             bytesToHex(frame));
+    const uint16_t crc = computeCrc(frame.data(), 3);
+    const uint16_t respCrc = static_cast<uint16_t>(frame[3]) | (static_cast<uint16_t>(frame[4]) << 8);
+    if (crc != respCrc) {
+      return grpc::Status(grpc::StatusCode::UNAVAILABLE, "异常响应 CRC 不匹配");
+    }
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("Modbus 异常: {}", frame[2]));
+  }
+
+  std::array<uint8_t, 6> body{};
+  status = readExactLocked(body.data(), body.size(), timeout);
+  if (!status.ok()) {
+    return status;
+  }
+
+  std::vector<uint8_t> frame;
+  frame.reserve(header.size() + body.size());
+  frame.insert(frame.end(), header.begin(), header.end());
+  frame.insert(frame.end(), body.begin(), body.end());
+  LOG_INFO("ModbusRTU 报文接收: 设备={}, 长度={}, 数据={}",
+           config_.device(),
+           frame.size(),
+           bytesToHex(frame));
+
+  const uint16_t crc = computeCrc(frame.data(), frame.size() - 2);
+  const uint16_t respCrc = static_cast<uint16_t>(frame[6]) | (static_cast<uint16_t>(frame[7]) << 8);
+  if (crc != respCrc) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应 CRC 不匹配");
+  }
+  if (frame[0] != expectedSlaveId) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应 slave_id 不匹配");
+  }
+  if (frame[1] != kFunctionWriteSingleRegister) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应功能码不匹配");
+  }
+  const uint16_t address = static_cast<uint16_t>((static_cast<uint16_t>(frame[2]) << 8) | frame[3]);
+  const uint16_t value = static_cast<uint16_t>((static_cast<uint16_t>(frame[4]) << 8) | frame[5]);
+  if (address != expectedAddress) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "写单寄存器响应地址不匹配");
+  }
+  if (value != expectedValue) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "写单寄存器响应值不匹配");
+  }
+  return grpc::Status::OK;
+}
+
+grpc::Status SerialBus::readWriteMultipleRegistersResponseLocked(
+    uint8_t expectedSlaveId,
+    uint16_t expectedAddress,
+    uint16_t expectedQuantity) {
+  const auto timeout = std::chrono::milliseconds(config_.read_timeout_ms());
+  std::array<uint8_t, 2> header{};
+  auto status = readExactLocked(header.data(), header.size(), timeout);
+  if (!status.ok()) {
+    return status;
+  }
+
+  if (header[1] == static_cast<uint8_t>(kFunctionWriteMultipleRegisters | 0x80)) {
+    std::array<uint8_t, 3> body{};
+    status = readExactLocked(body.data(), body.size(), timeout);
+    if (!status.ok()) {
+      return status;
+    }
+    std::vector<uint8_t> frame;
+    frame.reserve(header.size() + body.size());
+    frame.insert(frame.end(), header.begin(), header.end());
+    frame.insert(frame.end(), body.begin(), body.end());
+    LOG_INFO("ModbusRTU 报文接收: 设备={}, 长度={}, 数据={}",
+             config_.device(),
+             frame.size(),
+             bytesToHex(frame));
+    const uint16_t crc = computeCrc(frame.data(), 3);
+    const uint16_t respCrc = static_cast<uint16_t>(frame[3]) | (static_cast<uint16_t>(frame[4]) << 8);
+    if (crc != respCrc) {
+      return grpc::Status(grpc::StatusCode::UNAVAILABLE, "异常响应 CRC 不匹配");
+    }
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("Modbus 异常: {}", frame[2]));
+  }
+
+  std::array<uint8_t, 6> body{};
+  status = readExactLocked(body.data(), body.size(), timeout);
+  if (!status.ok()) {
+    return status;
+  }
+
+  std::vector<uint8_t> frame;
+  frame.reserve(header.size() + body.size());
+  frame.insert(frame.end(), header.begin(), header.end());
+  frame.insert(frame.end(), body.begin(), body.end());
+  LOG_INFO("ModbusRTU 报文接收: 设备={}, 长度={}, 数据={}",
+           config_.device(),
+           frame.size(),
+           bytesToHex(frame));
+
+  const uint16_t crc = computeCrc(frame.data(), frame.size() - 2);
+  const uint16_t respCrc = static_cast<uint16_t>(frame[6]) | (static_cast<uint16_t>(frame[7]) << 8);
+  if (crc != respCrc) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应 CRC 不匹配");
+  }
+  if (frame[0] != expectedSlaveId) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应 slave_id 不匹配");
+  }
+  if (frame[1] != kFunctionWriteMultipleRegisters) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应功能码不匹配");
+  }
+  const uint16_t address = static_cast<uint16_t>((static_cast<uint16_t>(frame[2]) << 8) | frame[3]);
+  const uint16_t quantity = static_cast<uint16_t>((static_cast<uint16_t>(frame[4]) << 8) | frame[5]);
+  if (address != expectedAddress) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "写多寄存器响应地址不匹配");
+  }
+  if (quantity != expectedQuantity) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "写多寄存器响应数量不匹配");
+  }
   return grpc::Status::OK;
 }
 

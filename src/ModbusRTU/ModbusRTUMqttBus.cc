@@ -17,9 +17,13 @@ namespace ModbusRTU {
 namespace {
 constexpr uint8_t kFunctionReadCoils = 0x01;
 constexpr uint8_t kFunctionReadHoldingRegisters = 0x03;
+constexpr uint8_t kFunctionReadInputRegisters = 0x04;
+constexpr uint8_t kFunctionWriteSingleRegister = 0x06;
+constexpr uint8_t kFunctionWriteMultipleRegisters = 0x10;
 constexpr const char* kAppName = "AGVC";
 constexpr const char* kAppTypeUart = "uartManager";
 constexpr char kHexDigits[] = "0123456789ABCDEF";
+constexpr size_t kMaxWriteMultipleRegistersQuantity = 123;
 
 std::string statusToMessage(int32_t statusCode) {
   switch (statusCode) {
@@ -71,8 +75,24 @@ grpc::Status MqttBus::ReadCoil(uint8_t slaveId, uint16_t address, bool* out) {
     return status;
   }
 
+  std::vector<uint8_t> frame;
+  frame.reserve(8);
+  frame.push_back(slaveId);
+  frame.push_back(kFunctionReadCoils);
+  frame.push_back(static_cast<uint8_t>((address >> 8) & 0xFF));
+  frame.push_back(static_cast<uint8_t>(address & 0xFF));
+  frame.push_back(0x00);
+  frame.push_back(0x01);
+  SerialBus::appendCrc(&frame);
+
+  std::vector<uint8_t> responseFrame;
+  status = sendFrame(frame, &responseFrame);
+  if (!status.ok()) {
+    return status;
+  }
+
   std::vector<uint8_t> data;
-  status = sendRequest(slaveId, kFunctionReadCoils, address, 1, &data);
+  status = parseReadResponse(responseFrame, slaveId, kFunctionReadCoils, 1, &data);
   if (!status.ok()) {
     return status;
   }
@@ -116,8 +136,24 @@ grpc::Status MqttBus::ReadHoldingRegisters(uint8_t slaveId,
     return status;
   }
 
+  std::vector<uint8_t> frame;
+  frame.reserve(8);
+  frame.push_back(slaveId);
+  frame.push_back(kFunctionReadHoldingRegisters);
+  frame.push_back(static_cast<uint8_t>((address >> 8) & 0xFF));
+  frame.push_back(static_cast<uint8_t>(address & 0xFF));
+  frame.push_back(static_cast<uint8_t>((quantity >> 8) & 0xFF));
+  frame.push_back(static_cast<uint8_t>(quantity & 0xFF));
+  SerialBus::appendCrc(&frame);
+
+  std::vector<uint8_t> responseFrame;
+  status = sendFrame(frame, &responseFrame);
+  if (!status.ok()) {
+    return status;
+  }
+
   std::vector<uint8_t> data;
-  status = sendRequest(slaveId, kFunctionReadHoldingRegisters, address, quantity, &data);
+  status = parseReadResponse(responseFrame, slaveId, kFunctionReadHoldingRegisters, quantity, &data);
   if (!status.ok()) {
     return status;
   }
@@ -141,6 +177,145 @@ grpc::Status MqttBus::ReadHoldingRegisters(uint8_t slaveId,
   return grpc::Status::OK;
 }
 
+grpc::Status MqttBus::ReadInputRegister(uint8_t slaveId, uint16_t address, uint16_t* out) {
+  if (out == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
+  }
+  std::vector<uint16_t> values;
+  auto status = ReadInputRegisters(slaveId, address, 1, &values);
+  if (!status.ok()) {
+    return status;
+  }
+  if (values.size() != 1) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "输入寄存器响应数量异常");
+  }
+  *out = values.front();
+  return grpc::Status::OK;
+}
+
+grpc::Status MqttBus::ReadInputRegisters(uint8_t slaveId,
+                                         uint16_t address,
+                                         uint16_t quantity,
+                                         std::vector<uint16_t>* out) {
+  if (out == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
+  }
+  if (quantity == 0) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "quantity 不能为空");
+  }
+
+  std::lock_guard<std::mutex> lock(mu_);
+  auto status = ensureOpenLocked();
+  if (!status.ok()) {
+    return status;
+  }
+
+  std::vector<uint8_t> frame;
+  frame.reserve(8);
+  frame.push_back(slaveId);
+  frame.push_back(kFunctionReadInputRegisters);
+  frame.push_back(static_cast<uint8_t>((address >> 8) & 0xFF));
+  frame.push_back(static_cast<uint8_t>(address & 0xFF));
+  frame.push_back(static_cast<uint8_t>((quantity >> 8) & 0xFF));
+  frame.push_back(static_cast<uint8_t>(quantity & 0xFF));
+  SerialBus::appendCrc(&frame);
+
+  std::vector<uint8_t> responseFrame;
+  status = sendFrame(frame, &responseFrame);
+  if (!status.ok()) {
+    return status;
+  }
+
+  std::vector<uint8_t> data;
+  status = parseReadResponse(responseFrame, slaveId, kFunctionReadInputRegisters, quantity, &data);
+  if (!status.ok()) {
+    return status;
+  }
+  if (data.size() != static_cast<size_t>(quantity) * 2) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "输入寄存器响应长度异常");
+  }
+
+  out->clear();
+  out->reserve(quantity);
+  for (uint16_t i = 0; i < quantity; ++i) {
+    const size_t offset = static_cast<size_t>(i) * 2;
+    const uint16_t value = static_cast<uint16_t>((static_cast<uint16_t>(data[offset]) << 8) | data[offset + 1]);
+    out->push_back(value);
+  }
+  LOG_DEBUG("ModbusRTU MQTT 输入寄存器响应解析完成: conn_name={}, serial_port={}, address={}, quantity={}, 数据={}",
+            config_.conn_name(),
+            config_.serial_port(),
+            address,
+            quantity,
+            bytesToHex(data));
+  return grpc::Status::OK;
+}
+
+grpc::Status MqttBus::WriteSingleRegister(uint8_t slaveId, uint16_t address, uint16_t value) {
+  std::lock_guard<std::mutex> lock(mu_);
+  auto status = ensureOpenLocked();
+  if (!status.ok()) {
+    return status;
+  }
+
+  std::vector<uint8_t> frame;
+  frame.reserve(8);
+  frame.push_back(slaveId);
+  frame.push_back(kFunctionWriteSingleRegister);
+  frame.push_back(static_cast<uint8_t>((address >> 8) & 0xFF));
+  frame.push_back(static_cast<uint8_t>(address & 0xFF));
+  frame.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
+  frame.push_back(static_cast<uint8_t>(value & 0xFF));
+  SerialBus::appendCrc(&frame);
+
+  std::vector<uint8_t> responseFrame;
+  status = sendFrame(frame, &responseFrame);
+  if (!status.ok()) {
+    return status;
+  }
+  return parseWriteSingleRegisterResponse(responseFrame, slaveId, address, value);
+}
+
+grpc::Status MqttBus::WriteMultipleRegisters(uint8_t slaveId,
+                                             uint16_t address,
+                                             const std::vector<uint16_t>& values) {
+  if (values.empty()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "values 不能为空");
+  }
+  if (values.size() > kMaxWriteMultipleRegistersQuantity) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "写多寄存器数量不能超过 123");
+  }
+
+  std::lock_guard<std::mutex> lock(mu_);
+  auto status = ensureOpenLocked();
+  if (!status.ok()) {
+    return status;
+  }
+  const auto quantity = static_cast<uint16_t>(values.size());
+
+  std::vector<uint8_t> frame;
+  frame.reserve(9 + values.size() * 2);
+  frame.push_back(slaveId);
+  frame.push_back(kFunctionWriteMultipleRegisters);
+  frame.push_back(static_cast<uint8_t>((address >> 8) & 0xFF));
+  frame.push_back(static_cast<uint8_t>(address & 0xFF));
+  frame.push_back(static_cast<uint8_t>((quantity >> 8) & 0xFF));
+  frame.push_back(static_cast<uint8_t>(quantity & 0xFF));
+  frame.push_back(static_cast<uint8_t>(quantity * 2));
+  for (const auto value : values) {
+    frame.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
+    frame.push_back(static_cast<uint8_t>(value & 0xFF));
+  }
+  SerialBus::appendCrc(&frame);
+
+  std::vector<uint8_t> responseFrame;
+  status = sendFrame(frame, &responseFrame);
+  if (!status.ok()) {
+    return status;
+  }
+  return parseWriteMultipleRegistersResponse(responseFrame, slaveId, address, quantity);
+}
+
 grpc::Status MqttBus::ensureOpenLocked() {
   if (opened_) {
     return grpc::Status::OK;
@@ -162,24 +337,10 @@ grpc::Status MqttBus::ensureOpenLocked() {
   return grpc::Status::OK;
 }
 
-grpc::Status MqttBus::sendRequest(uint8_t slaveId,
-                                  uint8_t function,
-                                  uint16_t address,
-                                  uint16_t quantity,
-                                  std::vector<uint8_t>* outData) {
-  if (outData == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "outData 为空");
+grpc::Status MqttBus::sendFrame(const std::vector<uint8_t>& frame, std::vector<uint8_t>* outFrame) {
+  if (outFrame == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "outFrame 为空");
   }
-
-  std::vector<uint8_t> frame;
-  frame.reserve(8);
-  frame.push_back(slaveId);
-  frame.push_back(function);
-  frame.push_back(static_cast<uint8_t>((address >> 8) & 0xFF));
-  frame.push_back(static_cast<uint8_t>(address & 0xFF));
-  frame.push_back(static_cast<uint8_t>((quantity >> 8) & 0xFF));
-  frame.push_back(static_cast<uint8_t>(quantity & 0xFF));
-  SerialBus::appendCrc(&frame);
 
   const auto token = std::to_string(tokenCounter_.fetch_add(1, std::memory_order_relaxed) + 1);
   boost::json::object requestObj;
@@ -278,14 +439,15 @@ grpc::Status MqttBus::sendRequest(uint8_t slaveId,
            config_.conn_name(),
            config_.serial_port(),
            bytesToHex(responseFrame));
-  return parseResponse(responseFrame, slaveId, function, quantity, outData);
+  *outFrame = std::move(responseFrame);
+  return grpc::Status::OK;
 }
 
-grpc::Status MqttBus::parseResponse(const std::vector<uint8_t>& frame,
-                                    uint8_t expectedSlaveId,
-                                    uint8_t expectedFunction,
-                                    uint16_t quantity,
-                                    std::vector<uint8_t>* outData) const {
+grpc::Status MqttBus::parseReadResponse(const std::vector<uint8_t>& frame,
+                                        uint8_t expectedSlaveId,
+                                        uint8_t expectedFunction,
+                                        uint16_t quantity,
+                                        std::vector<uint8_t>* outData) const {
   if (outData == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "outData 为空");
   }
@@ -334,6 +496,102 @@ grpc::Status MqttBus::parseResponse(const std::vector<uint8_t>& frame,
   }
 
   outData->assign(frame.begin() + 3, frame.begin() + 3 + byteCount);
+  return grpc::Status::OK;
+}
+
+grpc::Status MqttBus::parseWriteSingleRegisterResponse(const std::vector<uint8_t>& frame,
+                                                       uint8_t expectedSlaveId,
+                                                       uint16_t expectedAddress,
+                                                       uint16_t expectedValue) const {
+  if (frame.size() < 5) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应帧过短");
+  }
+  if (frame[0] != expectedSlaveId) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应 slave_id 不匹配");
+  }
+
+  const uint8_t function = frame[1];
+  if (function == static_cast<uint8_t>(kFunctionWriteSingleRegister | 0x80)) {
+    if (frame.size() != 5) {
+      return grpc::Status(grpc::StatusCode::UNAVAILABLE, "异常响应长度异常");
+    }
+    const uint16_t crc = SerialBus::computeCrc(frame.data(), 3);
+    const uint16_t respCrc = static_cast<uint16_t>(frame[3]) | (static_cast<uint16_t>(frame[4]) << 8);
+    if (crc != respCrc) {
+      return grpc::Status(grpc::StatusCode::UNAVAILABLE, "异常响应 CRC 不匹配");
+    }
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("Modbus 异常: {}", frame[2]));
+  }
+
+  if (function != kFunctionWriteSingleRegister) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应功能码不匹配");
+  }
+  if (frame.size() != 8) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "写单寄存器响应长度不匹配");
+  }
+
+  const uint16_t crc = SerialBus::computeCrc(frame.data(), frame.size() - 2);
+  const uint16_t respCrc = static_cast<uint16_t>(frame[6]) | (static_cast<uint16_t>(frame[7]) << 8);
+  if (crc != respCrc) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应 CRC 不匹配");
+  }
+
+  const uint16_t address = static_cast<uint16_t>((static_cast<uint16_t>(frame[2]) << 8) | frame[3]);
+  const uint16_t value = static_cast<uint16_t>((static_cast<uint16_t>(frame[4]) << 8) | frame[5]);
+  if (address != expectedAddress) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "写单寄存器响应地址不匹配");
+  }
+  if (value != expectedValue) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "写单寄存器响应值不匹配");
+  }
+  return grpc::Status::OK;
+}
+
+grpc::Status MqttBus::parseWriteMultipleRegistersResponse(const std::vector<uint8_t>& frame,
+                                                          uint8_t expectedSlaveId,
+                                                          uint16_t expectedAddress,
+                                                          uint16_t expectedQuantity) const {
+  if (frame.size() < 5) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应帧过短");
+  }
+  if (frame[0] != expectedSlaveId) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应 slave_id 不匹配");
+  }
+
+  const uint8_t function = frame[1];
+  if (function == static_cast<uint8_t>(kFunctionWriteMultipleRegisters | 0x80)) {
+    if (frame.size() != 5) {
+      return grpc::Status(grpc::StatusCode::UNAVAILABLE, "异常响应长度异常");
+    }
+    const uint16_t crc = SerialBus::computeCrc(frame.data(), 3);
+    const uint16_t respCrc = static_cast<uint16_t>(frame[3]) | (static_cast<uint16_t>(frame[4]) << 8);
+    if (crc != respCrc) {
+      return grpc::Status(grpc::StatusCode::UNAVAILABLE, "异常响应 CRC 不匹配");
+    }
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("Modbus 异常: {}", frame[2]));
+  }
+
+  if (function != kFunctionWriteMultipleRegisters) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应功能码不匹配");
+  }
+  if (frame.size() != 8) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "写多寄存器响应长度不匹配");
+  }
+
+  const uint16_t crc = SerialBus::computeCrc(frame.data(), frame.size() - 2);
+  const uint16_t respCrc = static_cast<uint16_t>(frame[6]) | (static_cast<uint16_t>(frame[7]) << 8);
+  if (crc != respCrc) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应 CRC 不匹配");
+  }
+
+  const uint16_t address = static_cast<uint16_t>((static_cast<uint16_t>(frame[2]) << 8) | frame[3]);
+  const uint16_t quantity = static_cast<uint16_t>((static_cast<uint16_t>(frame[4]) << 8) | frame[5]);
+  if (address != expectedAddress) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "写多寄存器响应地址不匹配");
+  }
+  if (quantity != expectedQuantity) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "写多寄存器响应数量不匹配");
+  }
   return grpc::Status::OK;
 }
 

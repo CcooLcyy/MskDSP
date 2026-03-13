@@ -1,223 +1,1009 @@
 {
-  // DataCenter 配置下发示例（仅对已存在连接生效）
+  // DataCenter 配置示例：
+  // 1. 4 个 ModbusRTU 逆变器全部 0x04 遥测转发到 IEC104。
+  // 2. IEC104 的 AGC 总给定路由到 AGC 控制组。
+  // 3. AGC 汇总 4 台逆变器量测，并把总量输出回 IEC104。
   "point_tables": [
     {
       "module_name": "IEC104",
       "conn_name": "模拟IEC104从站",
       "replace": true,
       "tags": [
-        // 遥测
-        "a",
-        "DLT645-B相电压",
-        "DLT645-C相电压",
-        "AGC-1号逆变器当前功率",
-        "AGC-2号逆变器当前功率",
-        "AGC-当前逆变器总功率",
-        "AGC-总逆变器功率目标值",
-        "AGC-总逆变器功率距离目标值偏差",
-        "Modbus-本地主站-A相电压",
-        "Modbus-本地主站-A相电流",
-        // 遥调
-        "AGC遥调控制点",
-        "DLT645-有功功率设定值"
+        "1号逆变器-运行状态",
+        "1号逆变器-故障状态",
+        "1号逆变器-A相电压",
+        "1号逆变器-B相电压",
+        "1号逆变器-C相电压",
+        "1号逆变器-A相电流",
+        "1号逆变器-B相电流",
+        "1号逆变器-C相电流",
+        "1号逆变器-频率",
+        "1号逆变器-有功功率",
+        "1号逆变器-无功功率",
+        "1号逆变器-功率因数",
+        "1号逆变器-日发电量",
+        "1号逆变器-总发电量",
+        "2号逆变器-运行状态",
+        "2号逆变器-故障状态",
+        "2号逆变器-A相电压",
+        "2号逆变器-B相电压",
+        "2号逆变器-C相电压",
+        "2号逆变器-A相电流",
+        "2号逆变器-B相电流",
+        "2号逆变器-C相电流",
+        "2号逆变器-频率",
+        "2号逆变器-有功功率",
+        "2号逆变器-无功功率",
+        "2号逆变器-功率因数",
+        "2号逆变器-日发电量",
+        "2号逆变器-总发电量",
+        "3号逆变器-运行状态",
+        "3号逆变器-故障状态",
+        "3号逆变器-A相电压",
+        "3号逆变器-B相电压",
+        "3号逆变器-C相电压",
+        "3号逆变器-A相电流",
+        "3号逆变器-B相电流",
+        "3号逆变器-C相电流",
+        "3号逆变器-频率",
+        "3号逆变器-有功功率",
+        "3号逆变器-无功功率",
+        "3号逆变器-功率因数",
+        "3号逆变器-日发电量",
+        "3号逆变器-总发电量",
+        "4号逆变器-运行状态",
+        "4号逆变器-故障状态",
+        "4号逆变器-A相电压",
+        "4号逆变器-B相电压",
+        "4号逆变器-C相电压",
+        "4号逆变器-A相电流",
+        "4号逆变器-B相电流",
+        "4号逆变器-C相电流",
+        "4号逆变器-频率",
+        "4号逆变器-有功功率",
+        "4号逆变器-无功功率",
+        "4号逆变器-功率因数",
+        "4号逆变器-日发电量",
+        "4号逆变器-总发电量",
+        "AGC总有功实时值",
+        "AGC总有功目标值",
+        "AGC总有功偏差",
+        "AGC总有功给定"
       ]
     },
     {
-      "module_name": "DLT645",
-      "conn_name": "模拟DLT645_LORA主站_01",
-      "replace": true,
-      "tags": [
-        "A相电压",
-        "B相电压",
-        "C相电压",
-        "有功功率设定值",
-        "有功功率实际值"
-      ]
-    },
-    {
-      "module_name": "DLT645",
-      "conn_name": "模拟DLT645_LORA主站_02",
-      "replace": true,
-      "tags": [
-        "A相电压",
-        "B相电压",
-        "C相电压",
-        "有功功率设定值",
-        "有功功率实际值"
-      ]
-    },
-    {
+      // AGC 自身会注册点表，这里显式保留一份，便于 DataCenter 路由校验与示例展示。
       "module_name": "AGC",
       "conn_name": "1号AGC控制组",
       "replace": true,
       "tags": [
-        "P_CMD",
-        "INV1_P_MEAS",
-        "INV1_P_SET",
-        "INV2_P_MEAS",
-        "INV2_P_SET",
-        "P_TOTAL_MEAS",
-        "P_TOTAL_TARGET",
-        "P_TOTAL_ERROR"
+        "AGC总有功给定输入",
+        "RS485-6-1号逆变器有功功率量测",
+        "RS485-6-1号逆变器有功功率设定",
+        "RS485-6-2号逆变器有功功率量测",
+        "RS485-6-2号逆变器有功功率设定",
+        "RS485-5-1号逆变器有功功率量测",
+        "RS485-5-1号逆变器有功功率设定",
+        "RS485-5-2号逆变器有功功率量测",
+        "RS485-5-2号逆变器有功功率设定",
+        "AGC总有功实时值",
+        "AGC总有功目标值",
+        "AGC总有功偏差"
       ]
     },
     {
       "module_name": "ModbusRTU",
-      "conn_name": "本地Modbus主站",
+      "conn_name": "锦浪Solis-RS485-6",
       "replace": true,
       "tags": [
-        "本地主站-A相电压",
-        "本地主站-A相电流"
+        "锦浪Solis-运行状态",
+        "锦浪Solis-故障状态",
+        "锦浪Solis-A相电压",
+        "锦浪Solis-B相电压",
+        "锦浪Solis-C相电压",
+        "锦浪Solis-A相电流",
+        "锦浪Solis-B相电流",
+        "锦浪Solis-C相电流",
+        "锦浪Solis-频率",
+        "锦浪Solis-有功功率",
+        "锦浪Solis-无功功率",
+        "锦浪Solis-功率因数",
+        "锦浪Solis-日发电量",
+        "锦浪Solis-总发电量",
+        "锦浪Solis-有功功率限值-命令"
+      ]
+    },
+    {
+      "module_name": "ModbusRTU",
+      "conn_name": "锦浪Solis-RS485-6-2号地址",
+      "replace": true,
+      "tags": [
+        "锦浪Solis-运行状态",
+        "锦浪Solis-故障状态",
+        "锦浪Solis-A相电压",
+        "锦浪Solis-B相电压",
+        "锦浪Solis-C相电压",
+        "锦浪Solis-A相电流",
+        "锦浪Solis-B相电流",
+        "锦浪Solis-C相电流",
+        "锦浪Solis-频率",
+        "锦浪Solis-有功功率",
+        "锦浪Solis-无功功率",
+        "锦浪Solis-功率因数",
+        "锦浪Solis-日发电量",
+        "锦浪Solis-总发电量",
+        "锦浪Solis-有功功率限值-命令"
+      ]
+    },
+    {
+      "module_name": "ModbusRTU",
+      "conn_name": "锦浪Solis-RS485-5-1号地址",
+      "replace": true,
+      "tags": [
+        "锦浪Solis-运行状态",
+        "锦浪Solis-故障状态",
+        "锦浪Solis-A相电压",
+        "锦浪Solis-B相电压",
+        "锦浪Solis-C相电压",
+        "锦浪Solis-A相电流",
+        "锦浪Solis-B相电流",
+        "锦浪Solis-C相电流",
+        "锦浪Solis-频率",
+        "锦浪Solis-有功功率",
+        "锦浪Solis-无功功率",
+        "锦浪Solis-功率因数",
+        "锦浪Solis-日发电量",
+        "锦浪Solis-总发电量",
+        "锦浪Solis-有功功率限值-命令"
+      ]
+    },
+    {
+      "module_name": "ModbusRTU",
+      "conn_name": "锦浪Solis-RS485-5-2号地址",
+      "replace": true,
+      "tags": [
+        "锦浪Solis-运行状态",
+        "锦浪Solis-故障状态",
+        "锦浪Solis-A相电压",
+        "锦浪Solis-B相电压",
+        "锦浪Solis-C相电压",
+        "锦浪Solis-A相电流",
+        "锦浪Solis-B相电流",
+        "锦浪Solis-C相电流",
+        "锦浪Solis-频率",
+        "锦浪Solis-有功功率",
+        "锦浪Solis-无功功率",
+        "锦浪Solis-功率因数",
+        "锦浪Solis-日发电量",
+        "锦浪Solis-总发电量",
+        "锦浪Solis-有功功率限值-命令"
       ]
     }
   ],
   "routes": {
     "replace": true,
     "routes": [
-      // 本地Modbus主站出口路由
       {
         "src": {
           "module_name": "ModbusRTU",
-          "conn_name": "本地Modbus主站",
-          "tag": "本地主站-A相电压"
+          "conn_name": "锦浪Solis-RS485-6",
+          "tag": "锦浪Solis-运行状态"
         },
         "dst": {
           "module_name": "IEC104",
           "conn_name": "模拟IEC104从站",
-          "tag": "Modbus-本地主站-A相电压"
+          "tag": "1号逆变器-运行状态"
         }
       },
       {
         "src": {
           "module_name": "ModbusRTU",
-          "conn_name": "本地Modbus主站",
-          "tag": "本地主站-A相电流"
+          "conn_name": "锦浪Solis-RS485-6",
+          "tag": "锦浪Solis-故障状态"
         },
         "dst": {
           "module_name": "IEC104",
           "conn_name": "模拟IEC104从站",
-          "tag": "Modbus-本地主站-A相电流"
-        }
-      },
-      // AGC路由
-      {
-        "src": {
-          "module_name": "IEC104",
-          "conn_name": "模拟IEC104从站",
-          "tag": "AGC遥调控制点"
-        },
-        "dst": {
-          "module_name": "AGC",
-          "conn_name": "1号AGC控制组",
-          "tag": "P_CMD"
+          "tag": "1号逆变器-故障状态"
         }
       },
       {
         "src": {
-          "module_name": "AGC",
-          "conn_name": "1号AGC控制组",
-          "tag": "INV1_P_MEAS"
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6",
+          "tag": "锦浪Solis-A相电压"
         },
         "dst": {
           "module_name": "IEC104",
           "conn_name": "模拟IEC104从站",
-          "tag": "AGC-1号逆变器当前功率"
+          "tag": "1号逆变器-A相电压"
         }
       },
       {
         "src": {
-          "module_name": "AGC",
-          "conn_name": "1号AGC控制组",
-          "tag": "INV2_P_MEAS"
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6",
+          "tag": "锦浪Solis-B相电压"
         },
         "dst": {
           "module_name": "IEC104",
           "conn_name": "模拟IEC104从站",
-          "tag": "AGC-2号逆变器当前功率"
+          "tag": "1号逆变器-B相电压"
         }
       },
       {
         "src": {
-          "module_name": "AGC",
-          "conn_name": "1号AGC控制组",
-          "tag": "P_TOTAL_MEAS"
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6",
+          "tag": "锦浪Solis-C相电压"
         },
         "dst": {
           "module_name": "IEC104",
           "conn_name": "模拟IEC104从站",
-          "tag": "AGC-当前逆变器总功率"
+          "tag": "1号逆变器-C相电压"
         }
       },
       {
         "src": {
-          "module_name": "AGC",
-          "conn_name": "1号AGC控制组",
-          "tag": "P_TOTAL_TARGET"
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6",
+          "tag": "锦浪Solis-A相电流"
         },
         "dst": {
           "module_name": "IEC104",
           "conn_name": "模拟IEC104从站",
-          "tag": "AGC-总逆变器功率目标值"
+          "tag": "1号逆变器-A相电流"
         }
       },
       {
         "src": {
-          "module_name": "AGC",
-          "conn_name": "1号AGC控制组",
-          "tag": "P_TOTAL_ERROR"
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6",
+          "tag": "锦浪Solis-B相电流"
         },
         "dst": {
           "module_name": "IEC104",
           "conn_name": "模拟IEC104从站",
-          "tag": "AGC-总逆变器功率距离目标值偏差"
+          "tag": "1号逆变器-B相电流"
         }
       },
       {
         "src": {
-          "module_name": "DLT645",
-          "conn_name": "模拟DLT645_LORA主站_01",
-          "tag": "有功功率实际值"
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6",
+          "tag": "锦浪Solis-C相电流"
         },
         "dst": {
-          "module_name": "AGC",
-          "conn_name": "1号AGC控制组",
-          "tag": "INV1_P_MEAS"
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "1号逆变器-C相电流"
         }
       },
       {
         "src": {
-          "module_name": "DLT645",
-          "conn_name": "模拟DLT645_LORA主站_02",
-          "tag": "有功功率实际值"
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6",
+          "tag": "锦浪Solis-频率"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "1号逆变器-频率"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6",
+          "tag": "锦浪Solis-有功功率"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "1号逆变器-有功功率"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6",
+          "tag": "锦浪Solis-无功功率"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "1号逆变器-无功功率"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6",
+          "tag": "锦浪Solis-功率因数"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "1号逆变器-功率因数"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6",
+          "tag": "锦浪Solis-日发电量"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "1号逆变器-日发电量"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6",
+          "tag": "锦浪Solis-总发电量"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "1号逆变器-总发电量"
+        }
+      },
+
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6-2号地址",
+          "tag": "锦浪Solis-运行状态"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "2号逆变器-运行状态"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6-2号地址",
+          "tag": "锦浪Solis-故障状态"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "2号逆变器-故障状态"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6-2号地址",
+          "tag": "锦浪Solis-A相电压"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "2号逆变器-A相电压"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6-2号地址",
+          "tag": "锦浪Solis-B相电压"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "2号逆变器-B相电压"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6-2号地址",
+          "tag": "锦浪Solis-C相电压"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "2号逆变器-C相电压"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6-2号地址",
+          "tag": "锦浪Solis-A相电流"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "2号逆变器-A相电流"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6-2号地址",
+          "tag": "锦浪Solis-B相电流"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "2号逆变器-B相电流"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6-2号地址",
+          "tag": "锦浪Solis-C相电流"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "2号逆变器-C相电流"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6-2号地址",
+          "tag": "锦浪Solis-频率"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "2号逆变器-频率"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6-2号地址",
+          "tag": "锦浪Solis-有功功率"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "2号逆变器-有功功率"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6-2号地址",
+          "tag": "锦浪Solis-无功功率"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "2号逆变器-无功功率"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6-2号地址",
+          "tag": "锦浪Solis-功率因数"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "2号逆变器-功率因数"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6-2号地址",
+          "tag": "锦浪Solis-日发电量"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "2号逆变器-日发电量"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6-2号地址",
+          "tag": "锦浪Solis-总发电量"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "2号逆变器-总发电量"
+        }
+      },
+
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-1号地址",
+          "tag": "锦浪Solis-运行状态"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "3号逆变器-运行状态"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-1号地址",
+          "tag": "锦浪Solis-故障状态"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "3号逆变器-故障状态"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-1号地址",
+          "tag": "锦浪Solis-A相电压"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "3号逆变器-A相电压"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-1号地址",
+          "tag": "锦浪Solis-B相电压"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "3号逆变器-B相电压"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-1号地址",
+          "tag": "锦浪Solis-C相电压"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "3号逆变器-C相电压"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-1号地址",
+          "tag": "锦浪Solis-A相电流"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "3号逆变器-A相电流"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-1号地址",
+          "tag": "锦浪Solis-B相电流"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "3号逆变器-B相电流"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-1号地址",
+          "tag": "锦浪Solis-C相电流"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "3号逆变器-C相电流"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-1号地址",
+          "tag": "锦浪Solis-频率"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "3号逆变器-频率"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-1号地址",
+          "tag": "锦浪Solis-有功功率"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "3号逆变器-有功功率"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-1号地址",
+          "tag": "锦浪Solis-无功功率"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "3号逆变器-无功功率"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-1号地址",
+          "tag": "锦浪Solis-功率因数"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "3号逆变器-功率因数"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-1号地址",
+          "tag": "锦浪Solis-日发电量"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "3号逆变器-日发电量"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-1号地址",
+          "tag": "锦浪Solis-总发电量"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "3号逆变器-总发电量"
+        }
+      },
+
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-2号地址",
+          "tag": "锦浪Solis-运行状态"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "4号逆变器-运行状态"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-2号地址",
+          "tag": "锦浪Solis-故障状态"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "4号逆变器-故障状态"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-2号地址",
+          "tag": "锦浪Solis-A相电压"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "4号逆变器-A相电压"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-2号地址",
+          "tag": "锦浪Solis-B相电压"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "4号逆变器-B相电压"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-2号地址",
+          "tag": "锦浪Solis-C相电压"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "4号逆变器-C相电压"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-2号地址",
+          "tag": "锦浪Solis-A相电流"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "4号逆变器-A相电流"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-2号地址",
+          "tag": "锦浪Solis-B相电流"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "4号逆变器-B相电流"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-2号地址",
+          "tag": "锦浪Solis-C相电流"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "4号逆变器-C相电流"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-2号地址",
+          "tag": "锦浪Solis-频率"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "4号逆变器-频率"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-2号地址",
+          "tag": "锦浪Solis-有功功率"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "4号逆变器-有功功率"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-2号地址",
+          "tag": "锦浪Solis-无功功率"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "4号逆变器-无功功率"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-2号地址",
+          "tag": "锦浪Solis-功率因数"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "4号逆变器-功率因数"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-2号地址",
+          "tag": "锦浪Solis-日发电量"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "4号逆变器-日发电量"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-2号地址",
+          "tag": "锦浪Solis-总发电量"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "4号逆变器-总发电量"
+        }
+      },
+
+      {
+        "src": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "AGC总有功给定"
         },
         "dst": {
           "module_name": "AGC",
           "conn_name": "1号AGC控制组",
-          "tag": "INV2_P_MEAS"
+          "tag": "AGC总有功给定输入"
+        }
+      },
+
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6",
+          "tag": "锦浪Solis-有功功率"
+        },
+        "dst": {
+          "module_name": "AGC",
+          "conn_name": "1号AGC控制组",
+          "tag": "RS485-6-1号逆变器有功功率量测"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6-2号地址",
+          "tag": "锦浪Solis-有功功率"
+        },
+        "dst": {
+          "module_name": "AGC",
+          "conn_name": "1号AGC控制组",
+          "tag": "RS485-6-2号逆变器有功功率量测"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-1号地址",
+          "tag": "锦浪Solis-有功功率"
+        },
+        "dst": {
+          "module_name": "AGC",
+          "conn_name": "1号AGC控制组",
+          "tag": "RS485-5-1号逆变器有功功率量测"
+        }
+      },
+      {
+        "src": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-2号地址",
+          "tag": "锦浪Solis-有功功率"
+        },
+        "dst": {
+          "module_name": "AGC",
+          "conn_name": "1号AGC控制组",
+          "tag": "RS485-5-2号逆变器有功功率量测"
+        }
+      },
+
+      {
+        "src": {
+          "module_name": "AGC",
+          "conn_name": "1号AGC控制组",
+          "tag": "RS485-6-1号逆变器有功功率设定"
+        },
+        "dst": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6",
+          "tag": "锦浪Solis-有功功率限值-命令"
         }
       },
       {
         "src": {
           "module_name": "AGC",
           "conn_name": "1号AGC控制组",
-          "tag": "INV1_P_SET"
+          "tag": "RS485-6-2号逆变器有功功率设定"
         },
         "dst": {
-          "module_name": "DLT645",
-          "conn_name": "模拟DLT645_LORA主站_01",
-          "tag": "有功功率设定值"
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-6-2号地址",
+          "tag": "锦浪Solis-有功功率限值-命令"
         }
       },
       {
         "src": {
           "module_name": "AGC",
           "conn_name": "1号AGC控制组",
-          "tag": "INV2_P_SET"
+          "tag": "RS485-5-1号逆变器有功功率设定"
         },
         "dst": {
-          "module_name": "DLT645",
-          "conn_name": "模拟DLT645_LORA主站_02",
-          "tag": "有功功率设定值"
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-1号地址",
+          "tag": "锦浪Solis-有功功率限值-命令"
+        }
+      },
+      {
+        "src": {
+          "module_name": "AGC",
+          "conn_name": "1号AGC控制组",
+          "tag": "RS485-5-2号逆变器有功功率设定"
+        },
+        "dst": {
+          "module_name": "ModbusRTU",
+          "conn_name": "锦浪Solis-RS485-5-2号地址",
+          "tag": "锦浪Solis-有功功率限值-命令"
+        }
+      },
+
+      {
+        "src": {
+          "module_name": "AGC",
+          "conn_name": "1号AGC控制组",
+          "tag": "AGC总有功实时值"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "AGC总有功实时值"
+        }
+      },
+      {
+        "src": {
+          "module_name": "AGC",
+          "conn_name": "1号AGC控制组",
+          "tag": "AGC总有功目标值"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "AGC总有功目标值"
+        }
+      },
+      {
+        "src": {
+          "module_name": "AGC",
+          "conn_name": "1号AGC控制组",
+          "tag": "AGC总有功偏差"
+        },
+        "dst": {
+          "module_name": "IEC104",
+          "conn_name": "模拟IEC104从站",
+          "tag": "AGC总有功偏差"
         }
       }
     ]

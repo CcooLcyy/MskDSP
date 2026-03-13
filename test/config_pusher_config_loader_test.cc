@@ -61,7 +61,8 @@ TEST(ConfigPusherConfigLoaderTest, LoadConfigWithCommentsAndHexFunction) {
         "point_table": {
           "points": [
             { "tag": "A", "function": "0x01", "address": 1, "type": "DATA_TYPE_BOOL" },
-            { "tag": "B", "function": "0x03", "address": 2, "type": "DATA_TYPE_UINT16" }
+            { "tag": "B", "function": "0x03", "address": 2, "type": "DATA_TYPE_UINT16" },
+            { "tag": "C", "function": "0x04", "address": 3, "type": "DATA_TYPE_UINT16" }
           ]
         }
       }
@@ -78,9 +79,10 @@ TEST(ConfigPusherConfigLoaderTest, LoadConfigWithCommentsAndHexFunction) {
   const auto &task = modbus.links(0);
   ASSERT_TRUE(task.has_point_table());
   const auto &pointTable = task.point_table();
-  ASSERT_EQ(pointTable.points_size(), 2);
+  ASSERT_EQ(pointTable.points_size(), 3);
   EXPECT_EQ(pointTable.points(0).function(), ModbusRTUProto::FUNCTION_READ_COILS);
   EXPECT_EQ(pointTable.points(1).function(), ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS);
+  EXPECT_EQ(pointTable.points(2).function(), ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS);
 }
 
 // 验证：加载 DataCenter 配置时支持 JSONC 注释并解析点表与路由。

@@ -30,6 +30,8 @@ public:
   grpc::Status PublishBool(uint32_t connId, const std::string& tag, bool value, DataCenterProto::Quality quality, int64_t tsMs);
   grpc::Status PublishUInt16(uint32_t connId, const std::string& tag, uint16_t value, DataCenterProto::Quality quality, int64_t tsMs);
   grpc::Status PublishDouble(uint32_t connId, const std::string& tag, double value, DataCenterProto::Quality quality, int64_t tsMs);
+  std::unique_ptr<grpc::ClientReaderInterface<DataCenterProto::PointUpdate>> Subscribe(
+      grpc::ClientContext* context, uint32_t connId, const std::vector<std::string>& tags, bool snapshot);
 
   void setServerAddress(std::string address);
 

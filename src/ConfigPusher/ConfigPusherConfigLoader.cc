@@ -126,6 +126,15 @@ std::optional<int> mapModbusFunctionCode(uint32_t code) {
   if (code == 0x03) {
     return static_cast<int>(ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS);
   }
+  if (code == 0x04) {
+    return static_cast<int>(ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS);
+  }
+  if (code == 0x06) {
+    return static_cast<int>(ModbusRTUProto::FUNCTION_WRITE_SINGLE_REGISTER);
+  }
+  if (code == 0x10) {
+    return static_cast<int>(ModbusRTUProto::FUNCTION_WRITE_MULTIPLE_REGISTERS);
+  }
   return std::nullopt;
 }
 

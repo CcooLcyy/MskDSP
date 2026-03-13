@@ -33,6 +33,12 @@ public:
   grpc::Status ReadCoil(uint8_t slaveId, uint16_t address, bool* out) override;
   grpc::Status ReadHoldingRegister(uint8_t slaveId, uint16_t address, uint16_t* out) override;
   grpc::Status ReadHoldingRegisters(uint8_t slaveId, uint16_t address, uint16_t quantity, std::vector<uint16_t>* out) override;
+  grpc::Status ReadInputRegister(uint8_t slaveId, uint16_t address, uint16_t* out) override;
+  grpc::Status ReadInputRegisters(uint8_t slaveId, uint16_t address, uint16_t quantity, std::vector<uint16_t>* out) override;
+  grpc::Status WriteSingleRegister(uint8_t slaveId, uint16_t address, uint16_t value) override;
+  grpc::Status WriteMultipleRegisters(uint8_t slaveId,
+                                      uint16_t address,
+                                      const std::vector<uint16_t>& values) override;
 
   grpc::Status ReadRequest(RtuRequest* out);
   grpc::Status WriteFrame(const std::vector<uint8_t>& frame);
@@ -54,6 +60,14 @@ private:
       uint8_t expectedFunction,
       uint16_t quantity,
       std::vector<uint8_t>* outData);
+  grpc::Status readWriteSingleRegisterResponseLocked(
+      uint8_t expectedSlaveId,
+      uint16_t expectedAddress,
+      uint16_t expectedValue);
+  grpc::Status readWriteMultipleRegistersResponseLocked(
+      uint8_t expectedSlaveId,
+      uint16_t expectedAddress,
+      uint16_t expectedQuantity);
 
   ModbusRTUProto::SerialConfig config_;
   boost::asio::io_context io_;

@@ -212,6 +212,31 @@ grpc::Status DataCenterClient::PublishDouble(
   return stub->Publish(&ctx, req, &resp);
 }
 
+std::unique_ptr<grpc::ClientReaderInterface<DataCenterProto::PointUpdate>> DataCenterClient::Subscribe(
+    grpc::ClientContext* context, uint32_t connId, const std::vector<std::string>& tags, bool snapshot) {
+  if (context == nullptr) {
+    return nullptr;
+  }
+  if (connId == 0) {
+    return nullptr;
+  }
+  for (const auto& tag : tags) {
+    if (tag.empty()) {
+      return nullptr;
+    }
+  }
+  auto stub = getStub();
+
+  DataCenterProto::SubscribeRequest req;
+  req.set_conn_id(connId);
+  req.set_snapshot(snapshot);
+  for (const auto& tag : tags) {
+    req.add_tags(tag);
+  }
+
+  return stub->Subscribe(context, req);
+}
+
 std::shared_ptr<DataCenterProto::DataCenterService::StubInterface> DataCenterClient::getStub() {
   std::lock_guard<std::mutex> lock(mu_);
   ensureStubLocked();

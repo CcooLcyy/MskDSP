@@ -1,5 +1,8 @@
 {
-  // IEC104 配置下发示例
+  // IEC104 配置示例：
+  // 1. 104 侧作为从站，由上位机/主站访问。
+  // 2. 4 个 ModbusRTU 逆变器的全部 0x04 采集点均映射到 104。
+  // 3. 6201h 作为 AGC 总有功给定遥调点。
   "iec104": {
     "links": [
       {
@@ -7,7 +10,6 @@
           "config": {
             "conn_name": "模拟IEC104从站",
             "role": "ROLE_SERVER",
-            // 站点角色：主站/从站（决定业务语义）
             "station_role": "STATION_ROLE_SLAVE",
             "local": {
               "ip": "0.0.0.0",
@@ -19,7 +21,6 @@
             },
             "ca": 1,
             "oa": 1,
-            // APCI 参数可由上位机/configPusher 配置（单位秒）；CLIENT 在 STARTDT 成功后自动总召（QOI=20）
             "apci": {
               "k": 12,
               "w": 8,
@@ -28,143 +29,502 @@
               "t2": 10,
               "t3": 20
             },
-            // 点值上送参数（影响自发上送与总召应答）
             "point_batch_window_ms": 500,
-            // ASDU 单帧最大字节数（<=249），use_standard_limit=true 时忽略
             "point_max_asdu_bytes": 240,
-            // true: 强制使用 IEC104 标准上限（249 字节）
             "point_use_standard_limit": false,
-            // 自发点值合包去重（按 IOA 保留最新）
             "point_dedupe": true,
-            // 点值上送是否带时标（默认 false）
             "point_with_time": false,
-            // 对时触发 tag（STATION_ROLE_MASTER 订阅该 tag 的 DataCenter 更新并发送对时命令）
-            // 为空时默认 "__time_sync__"
             "time_sync_tag": "__time_sync__"
           }
         },
         "point_table": {
           "replace": true,
           "points": [
-            // 遥调点表开始 
             {
-              "tag": "a",
+              "tag": "1号逆变器-运行状态",
               "ioa": 16385,
               "type": "POINT_TYPE_FLOAT",
-              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
-              "offset": 0.0, // 偏移
-              "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
             },
             {
-              "tag": "DLT645-B相电压",
+              "tag": "1号逆变器-故障状态",
               "ioa": 16386,
               "type": "POINT_TYPE_FLOAT",
-              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
-              "offset": 0.0, // 偏移
-              "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
             },
             {
-              "tag": "DLT645-C相电压",
+              "tag": "1号逆变器-A相电压",
               "ioa": 16387,
               "type": "POINT_TYPE_FLOAT",
-              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
-              "offset": 0.0, // 偏移
-              "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
             },
             {
-              "tag": "AGC-1号逆变器当前功率",
+              "tag": "1号逆变器-B相电压",
               "ioa": 16388,
               "type": "POINT_TYPE_FLOAT",
-              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
-              "offset": 0.0, // 偏移
-              "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
             },
             {
-              "tag": "AGC-2号逆变器当前功率",
+              "tag": "1号逆变器-C相电压",
               "ioa": 16389,
               "type": "POINT_TYPE_FLOAT",
-              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
-              "offset": 0.0, // 偏移
-              "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
             },
             {
-              "tag": "AGC-当前逆变器总功率",
+              "tag": "1号逆变器-A相电流",
               "ioa": 16390,
               "type": "POINT_TYPE_FLOAT",
-              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
-              "offset": 0.0, // 偏移
-              "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
             },
             {
-              "tag": "AGC-总逆变器功率目标值",
+              "tag": "1号逆变器-B相电流",
               "ioa": 16391,
               "type": "POINT_TYPE_FLOAT",
-              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
-              "offset": 0.0, // 偏移
-              "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
             },
             {
-              "tag": "AGC-总逆变器功率距离目标值偏差",
+              "tag": "1号逆变器-C相电流",
               "ioa": 16392,
               "type": "POINT_TYPE_FLOAT",
-              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
-              "offset": 0.0, // 偏移
-              "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
             },
             {
-              "tag": "Modbus-本地主站-A相电压",
+              "tag": "1号逆变器-频率",
               "ioa": 16393,
               "type": "POINT_TYPE_FLOAT",
-              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
-              "offset": 0.0, // 偏移
-              "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
             },
             {
-              "tag": "Modbus-本地主站-A相电流",
+              "tag": "1号逆变器-有功功率",
               "ioa": 16394,
               "type": "POINT_TYPE_FLOAT",
-              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
-              "offset": 0.0, // 偏移
-              "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
             },
-            // 遥调点表结束 ================
             {
-              "tag": "AGC遥调控制点",
+              "tag": "1号逆变器-无功功率",
+              "ioa": 16395,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "1号逆变器-功率因数",
+              "ioa": 16396,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "1号逆变器-日发电量",
+              "ioa": 16397,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "1号逆变器-总发电量",
+              "ioa": 16398,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "2号逆变器-运行状态",
+              "ioa": 16399,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "2号逆变器-故障状态",
+              "ioa": 16400,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "2号逆变器-A相电压",
+              "ioa": 16401,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "2号逆变器-B相电压",
+              "ioa": 16402,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "2号逆变器-C相电压",
+              "ioa": 16403,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "2号逆变器-A相电流",
+              "ioa": 16404,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "2号逆变器-B相电流",
+              "ioa": 16405,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "2号逆变器-C相电流",
+              "ioa": 16406,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "2号逆变器-频率",
+              "ioa": 16407,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "2号逆变器-有功功率",
+              "ioa": 16408,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "2号逆变器-无功功率",
+              "ioa": 16409,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "2号逆变器-功率因数",
+              "ioa": 16410,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "2号逆变器-日发电量",
+              "ioa": 16411,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "2号逆变器-总发电量",
+              "ioa": 16412,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "3号逆变器-运行状态",
+              "ioa": 16413,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "3号逆变器-故障状态",
+              "ioa": 16414,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "3号逆变器-A相电压",
+              "ioa": 16415,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "3号逆变器-B相电压",
+              "ioa": 16416,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "3号逆变器-C相电压",
+              "ioa": 16417,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "3号逆变器-A相电流",
+              "ioa": 16418,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "3号逆变器-B相电流",
+              "ioa": 16419,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "3号逆变器-C相电流",
+              "ioa": 16420,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "3号逆变器-频率",
+              "ioa": 16421,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "3号逆变器-有功功率",
+              "ioa": 16422,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "3号逆变器-无功功率",
+              "ioa": 16423,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "3号逆变器-功率因数",
+              "ioa": 16424,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "3号逆变器-日发电量",
+              "ioa": 16425,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "3号逆变器-总发电量",
+              "ioa": 16426,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "4号逆变器-运行状态",
+              "ioa": 16427,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "4号逆变器-故障状态",
+              "ioa": 16428,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "4号逆变器-A相电压",
+              "ioa": 16429,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "4号逆变器-B相电压",
+              "ioa": 16430,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "4号逆变器-C相电压",
+              "ioa": 16431,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "4号逆变器-A相电流",
+              "ioa": 16432,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "4号逆变器-B相电流",
+              "ioa": 16433,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "4号逆变器-C相电流",
+              "ioa": 16434,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "4号逆变器-频率",
+              "ioa": 16435,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "4号逆变器-有功功率",
+              "ioa": 16436,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "4号逆变器-无功功率",
+              "ioa": 16437,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "4号逆变器-功率因数",
+              "ioa": 16438,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "4号逆变器-日发电量",
+              "ioa": 16439,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "4号逆变器-总发电量",
+              "ioa": 16440,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "AGC总有功实时值",
+              "ioa": 16441,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "AGC总有功目标值",
+              "ioa": 16442,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              "tag": "AGC总有功偏差",
+              "ioa": 16443,
+              "type": "POINT_TYPE_FLOAT",
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
+            },
+            {
+              // 6201h(25089) 作为 AGC 总有功给定遥调点。
+              "tag": "AGC总有功给定",
               "ioa": 25089,
               "type": "POINT_TYPE_FLOAT",
-              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
-              "offset": 0.0, // 偏移
-              "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
-            },
-            {
-              "tag": "DLT645-有功功率设定值",
-              "ioa": 25095,
-              "type": "POINT_TYPE_FLOAT",
-              "scale": 1.0, // 标度：工程量 = 原始值 * scale + offset（scale=0 视为 1）
-              "offset": 0.0, // 偏移
-              "deadband": 0.0 // 死区：工程量单位，<=0 不过滤
+              "scale": 1.0,
+              "offset": 0.0,
+              "deadband": 0.0
             }
           ]
         },
         "start": true
       }
-      // client 示例（仅供参考，取消注释后可用）:
-      // {
-      //   "link": {
-      //     "config": {
-      //       "conn_name": "line-2",
-      //       "role": "ROLE_CLIENT",
-      //       "station_role": "STATION_ROLE_MASTER",
-      //       "local": { "ip": "", "port": 0 },
-      //       "remote": { "ip": "127.0.0.1", "port": 2404 },
-      //       "ca": 1,
-      //       "oa": 1,
-      //       "apci": { "k": 12, "w": 8, "t0": 30, "t1": 15, "t2": 10, "t3": 20 }
-      //     }
-      //   },
-      //   "point_table": { "replace": true, "points": [{ "tag": "Ua", "ioa": 100, "type": "POINT_TYPE_FLOAT" }] },
-      //   "start": true
-      // }
     ]
   }
 }

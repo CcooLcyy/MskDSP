@@ -20,6 +20,15 @@ public:
                                             uint16_t address,
                                             uint16_t quantity,
                                             std::vector<uint16_t>* out) = 0;
+  virtual grpc::Status ReadInputRegister(uint8_t slaveId, uint16_t address, uint16_t* out) = 0;
+  virtual grpc::Status ReadInputRegisters(uint8_t slaveId,
+                                          uint16_t address,
+                                          uint16_t quantity,
+                                          std::vector<uint16_t>* out) = 0;
+  virtual grpc::Status WriteSingleRegister(uint8_t slaveId, uint16_t address, uint16_t value) = 0;
+  virtual grpc::Status WriteMultipleRegisters(uint8_t slaveId,
+                                              uint16_t address,
+                                              const std::vector<uint16_t>& values) = 0;
 };
 
 }  // namespace ModbusRTU
