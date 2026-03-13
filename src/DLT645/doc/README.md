@@ -190,6 +190,12 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
 - `status` 语义：`0/ok/success` 为成功；`Fail/Frametimeout/Porterror/Buffull/Formaterror` 会被识别为失败。
 - 档案管理（仅 Lora/载波）：按 `(comm_mode, meter_addr)` 做地址级引用计数；首个连接启动连接功能时发送 `addslaveNode`，最后一个连接停止连接功能时发送 `delslaveNode`。
 
+### 并发模型说明（Lora/载波/串口）
+- `COMM_MODE_LORA`：由于 Lora 头端与尾端之间不支持并发，DLT645 模块内部会对所有 Lora 请求执行全局串行；同一时刻仅允许一个 Lora 请求处于“发送并等待响应”阶段。
+- 串行范围：覆盖点抄、写入、档案添加、档案删除等所有通过 Lora 发出的请求。
+- `COMM_MODE_CARRIER` 与 `COMM_MODE_SERIAL`：不受上述限制，仍按各连接独立线程并发执行。
+- 上位机与运维侧在评估 Lora 吞吐时，应按“模块内全局串行”估算总周期，而不是按连接数线性并发估算。
+
 ### 同地址档案生命周期去重说明（Lora/载波）
 - 适用对象：`COMM_MODE_LORA` 与 `COMM_MODE_CARRIER`。
 - 去重键：`(comm_mode, meter_addr)`。
@@ -224,6 +230,7 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
 - 2026-02-03：新增数据块配置（blocks/items/trim_right_space）及读块写点规则说明。
 - 2026-03-04：新增 `COMM_MODE_SERIAL` 串口通道实现，支持 uartManager 主题与串口参数下发。
 - 2026-03-05：Lora/载波同地址档案管理改为地址级去重（首启添加、末停删除），支持同一协议转换器下多逻辑连接共用档案生命周期。
+- 2026-03-12：Lora 请求改为模块内全局串行执行，载波与串口继续保持按连接并发。
 
 ## 线程与日志
 - 模块内部线程统一使用 `ModuleManager::StartModuleThread(模块LibInfo.LIB_NAME, ...)` 创建，自动绑定日志模块名上下文。

@@ -1,16 +1,16 @@
 #include "DLT645LinkManager.h"
 
+#include <algorithm>
 #include <boost/json.hpp>
 #include <boost/system/error_code.hpp>
-#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
-#include <cstdlib>
 #include <cstdio>
-#include <ctime>
+#include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <format>
 #include <iomanip>
 #include <optional>
@@ -30,10 +30,10 @@ constexpr uint8_t kWriteControl = 0x14;
 constexpr uint8_t kDefaultQos = 1;
 constexpr uint32_t kDefaultPollIntervalMs = 1000;
 constexpr uint32_t kDefaultRequestTimeoutMs = 3000;
-constexpr const char* kAppName = "AGVC";
-constexpr const char* kAppTypeLora = "loraManager";
-constexpr const char* kAppTypeCarrier = "ccoRouter";
-constexpr const char* kAppTypeUart = "uartManager";
+constexpr const char *kAppName = "AGVC";
+constexpr const char *kAppTypeLora = "loraManager";
+constexpr const char *kAppTypeCarrier = "ccoRouter";
+constexpr const char *kAppTypeUart = "uartManager";
 constexpr size_t kMinFrameSize = 12;
 constexpr uint32_t kDefaultSerialBaudRate = 9600;
 constexpr uint32_t kDefaultSerialDataBits = 8;
@@ -45,11 +45,11 @@ bool useArchiveManagement(DLT645Proto::CommMode mode) {
   return mode == DLT645Proto::COMM_MODE_LORA || mode == DLT645Proto::COMM_MODE_CARRIER;
 }
 
-std::string makeArchiveKey(const DLT645Proto::LinkConfig& config) {
+std::string makeArchiveKey(const DLT645Proto::LinkConfig &config) {
   return std::format("{}|{}", static_cast<int>(config.comm_mode()), config.meter_addr());
 }
 
-bool parseTokenString(const boost::json::value& value, std::string* out) {
+bool parseTokenString(const boost::json::value &value, std::string *out) {
   if (out == nullptr || !value.is_string()) {
     return false;
   }
@@ -57,7 +57,7 @@ bool parseTokenString(const boost::json::value& value, std::string* out) {
   return !out->empty();
 }
 
-std::string base64Encode(const std::vector<uint8_t>& data) {
+std::string base64Encode(const std::vector<uint8_t> &data) {
   static const char kTable[] =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   std::string out;
@@ -76,27 +76,12 @@ std::string base64Encode(const std::vector<uint8_t>& data) {
   return out;
 }
 
-bool base64Decode(std::string_view text, std::vector<uint8_t>* out) {
+bool base64Decode(std::string_view text, std::vector<uint8_t> *out) {
   if (out == nullptr) {
     return false;
   }
   static const int kDecodeTable[256] = {
-      -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-      -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-      -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
-      52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-2,-1,-1,
-      -1,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,
-      15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
-      -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
-      41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
-      -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-      -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-      -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-      -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-      -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-      -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-      -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-      -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
+      -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 62, -1, -1, -1, 63, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, -1, -1, -1, -2, -1, -1, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, -1, -1, -1, -1, -1, -1, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 
   out->clear();
   uint32_t buffer = 0;
@@ -122,7 +107,7 @@ bool base64Decode(std::string_view text, std::vector<uint8_t>* out) {
   return !out->empty() || text.empty();
 }
 
-bool isDigits(const std::string& text) {
+bool isDigits(const std::string &text) {
   if (text.empty()) {
     return false;
   }
@@ -134,7 +119,7 @@ bool isDigits(const std::string& text) {
   return true;
 }
 
-bool isHex(const std::string& text) {
+bool isHex(const std::string &text) {
   if (text.empty()) {
     return false;
   }
@@ -150,7 +135,7 @@ bool isHex(const std::string& text) {
 }
 
 std::string toLowerAscii(std::string text) {
-  for (char& ch : text) {
+  for (char &ch : text) {
     ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
   }
   return text;
@@ -169,11 +154,11 @@ std::string trimAscii(std::string text) {
   return text;
 }
 
-bool parseInt32Text(const std::string& text, int32_t* out) {
+bool parseInt32Text(const std::string &text, int32_t *out) {
   if (out == nullptr || text.empty()) {
     return false;
   }
-  char* end = nullptr;
+  char *end = nullptr;
   const auto value = std::strtol(text.c_str(), &end, 10);
   if (end == nullptr || *end != '\0') {
     return false;
@@ -182,7 +167,7 @@ bool parseInt32Text(const std::string& text, int32_t* out) {
   return true;
 }
 
-int32_t parseStatusCode(const boost::json::value& value, bool* ok) {
+int32_t parseStatusCode(const boost::json::value &value, bool *ok) {
   if (ok != nullptr) {
     *ok = false;
   }
@@ -259,25 +244,25 @@ int32_t parseStatusCode(const boost::json::value& value, bool* ok) {
 
 std::string serialParityToText(DLT645Proto::SerialParity parity) {
   switch (parity) {
-    case DLT645Proto::SERIAL_PARITY_ODD:
-      return "odd";
-    case DLT645Proto::SERIAL_PARITY_EVEN:
-      return "even";
-    case DLT645Proto::SERIAL_PARITY_NONE:
-    case DLT645Proto::SERIAL_PARITY_UNSPECIFIED:
-    default:
-      return "none";
+  case DLT645Proto::SERIAL_PARITY_ODD:
+    return "odd";
+  case DLT645Proto::SERIAL_PARITY_EVEN:
+    return "even";
+  case DLT645Proto::SERIAL_PARITY_NONE:
+  case DLT645Proto::SERIAL_PARITY_UNSPECIFIED:
+  default:
+    return "none";
   }
 }
 
 uint32_t serialStopBitsToNumber(DLT645Proto::SerialStopBits stopBits) {
   switch (stopBits) {
-    case DLT645Proto::SERIAL_STOP_BITS_TWO:
-      return 2;
-    case DLT645Proto::SERIAL_STOP_BITS_ONE:
-    case DLT645Proto::SERIAL_STOP_BITS_UNSPECIFIED:
-    default:
-      return 1;
+  case DLT645Proto::SERIAL_STOP_BITS_TWO:
+    return 2;
+  case DLT645Proto::SERIAL_STOP_BITS_ONE:
+  case DLT645Proto::SERIAL_STOP_BITS_UNSPECIFIED:
+  default:
+    return 1;
   }
 }
 }  // namespace
@@ -302,8 +287,7 @@ void LinkManager::setMqttStub(std::shared_ptr<MQTTManagerProto::MQTTManagerServi
   LOG_INFO("DLT645 已设置 MQTT Stub");
 }
 
-grpc::Status LinkManager::UpdateConfig(const DLT645Proto::UpdateConfigRequest& request,
-                                       DLT645Proto::UpdateConfigResponse* response) {
+grpc::Status LinkManager::UpdateConfig(const DLT645Proto::UpdateConfigRequest &request, DLT645Proto::UpdateConfigResponse *response) {
   if (response == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
   }
@@ -312,7 +296,7 @@ grpc::Status LinkManager::UpdateConfig(const DLT645Proto::UpdateConfigRequest& r
     response->set_message("MQTT 配置为空");
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "MQTT 配置为空");
   }
-  const auto& mqtt = request.mqtt();
+  const auto &mqtt = request.mqtt();
   if (mqtt.host().empty() || mqtt.port() == 0 || mqtt.client_id().empty()) {
     response->set_ok(false);
     response->set_message("MQTT 连接参数不完整");
@@ -324,7 +308,7 @@ grpc::Status LinkManager::UpdateConfig(const DLT645Proto::UpdateConfigRequest& r
   return grpc::Status::OK;
 }
 
-grpc::Status LinkManager::UpsertLink(const DLT645Proto::UpsertLinkRequest& request, DLT645Proto::LinkInfo* out) {
+grpc::Status LinkManager::UpsertLink(const DLT645Proto::UpsertLinkRequest &request, DLT645Proto::LinkInfo *out) {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
   }
@@ -364,7 +348,7 @@ grpc::Status LinkManager::UpsertLink(const DLT645Proto::UpsertLinkRequest& reque
   return fillLinkInfoLocked(*runtime, out);
 }
 
-grpc::Status LinkManager::GetLink(const std::string& connName, DLT645Proto::LinkInfo* out) const {
+grpc::Status LinkManager::GetLink(const std::string &connName, DLT645Proto::LinkInfo *out) const {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
   }
@@ -380,20 +364,20 @@ grpc::Status LinkManager::GetLink(const std::string& connName, DLT645Proto::Link
   return fillLinkInfoLocked(*it->second, out);
 }
 
-grpc::Status LinkManager::ListLinks(DLT645Proto::ListLinksResponse* out) const {
+grpc::Status LinkManager::ListLinks(DLT645Proto::ListLinksResponse *out) const {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
   }
   std::lock_guard<std::mutex> lock(mu_);
   out->Clear();
-  for (const auto& item : linksByName_) {
-    auto* info = out->add_links();
+  for (const auto &item : linksByName_) {
+    auto *info = out->add_links();
     fillLinkInfoLocked(*item.second, info);
   }
   return grpc::Status::OK;
 }
 
-grpc::Status LinkManager::StartLink(const std::string& connName) {
+grpc::Status LinkManager::StartLink(const std::string &connName) {
   auto status = validateConnName(connName);
   if (!status.ok()) {
     return status;
@@ -447,24 +431,21 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
       while (true) {
         archiveStateCv_.wait(lock, [this, &archiveKey]() {
           return archiveAddInFlightByKey_.count(archiveKey) == 0 &&
-                 archiveDelInFlightByKey_.count(archiveKey) == 0;
+              archiveDelInFlightByKey_.count(archiveKey) == 0;
         });
         auto it = archiveRefCountByKey_.find(archiveKey);
         if (it == archiveRefCountByKey_.end()) {
-          LOG_WARNING("DLT645 启动连接功能回滚未找到档案引用: conn_name={}, meter_addr={}",
-                      connName, link->config.meter_addr());
+          LOG_WARNING("DLT645 启动连接功能回滚未找到档案引用: conn_name={}, meter_addr={}", connName, link->config.meter_addr());
           break;
         }
         if (it->second > 1) {
           it->second -= 1;
-          LOG_INFO("DLT645 启动连接功能回滚已归还档案引用: conn_name={}, meter_addr={}, 剩余引用计数={}",
-                   connName, link->config.meter_addr(), it->second);
+          LOG_INFO("DLT645 启动连接功能回滚已归还档案引用: conn_name={}, meter_addr={}, 剩余引用计数={}", connName, link->config.meter_addr(), it->second);
           break;
         }
         archiveDelInFlightByKey_.insert(archiveKey);
         needDeleteArchive = true;
-        LOG_INFO("DLT645 启动连接功能回滚进入档案删除阶段: conn_name={}, meter_addr={}",
-                 connName, link->config.meter_addr());
+        LOG_INFO("DLT645 启动连接功能回滚进入档案删除阶段: conn_name={}, meter_addr={}", connName, link->config.meter_addr());
         break;
       }
     }
@@ -485,17 +466,14 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
         if (leftRef == 0) {
           archiveRefCountByKey_.erase(it);
         }
-        LOG_INFO("DLT645 启动连接功能回滚更新档案引用状态: conn_name={}, meter_addr={}, 剩余引用计数={}",
-                 connName, link->config.meter_addr(), leftRef);
+        LOG_INFO("DLT645 启动连接功能回滚更新档案引用状态: conn_name={}, meter_addr={}, 剩余引用计数={}", connName, link->config.meter_addr(), leftRef);
       } else {
-        LOG_WARNING("DLT645 启动连接功能回滚未找到档案引用状态: conn_name={}, meter_addr={}",
-                    connName, link->config.meter_addr());
+        LOG_WARNING("DLT645 启动连接功能回滚未找到档案引用状态: conn_name={}, meter_addr={}", connName, link->config.meter_addr());
       }
     }
     archiveStateCv_.notify_all();
     if (!delStatus.ok()) {
-      LOG_WARNING("DLT645 启动连接功能回滚档案删除失败: conn_name={}, 原因={}",
-                  connName, delStatus.error_message());
+      LOG_WARNING("DLT645 启动连接功能回滚档案删除失败: conn_name={}, 原因={}", connName, delStatus.error_message());
     }
   };
 
@@ -505,27 +483,24 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
       while (true) {
         archiveStateCv_.wait(lock, [this, &archiveKey]() {
           return archiveAddInFlightByKey_.count(archiveKey) == 0 &&
-                 archiveDelInFlightByKey_.count(archiveKey) == 0;
+              archiveDelInFlightByKey_.count(archiveKey) == 0;
         });
         auto it = archiveRefCountByKey_.find(archiveKey);
         if (it != archiveRefCountByKey_.end() && it->second > 0) {
           it->second += 1;
           holdArchiveRef = true;
-          LOG_INFO("DLT645 启动连接功能复用档案引用: conn_name={}, meter_addr={}, 引用计数={}",
-                   connName, link->config.meter_addr(), it->second);
+          LOG_INFO("DLT645 启动连接功能复用档案引用: conn_name={}, meter_addr={}, 引用计数={}", connName, link->config.meter_addr(), it->second);
           break;
         }
         archiveAddInFlightByKey_.insert(archiveKey);
         needAddArchive = true;
-        LOG_INFO("DLT645 启动连接功能获取档案添加资格: conn_name={}, meter_addr={}",
-                 connName, link->config.meter_addr());
+        LOG_INFO("DLT645 启动连接功能获取档案添加资格: conn_name={}, meter_addr={}", connName, link->config.meter_addr());
         break;
       }
     }
 
     if (needAddArchive) {
-      LOG_INFO("DLT645 启动连接功能进入档案添加阶段: conn_name={}, comm_mode={}",
-               connName, DLT645Proto::CommMode_Name(link->config.comm_mode()));
+      LOG_INFO("DLT645 启动连接功能进入档案添加阶段: conn_name={}, comm_mode={}", connName, DLT645Proto::CommMode_Name(link->config.comm_mode()));
       status = sendAddSlaveNode(link.get());
       {
         std::lock_guard<std::mutex> lock(mu_);
@@ -533,28 +508,24 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
         if (status.ok()) {
           archiveRefCountByKey_[archiveKey] = 1;
           holdArchiveRef = true;
-          LOG_INFO("DLT645 启动连接功能档案引用建立成功: conn_name={}, meter_addr={}, 引用计数=1",
-                   connName, link->config.meter_addr());
+          LOG_INFO("DLT645 启动连接功能档案引用建立成功: conn_name={}, meter_addr={}, 引用计数=1", connName, link->config.meter_addr());
         } else {
           archiveRefCountByKey_.erase(archiveKey);
         }
       }
       archiveStateCv_.notify_all();
       if (!status.ok()) {
-        LOG_ERROR("DLT645 启动连接功能档案添加失败: conn_name={}, 原因={}",
-                  connName, status.error_message());
+        LOG_ERROR("DLT645 启动连接功能档案添加失败: conn_name={}, 原因={}", connName, status.error_message());
         std::lock_guard<std::mutex> lock(mu_);
         link->lastError = status.error_message();
         return status;
       }
       LOG_INFO("DLT645 启动连接功能档案添加成功: conn_name={}", connName);
     } else {
-      LOG_INFO("DLT645 启动连接功能跳过档案添加: conn_name={}, meter_addr={}, 原因=同地址档案已存在",
-               connName, link->config.meter_addr());
+      LOG_INFO("DLT645 启动连接功能跳过档案添加: conn_name={}, meter_addr={}, 原因=同地址档案已存在", connName, link->config.meter_addr());
     }
   } else {
-    LOG_INFO("DLT645 启动连接功能跳过档案管理: conn_name={}, comm_mode={}",
-             connName, DLT645Proto::CommMode_Name(link->config.comm_mode()));
+    LOG_INFO("DLT645 启动连接功能跳过档案管理: conn_name={}, comm_mode={}", connName, DLT645Proto::CommMode_Name(link->config.comm_mode()));
   }
 
   bool linkMissing = false;
@@ -581,7 +552,7 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
   return grpc::Status::OK;
 }
 
-grpc::Status LinkManager::StopLink(const std::string& connName) {
+grpc::Status LinkManager::StopLink(const std::string &connName) {
   auto status = validateConnName(connName);
   if (!status.ok()) {
     return status;
@@ -625,37 +596,32 @@ grpc::Status LinkManager::StopLink(const std::string& connName) {
       while (true) {
         archiveStateCv_.wait(lock, [this, &archiveKey]() {
           return archiveAddInFlightByKey_.count(archiveKey) == 0 &&
-                 archiveDelInFlightByKey_.count(archiveKey) == 0;
+              archiveDelInFlightByKey_.count(archiveKey) == 0;
         });
         auto it = archiveRefCountByKey_.find(archiveKey);
         if (it == archiveRefCountByKey_.end()) {
-          LOG_WARNING("DLT645 停止连接功能未找到档案引用，跳过档案删除: conn_name={}, meter_addr={}",
-                      connName, link->config.meter_addr());
+          LOG_WARNING("DLT645 停止连接功能未找到档案引用，跳过档案删除: conn_name={}, meter_addr={}", connName, link->config.meter_addr());
           break;
         }
         if (it->second == 0) {
-          LOG_WARNING("DLT645 停止连接功能发现档案引用计数异常(0)，跳过档案删除: conn_name={}, meter_addr={}",
-                      connName, link->config.meter_addr());
+          LOG_WARNING("DLT645 停止连接功能发现档案引用计数异常(0)，跳过档案删除: conn_name={}, meter_addr={}", connName, link->config.meter_addr());
           archiveRefCountByKey_.erase(it);
           break;
         }
         if (it->second > 1) {
           it->second -= 1;
-          LOG_INFO("DLT645 停止连接功能复用档案引用，跳过档案删除: conn_name={}, meter_addr={}, 剩余引用计数={}",
-                   connName, link->config.meter_addr(), it->second);
+          LOG_INFO("DLT645 停止连接功能复用档案引用，跳过档案删除: conn_name={}, meter_addr={}, 剩余引用计数={}", connName, link->config.meter_addr(), it->second);
           break;
         }
         archiveDelInFlightByKey_.insert(archiveKey);
         needDeleteArchive = true;
-        LOG_INFO("DLT645 停止连接功能获取档案删除资格: conn_name={}, meter_addr={}",
-                 connName, link->config.meter_addr());
+        LOG_INFO("DLT645 停止连接功能获取档案删除资格: conn_name={}, meter_addr={}", connName, link->config.meter_addr());
         break;
       }
     }
 
     if (needDeleteArchive) {
-      LOG_INFO("DLT645 停止连接功能进入档案删除阶段: conn_name={}, comm_mode={}",
-               connName, DLT645Proto::CommMode_Name(link->config.comm_mode()));
+      LOG_INFO("DLT645 停止连接功能进入档案删除阶段: conn_name={}, comm_mode={}", connName, DLT645Proto::CommMode_Name(link->config.comm_mode()));
       auto delStatus = sendDelSlaveNode(link.get());
       {
         std::lock_guard<std::mutex> lock(mu_);
@@ -669,29 +635,24 @@ grpc::Status LinkManager::StopLink(const std::string& connName) {
           if (leftRef == 0) {
             archiveRefCountByKey_.erase(it);
           }
-          LOG_INFO("DLT645 停止连接功能更新档案引用状态: conn_name={}, meter_addr={}, 剩余引用计数={}",
-                   connName, link->config.meter_addr(), leftRef);
+          LOG_INFO("DLT645 停止连接功能更新档案引用状态: conn_name={}, meter_addr={}, 剩余引用计数={}", connName, link->config.meter_addr(), leftRef);
         } else {
-          LOG_WARNING("DLT645 停止连接功能未找到档案引用状态: conn_name={}, meter_addr={}",
-                      connName, link->config.meter_addr());
+          LOG_WARNING("DLT645 停止连接功能未找到档案引用状态: conn_name={}, meter_addr={}", connName, link->config.meter_addr());
         }
       }
       archiveStateCv_.notify_all();
       if (!delStatus.ok()) {
-        LOG_WARNING("DLT645 停止连接功能档案删除失败: conn_name={}, 原因={}",
-                    connName, delStatus.error_message());
+        LOG_WARNING("DLT645 停止连接功能档案删除失败: conn_name={}, 原因={}", connName, delStatus.error_message());
         std::lock_guard<std::mutex> lock(mu_);
         link->lastError = delStatus.error_message();
       } else {
         LOG_INFO("DLT645 停止连接功能档案删除成功: conn_name={}", connName);
       }
     } else {
-      LOG_INFO("DLT645 停止连接功能跳过档案删除: conn_name={}, meter_addr={}, 原因=同地址仍有运行连接或无档案引用",
-               connName, link->config.meter_addr());
+      LOG_INFO("DLT645 停止连接功能跳过档案删除: conn_name={}, meter_addr={}, 原因=同地址仍有运行连接或无档案引用", connName, link->config.meter_addr());
     }
   } else {
-    LOG_INFO("DLT645 停止连接功能跳过档案管理: conn_name={}, comm_mode={}",
-             connName, DLT645Proto::CommMode_Name(link->config.comm_mode()));
+    LOG_INFO("DLT645 停止连接功能跳过档案管理: conn_name={}, comm_mode={}", connName, DLT645Proto::CommMode_Name(link->config.comm_mode()));
   }
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -706,7 +667,7 @@ grpc::Status LinkManager::StopLink(const std::string& connName) {
   return grpc::Status::OK;
 }
 
-grpc::Status LinkManager::DeleteLink(const std::string& connName) {
+grpc::Status LinkManager::DeleteLink(const std::string &connName) {
   auto status = validateConnName(connName);
   if (!status.ok()) {
     return status;
@@ -733,7 +694,7 @@ grpc::Status LinkManager::DeleteLink(const std::string& connName) {
   return grpc::Status::OK;
 }
 
-grpc::Status LinkManager::UpsertPointTable(const DLT645Proto::UpsertPointTableRequest& request) {
+grpc::Status LinkManager::UpsertPointTable(const DLT645Proto::UpsertPointTableRequest &request) {
   auto status = validateConnName(request.conn_name());
   if (!status.ok()) {
     return status;
@@ -778,7 +739,7 @@ grpc::Status LinkManager::UpsertPointTable(const DLT645Proto::UpsertPointTableRe
   return grpc::Status::OK;
 }
 
-grpc::Status LinkManager::GetPointTable(const std::string& connName, DLT645Proto::PointTable* out) const {
+grpc::Status LinkManager::GetPointTable(const std::string &connName, DLT645Proto::PointTable *out) const {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
   }
@@ -795,14 +756,14 @@ grpc::Status LinkManager::GetPointTable(const std::string& connName, DLT645Proto
   return grpc::Status::OK;
 }
 
-grpc::Status LinkManager::validateConnName(const std::string& connName) const {
+grpc::Status LinkManager::validateConnName(const std::string &connName) const {
   if (connName.empty()) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_name 不能为空");
   }
   return grpc::Status::OK;
 }
 
-grpc::Status LinkManager::normalizeLinkConfig(const DLT645Proto::LinkConfig& config, DLT645Proto::LinkConfig* out) const {
+grpc::Status LinkManager::normalizeLinkConfig(const DLT645Proto::LinkConfig &config, DLT645Proto::LinkConfig *out) const {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "config 为空");
   }
@@ -879,7 +840,7 @@ grpc::Status LinkManager::normalizeLinkConfig(const DLT645Proto::LinkConfig& con
   return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "暂不支持该传输类型");
 }
 
-grpc::Status LinkManager::fillLinkInfoLocked(const LinkRuntime& link, DLT645Proto::LinkInfo* out) const {
+grpc::Status LinkManager::fillLinkInfoLocked(const LinkRuntime &link, DLT645Proto::LinkInfo *out) const {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
   }
@@ -890,7 +851,7 @@ grpc::Status LinkManager::fillLinkInfoLocked(const LinkRuntime& link, DLT645Prot
   return grpc::Status::OK;
 }
 
-void LinkManager::startPollingLocked(const std::string& connName, const std::shared_ptr<LinkRuntime>& link) {
+void LinkManager::startPollingLocked(const std::string &connName, const std::shared_ptr<LinkRuntime> &link) {
   if (!link) {
     return;
   }
@@ -901,8 +862,8 @@ void LinkManager::startPollingLocked(const std::string& connName, const std::sha
       moduleName_,
       [this, connName, link, interval](std::stop_token st) {
         while (!st.stop_requested()) {
-          const auto& blocks = link->pointTable.Blocks();
-          for (const auto& block : blocks) {
+          const auto &blocks = link->pointTable.Blocks();
+          for (const auto &block : blocks) {
             if (st.stop_requested()) {
               break;
             }
@@ -910,27 +871,23 @@ void LinkManager::startPollingLocked(const std::string& connName, const std::sha
             std::vector<uint8_t> data = di;
             addOffset33(&data);
             auto frame = buildFrame(encodeAddress(link->config.meter_addr()), kReadControl, data);
-            LOG_INFO("DLT645 发送数据块读请求: conn_name={}, block_di={}, frame={}",
-                     connName, block.diText, formatHex(frame));
+            LOG_INFO("DLT645 发送数据块读请求: conn_name={}, block_di={}, frame={}", connName, block.diText, formatHex(frame));
 
             std::string payloadBase64;
             int32_t status = 0;
             auto sendStatus = sendMonitorRequest(link.get(), frame, &payloadBase64, &status);
             if (!sendStatus.ok()) {
-              LOG_WARNING("DLT645 数据块读请求失败: conn_name={}, block_di={}, 原因={}",
-                          connName, block.diText, sendStatus.error_message());
+              LOG_WARNING("DLT645 数据块读请求失败: conn_name={}, block_di={}, 原因={}", connName, block.diText, sendStatus.error_message());
               continue;
             }
             if (status != 0) {
-              LOG_WARNING("DLT645 数据块读请求返回失败: conn_name={}, block_di={}, 状态码={}",
-                          connName, block.diText, status);
+              LOG_WARNING("DLT645 数据块读请求返回失败: conn_name={}, block_di={}, 状态码={}", connName, block.diText, status);
               continue;
             }
             std::string error;
             sendStatus = handleMonitorResponse(link.get(), payloadBase64, block, &error);
             if (!sendStatus.ok()) {
-              LOG_WARNING("DLT645 数据块解析响应失败: conn_name={}, block_di={}, 原因={}",
-                          connName, block.diText, error);
+              LOG_WARNING("DLT645 数据块解析响应失败: conn_name={}, block_di={}, 原因={}", connName, block.diText, error);
               continue;
             }
           }
@@ -939,8 +896,8 @@ void LinkManager::startPollingLocked(const std::string& connName, const std::sha
             break;
           }
           const auto points = link->pointTable.Points();
-          const auto& blockTags = link->pointTable.BlockTags();
-          for (const auto& point : points) {
+          const auto &blockTags = link->pointTable.BlockTags();
+          for (const auto &point : points) {
             if (st.stop_requested()) {
               break;
             }
@@ -982,7 +939,7 @@ void LinkManager::startPollingLocked(const std::string& connName, const std::sha
       });
 }
 
-void LinkManager::stopPollingLocked(LinkRuntime* link) {
+void LinkManager::stopPollingLocked(LinkRuntime *link) {
   if (link == nullptr) {
     return;
   }
@@ -992,7 +949,7 @@ void LinkManager::stopPollingLocked(LinkRuntime* link) {
   }
 }
 
-void LinkManager::startMqttSubscribeLocked(const std::string& connName, const std::shared_ptr<LinkRuntime>& link) {
+void LinkManager::startMqttSubscribeLocked(const std::string &connName, const std::shared_ptr<LinkRuntime> &link) {
   if (!link) {
     return;
   }
@@ -1045,11 +1002,10 @@ void LinkManager::startMqttSubscribeLocked(const std::string& connName, const st
           boost::system::error_code ec;
           auto parsed = boost::json::parse(payload, ec);
           if (ec || !parsed.is_object()) {
-            LOG_WARNING("DLT645 MQTT 响应解析失败: conn_name={}, topic={}, 原因={}",
-                        connName, response.topic(), ec.message());
+            LOG_WARNING("DLT645 MQTT 响应解析失败: conn_name={}, topic={}, 原因={}", connName, response.topic(), ec.message());
             continue;
           }
-          const auto& obj = parsed.as_object();
+          const auto &obj = parsed.as_object();
           auto it = obj.find("token");
           if (it == obj.end()) {
             LOG_WARNING("DLT645 MQTT 响应缺少 token: conn_name={}, topic={}", connName, response.topic());
@@ -1057,8 +1013,7 @@ void LinkManager::startMqttSubscribeLocked(const std::string& connName, const st
           }
           std::string token;
           if (!parseTokenString(it->value(), &token)) {
-            LOG_WARNING("DLT645 MQTT 响应 token 非法，要求为非空字符串: conn_name={}, topic={}",
-                        connName, response.topic());
+            LOG_WARNING("DLT645 MQTT 响应 token 非法，要求为非空字符串: conn_name={}, topic={}", connName, response.topic());
             continue;
           }
 
@@ -1117,7 +1072,7 @@ void LinkManager::startMqttSubscribeLocked(const std::string& connName, const st
       });
 }
 
-void LinkManager::stopMqttSubscribeLocked(LinkRuntime* link) {
+void LinkManager::stopMqttSubscribeLocked(LinkRuntime *link) {
   if (link == nullptr) {
     return;
   }
@@ -1132,14 +1087,14 @@ void LinkManager::stopMqttSubscribeLocked(LinkRuntime* link) {
   }
 }
 
-void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, const std::shared_ptr<LinkRuntime>& link) {
+void LinkManager::startDataCenterSubscribeLocked(const std::string &connName, const std::shared_ptr<LinkRuntime> &link) {
   if (!link) {
     return;
   }
   stopDataCenterSubscribeLocked(link.get());
 
   std::vector<PointTable::Point> points;
-  for (const auto& point : link->pointTable.Points()) {
+  for (const auto &point : link->pointTable.Points()) {
     if (point.access == DLT645Proto::ACCESS_WRITE_ONLY ||
         point.access == DLT645Proto::ACCESS_READ_WRITE) {
       points.push_back(point);
@@ -1151,7 +1106,7 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, co
   std::vector<std::string> tags;
   tags.reserve(points.size());
   std::unordered_map<std::string, PointTable::Point> pointByTag;
-  for (const auto& point : points) {
+  for (const auto &point : points) {
     tags.push_back(point.tag);
     pointByTag.emplace(point.tag, point);
   }
@@ -1201,7 +1156,7 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, co
       });
 }
 
-void LinkManager::stopDataCenterSubscribeLocked(LinkRuntime* link) {
+void LinkManager::stopDataCenterSubscribeLocked(LinkRuntime *link) {
   if (link == nullptr) {
     return;
   }
@@ -1212,7 +1167,31 @@ void LinkManager::stopDataCenterSubscribeLocked(LinkRuntime* link) {
   link->dcSubscribeContext.reset();
 }
 
-grpc::Status LinkManager::sendAddSlaveNode(LinkRuntime* link) {
+grpc::Status LinkManager::runLoraSerialized(LinkRuntime *link, const char *operation, const std::string &topic, const std::function<grpc::Status()> &action) {
+  if (link == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "链路为空");
+  }
+  if (!action) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "操作为空");
+  }
+  if (link->config.comm_mode() != DLT645Proto::COMM_MODE_LORA) {
+    return action();
+  }
+
+  const char *opText = operation != nullptr ? operation : "未知操作";
+  LOG_INFO("DLT645 LoRa 串行通道等待: conn_name={}, 操作={}, topic={}", link->config.conn_name(), opText, topic);
+  std::unique_lock<std::mutex> lock(loraRequestMutex_);
+  LOG_INFO("DLT645 LoRa 串行通道开始执行: conn_name={}, 操作={}, topic={}", link->config.conn_name(), opText, topic);
+  auto status = action();
+  if (status.ok()) {
+    LOG_INFO("DLT645 LoRa 串行通道执行完成: conn_name={}, 操作={}, topic={}", link->config.conn_name(), opText, topic);
+  } else {
+    LOG_WARNING("DLT645 LoRa 串行通道执行失败: conn_name={}, 操作={}, topic={}, 原因={}", link->config.conn_name(), opText, topic, status.error_message());
+  }
+  return status;
+}
+
+grpc::Status LinkManager::sendAddSlaveNode(LinkRuntime *link) {
   if (link == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "链路为空");
   }
@@ -1234,13 +1213,17 @@ grpc::Status LinkManager::sendAddSlaveNode(LinkRuntime* link) {
   obj["body"] = std::move(body);
 
   const auto json = boost::json::serialize(obj);
-  LOG_INFO("DLT645 发送档案添加请求: conn_name={}, topic={}, response_topic={}, payload={}",
-           link->config.conn_name(), topic, respTopic, json);
+  LOG_INFO("DLT645 发送档案添加请求: conn_name={}, topic={}, response_topic={}, payload={}", link->config.conn_name(), topic, respTopic, json);
 
   std::string responsePayload;
   std::string error;
-  auto statusRet = mqttClient_.RequestAndWait(topic, respTopic, json, link->config.request_timeout_ms(), 0, 0, "token",
-                                              &responsePayload, &error);
+  auto statusRet = runLoraSerialized(
+      link,
+      "档案添加请求",
+      topic,
+      [this, &topic, &respTopic, &json, &link, &responsePayload, &error]() {
+        return mqttClient_.RequestAndWait(topic, respTopic, json, link->config.request_timeout_ms(), 0, 0, "token", &responsePayload, &error);
+      });
   if (!statusRet.ok()) {
     LOG_ERROR("DLT645 档案添加请求失败: conn_name={}, 原因={}", link->config.conn_name(), error);
     return statusRet;
@@ -1249,8 +1232,7 @@ grpc::Status LinkManager::sendAddSlaveNode(LinkRuntime* link) {
     LOG_ERROR("DLT645 档案添加响应为空: conn_name={}, topic={}", link->config.conn_name(), respTopic);
     return grpc::Status(grpc::StatusCode::INTERNAL, "档案添加响应为空");
   }
-  LOG_INFO("DLT645 收到档案添加响应: conn_name={}, topic={}, payload={}", link->config.conn_name(), respTopic,
-           responsePayload);
+  LOG_INFO("DLT645 收到档案添加响应: conn_name={}, topic={}, payload={}", link->config.conn_name(), respTopic, responsePayload);
 
   boost::system::error_code ec;
   auto parsed = boost::json::parse(responsePayload, ec);
@@ -1258,19 +1240,17 @@ grpc::Status LinkManager::sendAddSlaveNode(LinkRuntime* link) {
     LOG_ERROR("DLT645 档案添加响应解析失败: conn_name={}, 原因={}", link->config.conn_name(), ec.message());
     return grpc::Status(grpc::StatusCode::INTERNAL, "档案添加响应解析失败");
   }
-  const auto& respObj = parsed.as_object();
+  const auto &respObj = parsed.as_object();
   int32_t status = 0;
   auto statusIt = respObj.find("status");
   if (statusIt != respObj.end()) {
     bool parsedStatus = false;
     status = parseStatusCode(statusIt->value(), &parsedStatus);
     if (!parsedStatus) {
-      LOG_WARNING("DLT645 档案添加响应状态类型异常: conn_name={}, topic={}",
-                  link->config.conn_name(), respTopic);
+      LOG_WARNING("DLT645 档案添加响应状态类型异常: conn_name={}, topic={}", link->config.conn_name(), respTopic);
     }
   } else {
-    LOG_WARNING("DLT645 档案添加响应缺少状态字段: conn_name={}, topic={}",
-                link->config.conn_name(), respTopic);
+    LOG_WARNING("DLT645 档案添加响应缺少状态字段: conn_name={}, topic={}", link->config.conn_name(), respTopic);
   }
   if (status != 0) {
     return grpc::Status(grpc::StatusCode::INTERNAL, "档案添加失败");
@@ -1278,7 +1258,7 @@ grpc::Status LinkManager::sendAddSlaveNode(LinkRuntime* link) {
   return grpc::Status::OK;
 }
 
-grpc::Status LinkManager::sendDelSlaveNode(LinkRuntime* link) {
+grpc::Status LinkManager::sendDelSlaveNode(LinkRuntime *link) {
   if (link == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "链路为空");
   }
@@ -1298,13 +1278,17 @@ grpc::Status LinkManager::sendDelSlaveNode(LinkRuntime* link) {
   obj["body"] = std::move(body);
 
   const auto json = boost::json::serialize(obj);
-  LOG_INFO("DLT645 发送档案删除请求: conn_name={}, topic={}, response_topic={}, payload={}",
-           link->config.conn_name(), topic, respTopic, json);
+  LOG_INFO("DLT645 发送档案删除请求: conn_name={}, topic={}, response_topic={}, payload={}", link->config.conn_name(), topic, respTopic, json);
 
   std::string responsePayload;
   std::string error;
-  auto statusRet = mqttClient_.RequestAndWait(topic, respTopic, json, link->config.request_timeout_ms(), 0, 0, "token",
-                                              &responsePayload, &error);
+  auto statusRet = runLoraSerialized(
+      link,
+      "档案删除请求",
+      topic,
+      [this, &topic, &respTopic, &json, &link, &responsePayload, &error]() {
+        return mqttClient_.RequestAndWait(topic, respTopic, json, link->config.request_timeout_ms(), 0, 0, "token", &responsePayload, &error);
+      });
   if (!statusRet.ok()) {
     LOG_ERROR("DLT645 档案删除请求失败: conn_name={}, 原因={}", link->config.conn_name(), error);
     return statusRet;
@@ -1313,8 +1297,7 @@ grpc::Status LinkManager::sendDelSlaveNode(LinkRuntime* link) {
     LOG_ERROR("DLT645 档案删除响应为空: conn_name={}, topic={}", link->config.conn_name(), respTopic);
     return grpc::Status(grpc::StatusCode::INTERNAL, "档案删除响应为空");
   }
-  LOG_INFO("DLT645 收到档案删除响应: conn_name={}, topic={}, payload={}", link->config.conn_name(), respTopic,
-           responsePayload);
+  LOG_INFO("DLT645 收到档案删除响应: conn_name={}, topic={}, payload={}", link->config.conn_name(), respTopic, responsePayload);
 
   boost::system::error_code ec;
   auto parsed = boost::json::parse(responsePayload, ec);
@@ -1322,19 +1305,17 @@ grpc::Status LinkManager::sendDelSlaveNode(LinkRuntime* link) {
     LOG_ERROR("DLT645 档案删除响应解析失败: conn_name={}, 原因={}", link->config.conn_name(), ec.message());
     return grpc::Status(grpc::StatusCode::INTERNAL, "档案删除响应解析失败");
   }
-  const auto& respObj = parsed.as_object();
+  const auto &respObj = parsed.as_object();
   int32_t status = 0;
   auto statusIt = respObj.find("status");
   if (statusIt != respObj.end()) {
     bool parsedStatus = false;
     status = parseStatusCode(statusIt->value(), &parsedStatus);
     if (!parsedStatus) {
-      LOG_WARNING("DLT645 档案删除响应状态类型异常: conn_name={}, topic={}",
-                  link->config.conn_name(), respTopic);
+      LOG_WARNING("DLT645 档案删除响应状态类型异常: conn_name={}, topic={}", link->config.conn_name(), respTopic);
     }
   } else {
-    LOG_WARNING("DLT645 档案删除响应缺少状态字段: conn_name={}, topic={}",
-                link->config.conn_name(), respTopic);
+    LOG_WARNING("DLT645 档案删除响应缺少状态字段: conn_name={}, topic={}", link->config.conn_name(), respTopic);
   }
   if (status != 0) {
     return grpc::Status(grpc::StatusCode::INTERNAL, "档案删除失败");
@@ -1342,8 +1323,7 @@ grpc::Status LinkManager::sendDelSlaveNode(LinkRuntime* link) {
   return grpc::Status::OK;
 }
 
-grpc::Status LinkManager::sendMonitorRequest(LinkRuntime* link, const std::vector<uint8_t>& frame,
-                                             std::string* outPayloadBase64, int32_t* outStatus) {
+grpc::Status LinkManager::sendMonitorRequest(LinkRuntime *link, const std::vector<uint8_t> &frame, std::string *outPayloadBase64, int32_t *outStatus) {
   if (link == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "链路为空");
   }
@@ -1378,7 +1358,7 @@ grpc::Status LinkManager::sendMonitorRequest(LinkRuntime* link, const std::vecto
   return sendMonitorRequest(link, topic, respTopic, obj, link->config.request_timeout_ms(), outStatus, outPayloadBase64);
 }
 
-grpc::Status LinkManager::sendWriteRequest(LinkRuntime* link, const std::vector<uint8_t>& frame) {
+grpc::Status LinkManager::sendWriteRequest(LinkRuntime *link, const std::vector<uint8_t> &frame) {
   int32_t status = 0;
   std::string payload;
   auto ret = sendMonitorRequest(link, frame, &payload, &status);
@@ -1391,12 +1371,7 @@ grpc::Status LinkManager::sendWriteRequest(LinkRuntime* link, const std::vector<
   return grpc::Status::OK;
 }
 
-grpc::Status LinkManager::sendMonitorRequest(LinkRuntime* link, const std::string& requestTopic,
-                                             const std::string& responseTopic,
-                                             const boost::json::object& obj,
-                                             uint32_t timeoutMs,
-                                             int32_t* outStatus,
-                                             std::string* outPayloadBase64) {
+grpc::Status LinkManager::sendMonitorRequest(LinkRuntime *link, const std::string &requestTopic, const std::string &responseTopic, const boost::json::object &obj, uint32_t timeoutMs, int32_t *outStatus, std::string *outPayloadBase64) {
   if (link == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "链路为空");
   }
@@ -1409,45 +1384,44 @@ grpc::Status LinkManager::sendMonitorRequest(LinkRuntime* link, const std::strin
 
   std::string error;
   auto json = boost::json::serialize(obj);
-  LOG_INFO("DLT645 发送 MQTT 请求: conn_name={}, topic={}, response_topic={}, payload={}",
-           link->config.conn_name(), requestTopic, responseTopic, json);
+  LOG_INFO("DLT645 发送 MQTT 请求: conn_name={}, topic={}, response_topic={}, payload={}", link->config.conn_name(), requestTopic, responseTopic, json);
 
   std::string responsePayload;
   const auto waitMs = timeoutMs > 0 ? timeoutMs : kDefaultRequestTimeoutMs;
-  auto status = mqttClient_.RequestAndWait(requestTopic, responseTopic, json, waitMs, 0, 0, "token",
-                                           &responsePayload, &error);
+  auto status = runLoraSerialized(
+      link,
+      "点抄写请求",
+      requestTopic,
+      [this, &requestTopic, &responseTopic, &json, waitMs, &responsePayload, &error]() {
+        return mqttClient_.RequestAndWait(requestTopic, responseTopic, json, waitMs, 0, 0, "token", &responsePayload, &error);
+      });
   if (!status.ok()) {
-    LOG_ERROR("DLT645 MQTT 请求响应失败: conn_name={}, topic={}, 原因={}",
-              link->config.conn_name(), requestTopic, error);
+    LOG_ERROR("DLT645 MQTT 请求响应失败: conn_name={}, topic={}, 原因={}", link->config.conn_name(), requestTopic, error);
     return status;
   }
   if (responsePayload.empty()) {
     LOG_ERROR("DLT645 MQTT 响应为空: conn_name={}, topic={}", link->config.conn_name(), responseTopic);
     return grpc::Status(grpc::StatusCode::INTERNAL, "MQTT 响应为空");
   }
-  LOG_INFO("DLT645 收到 MQTT 响应: conn_name={}, topic={}, payload={}",
-           link->config.conn_name(), responseTopic, responsePayload);
+  LOG_INFO("DLT645 收到 MQTT 响应: conn_name={}, topic={}, payload={}", link->config.conn_name(), responseTopic, responsePayload);
 
   boost::system::error_code ec;
   auto parsed = boost::json::parse(responsePayload, ec);
   if (ec || !parsed.is_object()) {
-    LOG_ERROR("DLT645 MQTT 响应解析失败: conn_name={}, topic={}, 原因={}",
-              link->config.conn_name(), responseTopic, ec.message());
+    LOG_ERROR("DLT645 MQTT 响应解析失败: conn_name={}, topic={}, 原因={}", link->config.conn_name(), responseTopic, ec.message());
     return grpc::Status(grpc::StatusCode::INTERNAL, "MQTT 响应解析失败");
   }
-  const auto& respObj = parsed.as_object();
+  const auto &respObj = parsed.as_object();
   int32_t statusCode = 0;
   auto statusIt = respObj.find("status");
   if (statusIt != respObj.end()) {
     bool parsedStatus = false;
     statusCode = parseStatusCode(statusIt->value(), &parsedStatus);
     if (!parsedStatus) {
-      LOG_WARNING("DLT645 MQTT 响应状态类型异常: conn_name={}, topic={}",
-                  link->config.conn_name(), responseTopic);
+      LOG_WARNING("DLT645 MQTT 响应状态类型异常: conn_name={}, topic={}", link->config.conn_name(), responseTopic);
     }
   } else {
-    LOG_WARNING("DLT645 MQTT 响应缺少状态字段: conn_name={}, topic={}",
-                link->config.conn_name(), responseTopic);
+    LOG_WARNING("DLT645 MQTT 响应缺少状态字段: conn_name={}, topic={}", link->config.conn_name(), responseTopic);
   }
   if (outStatus != nullptr) {
     *outStatus = statusCode;
@@ -1468,9 +1442,7 @@ grpc::Status LinkManager::sendMonitorRequest(LinkRuntime* link, const std::strin
   return grpc::Status::OK;
 }
 
-grpc::Status LinkManager::decodeAndPublish(LinkRuntime* link, const PointTable::Point& point,
-                                           const std::vector<uint8_t>& payload, int64_t tsMs,
-                                           bool trimRightSpace) {
+grpc::Status LinkManager::decodeAndPublish(LinkRuntime *link, const PointTable::Point &point, const std::vector<uint8_t> &payload, int64_t tsMs, bool trimRightSpace) {
   if (link == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "链路为空");
   }
@@ -1485,8 +1457,7 @@ grpc::Status LinkManager::decodeAndPublish(LinkRuntime* link, const PointTable::
     }
   }
   if (allFF) {
-    LOG_WARNING("DLT645 数据域全 FF，判定设备未接入: conn_name={}, tag={}, payload={}",
-                link->config.conn_name(), point.tag, formatHex(payload));
+    LOG_WARNING("DLT645 数据域全 FF，判定设备未接入: conn_name={}, tag={}, payload={}", link->config.conn_name(), point.tag, formatHex(payload));
     if (point.type == DLT645Proto::DATA_TYPE_BOOL) {
       return dataCenter_.PublishBool(link->connId, point.tag, false, DataCenterProto::QUALITY_BAD, tsMs);
     }
@@ -1515,10 +1486,7 @@ grpc::Status LinkManager::decodeAndPublish(LinkRuntime* link, const PointTable::
   if (point.type == DLT645Proto::DATA_TYPE_UINT16 && point.dataLen >= 2) {
     raw = static_cast<double>(payload[0] | (payload[1] << 8));
   } else if (point.type == DLT645Proto::DATA_TYPE_UINT32 && point.dataLen >= 4) {
-    raw = static_cast<double>(payload[0] |
-                              (payload[1] << 8) |
-                              (payload[2] << 16) |
-                              (payload[3] << 24));
+    raw = static_cast<double>(payload[0] | (payload[1] << 8) | (payload[2] << 16) | (payload[3] << 24));
   } else if (point.type == DLT645Proto::DATA_TYPE_FLOAT && point.dataLen >= 4) {
     uint32_t temp = payload[0] |
         (payload[1] << 8) |
@@ -1542,7 +1510,7 @@ grpc::Status LinkManager::decodeAndPublish(LinkRuntime* link, const PointTable::
     }
     try {
       raw = std::stod(digits);
-    } catch (const std::exception&) {
+    } catch (const std::exception &) {
       return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "BCD 数值解析失败");
     }
   } else {
@@ -1555,8 +1523,7 @@ grpc::Status LinkManager::decodeAndPublish(LinkRuntime* link, const PointTable::
     auto lastIt = link->lastReportedByTag.find(point.tag);
     if (lastIt != link->lastReportedByTag.end()) {
       if (std::abs(value - lastIt->second) <= point.deadband) {
-        LOG_DEBUG("DLT645 死区过滤: tag={}, value={}, last={}, deadband={}",
-                  point.tag, value, lastIt->second, point.deadband);
+        LOG_DEBUG("DLT645 死区过滤: tag={}, value={}, last={}, deadband={}", point.tag, value, lastIt->second, point.deadband);
         return grpc::Status::OK;
       }
     }
@@ -1568,7 +1535,7 @@ grpc::Status LinkManager::decodeAndPublish(LinkRuntime* link, const PointTable::
   return status;
 }
 
-std::string LinkManager::makeMonitorRequestTopic(const DLT645Proto::LinkConfig& config) {
+std::string LinkManager::makeMonitorRequestTopic(const DLT645Proto::LinkConfig &config) {
   const auto mode = config.comm_mode();
   if (mode == DLT645Proto::COMM_MODE_LORA) {
     return std::string(kAppName) + "/" + kAppTypeLora + "/JSON/action/request/monitorNode";
@@ -1582,7 +1549,7 @@ std::string LinkManager::makeMonitorRequestTopic(const DLT645Proto::LinkConfig& 
   return "";
 }
 
-std::string LinkManager::makeMonitorResponseTopic(const DLT645Proto::LinkConfig& config) {
+std::string LinkManager::makeMonitorResponseTopic(const DLT645Proto::LinkConfig &config) {
   const auto mode = config.comm_mode();
   if (mode == DLT645Proto::COMM_MODE_LORA) {
     return std::string(kAppTypeLora) + "/" + kAppName + "/JSON/action/response/monitorNode";
@@ -1636,7 +1603,7 @@ std::string LinkManager::makeDelSlaveResponseTopic(DLT645Proto::CommMode mode) {
   return "";
 }
 
-std::string LinkManager::formatHex(const std::vector<uint8_t>& data) {
+std::string LinkManager::formatHex(const std::vector<uint8_t> &data) {
   std::ostringstream oss;
   oss << std::hex << std::setfill('0');
   for (uint8_t b : data) {
@@ -1651,14 +1618,7 @@ std::string LinkManager::formatTimestamp() {
   const auto milli = ms % 1000;
   std::time_t t = static_cast<std::time_t>(sec);
   std::tm tm = *std::gmtime(&t);
-  return std::format("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}+0000",
-                     tm.tm_year + 1900,
-                     tm.tm_mon + 1,
-                     tm.tm_mday,
-                     tm.tm_hour,
-                     tm.tm_min,
-                     tm.tm_sec,
-                     milli);
+  return std::format("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}+0000", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, milli);
 }
 
 uint64_t LinkManager::nowMs() {
@@ -1667,11 +1627,11 @@ uint64_t LinkManager::nowMs() {
                                    .count());
 }
 
-bool LinkManager::parseHexByte(const std::string& text, uint8_t* out) {
+bool LinkManager::parseHexByte(const std::string &text, uint8_t *out) {
   if (out == nullptr || text.size() != 2 || !isHex(text)) {
     return false;
   }
-  char* end = nullptr;
+  char *end = nullptr;
   auto value = std::strtoul(text.c_str(), &end, 16);
   if (end == nullptr || *end != '\0') {
     return false;
@@ -1680,7 +1640,7 @@ bool LinkManager::parseHexByte(const std::string& text, uint8_t* out) {
   return true;
 }
 
-bool LinkManager::decodeHexString(const std::string& text, std::vector<uint8_t>* out) {
+bool LinkManager::decodeHexString(const std::string &text, std::vector<uint8_t> *out) {
   if (out == nullptr || text.size() % 2 != 0 || !isHex(text)) {
     return false;
   }
@@ -1696,7 +1656,7 @@ bool LinkManager::decodeHexString(const std::string& text, std::vector<uint8_t>*
   return true;
 }
 
-std::vector<uint8_t> LinkManager::encodeBcd(const std::string& digits) {
+std::vector<uint8_t> LinkManager::encodeBcd(const std::string &digits) {
   std::string data = digits;
   if (data.size() % 2 != 0) {
     data.insert(data.begin(), '0');
@@ -1711,7 +1671,7 @@ std::vector<uint8_t> LinkManager::encodeBcd(const std::string& digits) {
   return out;
 }
 
-std::vector<uint8_t> LinkManager::encodeAddress(const std::string& addr) {
+std::vector<uint8_t> LinkManager::encodeAddress(const std::string &addr) {
   std::vector<uint8_t> out;
   out.reserve(6);
   for (int i = 0; i < 6; ++i) {
@@ -1724,8 +1684,7 @@ std::vector<uint8_t> LinkManager::encodeAddress(const std::string& addr) {
   return out;
 }
 
-std::vector<uint8_t> LinkManager::encodeDiBytes(const std::array<uint8_t, 4>& diBytes,
-                                                 const DLT645Proto::LinkConfig& config) {
+std::vector<uint8_t> LinkManager::encodeDiBytes(const std::array<uint8_t, 4> &diBytes, const DLT645Proto::LinkConfig &config) {
   std::vector<uint8_t> out(diBytes.begin(), diBytes.end());
   if (config.protocol_variant() == DLT645Proto::PROTOCOL_VARIANT_DLT645_PCD) {
     uint8_t deviceNo = 0;
@@ -1735,12 +1694,11 @@ std::vector<uint8_t> LinkManager::encodeDiBytes(const std::array<uint8_t, 4>& di
   return out;
 }
 
-std::vector<uint8_t> LinkManager::encodeDi(const PointTable::Point& point, const DLT645Proto::LinkConfig& config) {
+std::vector<uint8_t> LinkManager::encodeDi(const PointTable::Point &point, const DLT645Proto::LinkConfig &config) {
   return encodeDiBytes(point.diBytes, config);
 }
 
-std::vector<uint8_t> LinkManager::encodeData(const PointTable::Point& point,
-                                              const DataCenterProto::PointValue& value, std::string* error) {
+std::vector<uint8_t> LinkManager::encodeData(const PointTable::Point &point, const DataCenterProto::PointValue &value, std::string *error) {
   std::vector<uint8_t> out;
   out.reserve(point.dataLen);
 
@@ -1854,7 +1812,7 @@ std::vector<uint8_t> LinkManager::encodeData(const PointTable::Point& point,
   return {};
 }
 
-bool LinkManager::decodeFrame(const std::vector<uint8_t>& data, Frame* out, std::string* error) {
+bool LinkManager::decodeFrame(const std::vector<uint8_t> &data, Frame *out, std::string *error) {
   if (out == nullptr) {
     if (error != nullptr) {
       *error = "响应为空";
@@ -1902,8 +1860,7 @@ bool LinkManager::decodeFrame(const std::vector<uint8_t>& data, Frame* out, std:
   return true;
 }
 
-std::vector<uint8_t> LinkManager::buildFrame(const std::vector<uint8_t>& addr, uint8_t control,
-                                             const std::vector<uint8_t>& data) {
+std::vector<uint8_t> LinkManager::buildFrame(const std::vector<uint8_t> &addr, uint8_t control, const std::vector<uint8_t> &data) {
   std::vector<uint8_t> frame;
   frame.reserve(12 + data.size());
   frame.push_back(kFrameStart);
@@ -1918,7 +1875,7 @@ std::vector<uint8_t> LinkManager::buildFrame(const std::vector<uint8_t>& addr, u
   return frame;
 }
 
-uint8_t LinkManager::checksum(const std::vector<uint8_t>& data) {
+uint8_t LinkManager::checksum(const std::vector<uint8_t> &data) {
   uint32_t sum = 0;
   for (uint8_t b : data) {
     sum += b;
@@ -1926,26 +1883,25 @@ uint8_t LinkManager::checksum(const std::vector<uint8_t>& data) {
   return static_cast<uint8_t>(sum & 0xFF);
 }
 
-void LinkManager::addOffset33(std::vector<uint8_t>* data) {
+void LinkManager::addOffset33(std::vector<uint8_t> *data) {
   if (!data) {
     return;
   }
-  for (auto& b : *data) {
+  for (auto &b : *data) {
     b = static_cast<uint8_t>(b + 0x33);
   }
 }
 
-void LinkManager::subOffset33(std::vector<uint8_t>* data) {
+void LinkManager::subOffset33(std::vector<uint8_t> *data) {
   if (!data) {
     return;
   }
-  for (auto& b : *data) {
+  for (auto &b : *data) {
     b = static_cast<uint8_t>(b - 0x33);
   }
 }
 
-grpc::Status LinkManager::handleMonitorResponse(LinkRuntime* link, const std::string& payloadBase64,
-                                                const PointTable::Point& point, std::string* error) {
+grpc::Status LinkManager::handleMonitorResponse(LinkRuntime *link, const std::string &payloadBase64, const PointTable::Point &point, std::string *error) {
   Frame frame;
   auto status = parseResponsePayload(payloadBase64, &frame, error);
   if (!status.ok()) {
@@ -2002,8 +1958,7 @@ grpc::Status LinkManager::handleMonitorResponse(LinkRuntime* link, const std::st
   return decodeAndPublish(link, point, payload, nowMs(), false);
 }
 
-grpc::Status LinkManager::handleMonitorResponse(LinkRuntime* link, const std::string& payloadBase64,
-                                                const PointTable::Block& block, std::string* error) {
+grpc::Status LinkManager::handleMonitorResponse(LinkRuntime *link, const std::string &payloadBase64, const PointTable::Block &block, std::string *error) {
   Frame frame;
   auto status = parseResponsePayload(payloadBase64, &frame, error);
   if (!status.ok()) {
@@ -2056,31 +2011,27 @@ grpc::Status LinkManager::handleMonitorResponse(LinkRuntime* link, const std::st
     }
   }
   std::vector<uint8_t> payload(frame.data.begin() + diLen, frame.data.begin() + diLen + block.dataLen);
-  LOG_INFO("DLT645 收到数据块响应: conn_name={}, block_di={}, payload={}",
-           link->config.conn_name(), block.diText, formatHex(payload));
+  LOG_INFO("DLT645 收到数据块响应: conn_name={}, block_di={}, payload={}", link->config.conn_name(), block.diText, formatHex(payload));
 
   const auto tsMs = nowMs();
   bool hasError = false;
   std::string lastError;
-  for (const auto& item : block.items) {
+  for (const auto &item : block.items) {
     if (item.point.access == DLT645Proto::ACCESS_WRITE_ONLY) {
       continue;
     }
     if (item.offset + item.point.dataLen > payload.size()) {
       hasError = true;
       lastError = "数据块子项超出范围";
-      LOG_WARNING("DLT645 数据块子项超出范围: conn_name={}, block_di={}, tag={}, offset={}, data_len={}",
-                  link->config.conn_name(), block.diText, item.point.tag, item.offset, item.point.dataLen);
+      LOG_WARNING("DLT645 数据块子项超出范围: conn_name={}, block_di={}, tag={}, offset={}, data_len={}", link->config.conn_name(), block.diText, item.point.tag, item.offset, item.point.dataLen);
       continue;
     }
-    std::vector<uint8_t> itemPayload(payload.begin() + item.offset,
-                                     payload.begin() + item.offset + item.point.dataLen);
+    std::vector<uint8_t> itemPayload(payload.begin() + item.offset, payload.begin() + item.offset + item.point.dataLen);
     auto itemStatus = decodeAndPublish(link, item.point, itemPayload, tsMs, item.trimRightSpace);
     if (!itemStatus.ok()) {
       hasError = true;
       lastError = itemStatus.error_message();
-      LOG_WARNING("DLT645 数据块子项解析失败: conn_name={}, block_di={}, tag={}, 原因={}",
-                  link->config.conn_name(), block.diText, item.point.tag, itemStatus.error_message());
+      LOG_WARNING("DLT645 数据块子项解析失败: conn_name={}, block_di={}, tag={}, 原因={}", link->config.conn_name(), block.diText, item.point.tag, itemStatus.error_message());
     }
   }
   if (hasError) {
@@ -2092,7 +2043,7 @@ grpc::Status LinkManager::handleMonitorResponse(LinkRuntime* link, const std::st
   return grpc::Status::OK;
 }
 
-grpc::Status LinkManager::parseResponsePayload(const std::string& payloadBase64, Frame* outFrame, std::string* error) {
+grpc::Status LinkManager::parseResponsePayload(const std::string &payloadBase64, Frame *outFrame, std::string *error) {
   std::vector<uint8_t> raw;
   if (!base64Decode(payloadBase64, &raw)) {
     if (error != nullptr) {
@@ -2121,8 +2072,7 @@ grpc::Status LinkManager::parseResponsePayload(const std::string& payloadBase64,
     if (i + expected > raw.size()) {
       continue;
     }
-    std::vector<uint8_t> candidate(raw.begin() + static_cast<std::vector<uint8_t>::difference_type>(i),
-                                   raw.begin() + static_cast<std::vector<uint8_t>::difference_type>(i + expected));
+    std::vector<uint8_t> candidate(raw.begin() + static_cast<std::vector<uint8_t>::difference_type>(i), raw.begin() + static_cast<std::vector<uint8_t>::difference_type>(i + expected));
     std::string candidateError;
     if (!decodeFrame(candidate, outFrame, &candidateError)) {
       continue;
@@ -2136,7 +2086,7 @@ grpc::Status LinkManager::parseResponsePayload(const std::string& payloadBase64,
   return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "帧解析失败且未找到有效帧");
 }
 
-bool LinkManager::pointValueToDouble(const DataCenterProto::PointValue& value, double* out) {
+bool LinkManager::pointValueToDouble(const DataCenterProto::PointValue &value, double *out) {
   if (out == nullptr) {
     return false;
   }
@@ -2151,7 +2101,7 @@ bool LinkManager::pointValueToDouble(const DataCenterProto::PointValue& value, d
   return false;
 }
 
-bool LinkManager::pointValueToBool(const DataCenterProto::PointValue& value, bool* out) {
+bool LinkManager::pointValueToBool(const DataCenterProto::PointValue &value, bool *out) {
   if (out == nullptr) {
     return false;
   }
@@ -2166,7 +2116,7 @@ bool LinkManager::pointValueToBool(const DataCenterProto::PointValue& value, boo
   return false;
 }
 
-bool LinkManager::pointValueToString(const DataCenterProto::PointValue& value, std::string* out) {
+bool LinkManager::pointValueToString(const DataCenterProto::PointValue &value, std::string *out) {
   if (out == nullptr) {
     return false;
   }
@@ -2177,7 +2127,7 @@ bool LinkManager::pointValueToString(const DataCenterProto::PointValue& value, s
   return false;
 }
 
-bool LinkManager::reverseScale(double value, double scale, double offset, double* out) {
+bool LinkManager::reverseScale(double value, double scale, double offset, double *out) {
   if (out == nullptr) {
     return false;
   }

@@ -54,10 +54,7 @@ std::string Base64Encode(const std::vector<uint8_t> &data) {
 namespace DLT645 {
 class DLT645LinkManagerTestPeer {
 public:
-  static grpc::Status ParseResponsePayload(LinkManager &mgr,
-                                           const std::string &payloadBase64,
-                                           ParsedFrame *out,
-                                           std::string *error) {
+  static grpc::Status ParseResponsePayload(LinkManager &mgr, const std::string &payloadBase64, ParsedFrame *out, std::string *error) {
     LinkManager::Frame frame;
     auto st = mgr.parseResponsePayload(payloadBase64, &frame, error);
     if (st.ok() && out != nullptr) {
@@ -68,12 +65,7 @@ public:
     return st;
   }
 
-  static grpc::Status DecodeAndPublish(LinkManager &mgr,
-                                       const std::string &connName,
-                                       const PointTable::Point &point,
-                                       const std::vector<uint8_t> &payload,
-                                       int64_t tsMs,
-                                       bool trimRightSpace) {
+  static grpc::Status DecodeAndPublish(LinkManager &mgr, const std::string &connName, const PointTable::Point &point, const std::vector<uint8_t> &payload, int64_t tsMs, bool trimRightSpace) {
     auto it = mgr.linksByName_.find(connName);
     if (it == mgr.linksByName_.end()) {
       return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接不存在");
@@ -101,14 +93,20 @@ public:
     return LinkManager::encodeAddress(addr);
   }
 
-  static std::vector<uint8_t> BuildFrame(const std::vector<uint8_t> &addr,
-                                         uint8_t control,
-                                         const std::vector<uint8_t> &data) {
+  static std::vector<uint8_t> BuildFrame(const std::vector<uint8_t> &addr, uint8_t control, const std::vector<uint8_t> &data) {
     return LinkManager::buildFrame(addr, control, data);
   }
 
   static void AddOffset33(std::vector<uint8_t> *data) {
     LinkManager::addOffset33(data);
+  }
+
+  static grpc::Status SendMonitorRequest(LinkManager &mgr, const std::string &connName, const std::vector<uint8_t> &frame, std::string *outPayloadBase64, int32_t *outStatus) {
+    auto it = mgr.linksByName_.find(connName);
+    if (it == mgr.linksByName_.end()) {
+      return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接不存在");
+    }
+    return mgr.sendMonitorRequest(it->second.get(), frame, outPayloadBase64, outStatus);
   }
 };
 }  // namespace DLT645
@@ -141,12 +139,7 @@ DLT645Proto::UpdateConfigRequest MakeMqttUpdateRequest(const char *host, uint32_
   return req;
 }
 
-PointTable::Point MakePoint(const char *tag,
-                            uint32_t dataLen,
-                            DLT645Proto::DataType type,
-                            double scale,
-                            double offset,
-                            double deadband) {
+PointTable::Point MakePoint(const char *tag, uint32_t dataLen, DLT645Proto::DataType type, double scale, double offset, double deadband) {
   PointTable::Point p;
   p.tag = tag;
   p.dataLen = dataLen;
@@ -480,9 +473,9 @@ TEST(Dlt645LinkManagerTest, StartLinkLoraBlockedDoesNotBlockUart) {
   bool releaseLora = false;
   ON_CALL(*mqttStub, RequestAndWait(_, _, _))
       .WillByDefault(::testing::Invoke([&gateMu, &gateCv, &loraEntered, &releaseLora](
-                                           grpc::ClientContext*,
-                                           const MQTTManagerProto::RequestAndWaitRequest& req,
-                                           MQTTManagerProto::RequestAndWaitResponse* resp) {
+                                           grpc::ClientContext *,
+                                           const MQTTManagerProto::RequestAndWaitRequest &req,
+                                           MQTTManagerProto::RequestAndWaitResponse *resp) {
         if (resp == nullptr) {
           return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
         }
@@ -532,6 +525,209 @@ TEST(Dlt645LinkManagerTest, StartLinkLoraBlockedDoesNotBlockUart) {
   EXPECT_EQ(uartGot.state(), DLT645Proto::LINK_STATE_RUNNING);
 }
 
+// 验证：多个 Lora 连接的点抄请求在模块内按全局串行顺序执行。
+TEST(Dlt645LinkManagerTest, LoraMonitorRequestsSerializeAcrossConnections) {
+  FakeDataCenterState state;
+  auto dcStub = MakeStub(&state);
+  auto mqttStub = std::make_shared<MQTTManagerProto::MockMQTTManagerServiceStub>();
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(dcStub);
+  mgr.setMqttStub(mqttStub);
+
+  auto updateReq = MakeMqttUpdateRequest("127.0.0.1", 1883, "c-lora-serial");
+  DLT645Proto::UpdateConfigResponse updateResp;
+  ASSERT_TRUE(mgr.UpdateConfig(updateReq, &updateResp).ok());
+
+  DLT645Proto::UpsertLinkRequest reqA;
+  *reqA.mutable_config() = MakeValidLinkConfig("conn-lora-a", DLT645Proto::COMM_MODE_LORA);
+  DLT645Proto::LinkInfo infoA;
+  ASSERT_TRUE(mgr.UpsertLink(reqA, &infoA).ok());
+
+  DLT645Proto::UpsertLinkRequest reqB;
+  *reqB.mutable_config() = MakeValidLinkConfig("conn-lora-b", DLT645Proto::COMM_MODE_LORA);
+  reqB.mutable_config()->set_meter_addr("123456789013");
+  DLT645Proto::LinkInfo infoB;
+  ASSERT_TRUE(mgr.UpsertLink(reqB, &infoB).ok());
+
+  std::mutex gateMu;
+  std::condition_variable gateCv;
+  int activeLora = 0;
+  int maxActiveLora = 0;
+  int loraCalls = 0;
+  bool firstEntered = false;
+  bool secondEntered = false;
+  bool releaseFirst = false;
+  ON_CALL(*mqttStub, RequestAndWait(_, _, _))
+      .WillByDefault(::testing::Invoke([&gateMu,
+                                        &gateCv,
+                                        &activeLora,
+                                        &maxActiveLora,
+                                        &loraCalls,
+                                        &firstEntered,
+                                        &secondEntered,
+                                        &releaseFirst](
+                                           grpc::ClientContext *,
+                                           const MQTTManagerProto::RequestAndWaitRequest &req,
+                                           MQTTManagerProto::RequestAndWaitResponse *resp) {
+        if (resp == nullptr) {
+          return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
+        }
+        resp->set_ok(true);
+        resp->set_message("成功");
+        if (req.request_topic().find("loraManager") != std::string::npos &&
+            req.request_topic().find("monitorNode") != std::string::npos) {
+          std::unique_lock<std::mutex> lock(gateMu);
+          ++activeLora;
+          if (activeLora > maxActiveLora) {
+            maxActiveLora = activeLora;
+          }
+          ++loraCalls;
+          if (loraCalls == 1) {
+            firstEntered = true;
+            gateCv.notify_all();
+            gateCv.wait_for(lock, std::chrono::seconds(3), [&releaseFirst]() { return releaseFirst; });
+          } else if (loraCalls == 2) {
+            secondEntered = true;
+            gateCv.notify_all();
+          }
+          --activeLora;
+        }
+        resp->set_payload("{\"status\":0,\"data\":\"AQ==\"}");
+        return grpc::Status::OK;
+      }));
+
+  const std::vector<uint8_t> frame = {0x68, 0x11, 0x22};
+  auto sendMonitor = [&mgr, &frame](const std::string &connName) {
+    std::string payloadBase64;
+    int32_t status = -1;
+    auto st = DLT645LinkManagerTestPeer::SendMonitorRequest(mgr, connName, frame, &payloadBase64, &status);
+    if (!st.ok()) {
+      return st;
+    }
+    if (status != 0) {
+      return grpc::Status(grpc::StatusCode::INTERNAL, "状态码非零");
+    }
+    if (payloadBase64.empty()) {
+      return grpc::Status(grpc::StatusCode::INTERNAL, "响应数据为空");
+    }
+    return grpc::Status::OK;
+  };
+
+  auto futureA = std::async(std::launch::async, [&sendMonitor]() { return sendMonitor("conn-lora-a"); });
+  {
+    std::unique_lock<std::mutex> lock(gateMu);
+    ASSERT_TRUE(gateCv.wait_for(lock, std::chrono::seconds(2), [&firstEntered]() { return firstEntered; }));
+  }
+
+  auto futureB = std::async(std::launch::async, [&sendMonitor]() { return sendMonitor("conn-lora-b"); });
+  {
+    std::unique_lock<std::mutex> lock(gateMu);
+    EXPECT_FALSE(gateCv.wait_for(lock, std::chrono::milliseconds(300), [&secondEntered]() { return secondEntered; }));
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(gateMu);
+    releaseFirst = true;
+  }
+  gateCv.notify_all();
+
+  auto stA = futureA.get();
+  auto stB = futureB.get();
+  EXPECT_TRUE(stA.ok());
+  EXPECT_TRUE(stB.ok());
+  EXPECT_EQ(loraCalls, 2);
+  EXPECT_TRUE(secondEntered);
+  EXPECT_EQ(maxActiveLora, 1);
+}
+
+// 验证：Lora 点抄请求阻塞时，不会阻塞 Carrier 点抄请求。
+TEST(Dlt645LinkManagerTest, LoraMonitorBlockedDoesNotBlockCarrier) {
+  FakeDataCenterState state;
+  auto dcStub = MakeStub(&state);
+  auto mqttStub = std::make_shared<MQTTManagerProto::MockMQTTManagerServiceStub>();
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(dcStub);
+  mgr.setMqttStub(mqttStub);
+
+  auto updateReq = MakeMqttUpdateRequest("127.0.0.1", 1883, "c-lora-carrier");
+  DLT645Proto::UpdateConfigResponse updateResp;
+  ASSERT_TRUE(mgr.UpdateConfig(updateReq, &updateResp).ok());
+
+  DLT645Proto::UpsertLinkRequest loraReq;
+  *loraReq.mutable_config() = MakeValidLinkConfig("conn-lora-monitor", DLT645Proto::COMM_MODE_LORA);
+  DLT645Proto::LinkInfo loraInfo;
+  ASSERT_TRUE(mgr.UpsertLink(loraReq, &loraInfo).ok());
+
+  DLT645Proto::UpsertLinkRequest carrierReq;
+  *carrierReq.mutable_config() = MakeValidLinkConfig("conn-carrier-monitor", DLT645Proto::COMM_MODE_CARRIER);
+  carrierReq.mutable_config()->set_meter_addr("123456789014");
+  DLT645Proto::LinkInfo carrierInfo;
+  ASSERT_TRUE(mgr.UpsertLink(carrierReq, &carrierInfo).ok());
+
+  std::mutex gateMu;
+  std::condition_variable gateCv;
+  bool loraEntered = false;
+  bool releaseLora = false;
+  ON_CALL(*mqttStub, RequestAndWait(_, _, _))
+      .WillByDefault(::testing::Invoke([&gateMu, &gateCv, &loraEntered, &releaseLora](
+                                           grpc::ClientContext *,
+                                           const MQTTManagerProto::RequestAndWaitRequest &req,
+                                           MQTTManagerProto::RequestAndWaitResponse *resp) {
+        if (resp == nullptr) {
+          return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
+        }
+        resp->set_ok(true);
+        resp->set_message("成功");
+        if (req.request_topic().find("loraManager") != std::string::npos &&
+            req.request_topic().find("monitorNode") != std::string::npos) {
+          {
+            std::lock_guard<std::mutex> lock(gateMu);
+            loraEntered = true;
+          }
+          gateCv.notify_all();
+          std::unique_lock<std::mutex> lock(gateMu);
+          gateCv.wait_for(lock, std::chrono::seconds(3), [&releaseLora]() { return releaseLora; });
+        }
+        resp->set_payload("{\"status\":0,\"data\":\"AQ==\"}");
+        return grpc::Status::OK;
+      }));
+
+  const std::vector<uint8_t> frame = {0x68, 0x33, 0x44};
+  auto loraFuture = std::async(std::launch::async, [&mgr, &frame]() {
+    std::string payloadBase64;
+    int32_t status = -1;
+    return DLT645LinkManagerTestPeer::SendMonitorRequest(mgr, "conn-lora-monitor", frame, &payloadBase64, &status);
+  });
+  {
+    std::unique_lock<std::mutex> lock(gateMu);
+    ASSERT_TRUE(gateCv.wait_for(lock, std::chrono::seconds(2), [&loraEntered]() { return loraEntered; }));
+  }
+
+  const auto carrierStartBegin = std::chrono::steady_clock::now();
+  std::string carrierPayloadBase64;
+  int32_t carrierStatus = -1;
+  auto carrierSt = DLT645LinkManagerTestPeer::SendMonitorRequest(
+      mgr, "conn-carrier-monitor", frame, &carrierPayloadBase64, &carrierStatus);
+  const auto carrierCostMs =
+      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - carrierStartBegin)
+          .count();
+  EXPECT_TRUE(carrierSt.ok());
+  EXPECT_EQ(carrierStatus, 0);
+  EXPECT_FALSE(carrierPayloadBase64.empty());
+  EXPECT_LT(carrierCostMs, 1000);
+
+  {
+    std::lock_guard<std::mutex> lock(gateMu);
+    releaseLora = true;
+  }
+  gateCv.notify_all();
+
+  auto loraSt = loraFuture.get();
+  EXPECT_TRUE(loraSt.ok());
+}
+
 // 验证：同一 Lora 地址的多个连接仅在首启/末停时各执行一次档案增删。
 TEST(Dlt645LinkManagerTest, StartStopLoraSameAddrSharesArchiveLifecycle) {
   FakeDataCenterState state;
@@ -560,9 +756,9 @@ TEST(Dlt645LinkManagerTest, StartStopLoraSameAddrSharesArchiveLifecycle) {
   std::atomic<int> delCount{0};
   ON_CALL(*mqttStub, RequestAndWait(_, _, _))
       .WillByDefault(::testing::Invoke([&addCount, &delCount](
-                                           grpc::ClientContext*,
-                                           const MQTTManagerProto::RequestAndWaitRequest& req,
-                                           MQTTManagerProto::RequestAndWaitResponse* resp) {
+                                           grpc::ClientContext *,
+                                           const MQTTManagerProto::RequestAndWaitRequest &req,
+                                           MQTTManagerProto::RequestAndWaitResponse *resp) {
         if (resp == nullptr) {
           return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
         }
@@ -729,20 +925,14 @@ TEST(Dlt645LinkManagerTest, DecodeAndPublishStringTrimAndDeadband) {
   float f1 = 10.0f;
   uint32_t u1 = 0;
   std::memcpy(&u1, &f1, sizeof(float));
-  std::vector<uint8_t> floatPayload = {static_cast<uint8_t>(u1 & 0xFF),
-                                       static_cast<uint8_t>((u1 >> 8) & 0xFF),
-                                       static_cast<uint8_t>((u1 >> 16) & 0xFF),
-                                       static_cast<uint8_t>((u1 >> 24) & 0xFF)};
+  std::vector<uint8_t> floatPayload = {static_cast<uint8_t>(u1 & 0xFF), static_cast<uint8_t>((u1 >> 8) & 0xFF), static_cast<uint8_t>((u1 >> 16) & 0xFF), static_cast<uint8_t>((u1 >> 24) & 0xFF)};
   st = DLT645LinkManagerTestPeer::DecodeAndPublish(mgr, "conn-str", floatPoint, floatPayload, 2, false);
   EXPECT_TRUE(st.ok());
 
   float f2 = 10.5f;
   uint32_t u2 = 0;
   std::memcpy(&u2, &f2, sizeof(float));
-  std::vector<uint8_t> floatPayload2 = {static_cast<uint8_t>(u2 & 0xFF),
-                                        static_cast<uint8_t>((u2 >> 8) & 0xFF),
-                                        static_cast<uint8_t>((u2 >> 16) & 0xFF),
-                                        static_cast<uint8_t>((u2 >> 24) & 0xFF)};
+  std::vector<uint8_t> floatPayload2 = {static_cast<uint8_t>(u2 & 0xFF), static_cast<uint8_t>((u2 >> 8) & 0xFF), static_cast<uint8_t>((u2 >> 16) & 0xFF), static_cast<uint8_t>((u2 >> 24) & 0xFF)};
   // 死区过滤：差值小于 deadband 时直接返回 OK。
   st = DLT645LinkManagerTestPeer::DecodeAndPublish(mgr, "conn-str", floatPoint, floatPayload2, 3, false);
   EXPECT_TRUE(st.ok());
