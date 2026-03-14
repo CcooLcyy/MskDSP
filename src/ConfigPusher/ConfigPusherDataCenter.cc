@@ -89,24 +89,24 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
   }
 
   bool ok = true;
-  struct ResolvedPointTable {
+  struct ResolvedConnTags {
     uint32_t connId;
     bool replace;
     std::vector<std::string> tags;
     std::string moduleName;
     std::string connName;
   };
-  std::vector<ResolvedPointTable> pointTables;
-  pointTables.reserve(static_cast<size_t>(config.point_tables_size()));
+  std::vector<ResolvedConnTags> connTagsList;
+  connTagsList.reserve(static_cast<size_t>(config.point_tables_size()));
 
   for (const auto &table : config.point_tables()) {
     if (!ValidateConnKey(table.module_name(), table.conn_name())) {
-      LOG_ERROR("DataCenter 点表配置缺少 模块名/连接名");
+      LOG_ERROR("DataCenter 连接标签注册表配置缺少 模块名/连接名");
       ok = false;
       continue;
     }
     if (table.tags().empty()) {
-      LOG_ERROR("DataCenter 点表配置缺少标签: 模块名={}, 连接名={}", table.module_name(), table.conn_name());
+      LOG_ERROR("DataCenter 连接标签注册表配置缺少标签: 模块名={}, 连接名={}", table.module_name(), table.conn_name());
       ok = false;
       continue;
     }
@@ -123,7 +123,7 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
     tags.reserve(static_cast<size_t>(table.tags_size()));
     for (const auto &tag : table.tags()) {
       if (tag.empty()) {
-        LOG_ERROR("DataCenter 点表配置包含空标签: 模块名={}, 连接名={}", table.module_name(), table.conn_name());
+        LOG_ERROR("DataCenter 连接标签注册表配置包含空标签: 模块名={}, 连接名={}", table.module_name(), table.conn_name());
         tagsOk = false;
         continue;
       }
@@ -134,7 +134,7 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
       continue;
     }
 
-    pointTables.push_back(ResolvedPointTable{
+    connTagsList.push_back(ResolvedConnTags{
         .connId = connId,
         .replace = table.replace(),
         .tags = std::move(tags),
@@ -200,33 +200,33 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
     return false;
   }
 
-  for (const auto &table : pointTables) {
-    DataCenterProto::UpsertPointTableRequest req;
+  for (const auto &table : connTagsList) {
+    DataCenterProto::UpsertConnTagsRequest req;
     req.set_conn_id(table.connId);
     req.set_replace(table.replace);
     for (const auto &tag : table.tags) {
       req.add_tags(tag);
     }
 
-    LOG_INFO("开始下发 DataCenter 点表: 模块名={}, 连接名={}, 标签数={}, 是否替换={}",
+    LOG_INFO("开始下发 DataCenter 连接标签注册表: 模块名={}, 连接名={}, 标签数={}, 是否替换={}",
              table.moduleName,
              table.connName,
              req.tags_size(),
              req.replace());
-    LOG_INFO("发送 DataCenter 点表请求报文: {}", formatProtoForLog(req));
+    LOG_INFO("发送 DataCenter 连接标签注册表请求报文: {}", formatProtoForLog(req));
     grpc::ClientContext ctx;
     DataCenterProto::Empty resp;
-    status = stub->UpsertPointTable(&ctx, req, &resp);
+    status = stub->UpsertConnTags(&ctx, req, &resp);
     if (!status.ok()) {
-      LOG_ERROR("DataCenter 点表下发失败: 模块名={}, 连接名={}, 请求={}, 原因={}",
+      LOG_ERROR("DataCenter 连接标签注册表下发失败: 模块名={}, 连接名={}, 请求={}, 原因={}",
                 table.moduleName,
                 table.connName,
                 formatProtoForLog(req),
                 status.error_message());
       return false;
     }
-    LOG_INFO("收到 DataCenter 点表响应报文: {}", formatProtoForLog(resp));
-    LOG_INFO("DataCenter 点表下发成功: 模块名={}, 连接名={}, 标签数={}",
+    LOG_INFO("收到 DataCenter 连接标签注册表响应报文: {}", formatProtoForLog(resp));
+    LOG_INFO("DataCenter 连接标签注册表下发成功: 模块名={}, 连接名={}, 标签数={}",
              table.moduleName,
              table.connName,
              req.tags_size());

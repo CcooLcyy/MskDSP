@@ -43,22 +43,22 @@ TEST(ConfigPusherDataCenterTest, AbortWhenConnectionMissing) {
   state.AddConnection(10, "IEC104", "line-1");
   auto stub = MakeStub(&state);
 
-  EXPECT_CALL(*stub, UpsertPointTable(_, _, _)).Times(0);
+  EXPECT_CALL(*stub, UpsertConnTags(_, _, _)).Times(0);
   EXPECT_CALL(*stub, UpsertRoutes(_, _, _)).Times(0);
 
   auto config = MakeConfig("IEC104", "line-1", "AGC", "g-1");
   EXPECT_FALSE(ConfigPusher::ApplyDataCenterConfig(config, stub.get()));
 }
 
-// 验证：连接存在时可下发点表与路由。
+// 验证：连接存在时可下发连接标签注册表与路由。
 TEST(ConfigPusherDataCenterTest, ApplyPointTablesAndRoutes) {
   FakeDataCenterState state;
   state.AddConnection(10, "IEC104", "line-1");
   state.AddConnection(20, "AGC", "g-1");
   auto stub = MakeStub(&state);
 
-  EXPECT_CALL(*stub, UpsertPointTable(_, _, _))
-      .WillOnce(Invoke([](grpc::ClientContext*, const DataCenterProto::UpsertPointTableRequest& req, DataCenterProto::Empty*) {
+  EXPECT_CALL(*stub, UpsertConnTags(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext*, const DataCenterProto::UpsertConnTagsRequest& req, DataCenterProto::Empty*) {
         EXPECT_EQ(req.conn_id(), 10u);
         EXPECT_TRUE(req.replace());
         std::unordered_set<std::string> tags;

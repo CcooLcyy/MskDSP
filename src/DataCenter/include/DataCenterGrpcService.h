@@ -20,8 +20,8 @@ public:
   grpc::Status RenameConnection(grpc::ServerContext* context, const DataCenterProto::RenameConnectionRequest* request, DataCenterProto::ConnectionInfo* response) override;
   grpc::Status DeleteConnection(grpc::ServerContext* context, const DataCenterProto::DeleteConnectionRequest* request, DataCenterProto::Empty* response) override;
 
-  grpc::Status UpsertPointTable(grpc::ServerContext* context, const DataCenterProto::UpsertPointTableRequest* request, DataCenterProto::Empty* response) override;
-  grpc::Status GetPointTable(grpc::ServerContext* context, const DataCenterProto::GetPointTableRequest* request, DataCenterProto::PointTable* response) override;
+  grpc::Status UpsertConnTags(grpc::ServerContext* context, const DataCenterProto::UpsertConnTagsRequest* request, DataCenterProto::Empty* response) override;
+  grpc::Status GetConnTags(grpc::ServerContext* context, const DataCenterProto::GetConnTagsRequest* request, DataCenterProto::ConnTags* response) override;
 
   grpc::Status UpsertRoutes(grpc::ServerContext* context, const DataCenterProto::UpsertRoutesRequest* request, DataCenterProto::Empty* response) override;
   grpc::Status DeleteRoutes(grpc::ServerContext* context, const DataCenterProto::DeleteRoutesRequest* request, DataCenterProto::Empty* response) override;

@@ -9,7 +9,7 @@ DataCenter 是进程内的“数据总线/转发枢纽”，用于在不同协�
 - 点位对齐：通过 `tag`（逻辑点名，可中文）对齐跨协议的同一业务量
 - 有向路由：按点位维度配置 `src -> dst` 的转发规则，支持一对一与一对多
 - 最新值缓存：支持 `GetLatest` / `Subscribe(snapshot=true)` 获取目的连接内的最新值（best-effort）
-- 点表配置持久化：将点表配置落盘到 `./conf/dataCenter/point_tables.pb`，重启后自动恢复（当前实现）
+- 连接标签注册表持久化：将 `conn_id -> tags` 注册表落盘到 `./conf/dataCenter/conn_tags.pb`，重启后自动恢复；若新文件不存在，会兼容读取历史文件名 `point_tables.pb`
 - 路由配置持久化：将路由配置落盘到 `./conf/dataCenter/routes.pb`，重启后自动恢复（当前实现）
 - 连接注册表持久化：将连接注册表落盘到 `./conf/dataCenter/connections.pb`，重启后自动恢复（当前实现）
 
@@ -36,30 +36,31 @@ DataCenter 是进程内的“数据总线/转发枢纽”，用于在不同协�
 - gRPC Service：`DataCenterProto::DataCenterService`
 
 ## gRPC 接口说明（当前实现）
-DataCenter 对外提供一组面向“连接/点表/路由/转发”的 gRPC 接口，用于支撑跨协议数据转发闭环。
+DataCenter 对外提供一组面向“连接/连接标签注册表/路由/转发”的 gRPC 接口，用于支撑跨协议数据转发闭环。
 
 ### 术语
 - `Endpoint`：`(connId, tag)`；`tag` 为连接内的逻辑点名（UTF-8，可中文）。
 - `Route`：有向绑定 `src Endpoint -> dst Endpoint`；允许 `srcTag != dstTag`，转发时会按目的端点重写为 `dstTag`。
 - `PointUpdate`：路由后的更新，包含 `src/dst` 端点信息与 `value/ts_ms/quality`。
 
-### 连接/点表（用于展示与校验，可选）
+### 连接/连接标签注册表（用于展示与校验，可选）
 - `GetOrCreateConnection(GetOrCreateConnectionRequest) -> ConnectionInfo`
   - connId 分配器：按 `(module_name, conn_name)` 分配/查询 `conn_id`（若已存在则返回既有 `conn_id`；否则分配新 ID 并落盘持久化）。
 - `RenameConnection(RenameConnectionRequest) -> ConnectionInfo`
   - 重命名连接主键：将 `old_key` 改为 `new_key`，并保持 `conn_id` 不变；若 `new_key` 已存在则返回 `ALREADY_EXISTS`。
 - `DeleteConnection(DeleteConnectionRequest) -> Empty`
-  - 删除连接（按 `(module_name, conn_name)`）；会同步删除该 `conn_id` 关联的点表/路由/最新值缓存，并关闭该 `conn_id` 的订阅者连接（best-effort），随后落盘持久化。
+  - 删除连接（按 `(module_name, conn_name)`）；会同步删除该 `conn_id` 关联的连接标签注册表/路由/最新值缓存，并关闭该 `conn_id` 的订阅者连接（best-effort），随后落盘持久化。
 - `UpsertConnection(UpsertConnectionRequest) -> Empty`
   - 兼容接口：更新已分配 `conn_id` 的连接信息（不负责分配 `conn_id`；若 `conn_id` 未在注册表中会返回 `NOT_FOUND`）。
 - `ListConnections(Empty) -> ListConnectionsResponse`
   - 列出已注册连接信息（用于 UI/配置工具展示）。
-- `UpsertPointTable(UpsertPointTableRequest) -> Empty`
-  - 注册/更新某连接点表（`replace=true` 全量覆盖；否则增量追加）。
-  - 说明：该 RPC 成功后会触发点表配置落盘；若落盘失败会返回 `INTERNAL`（内存中的点表不会回滚）。
-- `GetPointTable(GetPointTableRequest) -> PointTable`
-  - 获取某连接点表；若未注册返回 `NOT_FOUND`。
-  - 说明：点表并非硬依赖；但当点表存在时，`UpsertRoutes` 会校验 `tag` 必须在点表中，避免配置错误。
+- `UpsertConnTags(UpsertConnTagsRequest) -> Empty`
+  - 注册/更新某连接的连接标签注册表（`replace=true` 全量覆盖；否则增量追加）。
+  - 说明：这里的 `ConnTags` 只是 `conn_id -> tags` 注册表，用于路由校验、展示、自愈，不是协议地址映射点表。
+  - 说明：该 RPC 成功后会触发连接标签注册表配置落盘；若落盘失败会返回 `INTERNAL`（内存中的注册表不会回滚）。
+- `GetConnTags(GetConnTagsRequest) -> ConnTags`
+  - 获取某连接的连接标签注册表；若未注册返回 `NOT_FOUND`。
+  - 说明：连接标签注册表并非硬依赖；但当其存在时，`UpsertRoutes` 会校验 `tag` 必须在注册表中，避免配置错误。
 
 ### 路由管理（有向绑定）
 - `UpsertRoutes(UpsertRoutesRequest) -> Empty`
@@ -88,8 +89,8 @@ DataCenter 对外提供一组面向“连接/点表/路由/转发”的 gRPC 接
 
 ## 配置与使用流程（建议）
 1. 在各协议模块（IEC104/ModbusRTU/DLT645/…）配置阶段，通过 DataCenter 的 `GetOrCreateConnection(module_name, conn_name)` 获取 `connId`（全局唯一且持久化），并将该 `connId` 写入该连接的配置；为每个点配置 `tag`（逻辑点名，可中文）。
-2. 在 DataCenter 中为源/目的两侧连接下发点表（可选但建议）：`UpsertPointTable(connId, tags...)`。
-3. 在 DataCenter 中配置路由方向（有向绑定）：基于源/目的两侧点表中已知的 `connId + tag` 建立 `src -> dst` 规则（支持一对多）。
+2. 在 DataCenter 中为源/目的两侧连接下发连接标签注册表（可选但建议）：`UpsertConnTags(connId, tags...)`。
+3. 在 DataCenter 中配置路由方向（有向绑定）：基于源/目的两侧连接标签注册表中已知的 `connId + tag` 建立 `src -> dst` 规则（支持一对多）。
 4. 启动模块：通过管理器启动 DataCenter 与各协议模块；采集端向 DataCenter 发布数据，上送端订阅/获取对应 `tag` 的更新进行上报。
 
 ## 上位机设计建议
@@ -102,13 +103,13 @@ DataCenter 对外提供一组面向“连接/点表/路由/转发”的 gRPC 接
 
 ### 2) connId 分配策略（推荐）
 - 上位机/协议模块在“配置阶段”先调用 `GetOrCreateConnection` 获取 `connId`，并将返回的 `connId` 固化到该连接配置中（后续运行期 `Publish/Subscribe` 使用同一 `connId`）。
-- `RenameConnection` 用于仅修改主键（`connId` 不变）：因此路由、点表不需要改写，只需更新显示/引用主键即可。
-- `DeleteConnection` 为破坏性操作：会清理该 `connId` 的点表/路由/最新值缓存，并关闭该 `connId` 的订阅者连接（best-effort）；上位机应在 UI 上做二次确认，并按需重建配置。
+- `RenameConnection` 用于仅修改主键（`connId` 不变）：因此路由、连接标签注册表不需要改写，只需更新显示/引用主键即可。
+- `DeleteConnection` 为破坏性操作：会清理该 `connId` 的连接标签注册表/路由/最新值缓存，并关闭该 `connId` 的订阅者连接（best-effort）；上位机应在 UI 上做二次确认，并按需重建配置。
 
 ### 3) 配置幂等与下发顺序
-- 建议在上位机侧把“连接、点表、路由”都做成幂等下发：配置工具反复点击/重复下发不应产生副作用。
-- 推荐顺序：先 `GetOrCreateConnection` → 再 `UpsertPointTable`（如启用点表校验）→ 再 `UpsertRoutes`。
-- 当点表存在时，路由会校验 `tag` 必须在点表中；因此点表/路由的 UI 编辑可通过 `GetPointTable` / `ListRoutes` 做回读校验与展示。
+- 建议在上位机侧把“连接、连接标签注册表、路由”都做成幂等下发：配置工具反复点击/重复下发不应产生副作用。
+- 推荐顺序：先 `GetOrCreateConnection` → 再 `UpsertConnTags`（如启用连接标签注册表校验）→ 再 `UpsertRoutes`。
+- 当连接标签注册表存在时，路由会校验 `tag` 必须在注册表中；因此连接标签注册表/路由的 UI 编辑可通过 `GetConnTags` / `ListRoutes` 做回读校验与展示。
 
 ### 4) 数据接收侧建议
 - 接收方启动后若希望“先拿到当前值再跟随实时更新”，建议使用 `Subscribe(snapshot=true)`；若只关心一次性拉取，则使用 `GetLatest`。
@@ -132,23 +133,25 @@ DataCenter 会将连接注册表落盘到工作目录下的 `./conf/dataCenter/c
 - 若主文件损坏：尝试使用备份文件启动；若备份可用，会将损坏主文件隔离，并用备份内容恢复出新的主文件（best-effort）。
 - 若主/备均不可用：以空连接注册表启动（下次调用 `GetOrCreateConnection` 时会重新分配/创建）。
 
-## 点表配置持久化（当前实现）
-DataCenter 会将点表配置落盘到工作目录下的 `./conf/dataCenter/point_tables.pb`，用于进程重启后的自动恢复。
+## 连接标签注册表持久化（当前实现）
+DataCenter 会将 `conn_id -> tags` 连接标签注册表落盘到工作目录下的 `./conf/dataCenter/conn_tags.pb`，用于进程重启后的自动恢复；若新文件不存在，则会兼容读取历史文件名 `point_tables.pb`。
 
 ### 文件与策略
-- 主文件：`./conf/dataCenter/point_tables.pb`
-- 备份文件：`./conf/dataCenter/point_tables.pb.bak`（上一份“可解析且校验通过”的配置）
-- 临时文件：`./conf/dataCenter/point_tables.pb.tmp`（用于安全写入，避免写坏主文件）
-- 隔离文件：`./conf/dataCenter/point_tables.pb.corrupt.<timestamp>`（当发现主文件损坏时保留原件，便于排查）
+- 主文件：`./conf/dataCenter/conn_tags.pb`
+- 备份文件：`./conf/dataCenter/conn_tags.pb.bak`（上一份“可解析且校验通过”的配置）
+- 临时文件：`./conf/dataCenter/conn_tags.pb.tmp`（用于安全写入，避免写坏主文件）
+- 隔离文件：`./conf/dataCenter/conn_tags.pb.corrupt.<timestamp>`（当发现主文件损坏时保留原件，便于排查）
+- 兼容读取：`./conf/dataCenter/point_tables.pb` 与 `./conf/dataCenter/point_tables.pb.bak`（仅当新文件与其备份都不存在时）
 
 ### 保存时机与语义
-- 每次 `UpsertPointTable` 成功后自动落盘。
-- 落盘失败会返回 `INTERNAL`，但内存中的点表不会回滚（配置端可重试）。
+- 每次 `UpsertConnTags` 成功后自动落盘。
+- 落盘失败会返回 `INTERNAL`，但内存中的连接标签注册表不会回滚（配置端可重试）。
 
 ### 启动恢复
 - 若主文件存在且可用：加载主文件。
 - 若主文件损坏：尝试使用备份文件启动；若备份可用，会将损坏主文件隔离，并用备份内容恢复出新的主文件（best-effort）。
-- 若主/备均不可用：以空点表启动，等待重新下发。
+- 若新文件与其备份都不存在，但历史文件名存在且可用：按历史文件名读取，兼容旧版本落盘数据。
+- 若主/备均不可用：以空连接标签注册表启动，等待重新下发。
 
 ## 路由配置持久化（当前实现）
 DataCenter 会将路由配置落盘到工作目录下的 `./conf/dataCenter/routes.pb`，用于进程重启后的自动恢复。
@@ -167,7 +170,7 @@ DataCenter 会将路由配置落盘到工作目录下的 `./conf/dataCenter/rout
 - 若主文件存在且可用：加载主文件。
 - 若主文件损坏：尝试使用备份文件启动；若备份可用，会将损坏主文件隔离，并用备份内容恢复出新的主文件（best-effort）。
 - 若主/备均不可用：以空路由启动，等待重新下发。
-- 若路由配置可解析但与已加载点表校验冲突：记录日志并不应用该路由配置。
+- 若路由配置可解析但与已加载连接标签注册表校验冲突：记录日志并不应用该路由配置。
 
 ## 线程与日志
 - 模块内部线程统一使用 `ModuleManager::StartModuleThread(模块LibInfo.LIB_NAME, ...)` 创建，自动绑定日志模块名上下文。
@@ -176,8 +179,8 @@ DataCenter 会将路由配置落盘到工作目录下的 `./conf/dataCenter/rout
 ## 测试
 相关单元测试位于 `test/`：
 
-- `dataCenterCore_test`：覆盖连接分配/重命名/删除、点表/路由校验、转发与最新值缓存等核心语义。
-- `dataCenterPointTableStore_test`：覆盖点表配置落盘/读取与损坏回退策略。
+- `dataCenterCore_test`：覆盖连接分配/重命名/删除、连接标签注册表/路由校验、转发与最新值缓存等核心语义。
+- `dataCenterPointTableStore_test`：覆盖连接标签注册表配置落盘/读取与损坏回退策略。
 - `dataCenterRouteStore_test`：覆盖路由配置落盘/读取与损坏回退策略。
 - `dataCenterConnectionStore_test`：覆盖连接注册表落盘/读取与损坏回退策略。
 

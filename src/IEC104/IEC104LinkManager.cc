@@ -571,13 +571,8 @@ grpc::Status LinkManager::UpsertPointTable(const IEC104Proto::UpsertPointTableRe
     return status;
   }
 
-  auto tags = next.Tags();
-  const auto timeSyncTag = normalizeTimeSyncTag(config);
-  if (!timeSyncTag.empty() && std::find(tags.begin(), tags.end(), timeSyncTag) == tags.end()) {
-    tags.emplace_back(timeSyncTag);
-    std::sort(tags.begin(), tags.end());
-  }
-  status = dataCenter_.UpsertPointTable(connId, tags, true);
+  auto tags = buildDataCenterTags(next, config);
+  status = dataCenter_.UpsertConnTags(connId, tags, true);
   if (!status.ok()) {
     return status;
   }

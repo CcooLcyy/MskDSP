@@ -85,6 +85,11 @@ public:
     conns_.erase(ConnKey{module, conn});
   }
 
+  void SetNextConnId(uint32_t nextConnId) {
+    std::lock_guard<std::mutex> lock(mu_);
+    nextConnId_ = (nextConnId == 0) ? 1 : nextConnId;
+  }
+
   void FailDeleteForConnName(std::string connName) {
     std::lock_guard<std::mutex> lock(mu_);
     failDeleteConnNames_.emplace(std::move(connName));
@@ -296,8 +301,8 @@ inline std::shared_ptr<DataCenterProto::MockDataCenterServiceStub> MakeStub(Fake
         return state->DeleteConnection(req);
       }));
 
-  ON_CALL(*stub, UpsertPointTable(::testing::_, ::testing::_, ::testing::_))
-      .WillByDefault(::testing::Invoke([](grpc::ClientContext*, const DataCenterProto::UpsertPointTableRequest& req, DataCenterProto::Empty*) {
+  ON_CALL(*stub, UpsertConnTags(::testing::_, ::testing::_, ::testing::_))
+      .WillByDefault(::testing::Invoke([](grpc::ClientContext*, const DataCenterProto::UpsertConnTagsRequest& req, DataCenterProto::Empty*) {
         if (req.conn_id() == 0) {
           return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id is required");
         }

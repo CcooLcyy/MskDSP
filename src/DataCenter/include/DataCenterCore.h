@@ -23,10 +23,10 @@ public:
   grpc::Status UpsertConnection(const DataCenterProto::UpsertConnectionRequest &request);
   DataCenterProto::ListConnectionsResponse ListConnections() const;
 
-  grpc::Status UpsertPointTable(const DataCenterProto::UpsertPointTableRequest &request);
-  grpc::Status GetPointTable(uint32_t connId, DataCenterProto::PointTable *out) const;
-  grpc::Status ReplacePointTablesConfig(const DataCenterProto::PointTablesConfig &config);
-  DataCenterProto::PointTablesConfig DumpPointTablesConfig() const;
+  grpc::Status UpsertConnTags(const DataCenterProto::UpsertConnTagsRequest &request);
+  grpc::Status GetConnTags(uint32_t connId, DataCenterProto::ConnTags *out) const;
+  grpc::Status ReplaceConnTagsConfig(const DataCenterProto::ConnTagsConfig &config);
+  DataCenterProto::ConnTagsConfig DumpConnTagsConfig() const;
 
   grpc::Status UpsertRoutes(const DataCenterProto::UpsertRoutesRequest &request);
   grpc::Status DeleteRoutes(const DataCenterProto::DeleteRoutesRequest &request);
@@ -67,14 +67,14 @@ private:
   static grpc::Status validateConnKey(const DataCenterProto::ConnectionKey &key);
 
   static grpc::Status validateEndpoint(uint32_t connId, const std::string &tag);
-  grpc::Status validateEndpointAgainstPointTable(uint32_t connId, const std::string &tag) const;
+  grpc::Status validateEndpointAgainstConnTags(uint32_t connId, const std::string &tag) const;
 
   static int64_t nowMs();
 
   std::unordered_map<uint32_t, DataCenterProto::ConnectionInfo> connections_;
   std::unordered_map<ConnKey, uint32_t, ConnKeyHash> connIdsByKey_;
   uint32_t nextConnId_{1};
-  std::unordered_map<uint32_t, std::unordered_set<std::string>> pointTables_;
+  std::unordered_map<uint32_t, std::unordered_set<std::string>> connTagsByConnId_;
   std::unordered_map<EndpointKey, EndpointKeySet, EndpointKeyHash> routes_;
   std::unordered_map<EndpointKey, DataCenterProto::PointUpdate, EndpointKeyHash> latestByDst_;
 };

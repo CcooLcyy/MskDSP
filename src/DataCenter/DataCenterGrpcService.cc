@@ -18,7 +18,7 @@
 
 #include "DataCenterConnectionStore.h"
 #include "DataCenterCore.h"
-#include "DataCenterPointTableStore.h"
+#include "DataCenterConnTagsStore.h"
 #include "DataCenterRouteStore.h"
 #include "Logger.h"
 
@@ -104,7 +104,7 @@ struct DataCenterGrpcServiceImpl::Impl {
   std::mutex mu;
   DataCenterCore core;
   DataCenterConnectionStore connectionStore;
-  DataCenterPointTableStore pointTableStore;
+  DataCenterConnTagsStore connTagsStore;
   DataCenterRouteStore routeStore;
 
   uint64_t nextSubscriberId{0};
@@ -207,11 +207,11 @@ struct DataCenterGrpcServiceImpl::Impl {
     return status;
   }
 
-  grpc::Status savePointTablesLocked() {
-    auto config = core.DumpPointTablesConfig();
-    auto status = pointTableStore.Save(config);
+  grpc::Status saveConnTagsLocked() {
+    auto config = core.DumpConnTagsConfig();
+    auto status = connTagsStore.Save(config);
     if (!status.ok()) {
-      LOG_INFO("DataCenter 点表落盘失败: {}", status.error_message());
+      LOG_INFO("DataCenter 连接标签注册表落盘失败: {}", status.error_message());
     }
     return status;
   }
@@ -245,17 +245,17 @@ DataCenterGrpcServiceImpl::DataCenterGrpcServiceImpl() :
   }
 
   {
-    DataCenterProto::PointTablesConfig config;
-    auto status = impl_->pointTableStore.Load(&config);
+    DataCenterProto::ConnTagsConfig config;
+    auto status = impl_->connTagsStore.Load(&config);
     if (!status.ok()) {
-      LOG_INFO("DataCenter 点表加载失败: {}", status.error_message());
-    } else if (config.point_tables_size() > 0) {
-      status = impl_->core.ReplacePointTablesConfig(config);
+      LOG_INFO("DataCenter 连接标签注册表加载失败: {}", status.error_message());
+    } else if (config.conn_tags_size() > 0) {
+      status = impl_->core.ReplaceConnTagsConfig(config);
       if (!status.ok()) {
-        LOG_INFO("DataCenter 点表应用失败: {}", status.error_message());
+        LOG_INFO("DataCenter 连接标签注册表应用失败: {}", status.error_message());
       } else {
-        const auto count = config.point_tables_size();
-        LOG_INFO("DataCenter 已加载点表配置: {} 个连接", count);
+        const auto count = config.conn_tags_size();
+        LOG_INFO("DataCenter 已加载连接标签注册表配置: {} 个连接", count);
       }
     }
   }
@@ -403,9 +403,9 @@ grpc::Status DataCenterGrpcServiceImpl::DeleteConnection(grpc::ServerContext*, c
     return status;
   }
 
-  status = impl_->savePointTablesLocked();
+  status = impl_->saveConnTagsLocked();
   if (!status.ok()) {
-    LOG_ERROR("DataCenter 删除连接点表落盘失败: module_name={}, conn_name={}, conn_id={}, 原因={}",
+    LOG_ERROR("DataCenter 删除连接标签注册表落盘失败: module_name={}, conn_name={}, conn_id={}, 原因={}",
               conn.module_name(), conn.conn_name(), conn.conn_id(), status.error_message());
     return status;
   }
@@ -421,36 +421,36 @@ grpc::Status DataCenterGrpcServiceImpl::DeleteConnection(grpc::ServerContext*, c
   return grpc::Status::OK;
 }
 
-grpc::Status DataCenterGrpcServiceImpl::UpsertPointTable(grpc::ServerContext*, const DataCenterProto::UpsertPointTableRequest* request, DataCenterProto::Empty*) {
+grpc::Status DataCenterGrpcServiceImpl::UpsertConnTags(grpc::ServerContext*, const DataCenterProto::UpsertConnTagsRequest* request, DataCenterProto::Empty*) {
   if (request == nullptr) {
-    LOG_ERROR("DataCenter UpsertPointTable 请求为空");
+    LOG_ERROR("DataCenter UpsertConnTags 请求为空");
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求为空");
   }
   std::lock_guard<std::mutex> lock(impl_->mu);
-  auto status = impl_->core.UpsertPointTable(*request);
+  auto status = impl_->core.UpsertConnTags(*request);
   if (!status.ok()) {
-    LOG_ERROR("DataCenter 更新点表失败: conn_id={}, 点数={}, replace={}, 原因={}",
+    LOG_ERROR("DataCenter 更新连接标签注册表失败: conn_id={}, 标签数={}, replace={}, 原因={}",
               request->conn_id(), request->tags_size(), request->replace(), status.error_message());
     return status;
   }
-  status = impl_->savePointTablesLocked();
+  status = impl_->saveConnTagsLocked();
   if (!status.ok()) {
-    LOG_ERROR("DataCenter 点表落盘失败: conn_id={}, 点数={}, replace={}, 原因={}",
+    LOG_ERROR("DataCenter 连接标签注册表落盘失败: conn_id={}, 标签数={}, replace={}, 原因={}",
               request->conn_id(), request->tags_size(), request->replace(), status.error_message());
     return status;
   }
-  LOG_INFO("DataCenter 已更新点表: conn_id={}, 点数={}, replace={}",
+  LOG_INFO("DataCenter 已更新连接标签注册表: conn_id={}, 标签数={}, replace={}",
            request->conn_id(), request->tags_size(), request->replace());
   return grpc::Status::OK;
 }
 
-grpc::Status DataCenterGrpcServiceImpl::GetPointTable(grpc::ServerContext*, const DataCenterProto::GetPointTableRequest* request, DataCenterProto::PointTable* response) {
+grpc::Status DataCenterGrpcServiceImpl::GetConnTags(grpc::ServerContext*, const DataCenterProto::GetConnTagsRequest* request, DataCenterProto::ConnTags* response) {
   if (request == nullptr || response == nullptr) {
-    LOG_ERROR("DataCenter GetPointTable 请求为空");
+    LOG_ERROR("DataCenter GetConnTags 请求为空");
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
   }
   std::lock_guard<std::mutex> lock(impl_->mu);
-  return impl_->core.GetPointTable(request->conn_id(), response);
+  return impl_->core.GetConnTags(request->conn_id(), response);
 }
 
 grpc::Status DataCenterGrpcServiceImpl::UpsertRoutes(grpc::ServerContext*, const DataCenterProto::UpsertRoutesRequest* request, DataCenterProto::Empty*) {

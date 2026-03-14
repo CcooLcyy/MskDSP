@@ -1777,7 +1777,7 @@ grpc::Status LinkManager::UpsertPointTable(const ModbusRTUProto::UpsertPointTabl
   }
 
   auto tags = next.Tags();
-  status = dataCenter_.UpsertPointTable(connId, tags, true);
+  status = dataCenter_.UpsertConnTags(connId, tags, true);
   if (!status.ok()) {
     return status;
   }

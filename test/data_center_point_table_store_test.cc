@@ -7,10 +7,10 @@
 #include <string>
 #include <unordered_map>
 
-#include "DataCenterPointTableStore.h"
+#include "DataCenterConnTagsStore.h"
 
 namespace {
-using DataCenter::DataCenterPointTableStore;
+using DataCenter::DataCenterConnTagsStore;
 
 class ScopedTempDir {
 public:
@@ -32,9 +32,9 @@ private:
   std::filesystem::path path_;
 };
 
-std::unordered_map<uint32_t, std::set<std::string>> ToMap(const DataCenterProto::PointTablesConfig& cfg) {
+std::unordered_map<uint32_t, std::set<std::string>> ToMap(const DataCenterProto::ConnTagsConfig& cfg) {
   std::unordered_map<uint32_t, std::set<std::string>> out;
-  for (const auto& table : cfg.point_tables()) {
+  for (const auto& table : cfg.conn_tags()) {
     auto& set = out[table.conn_id()];
     for (const auto& tag : table.tags()) {
       set.emplace(tag);
@@ -43,10 +43,10 @@ std::unordered_map<uint32_t, std::set<std::string>> ToMap(const DataCenterProto:
   return out;
 }
 
-DataCenterProto::PointTablesConfig MakeConfig(std::initializer_list<std::pair<uint32_t, std::initializer_list<const char*>>> tables) {
-  DataCenterProto::PointTablesConfig cfg;
+DataCenterProto::ConnTagsConfig MakeConfig(std::initializer_list<std::pair<uint32_t, std::initializer_list<const char*>>> tables) {
+  DataCenterProto::ConnTagsConfig cfg;
   for (const auto& [connId, tags] : tables) {
-    auto* table = cfg.add_point_tables();
+    auto* table = cfg.add_conn_tags();
     table->set_conn_id(connId);
     for (const auto* tag : tags) {
       table->add_tags(tag);
@@ -56,20 +56,27 @@ DataCenterProto::PointTablesConfig MakeConfig(std::initializer_list<std::pair<ui
 }
 }  // namespace
 
-// 验证：当点表配置文件不存在时，Load 返回空配置且不报错。
-TEST(DataCenterPointTableStoreTest, LoadReturnsEmptyWhenNoFiles) {
+// 验证：当连接标签注册表配置文件不存在时，Load 返回空配置且不报错。
+TEST(DataCenterConnTagsStoreTest, LoadReturnsEmptyWhenNoFiles) {
   ScopedTempDir dir;
-  DataCenterPointTableStore store(dir.path() / "point_tables.pb");
+  DataCenterConnTagsStore store(dir.path() / "conn_tags.pb");
 
-  DataCenterProto::PointTablesConfig cfg;
+  DataCenterProto::ConnTagsConfig cfg;
   ASSERT_TRUE(store.Load(&cfg).ok());
-  EXPECT_EQ(cfg.point_tables_size(), 0);
+  EXPECT_EQ(cfg.conn_tags_size(), 0);
+}
+
+// 验证：默认构造使用新的连接标签注册表文件名。
+TEST(DataCenterConnTagsStoreTest, DefaultPathUsesConnTagsFileName) {
+  DataCenterConnTagsStore store;
+
+  EXPECT_EQ(store.connTagsPath(), std::filesystem::path("./conf/dataCenter/conn_tags.pb"));
 }
 
 // 验证：Save 后可被 Load 读取，且内容一致（roundtrip）。
-TEST(DataCenterPointTableStoreTest, SaveAndLoadRoundtrip) {
+TEST(DataCenterConnTagsStoreTest, SaveAndLoadRoundtrip) {
   ScopedTempDir dir;
-  DataCenterPointTableStore store(dir.path() / "point_tables.pb");
+  DataCenterConnTagsStore store(dir.path() / "conn_tags.pb");
 
   auto cfg = MakeConfig({
       {1, {"点1", "点2"}},
@@ -77,18 +84,18 @@ TEST(DataCenterPointTableStoreTest, SaveAndLoadRoundtrip) {
   });
   ASSERT_TRUE(store.Save(cfg).ok());
 
-  DataCenterProto::PointTablesConfig loaded;
+  DataCenterProto::ConnTagsConfig loaded;
   ASSERT_TRUE(store.Load(&loaded).ok());
   EXPECT_EQ(ToMap(loaded), ToMap(cfg));
 }
 
 // 验证：Save 会拒绝非法配置（例如 conn_id=0 或空 tag）。
-TEST(DataCenterPointTableStoreTest, SaveRejectsInvalidConfig) {
+TEST(DataCenterConnTagsStoreTest, SaveRejectsInvalidConfig) {
   ScopedTempDir dir;
-  DataCenterPointTableStore store(dir.path() / "point_tables.pb");
+  DataCenterConnTagsStore store(dir.path() / "conn_tags.pb");
 
-  DataCenterProto::PointTablesConfig cfg;
-  auto* table = cfg.add_point_tables();
+  DataCenterProto::ConnTagsConfig cfg;
+  auto* table = cfg.add_conn_tags();
   table->set_conn_id(0);
   table->add_tags("x");
 
@@ -98,10 +105,10 @@ TEST(DataCenterPointTableStoreTest, SaveRejectsInvalidConfig) {
 }
 
 // 验证：主文件损坏时 Load 会回退到备份文件，并 best-effort 恢复主文件。
-TEST(DataCenterPointTableStoreTest, LoadFallsBackToBackupWhenMainCorruptedAndRestoresMainBestEffort) {
+TEST(DataCenterConnTagsStoreTest, LoadFallsBackToBackupWhenMainCorruptedAndRestoresMainBestEffort) {
   ScopedTempDir dir;
-  const auto base = dir.path() / "point_tables.pb";
-  DataCenterPointTableStore store(base);
+  const auto base = dir.path() / "conn_tags.pb";
+  DataCenterConnTagsStore store(base);
 
   auto cfg1 = MakeConfig({
       {1, {"源点"}},
@@ -119,11 +126,11 @@ TEST(DataCenterPointTableStoreTest, LoadFallsBackToBackupWhenMainCorruptedAndRes
     ofs << "corrupt";
   }
 
-  DataCenterProto::PointTablesConfig loaded;
+  DataCenterProto::ConnTagsConfig loaded;
   ASSERT_TRUE(store.Load(&loaded).ok());
   EXPECT_EQ(ToMap(loaded), ToMap(cfg1));
 
-  DataCenterProto::PointTablesConfig restoredMain;
+  DataCenterProto::ConnTagsConfig restoredMain;
   ASSERT_TRUE(restoredMain.ParseFromString([&]() {
     std::ifstream ifs(base, std::ios::binary);
     EXPECT_TRUE(ifs.is_open());
@@ -134,7 +141,7 @@ TEST(DataCenterPointTableStoreTest, LoadFallsBackToBackupWhenMainCorruptedAndRes
   bool foundCorrupt = false;
   for (const auto& entry : std::filesystem::directory_iterator(dir.path())) {
     const auto name = entry.path().filename().string();
-    if (name.rfind("point_tables.pb.corrupt.", 0) == 0) {
+    if (name.rfind("conn_tags.pb.corrupt.", 0) == 0) {
       foundCorrupt = true;
       break;
     }
@@ -142,13 +149,33 @@ TEST(DataCenterPointTableStoreTest, LoadFallsBackToBackupWhenMainCorruptedAndRes
   EXPECT_TRUE(foundCorrupt);
 }
 
-// 验证：backupPath/tmpPath 派生规则与构造路径一致。
-TEST(DataCenterPointTableStoreTest, BackupAndTmpPathsAreDerivedFromBasePath) {
+// 验证：新文件不存在时，Load 会兼容读取历史文件名 point_tables.pb。
+TEST(DataCenterConnTagsStoreTest, LoadFallsBackToLegacyPointTablesFileWhenNewFilesMissing) {
   ScopedTempDir dir;
-  const auto base = dir.path() / "point_tables.pb";
-  DataCenterPointTableStore store(base);
+  const auto legacyPath = dir.path() / "point_tables.pb";
+  DataCenterConnTagsStore legacyStore(legacyPath);
 
-  EXPECT_EQ(store.pointTablesPath(), base);
+  auto cfg = MakeConfig({
+      {7, {"遥测A", "遥信B"}},
+  });
+  ASSERT_TRUE(legacyStore.Save(cfg).ok());
+
+  const auto currentPath = dir.path() / "conn_tags.pb";
+  DataCenterConnTagsStore store(currentPath);
+
+  DataCenterProto::ConnTagsConfig loaded;
+  ASSERT_TRUE(store.Load(&loaded).ok());
+  EXPECT_EQ(ToMap(loaded), ToMap(cfg));
+  EXPECT_FALSE(std::filesystem::exists(currentPath));
+}
+
+// 验证：backupPath/tmpPath 派生规则与构造路径一致。
+TEST(DataCenterConnTagsStoreTest, BackupAndTmpPathsAreDerivedFromBasePath) {
+  ScopedTempDir dir;
+  const auto base = dir.path() / "conn_tags.pb";
+  DataCenterConnTagsStore store(base);
+
+  EXPECT_EQ(store.connTagsPath(), base);
   EXPECT_EQ(store.backupPath(), std::filesystem::path(base.string() + ".bak"));
   EXPECT_EQ(store.tmpPath(), std::filesystem::path(base.string() + ".tmp"));
 }

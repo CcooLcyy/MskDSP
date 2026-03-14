@@ -105,16 +105,16 @@ protected:
     return resp;
   }
 
-  void UpsertPointTable(uint32_t connId, std::initializer_list<const char*> tags) {
+  void UpsertConnTags(uint32_t connId, std::initializer_list<const char*> tags) {
     grpc::ClientContext ctx;
-    DataCenterProto::UpsertPointTableRequest req;
+    DataCenterProto::UpsertConnTagsRequest req;
     req.set_conn_id(connId);
     req.set_replace(true);
     for (const auto* tag : tags) {
       req.add_tags(tag);
     }
     DataCenterProto::Empty resp;
-    auto status = stub_->UpsertPointTable(&ctx, req, &resp);
+    auto status = stub_->UpsertConnTags(&ctx, req, &resp);
     ASSERT_TRUE(status.ok()) << status.error_message();
   }
 
@@ -221,15 +221,15 @@ TEST_F(DataCenterGrpcServiceTest, PublishSubscribeSnapshotFilteringAndDeleteConn
   const auto src = GetOrCreateConnection("ModbusRTU", "src");
   const auto dst = GetOrCreateConnection("IEC104", "dst");
 
-  UpsertPointTable(src.conn_id(), {"A", "C"});
-  UpsertPointTable(dst.conn_id(), {"B", "D"});
+  UpsertConnTags(src.conn_id(), {"A", "C"});
+  UpsertConnTags(dst.conn_id(), {"B", "D"});
 
   {
     grpc::ClientContext ctx;
-    DataCenterProto::GetPointTableRequest req;
+    DataCenterProto::GetConnTagsRequest req;
     req.set_conn_id(dst.conn_id());
-    DataCenterProto::PointTable resp;
-    auto status = stub_->GetPointTable(&ctx, req, &resp);
+    DataCenterProto::ConnTags resp;
+    auto status = stub_->GetConnTags(&ctx, req, &resp);
     ASSERT_TRUE(status.ok()) << status.error_message();
     EXPECT_EQ(resp.conn_id(), dst.conn_id());
   }

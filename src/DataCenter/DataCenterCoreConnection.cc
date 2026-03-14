@@ -201,7 +201,7 @@ grpc::Status DataCenterCore::DeleteConnection(const DataCenterProto::DeleteConne
 
   connIdsByKey_.erase(it);
   connections_.erase(connId);
-  pointTables_.erase(connId);
+  connTagsByConnId_.erase(connId);
 
   for (auto routeIt = routes_.begin(); routeIt != routes_.end();) {
     if (routeIt->first.connId == connId) {

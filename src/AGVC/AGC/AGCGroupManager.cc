@@ -172,7 +172,7 @@ grpc::Status GroupManager::UpsertGroup(const AGCProto::UpsertGroupRequest &reque
       for (const auto &t : tags) {
         tagList.emplace_back(t);
       }
-      status = dataCenter_.UpsertPointTable(connId, tagList, true);
+      status = dataCenter_.UpsertConnTags(connId, tagList, true);
       if (!status.ok()) {
         std::lock_guard<std::mutex> lock(mu_);
         auto it = groupsByName_.find(groupName);

@@ -52,13 +52,13 @@ grpc::Status DataCenterCore::validateEndpoint(uint32_t connId, const std::string
   return grpc::Status::OK;
 }
 
-grpc::Status DataCenterCore::validateEndpointAgainstPointTable(uint32_t connId, const std::string &tag) const {
-  auto it = pointTables_.find(connId);
-  if (it == pointTables_.end()) {
+grpc::Status DataCenterCore::validateEndpointAgainstConnTags(uint32_t connId, const std::string &tag) const {
+  auto it = connTagsByConnId_.find(connId);
+  if (it == connTagsByConnId_.end()) {
     return grpc::Status::OK;
   }
   if (!it->second.contains(tag)) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "点表中未找到 tag");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "连接标签注册表中未找到 tag");
   }
   return grpc::Status::OK;
 }

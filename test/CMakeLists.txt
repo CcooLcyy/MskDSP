@@ -120,7 +120,7 @@ add_executable(dataCenterCore_test
   data_center_core_test.cc
   ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCore.cc
   ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCoreConnection.cc
-  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCorePointTable.cc
+  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCoreConnTags.cc
   ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCoreRoutes.cc
   ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCorePublish.cc
 )
@@ -138,7 +138,7 @@ add_test(NAME dataCenterCore_test COMMAND dataCenterCore_test)
 
 add_executable(dataCenterPointTableStore_test
   data_center_point_table_store_test.cc
-  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterPointTableStore.cc
+  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterConnTagsStore.cc
 )
 
 target_include_directories(dataCenterPointTableStore_test PRIVATE
@@ -189,10 +189,10 @@ add_executable(dataCenterGrpcService_test
   ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterGrpcService.cc
   ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCore.cc
   ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCoreConnection.cc
-  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCorePointTable.cc
+  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCoreConnTags.cc
   ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCoreRoutes.cc
   ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCorePublish.cc
-  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterPointTableStore.cc
+  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterConnTagsStore.cc
   ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterRouteStore.cc
   ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterConnectionStore.cc
 )

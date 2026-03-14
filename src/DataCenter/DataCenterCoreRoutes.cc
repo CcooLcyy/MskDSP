@@ -20,11 +20,11 @@ grpc::Status DataCenterCore::UpsertRoutes(const DataCenterProto::UpsertRoutesReq
     if (!status.ok()) {
       return status;
     }
-    status = validateEndpointAgainstPointTable(route.src().conn_id(), route.src().tag());
+    status = validateEndpointAgainstConnTags(route.src().conn_id(), route.src().tag());
     if (!status.ok()) {
       return status;
     }
-    status = validateEndpointAgainstPointTable(route.dst().conn_id(), route.dst().tag());
+    status = validateEndpointAgainstConnTags(route.dst().conn_id(), route.dst().tag());
     if (!status.ok()) {
       return status;
     }
@@ -110,11 +110,11 @@ grpc::Status DataCenterCore::ReplaceRoutesConfig(const DataCenterProto::RoutesCo
     if (!status.ok()) {
       return status;
     }
-    status = validateEndpointAgainstPointTable(route.src().conn_id(), route.src().tag());
+    status = validateEndpointAgainstConnTags(route.src().conn_id(), route.src().tag());
     if (!status.ok()) {
       return status;
     }
-    status = validateEndpointAgainstPointTable(route.dst().conn_id(), route.dst().tag());
+    status = validateEndpointAgainstConnTags(route.dst().conn_id(), route.dst().tag());
     if (!status.ok()) {
       return status;
     }
@@ -138,4 +138,3 @@ DataCenterProto::RoutesConfig DataCenterCore::DumpRoutesConfig() const {
   return config;
 }
 }  // namespace DataCenter
-

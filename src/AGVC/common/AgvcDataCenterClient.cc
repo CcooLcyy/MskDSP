@@ -91,7 +91,7 @@ grpc::Status DataCenterClient::DeleteConnection(const std::string& connName) {
   return stub->DeleteConnection(&ctx, req, &resp);
 }
 
-grpc::Status DataCenterClient::UpsertPointTable(uint32_t connId, const std::vector<std::string>& tags, bool replace) {
+grpc::Status DataCenterClient::UpsertConnTags(uint32_t connId, const std::vector<std::string>& tags, bool replace) {
   if (connId == 0) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id 不能为空");
   }
@@ -102,7 +102,7 @@ grpc::Status DataCenterClient::UpsertPointTable(uint32_t connId, const std::vect
   }
 
   auto stub = getStub();
-  DataCenterProto::UpsertPointTableRequest req;
+  DataCenterProto::UpsertConnTagsRequest req;
   req.set_conn_id(connId);
   req.set_replace(replace);
   for (const auto& tag : tags) {
@@ -111,7 +111,7 @@ grpc::Status DataCenterClient::UpsertPointTable(uint32_t connId, const std::vect
 
   grpc::ClientContext ctx;
   DataCenterProto::Empty resp;
-  return stub->UpsertPointTable(&ctx, req, &resp);
+  return stub->UpsertConnTags(&ctx, req, &resp);
 }
 
 grpc::Status DataCenterClient::PublishDouble(

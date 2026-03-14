@@ -88,8 +88,8 @@ TEST(DataCenterCoreTest, RenameConnectionKeepsConnId) {
   EXPECT_EQ(gotNew.conn_id(), created.conn_id());
 }
 
-// 验证：DeleteConnection 会清理该连接关联的点表/路由/最新值缓存。
-TEST(DataCenterCoreTest, DeleteConnectionCleansPointTableRoutesAndLatest) {
+// 验证：DeleteConnection 会清理该连接关联的连接标签注册表/路由/最新值缓存。
+TEST(DataCenterCoreTest, DeleteConnectionCleansConnTagsRoutesAndLatest) {
   DataCenterCore core;
 
   DataCenterProto::GetOrCreateConnectionRequest createSrc;
@@ -102,17 +102,17 @@ TEST(DataCenterCoreTest, DeleteConnectionCleansPointTableRoutesAndLatest) {
   DataCenterProto::ConnectionInfo dst;
   ASSERT_TRUE(core.GetOrCreateConnection(createDst, &dst).ok());
 
-  DataCenterProto::UpsertPointTableRequest srcPt;
+  DataCenterProto::UpsertConnTagsRequest srcPt;
   srcPt.set_conn_id(src.conn_id());
   srcPt.set_replace(true);
   srcPt.add_tags("A");
-  ASSERT_TRUE(core.UpsertPointTable(srcPt).ok());
+  ASSERT_TRUE(core.UpsertConnTags(srcPt).ok());
 
-  DataCenterProto::UpsertPointTableRequest dstPt;
+  DataCenterProto::UpsertConnTagsRequest dstPt;
   dstPt.set_conn_id(dst.conn_id());
   dstPt.set_replace(true);
   dstPt.add_tags("B");
-  ASSERT_TRUE(core.UpsertPointTable(dstPt).ok());
+  ASSERT_TRUE(core.UpsertConnTags(dstPt).ok());
 
   DataCenterProto::UpsertRoutesRequest routes;
   routes.set_replace(true);
@@ -138,8 +138,8 @@ TEST(DataCenterCoreTest, DeleteConnectionCleansPointTableRoutesAndLatest) {
   *delReq.mutable_key() = createSrc.key();
   ASSERT_TRUE(core.DeleteConnection(delReq).ok());
 
-  DataCenterProto::PointTable table;
-  auto ptStatus = core.GetPointTable(src.conn_id(), &table);
+  DataCenterProto::ConnTags table;
+  auto ptStatus = core.GetConnTags(src.conn_id(), &table);
   EXPECT_FALSE(ptStatus.ok());
   EXPECT_EQ(ptStatus.error_code(), grpc::StatusCode::NOT_FOUND);
 
@@ -152,15 +152,15 @@ TEST(DataCenterCoreTest, DeleteConnectionCleansPointTableRoutesAndLatest) {
   EXPECT_EQ(afterDel.updates_size(), 0);
 }
 
-// 验证：当点表存在时，UpsertRoutes 会校验 tag 必须在点表内。
-TEST(DataCenterCoreTest, UpsertRoutesValidatesAgainstPointTableWhenPresent) {
+// 验证：当连接标签注册表存在时，UpsertRoutes 会校验 tag 必须在注册表内。
+TEST(DataCenterCoreTest, UpsertRoutesValidatesAgainstConnTagsWhenPresent) {
   DataCenterCore core;
 
-  DataCenterProto::UpsertPointTableRequest pt;
+  DataCenterProto::UpsertConnTagsRequest pt;
   pt.set_conn_id(1);
   pt.set_replace(true);
   pt.add_tags("源点");
-  ASSERT_TRUE(core.UpsertPointTable(pt).ok());
+  ASSERT_TRUE(core.UpsertConnTags(pt).ok());
 
   DataCenterProto::UpsertRoutesRequest routes;
   routes.set_replace(true);
@@ -175,17 +175,17 @@ TEST(DataCenterCoreTest, UpsertRoutesValidatesAgainstPointTableWhenPresent) {
 TEST(DataCenterCoreTest, PublishRoutesWithTagRewriteOneToOne) {
   DataCenterCore core;
 
-  DataCenterProto::UpsertPointTableRequest srcPt;
+  DataCenterProto::UpsertConnTagsRequest srcPt;
   srcPt.set_conn_id(1);
   srcPt.set_replace(true);
   srcPt.add_tags("温度A");
-  ASSERT_TRUE(core.UpsertPointTable(srcPt).ok());
+  ASSERT_TRUE(core.UpsertConnTags(srcPt).ok());
 
-  DataCenterProto::UpsertPointTableRequest dstPt;
+  DataCenterProto::UpsertConnTagsRequest dstPt;
   dstPt.set_conn_id(2);
   dstPt.set_replace(true);
   dstPt.add_tags("温度B");
-  ASSERT_TRUE(core.UpsertPointTable(dstPt).ok());
+  ASSERT_TRUE(core.UpsertConnTags(dstPt).ok());
 
   DataCenterProto::UpsertRoutesRequest routes;
   routes.set_replace(true);
@@ -333,48 +333,48 @@ TEST(DataCenterCoreTest, BatchPublishIsAtomicAndDoesNotUpdateLatestOnValidationF
   EXPECT_EQ(latestResp.updates_size(), 0);
 }
 
-// 验证：DumpPointTablesConfig 与 ReplacePointTablesConfig 可 roundtrip 恢复点表配置。
-TEST(DataCenterCoreTest, DumpAndReplacePointTablesConfigRoundtrip) {
+// 验证：DumpConnTagsConfig 与 ReplaceConnTagsConfig 可 roundtrip 恢复连接标签注册表配置。
+TEST(DataCenterCoreTest, DumpAndReplaceConnTagsConfigRoundtrip) {
   DataCenterCore core;
 
-  DataCenterProto::UpsertPointTableRequest pt;
+  DataCenterProto::UpsertConnTagsRequest pt;
   pt.set_conn_id(1);
   pt.set_replace(true);
   pt.add_tags("点1");
   pt.add_tags("点2");
-  ASSERT_TRUE(core.UpsertPointTable(pt).ok());
+  ASSERT_TRUE(core.UpsertConnTags(pt).ok());
 
-  auto config = core.DumpPointTablesConfig();
+  auto config = core.DumpConnTagsConfig();
 
   DataCenterCore restored;
-  ASSERT_TRUE(restored.ReplacePointTablesConfig(config).ok());
+  ASSERT_TRUE(restored.ReplaceConnTagsConfig(config).ok());
 
-  DataCenterProto::PointTable table;
-  ASSERT_TRUE(restored.GetPointTable(1, &table).ok());
+  DataCenterProto::ConnTags table;
+  ASSERT_TRUE(restored.GetConnTags(1, &table).ok());
   ASSERT_EQ(table.tags_size(), 2);
   EXPECT_EQ(table.tags(0), "点1");
   EXPECT_EQ(table.tags(1), "点2");
 }
 
-// 验证：ReplacePointTablesConfig 会按 conn_id 合并并去重 tags。
-TEST(DataCenterCoreTest, ReplacePointTablesConfigMergesAndDeduplicatesByConnId) {
+// 验证：ReplaceConnTagsConfig 会按 conn_id 合并并去重 tags。
+TEST(DataCenterCoreTest, ReplaceConnTagsConfigMergesAndDeduplicatesByConnId) {
   DataCenterCore core;
 
-  DataCenterProto::PointTablesConfig config;
-  auto* t1 = config.add_point_tables();
+  DataCenterProto::ConnTagsConfig config;
+  auto* t1 = config.add_conn_tags();
   t1->set_conn_id(1);
   t1->add_tags("A");
   t1->add_tags("B");
 
-  auto* t2 = config.add_point_tables();
+  auto* t2 = config.add_conn_tags();
   t2->set_conn_id(1);
   t2->add_tags("B");
   t2->add_tags("C");
 
-  ASSERT_TRUE(core.ReplacePointTablesConfig(config).ok());
+  ASSERT_TRUE(core.ReplaceConnTagsConfig(config).ok());
 
-  DataCenterProto::PointTable table;
-  ASSERT_TRUE(core.GetPointTable(1, &table).ok());
+  DataCenterProto::ConnTags table;
+  ASSERT_TRUE(core.GetConnTags(1, &table).ok());
   ASSERT_EQ(table.tags_size(), 3);
   EXPECT_EQ(table.tags(0), "A");
   EXPECT_EQ(table.tags(1), "B");
@@ -426,15 +426,15 @@ TEST(DataCenterCoreTest, ReplaceRoutesConfigDeduplicatesBySrcDst) {
   EXPECT_EQ(resp.routes(0).dst().tag(), "B");
 }
 
-// 验证：当点表存在时，ReplaceRoutesConfig 会校验 tag 必须在点表内。
-TEST(DataCenterCoreTest, ReplaceRoutesConfigValidatesAgainstPointTableWhenPresent) {
+// 验证：当连接标签注册表存在时，ReplaceRoutesConfig 会校验 tag 必须在注册表内。
+TEST(DataCenterCoreTest, ReplaceRoutesConfigValidatesAgainstConnTagsWhenPresent) {
   DataCenterCore core;
 
-  DataCenterProto::UpsertPointTableRequest pt;
+  DataCenterProto::UpsertConnTagsRequest pt;
   pt.set_conn_id(1);
   pt.set_replace(true);
   pt.add_tags("存在的点");
-  ASSERT_TRUE(core.UpsertPointTable(pt).ok());
+  ASSERT_TRUE(core.UpsertConnTags(pt).ok());
 
   DataCenterProto::RoutesConfig config;
   *config.add_routes() = MakeRoute(1, "不存在的点", 2, "目的点");

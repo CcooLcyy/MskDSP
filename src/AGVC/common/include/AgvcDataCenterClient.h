@@ -26,7 +26,7 @@ public:
   grpc::Status ConnectionExists(const std::string& connName, bool* outExists);
   grpc::Status GetOrCreateConnection(const std::string& connName, DataCenterProto::ConnectionInfo* out);
   grpc::Status DeleteConnection(const std::string& connName);
-  grpc::Status UpsertPointTable(uint32_t connId, const std::vector<std::string>& tags, bool replace);
+  grpc::Status UpsertConnTags(uint32_t connId, const std::vector<std::string>& tags, bool replace);
 
   grpc::Status PublishDouble(uint32_t connId, const std::string& tag, double value, DataCenterProto::Quality quality, int64_t tsMs);
 
