@@ -28,6 +28,10 @@ ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRT
 - 默认由 ModuleManager 的 `StartModule` 启动。
 - 如需随系统启动自动加载，在 `./conf/module_manager.jsonc` 的 `auto_start_modules` 中加入 `ConfigPusher`。
 - 建议：自启动列表仅填写 `ConfigPusher`，其余模块由 ConfigPusher 按配置按需启动。
+- `ConfigPusher` 是否在启动后立即执行配置下发，受 `./conf/module_manager.jsonc` 的 `boot_config_mode` 控制：
+  - `CONFIG_PUSHER`：启动后读取 JSONC 并执行配置下发
+  - `UPPER`：启动后仅提供 gRPC 服务与日志，不执行配置下发
+- `boot_config_mode` 仅在 `MskDSP` 进程启动时读取一次；运行中修改配置文件不会立即生效，需重启后生效。
 
 ## 配置与数据
 - 配置文件：

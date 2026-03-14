@@ -36,13 +36,21 @@ extern "C" BOOST_SYMBOL_EXPORT bool GetModuleManifestPb(const uint8_t **data, si
 
 ## 启动自加载配置
 - 配置文件：`./conf/module_manager.jsonc`（可选；缺失则跳过）。
-- 字段：`auto_start_modules`（字符串数组，模块名需与 `lib<模块名>.so` 对应）。
-- 行为：管理器启动后读取并自动加载列表中的模块；已运行的模块会跳过。
-- 建议：自启动列表仅填写 `ConfigPusher`，其余模块由 ConfigPusher 按配置按需启动。
+- 字段：
+  - `boot_config_mode`：启动配置模式，支持 `CONFIG_PUSHER` 与 `UPPER`
+  - `auto_start_modules`（字符串数组，模块名需与 `lib<模块名>.so` 对应）
+- 行为：
+  - 管理器在进程启动时只读取一次 `boot_config_mode`，并固定为本次运行模式；运行中修改配置文件不会立即生效，需重启 `MskDSP`
+  - `CONFIG_PUSHER`：允许 `ConfigPusher` 在启动后读取 JSONC 并下发配置
+  - `UPPER`：即使 `auto_start_modules` 中包含 `ConfigPusher`，也会跳过其自动启动；若后续手动启动 `ConfigPusher`，模块仅启动服务，不会执行配置下发
+  - 管理器启动后读取 `auto_start_modules` 并自动加载列表中的其他模块；已运行的模块会跳过
+- 建议：使用 `CONFIG_PUSHER` 时，自启动列表仅填写 `ConfigPusher`；使用 `UPPER` 时，不要把 `ConfigPusher` 作为启动时配置入口。
 
 示例：
 ```jsonc
 {
+  // 启动配置模式：仅在进程启动时读取一次；修改后需重启 MskDSP 生效。
+  "boot_config_mode": "CONFIG_PUSHER",
   // ModuleManager 启动时自动加载的模块列表（建议仅填写 ConfigPusher）。
   // 其他模块建议通过 ConfigPusher 的配置进行按需启动。
   "auto_start_modules": ["ConfigPusher"]

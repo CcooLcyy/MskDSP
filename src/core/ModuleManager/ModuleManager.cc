@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cstdlib>
 #include <dlfcn.h>
 #include <link.h>
 #include <filesystem>
@@ -38,6 +39,10 @@
 
 namespace {
 constexpr const char *kAutoStartConfigPath = "./conf/module_manager.jsonc";
+constexpr const char *kBootConfigModeEnvName = "MSKDSP_BOOT_CONFIG_MODE";
+constexpr const char *kBootConfigModeConfigPusher = "CONFIG_PUSHER";
+constexpr const char *kBootConfigModeUpper = "UPPER";
+constexpr const char *kConfigPusherModuleName = "ConfigPusher";
 
 std::string stripJsonComments(std::string_view input) {
   std::string out;
@@ -433,6 +438,37 @@ bool selfCheckAutoStartConfig(std::string_view phase, std::string_view moduleNam
     LOG_INFO("自动启动配置自检通过，阶段: {}，模块: {}", phase, moduleName);
   }
   return true;
+}
+
+std::string parseBootConfigMode(const boost::json::object &obj) {
+  auto fieldIt = obj.find("boot_config_mode");
+  if (fieldIt == obj.end()) {
+    LOG_INFO("自动启动配置未包含 boot_config_mode，使用默认值: {}", kBootConfigModeConfigPusher);
+    return kBootConfigModeConfigPusher;
+  }
+  if (!fieldIt->value().is_string()) {
+    LOG_ERROR("自动启动配置的 boot_config_mode 必须为字符串，已回退为安全模式: {}", kBootConfigModeUpper);
+    return kBootConfigModeUpper;
+  }
+
+  const auto &modeValue = fieldIt->value().as_string();
+  std::string mode(modeValue.data(), modeValue.size());
+  if (mode == kBootConfigModeConfigPusher || mode == kBootConfigModeUpper) {
+    LOG_INFO("自动启动配置解析到 boot_config_mode: {}", mode);
+    return mode;
+  }
+
+  LOG_ERROR("自动启动配置的 boot_config_mode 非法: {}，已回退为安全模式: {}", mode, kBootConfigModeUpper);
+  return kBootConfigModeUpper;
+}
+
+void setProcessBootConfigMode(std::string_view mode) {
+  std::string modeText(mode);
+  if (::setenv(kBootConfigModeEnvName, modeText.c_str(), 1) != 0) {
+    LOG_ERROR("写入 boot_config_mode 环境变量失败: 变量={}, 模式={}", kBootConfigModeEnvName, modeText);
+    return;
+  }
+  LOG_INFO("本次进程已固定 boot_config_mode: {}（环境变量: {}）", modeText, kBootConfigModeEnvName);
 }
 
 std::string extractModuleNameFromLibName(const std::string &libName) {
@@ -848,6 +884,7 @@ void ModuleManager::ensureModuleInfos() {
 }
 void ModuleManager::autoStartModulesFromConfig() {
   const std::filesystem::path configPath(kAutoStartConfigPath);
+  std::string bootConfigMode = kBootConfigModeConfigPusher;
   std::error_code cwdError;
   auto currentPath = std::filesystem::current_path(cwdError);
   if (cwdError) {
@@ -864,6 +901,7 @@ void ModuleManager::autoStartModulesFromConfig() {
   }
   LOG_INFO("自动启动配置路径: {}", configPath.string());
   if (!std::filesystem::exists(configPath)) {
+    setProcessBootConfigMode(bootConfigMode);
     LOG_INFO("未找到自动启动配置文件: {}", configPath.string());
     return;
   }
@@ -877,6 +915,7 @@ void ModuleManager::autoStartModulesFromConfig() {
 
   std::string raw;
   if (!readFile(configPath, &raw)) {
+    setProcessBootConfigMode(kBootConfigModeUpper);
     LOG_ERROR("读取自动启动配置失败: {}", configPath.string());
     return;
   }
@@ -889,14 +928,18 @@ void ModuleManager::autoStartModulesFromConfig() {
            json.find("auto_start_modules") != std::string::npos ? "是" : "否");
   boost::json::value parsed;
   if (!parseJsonValue(json, &parsed, "自动启动配置", "解析配置", metaData_.name, false)) {
+    setProcessBootConfigMode(kBootConfigModeUpper);
     return;
   }
   if (!parsed.is_object()) {
+    setProcessBootConfigMode(kBootConfigModeUpper);
     LOG_ERROR("自动启动配置必须为对象");
     return;
   }
 
   const auto &obj = parsed.as_object();
+  bootConfigMode = parseBootConfigMode(obj);
+  setProcessBootConfigMode(bootConfigMode);
   std::vector<std::string> fieldNames;
   fieldNames.reserve(obj.size());
   for (const auto &entry : obj) {
@@ -936,6 +979,10 @@ void ModuleManager::autoStartModulesFromConfig() {
     std::string moduleName(nameValue.c_str(), nameValue.size());
     if (moduleName.empty()) {
       LOG_WARNING("自动启动模块条目为空");
+      continue;
+    }
+    if (bootConfigMode == kBootConfigModeUpper && moduleName == kConfigPusherModuleName) {
+      LOG_INFO("当前 boot_config_mode={}，跳过自动启动模块: {}", bootConfigMode, moduleName);
       continue;
     }
     LOG_INFO("自动启动模块: {}", moduleName);

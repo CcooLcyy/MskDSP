@@ -6,6 +6,7 @@
 #include <boost/dll.hpp>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
@@ -53,6 +54,9 @@ const std::string &GetSerializedManifest() {
 
 namespace ConfigPusher {
 namespace {
+constexpr const char *kBootConfigModeEnvName = "MSKDSP_BOOT_CONFIG_MODE";
+constexpr const char *kBootConfigModeConfigPusher = "CONFIG_PUSHER";
+constexpr const char *kBootConfigModeUpper = "UPPER";
 constexpr const char *kIec104ConfigPath = "./conf/configPusher/iec104.jsonc";
 constexpr const char *kModbusRtuConfigPath = "./conf/configPusher/modbus_rtu.jsonc";
 constexpr const char *kDlt645ConfigPath = "./conf/configPusher/DLT645.jsonc";
@@ -110,6 +114,27 @@ bool modbusNeedsMqtt(const ConfigPusherProto::Config &config) {
   }
   return false;
 }
+
+bool shouldApplyConfigOnStart() {
+  const char *modeValue = std::getenv(kBootConfigModeEnvName);
+  if (modeValue == nullptr || std::string_view(modeValue).empty()) {
+    LOG_INFO("未检测到 boot_config_mode 环境变量，按默认模式 {} 执行配置下发", kBootConfigModeConfigPusher);
+    return true;
+  }
+
+  const std::string_view mode(modeValue);
+  if (mode == kBootConfigModeConfigPusher) {
+    LOG_INFO("检测到 boot_config_mode={}，允许 ConfigPusher 执行配置下发", mode);
+    return true;
+  }
+  if (mode == kBootConfigModeUpper) {
+    LOG_INFO("检测到 boot_config_mode={}，ConfigPusher 仅启动服务，不执行配置下发", mode);
+    return false;
+  }
+
+  LOG_WARNING("检测到未知 boot_config_mode={}，为避免覆盖现场配置，ConfigPusher 本次不执行配置下发", mode);
+  return false;
+}
 }  // namespace
 
 ConfigPusher::ConfigPusher() :
@@ -124,7 +149,9 @@ void ConfigPusher::start(std::stop_token stopToken) {
   LOG_INFO("ConfigPusher 模块启动");
   configPusherService_->getConfigPusher(this);
   grpcServerBuilder(configPusherService_);
-  applyConfig();
+  if (shouldApplyConfigOnStart()) {
+    applyConfig();
+  }
 
   std::mutex mu;
   std::condition_variable_any cv;
