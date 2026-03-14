@@ -1,7 +1,7 @@
 # ConfigPusher 模块
 
 ## 简介
-ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRTU/DLT645/AGC，并按配置调用对应 gRPC 接口完成 IEC104/ModbusRTU/DLT645 连接与点表下发、AGC 控制组下发，以及 DataCenter 点表/路由下发；COMMock 仅在模块已启动时下发配置。
+ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRTU/DLT645/AGC，并按配置调用对应 gRPC 接口完成 IEC104/ModbusRTU/DLT645 连接与点表下发、AGC 控制组下发，以及 DataCenter 连接标签注册表/路由下发。
 
 ## 能力清单
 - 自动通过 ModuleManager 启动 DataCenter 与 IEC104/ModbusRTU/DLT645/AGC
@@ -10,9 +10,8 @@ ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRT
 - 下发 ModbusRTU 配置：UpdateConfig / UpsertLink / UpsertPointTable / StartLink
 - 下发 DLT645 配置：UpdateConfig / UpsertLink / UpsertPointTable / StartLink
 - 下发 AGC 配置：UpsertGroup / StartGroup
-- 下发 COMMock 配置：ApplyConfig（仅对已运行 COMMock 模块生效）
-- 下发 DataCenter 配置：UpsertPointTable / UpsertRoutes（仅对已存在连接生效）
-- 下发流程记录请求/响应报文日志（ModuleManager/IEC104/ModbusRTU/DLT645/AGC/COMMock/DataCenter）
+- 下发 DataCenter 配置：UpsertConnTags / UpsertRoutes（仅对已存在连接生效）
+- 下发流程记录请求/响应报文日志（ModuleManager/IEC104/ModbusRTU/DLT645/AGC/DataCenter）
 - 失败记录日志（当前不做重试）
 
 ## 接口与协议
@@ -36,7 +35,6 @@ ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRT
 ## 配置与数据
 - 配置文件：
   - `./conf/configPusher/DataCenter.jsonc`
-  - `./conf/configPusher/COMMock.jsonc`
   - `./conf/configPusher/DLT645.jsonc`
   - `./conf/configPusher/agc.jsonc`
   - `./conf/configPusher/iec104.jsonc`
@@ -55,9 +53,8 @@ ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRT
 - IEC104 可选下发对时触发 tag（`time_sync_tag`；为空时默认 `__time_sync__`）
 - IEC104 点表类型支持 `POINT_TYPE_FLOAT` 与 `POINT_TYPE_SINGLE`
 - AGC 配置使用 `agc.groups[].upsert` 下发控制组，`agc.groups[].start=true` 时会启动控制组内控制环功能
-- DataCenter 配置要求连接已存在（由模块或上位机创建）；若 `point_tables/routes` 引用连接不存在，则该次 DataCenter 配置不下发
+- DataCenter 配置要求连接已存在（由模块或上位机创建）；若 `point_tables/routes` 引用连接不存在，则该次 DataCenter 配置不下发。注意：这里的 `point_tables` 配置项当前仍沿用历史字段名，实际对应 DataCenter 的连接标签注册表 `ConnTags`。
 - `replace=true` 表示覆盖配置；`replace=false` 表示增量追加
-- COMMock 配置不触发模块启动，仅在 COMMock 模块已运行时下发
 - ModbusRTU 支持双传输并存：`TRANSPORT_SERIAL` 保留本地串口直连；`TRANSPORT_MQTT_UART` 通过 `MQTTManager + uartManager` 做串口透传
 - `modbus_rtu.mqtt` 为 ModbusRTU 的 MQTT 全局连接参数，字段为 `host/port/client_id/username/password/keepalive_sec/clean_session/connect_timeout_ms`
 - 当 `modbus_rtu.links[].link.config.transport_type=TRANSPORT_MQTT_UART` 时，`modbus_rtu.mqtt` 必填；ConfigPusher 会先调用 `ModbusRTU.UpdateConfig`，再继续下发链路与点表
@@ -256,7 +253,6 @@ IEC104 示例：
 ```
 ModbusRTU 示例见 `./conf/configPusher/modbus_rtu.jsonc`。
 AGC 示例见 `./conf/configPusher/agc.jsonc`。
-COMMock 示例见 `./conf/configPusher/COMMock.jsonc`。
 
 ## 线程与日志
 - 模块内部线程统一使用 `ModuleManager::StartModuleThread(模块LibInfo.LIB_NAME, ...)` 创建，自动绑定日志模块名上下文。

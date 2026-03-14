@@ -56,31 +56,6 @@ set_tests_properties(moduleInterface_test PROPERTIES
   WORKING_DIRECTORY "${MSKDSP_MODULE_INTERFACE_TEST_ENV_DIR}"
 )
 
-set(MSKDSP_COMMOCK_TEST_ENV_DIR "${CMAKE_BINARY_DIR}/test_env/commock")
-file(MAKE_DIRECTORY "${MSKDSP_COMMOCK_TEST_ENV_DIR}")
-
-add_executable(commock_test
-  commock_test.cc
-  ${CMAKE_SOURCE_DIR}/src/COMMock/COMMock.cc
-  ${CMAKE_SOURCE_DIR}/src/COMMock/COMMockGrpcService.cc
-)
-
-target_include_directories(commock_test PRIVATE
-  ${CMAKE_SOURCE_DIR}/src/COMMock/include
-  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
-)
-
-target_link_libraries(commock_test PRIVATE
-  GTest::gtest_main
-  dspProto
-  moduleManager
-)
-
-add_test(NAME commock_test COMMAND commock_test)
-set_tests_properties(commock_test PROPERTIES
-  WORKING_DIRECTORY "${MSKDSP_COMMOCK_TEST_ENV_DIR}"
-)
-
 set(MSKDSP_LOGGER_TEST_ENV_DIR "${CMAKE_BINARY_DIR}/test_env/logger")
 file(MAKE_DIRECTORY "${MSKDSP_LOGGER_TEST_ENV_DIR}")
 
@@ -657,7 +632,6 @@ add_test(NAME configPusherModuleManager_test COMMAND configPusherModuleManager_t
 set(MSKDSP_TEST_TARGETS
   moduleManager_test
   moduleInterface_test
-  commock_test
   logger_test
   mqtt_manager_test
   dataCenterCore_test

@@ -113,7 +113,6 @@ endif()
 
 set(MSKDSP_MODULE_TARGETS
   ConfigPusher
-  COMMock
   DataCenter
   IEC104
   DLT645

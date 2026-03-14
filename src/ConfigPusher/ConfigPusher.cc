@@ -17,10 +17,8 @@
 #include <string>
 
 #include "AGC.grpc.pb.h"
-#include "COMMock.grpc.pb.h"
 #include "ConfigPusher.pb.h"
 #include "ConfigPusherApplyAgc.h"
-#include "ConfigPusherApplyComMock.h"
 #include "ConfigPusherApplyDlt645.h"
 #include "ConfigPusherApplyIec104.h"
 #include "ConfigPusherApplyModbusRtu.h"
@@ -61,7 +59,6 @@ constexpr const char *kIec104ConfigPath = "./conf/configPusher/iec104.jsonc";
 constexpr const char *kModbusRtuConfigPath = "./conf/configPusher/modbus_rtu.jsonc";
 constexpr const char *kDlt645ConfigPath = "./conf/configPusher/DLT645.jsonc";
 constexpr const char *kDataCenterConfigPath = "./conf/configPusher/DataCenter.jsonc";
-constexpr const char *kComMockConfigPath = "./conf/configPusher/COMMock.jsonc";
 constexpr const char *kAgcConfigPath = "./conf/configPusher/agc.jsonc";
 constexpr const char *kModuleManagerAddress = "127.0.0.1:7000";
 constexpr const char *kDataCenterModuleName = "DataCenter";
@@ -69,7 +66,6 @@ constexpr const char *kIec104ModuleName = "IEC104";
 constexpr const char *kModbusRtuModuleName = "ModbusRTU";
 constexpr const char *kDlt645ModuleName = "DLT645";
 constexpr const char *kMqttManagerModuleName = "MQTTManager";
-constexpr const char *kComMockModuleName = "COMMock";
 constexpr const char *kAgcModuleName = "AGC";
 constexpr auto kModuleStartTimeout = std::chrono::seconds(5);
 
@@ -181,14 +177,12 @@ void ConfigPusher::applyConfig() {
     LOG_INFO("ConfigPusher 配置目录已解析: {}", configDir->string());
   }
 
-  auto comMockConfig = LoadConfigFile(ResolveConfigPath(configDir, kComMockConfigPath));
   auto iec104Config = LoadConfigFile(ResolveConfigPath(configDir, kIec104ConfigPath));
   auto modbusConfig = LoadConfigFile(ResolveConfigPath(configDir, kModbusRtuConfigPath));
   auto dlt645Config = LoadConfigFile(ResolveConfigPath(configDir, kDlt645ConfigPath));
   auto dataCenterConfig = LoadDataCenterConfigFile(ResolveConfigPath(configDir, kDataCenterConfigPath));
   auto agcConfig = LoadConfigFile(ResolveConfigPath(configDir, kAgcConfigPath));
 
-  const bool hasComMock = comMockConfig && comMockConfig->has_com_mock() && comMockConfig->com_mock().ports_size() > 0;
   const bool hasIec104 = iec104Config && iec104Config->has_iec104() && !iec104Config->iec104().links().empty();
   const bool hasModbus = modbusConfig && modbusConfig->has_modbus_rtu() && !modbusConfig->modbus_rtu().links().empty();
   const bool hasModbusMqtt = modbusConfig && modbusNeedsMqtt(*modbusConfig);
@@ -196,8 +190,8 @@ void ConfigPusher::applyConfig() {
   const bool hasAgc = agcConfig && agcConfig->has_agc() && agcConfig->agc().groups_size() > 0;
   const bool hasDataCenter = dataCenterConfig && (!dataCenterConfig->point_tables().empty() || (dataCenterConfig->has_routes() && dataCenterConfig->routes().routes_size() > 0));
   const bool needsDataCenter = hasIec104 || hasModbus || hasDlt645 || hasAgc || hasDataCenter;
-  if (!hasComMock && !hasIec104 && !hasModbus && !hasDlt645 && !hasAgc && !hasDataCenter) {
-    LOG_INFO("配置中未包含 COMMock/IEC104/ModbusRTU/DLT645/AGC/DataCenter 配置");
+  if (!hasIec104 && !hasModbus && !hasDlt645 && !hasAgc && !hasDataCenter) {
+    LOG_INFO("配置中未包含 IEC104/ModbusRTU/DLT645/AGC/DataCenter 配置");
     return;
   }
   LOG_INFO("ConfigPusher 配置解析完成，开始准备下发配置");
@@ -252,13 +246,6 @@ void ConfigPusher::applyConfig() {
     if (!mqttInfo) {
       LOG_ERROR("未找到模块: {}", kMqttManagerModuleName);
       return;
-    }
-  }
-  std::optional<ModuleManagerProto::ModuleInfo> comMockInfo;
-  if (hasComMock) {
-    comMockInfo = findModuleInfo(moduleInfos, kComMockModuleName);
-    if (!comMockInfo) {
-      LOG_ERROR("未找到模块: {}", kComMockModuleName);
     }
   }
   std::optional<ModuleManagerProto::ModuleInfo> agcInfo;
@@ -373,15 +360,6 @@ void ConfigPusher::applyConfig() {
     }
   }
 
-  std::optional<ModuleManagerProto::ModuleRunningInfo> runningComMock;
-  if (hasComMock && comMockInfo) {
-    runningComMock = findRunningInfo(running, kComMockModuleName);
-    if (!runningComMock) {
-      LOG_INFO("COMMock 模块未运行，跳过配置下发");
-    } else {
-      LOG_INFO("COMMock 模块已在运行");
-    }
-  }
   std::optional<ModuleManagerProto::ModuleRunningInfo> runningAgc;
   if (hasAgc) {
     runningAgc = findRunningInfo(running, kAgcModuleName);
@@ -409,16 +387,6 @@ void ConfigPusher::applyConfig() {
       LOG_ERROR("IEC104 配置下发存在错误");
     } else {
       LOG_INFO("IEC104 配置下发完成");
-    }
-  }
-
-  if (hasComMock && runningComMock) {
-    auto comMockChannel = grpc::CreateChannel(runningComMock->inner_grpc_server(), grpc::InsecureChannelCredentials());
-    auto comMockStub = COMMockProto::COMMockService::NewStub(comMockChannel);
-    if (!applyComMockConfig(comMockConfig->com_mock(), comMockStub.get())) {
-      LOG_ERROR("COMMock 配置下发存在错误");
-    } else {
-      LOG_INFO("COMMock 配置下发完成");
     }
   }
 
