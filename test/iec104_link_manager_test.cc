@@ -293,9 +293,9 @@ TEST(IEC104LinkManagerTest, UpsertPointTableMergesAndSendsTags) {
   ASSERT_TRUE(mgr.UpsertPointTable(pt1).ok());
 
   const auto connId = info.conn_id();
-  EXPECT_CALL(*stub, UpsertPointTable(_, _, _))
+  EXPECT_CALL(*stub, UpsertConnTags(_, _, _))
       .WillOnce(Invoke([connId](grpc::ClientContext*,
-                                const DataCenterProto::UpsertPointTableRequest& req,
+                                const DataCenterProto::UpsertConnTagsRequest& req,
                                 DataCenterProto::Empty*) {
         EXPECT_EQ(req.conn_id(), connId);
         EXPECT_TRUE(req.replace());
@@ -326,7 +326,7 @@ TEST(IEC104LinkManagerTest, UpsertPointTableReturnsNotFoundWhenMissing) {
   LinkManager mgr("IEC104");
   mgr.setDataCenterStub(stub);
 
-  EXPECT_CALL(*stub, UpsertPointTable(_, _, _)).Times(0);
+  EXPECT_CALL(*stub, UpsertConnTags(_, _, _)).Times(0);
 
   IEC104Proto::UpsertPointTableRequest req;
   req.set_conn_name("missing");

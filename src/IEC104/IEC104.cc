@@ -35,7 +35,7 @@ namespace IEC104 {
 IEC104::IEC104() :
   ModuleInterface(),
   iec104Service_(std::make_shared<IEC104GrpcServiceImpl>()),
-  linkManager_(IEC104LibInfo.LIB_NAME) {
+  linkManager_(IEC104LibInfo.LIB_NAME, "./conf/IEC104/links.pb", "./conf/IEC104/point_tables.pb") {
   initLibInfo(IEC104LibInfo);
 }
 IEC104::~IEC104() {}

@@ -415,7 +415,9 @@ add_executable(iec104LinkManager_test
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104DataCenterClient.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104LinkManager.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104LinkManagerDataCenter.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104LinkStore.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104PointTable.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104PointTableStore.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104TcpLink.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104TcpSession.cc
 )
@@ -434,6 +436,33 @@ target_link_libraries(iec104LinkManager_test PRIVATE
 )
 
 add_test(NAME iec104LinkManager_test COMMAND iec104LinkManager_test)
+
+add_executable(iec104Persistence_test
+  iec104_persistence_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104DataCenterClient.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104LinkManager.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104LinkManagerDataCenter.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104LinkStore.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104PointTable.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104PointTableStore.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104TcpLink.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104TcpSession.cc
+)
+
+target_include_directories(iec104Persistence_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC104/include
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+)
+
+target_link_libraries(iec104Persistence_test PRIVATE
+  GTest::gtest_main
+  GTest::gmock
+  dspProto
+  Boost::asio
+  moduleManager
+)
+
+add_test(NAME iec104Persistence_test COMMAND iec104Persistence_test)
 
 add_executable(modbusRtuLinkManager_test
   modbus_rtu_data_center_client_test.cc

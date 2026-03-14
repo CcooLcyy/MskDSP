@@ -1,5 +1,6 @@
 #pragma once
 
+#include <filesystem>
 #include <grpcpp/client_context.h>
 #include <grpcpp/support/status.h>
 
@@ -8,6 +9,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -19,9 +21,14 @@
 
 namespace IEC104 {
 
+class IEC104LinkStore;
+class IEC104PointTableStore;
+
 class LinkManager {
 public:
-  explicit LinkManager(std::string moduleName);
+  explicit LinkManager(std::string moduleName,
+                       std::filesystem::path linksPath = {},
+                       std::filesystem::path pointTablesPath = {});
 
   void setDataCenterServerAddress(std::string address);
   void setDataCenterStub(std::shared_ptr<DataCenterProto::DataCenterService::StubInterface> stub);
@@ -39,6 +46,7 @@ public:
 
 private:
   friend class IEC104LinkManagerTestPeer;
+  friend class IEC104LinkStore;
   struct ListenEndpoint {
     // ROLE_SERVER 的规范化监听地址。
     // - any=true 表示绑定到 0.0.0.0:<port>（local.ip 为空或为 "0.0.0.0"）。
@@ -82,6 +90,12 @@ private:
   static grpc::Status checkSystemListenAvailable(const ListenEndpoint &ep);
 
   grpc::Status fillLinkInfoLocked(const LinkRuntime &link, IEC104Proto::LinkInfo *out) const;
+  void loadPersistedConfig(std::string_view trigger);
+  grpc::Status saveLinksLocked();
+  grpc::Status savePointTablesLocked();
+  IEC104Proto::LinksConfig dumpLinksConfigLocked() const;
+  IEC104Proto::PointTablesConfig dumpPointTablesConfigLocked() const;
+  bool persistenceEnabled() const;
 
   void configureTransportCallbacksLocked(const std::string &connName, LinkRuntime *link);
   void startDataCenterSubscribeLocked(const std::string &connName, LinkRuntime *link);
@@ -104,6 +118,8 @@ private:
   std::unordered_map<std::string, ListenEndpoint> reservedServerListenByName_;
   // 在调用 DataCenter 期间阻止同一 conn_name 的并发创建。
   std::unordered_set<std::string> pendingCreateByName_;
+  std::unique_ptr<IEC104LinkStore> linkStore_;
+  std::unique_ptr<IEC104PointTableStore> pointTableStore_;
   DataCenterClient dataCenter_;
 };
 

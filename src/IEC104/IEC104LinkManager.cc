@@ -9,7 +9,10 @@
 #include <format>
 #include <string>
 #include <utility>
+#include <vector>
 
+#include "IEC104LinkStore.h"
+#include "IEC104PointTableStore.h"
 #include "Logger.h"
 
 namespace IEC104 {
@@ -21,17 +24,57 @@ grpc::Status makeNotFound(const std::string &connName) {
 constexpr uint32_t kMaxAsduBytes = 249;
 constexpr uint32_t kMinMeasuredValueAsduBytes = 21;
 constexpr const char *kDefaultTimeSyncTag = "__time_sync__";
+
+std::vector<std::string> buildDataCenterTags(const IEC104::PointTable &pointTable, const IEC104Proto::LinkConfig &config) {
+  auto tags = pointTable.Tags();
+  const auto timeSyncTag = config.time_sync_tag().empty() ? std::string(kDefaultTimeSyncTag) : config.time_sync_tag();
+  if (!timeSyncTag.empty() && std::find(tags.begin(), tags.end(), timeSyncTag) == tags.end()) {
+    tags.emplace_back(timeSyncTag);
+    std::sort(tags.begin(), tags.end());
+  }
+  return tags;
+}
 }  // namespace
 
-LinkManager::LinkManager(std::string moduleName) :
-  dataCenter_(std::move(moduleName)) {}
+LinkManager::LinkManager(std::string moduleName, std::filesystem::path linksPath, std::filesystem::path pointTablesPath) :
+  dataCenter_(std::move(moduleName)) {
+  if (linksPath.empty() != pointTablesPath.empty()) {
+    LOG_WARNING("IEC104 持久化路径配置不完整，已禁用本地配置落盘: links_path={}, point_tables_path={}",
+                linksPath.string(),
+                pointTablesPath.string());
+    return;
+  }
+  if (linksPath.empty()) {
+    return;
+  }
+
+  linkStore_ = std::make_unique<IEC104LinkStore>(std::move(linksPath));
+  pointTableStore_ = std::make_unique<IEC104PointTableStore>(std::move(pointTablesPath));
+  loadPersistedConfig("构造阶段");
+}
 
 void LinkManager::setDataCenterServerAddress(std::string address) {
   dataCenter_.setServerAddress(std::move(address));
+  bool needReload = false;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    needReload = persistenceEnabled() && linksByName_.empty() && reservedServerListenByName_.empty() && pendingCreateByName_.empty();
+  }
+  if (needReload) {
+    loadPersistedConfig("设置 DataCenter 地址后重试");
+  }
 }
 
 void LinkManager::setDataCenterStub(std::shared_ptr<DataCenterProto::DataCenterService::StubInterface> stub) {
   dataCenter_.setStub(std::move(stub));
+  bool needReload = false;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    needReload = persistenceEnabled() && linksByName_.empty() && reservedServerListenByName_.empty() && pendingCreateByName_.empty();
+  }
+  if (needReload) {
+    loadPersistedConfig("设置 DataCenter Stub 后重试");
+  }
 }
 
 grpc::Status LinkManager::validateConnName(const std::string &connName) {
@@ -213,6 +256,357 @@ grpc::Status LinkManager::fillLinkInfoLocked(const LinkRuntime &link, IEC104Prot
   return grpc::Status::OK;
 }
 
+void LinkManager::loadPersistedConfig(std::string_view trigger) {
+  if (!persistenceEnabled()) {
+    return;
+  }
+
+  LOG_INFO("IEC104 开始加载本地持久化配置: 触发来源={}", trigger);
+
+  IEC104Proto::LinksConfig linksConfig;
+  auto status = linkStore_->Load(&linksConfig);
+  if (!status.ok()) {
+    LOG_ERROR("IEC104 加载本地链路配置失败: {}", status.error_message());
+    return;
+  }
+
+  IEC104Proto::PointTablesConfig pointTablesConfig;
+  status = pointTableStore_->Load(&pointTablesConfig);
+  if (!status.ok()) {
+    LOG_ERROR("IEC104 加载本地点表配置失败: {}", status.error_message());
+    return;
+  }
+  LOG_INFO("IEC104 持久化配置载入摘要: 触发来源={}, 链路记录数={}, 点表记录数={}",
+           trigger,
+           linksConfig.links_size(),
+           pointTablesConfig.point_tables_size());
+
+  std::unordered_map<std::string, IEC104Proto::PointTable> pointTablesByConn;
+  std::unordered_map<std::string, int> pointTableIndexByConn;
+  pointTablesByConn.reserve(static_cast<size_t>(pointTablesConfig.point_tables_size()));
+  pointTableIndexByConn.reserve(static_cast<size_t>(pointTablesConfig.point_tables_size()));
+  std::vector<bool> keepPointTables(static_cast<size_t>(pointTablesConfig.point_tables_size()), true);
+  for (int i = 0; i < pointTablesConfig.point_tables_size(); ++i) {
+    const auto &table = pointTablesConfig.point_tables(i);
+    pointTablesByConn.emplace(table.conn_name(), table);
+    pointTableIndexByConn.emplace(table.conn_name(), i);
+  }
+
+  if (linksConfig.links_size() == 0) {
+    if (!pointTablesByConn.empty()) {
+      LOG_WARNING("IEC104 未找到链路持久化配置，但存在 {} 条点表持久化配置，准备清理孤立点表", pointTablesByConn.size());
+      auto saveStatus = pointTableStore_->Save(IEC104Proto::PointTablesConfig());
+      if (!saveStatus.ok()) {
+        LOG_ERROR("IEC104 清理孤立点表持久化配置失败: {}", saveStatus.error_message());
+      }
+    } else {
+      LOG_INFO("IEC104 未找到链路持久化配置");
+    }
+    return;
+  }
+
+  std::unordered_map<std::string, LinkRuntime> restoredLinks;
+  std::unordered_map<std::string, ListenEndpoint> restoredServerListenByName;
+  restoredLinks.reserve(static_cast<size_t>(linksConfig.links_size()));
+  restoredServerListenByName.reserve(static_cast<size_t>(linksConfig.links_size()));
+  std::unordered_map<std::string, uint32_t> updatedConnIds;
+  updatedConnIds.reserve(static_cast<size_t>(linksConfig.links_size()));
+  std::vector<bool> keepLinks(static_cast<size_t>(linksConfig.links_size()), true);
+  bool needResaveLinks = false;
+  bool needResavePointTables = false;
+  size_t failedCount = 0;
+  size_t dataCenterFailureCount = 0;
+
+  auto removePointTableForConn = [&](const std::string &connName) {
+    auto indexIt = pointTableIndexByConn.find(connName);
+    if (indexIt != pointTableIndexByConn.end()) {
+      auto &keep = keepPointTables[static_cast<size_t>(indexIt->second)];
+      if (keep) {
+        keep = false;
+        needResavePointTables = true;
+      }
+    }
+    pointTablesByConn.erase(connName);
+  };
+
+  auto removeLinkRecord = [&](size_t index, const std::string &connName) {
+    if (keepLinks[index]) {
+      keepLinks[index] = false;
+      needResaveLinks = true;
+    }
+    if (!connName.empty()) {
+      removePointTableForConn(connName);
+    }
+  };
+
+  for (int i = 0; i < linksConfig.links_size(); ++i) {
+    const auto &persisted = linksConfig.links(i);
+    if (!persisted.has_config()) {
+      LOG_WARNING("IEC104 跳过空链路持久化记录");
+      removeLinkRecord(static_cast<size_t>(i), "");
+      continue;
+    }
+
+    auto normalized = persisted.config();
+    if (normalized.time_sync_tag().empty()) {
+      normalized.set_time_sync_tag(kDefaultTimeSyncTag);
+    }
+    if (normalized.station_role() == IEC104Proto::STATION_ROLE_UNSPECIFIED) {
+      const auto stationRole = normalizeStationRole(normalized);
+      if (stationRole != IEC104Proto::STATION_ROLE_UNSPECIFIED) {
+        normalized.set_station_role(stationRole);
+      }
+    }
+    const auto connName = normalized.conn_name();
+    size_t persistedPointCount = 0;
+    if (auto persistedTableIt = pointTablesByConn.find(connName); persistedTableIt != pointTablesByConn.end()) {
+      persistedPointCount = static_cast<size_t>(persistedTableIt->second.points_size());
+    }
+    LOG_INFO("IEC104 开始恢复链路持久化记录: 触发来源={}, conn_name={}, 持久化conn_id={}, 待删除={}, 持久化点数={}",
+             trigger,
+             connName,
+             persisted.conn_id(),
+             persisted.pending_delete(),
+             persistedPointCount);
+
+    status = validateLinkConfig(normalized);
+    if (!status.ok()) {
+      ++failedCount;
+      LOG_ERROR("IEC104 链路持久化配置非法，已跳过: conn_name={}, 原因={}", connName, status.error_message());
+      removeLinkRecord(static_cast<size_t>(i), connName);
+      continue;
+    }
+
+    ListenEndpoint listen;
+    if (normalized.role() == IEC104Proto::ROLE_SERVER) {
+      status = makeListenEndpoint(normalized.local(), &listen);
+      if (!status.ok()) {
+        ++failedCount;
+        LOG_ERROR("IEC104 恢复链路时监听端点非法，已跳过: conn_name={}, 原因={}", connName, status.error_message());
+        removeLinkRecord(static_cast<size_t>(i), connName);
+        continue;
+      }
+
+      bool conflicted = false;
+      std::string conflictName;
+      ListenEndpoint conflictListen;
+      for (const auto &[otherName, otherListen] : restoredServerListenByName) {
+        if (listenEndpointsConflict(otherListen, listen)) {
+          conflicted = true;
+          conflictName = otherName;
+          conflictListen = otherListen;
+          break;
+        }
+      }
+      if (conflicted) {
+        ++failedCount;
+        LOG_ERROR("IEC104 恢复链路时监听端点冲突，已跳过: conn_name={}, 对端链路={}, 当前监听={}, 对端监听={}",
+                  connName,
+                  conflictName,
+                  listenEndpointToString(listen),
+                  listenEndpointToString(conflictListen));
+        removeLinkRecord(static_cast<size_t>(i), connName);
+        continue;
+      }
+    }
+
+    DataCenterProto::ConnectionInfo connInfo;
+    status = dataCenter_.GetOrCreateConnection(connName, &connInfo);
+    if (!status.ok()) {
+      ++failedCount;
+      ++dataCenterFailureCount;
+      LOG_ERROR("IEC104 恢复链路时获取 DataCenter 连接失败: 触发来源={}, conn_name={}, 原因={}, 本地点表点数={}",
+                trigger,
+                connName,
+                status.error_message(),
+                persistedPointCount);
+      pointTablesByConn.erase(connName);
+      continue;
+    }
+    if (connInfo.conn_id() == 0) {
+      ++failedCount;
+      LOG_ERROR("IEC104 恢复链路时 DataCenter 返回无效 conn_id，已跳过: 触发来源={}, conn_name={}, 本地点表点数={}",
+                trigger,
+                connName,
+                persistedPointCount);
+      pointTablesByConn.erase(connName);
+      continue;
+    }
+    if (persisted.conn_id() != connInfo.conn_id()) {
+      LOG_WARNING("IEC104 恢复链路时发现 conn_id 已变化: conn_name={}, 持久化conn_id={}, 当前conn_id={}",
+                  connName,
+                  persisted.conn_id(),
+                  connInfo.conn_id());
+      updatedConnIds[connName] = connInfo.conn_id();
+      needResaveLinks = true;
+    }
+
+    LinkRuntime runtime;
+    runtime.config = normalized;
+    runtime.connId = connInfo.conn_id();
+    runtime.state = persisted.pending_delete() ? IEC104Proto::LINK_STATE_PENDING_DELETE : IEC104Proto::LINK_STATE_STOPPED;
+    runtime.lastError.clear();
+    runtime.lastReportedByTag.clear();
+
+    size_t pointCount = 0;
+    auto tableIt = pointTablesByConn.find(connName);
+    if (tableIt != pointTablesByConn.end()) {
+      PointTable pointTable;
+      auto pointStatus = pointTable.Upsert(tableIt->second.points(), true);
+      if (!pointStatus.ok()) {
+        LOG_ERROR("IEC104 恢复点表失败，已忽略该点表: conn_name={}, 原因={}", connName, pointStatus.error_message());
+        removePointTableForConn(connName);
+      } else {
+        runtime.pointTable = std::move(pointTable);
+        pointCount = static_cast<size_t>(tableIt->second.points_size());
+        pointTablesByConn.erase(tableIt);
+      }
+    }
+
+    auto tags = buildDataCenterTags(runtime.pointTable, runtime.config);
+    auto syncStatus = dataCenter_.UpsertConnTags(runtime.connId, tags, true);
+    if (!syncStatus.ok()) {
+      LOG_ERROR("IEC104 恢复链路时同步 DataCenter 连接标签注册表失败: conn_name={}, conn_id={}, 原因={}",
+                connName,
+                runtime.connId,
+                syncStatus.error_message());
+    }
+
+    if (normalized.role() == IEC104Proto::ROLE_SERVER) {
+      restoredServerListenByName[connName] = listen;
+    }
+    restoredLinks[connName] = std::move(runtime);
+    LOG_INFO("IEC104 已恢复链路配置: conn_name={}, conn_id={}, 点数={}, 状态={}",
+             connName,
+             connInfo.conn_id(),
+             pointCount,
+             persisted.pending_delete() ? "待删除" : "已停止");
+  }
+
+  for (const auto &[connName, _] : pointTablesByConn) {
+    auto tableIt = pointTablesByConn.find(connName);
+    const size_t pointCount = tableIt == pointTablesByConn.end() ? 0u : static_cast<size_t>(tableIt->second.points_size());
+    LOG_WARNING("IEC104 点表持久化配置未找到对应链路，已忽略: conn_name={}", connName);
+    LOG_WARNING("IEC104 点表持久化配置未进入本次恢复快照: 触发来源={}, conn_name={}, 点数={}",
+                trigger,
+                connName,
+                pointCount);
+    auto indexIt = pointTableIndexByConn.find(connName);
+    if (indexIt != pointTableIndexByConn.end()) {
+      auto &keep = keepPointTables[static_cast<size_t>(indexIt->second)];
+      if (keep) {
+        keep = false;
+        needResavePointTables = true;
+      }
+    }
+  }
+
+  const auto restoredCount = restoredLinks.size();
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    linksByName_ = std::move(restoredLinks);
+    reservedServerListenByName_ = std::move(restoredServerListenByName);
+    pendingCreateByName_.clear();
+  }
+
+  // 仅回写已确认需要修正/清理的记录；DataCenter 瞬时失败的链路保留原持久化内容，留待下次恢复重试。
+  if (needResaveLinks) {
+    IEC104Proto::LinksConfig linksToPersist;
+    for (int i = 0; i < linksConfig.links_size(); ++i) {
+      if (!keepLinks[static_cast<size_t>(i)]) {
+        continue;
+      }
+      auto *item = linksToPersist.add_links();
+      *item = linksConfig.links(i);
+      if (item->has_config()) {
+        auto connIt = updatedConnIds.find(item->config().conn_name());
+        if (connIt != updatedConnIds.end()) {
+          item->set_conn_id(connIt->second);
+        }
+      }
+    }
+    LOG_WARNING("IEC104 本次恢复将回写链路持久化配置: 触发来源={}, 回写链路记录数={}",
+                trigger,
+                linksToPersist.links_size());
+    auto saveStatus = linkStore_->Save(linksToPersist);
+    if (!saveStatus.ok()) {
+      LOG_ERROR("IEC104 回写链路持久化配置失败: {}", saveStatus.error_message());
+    }
+  }
+
+  if (needResavePointTables) {
+    IEC104Proto::PointTablesConfig pointTablesToPersist;
+    for (int i = 0; i < pointTablesConfig.point_tables_size(); ++i) {
+      if (!keepPointTables[static_cast<size_t>(i)]) {
+        continue;
+      }
+      *pointTablesToPersist.add_point_tables() = pointTablesConfig.point_tables(i);
+    }
+    LOG_WARNING("IEC104 本次恢复将回写点表持久化配置: 触发来源={}, 回写点表记录数={}",
+                trigger,
+                pointTablesToPersist.point_tables_size());
+    auto saveStatus = pointTableStore_->Save(pointTablesToPersist);
+    if (!saveStatus.ok()) {
+      LOG_ERROR("IEC104 回写点表持久化配置失败: {}", saveStatus.error_message());
+    }
+  }
+
+  LOG_INFO("IEC104 本地持久化配置加载完成: 触发来源={}, 恢复成功={}, 恢复失败={}, DataCenter失败={}, 当前内存链路数={}",
+           trigger,
+           restoredCount,
+           failedCount,
+           dataCenterFailureCount,
+           restoredCount);
+}
+
+grpc::Status LinkManager::saveLinksLocked() {
+  if (!persistenceEnabled()) {
+    return grpc::Status::OK;
+  }
+  auto config = dumpLinksConfigLocked();
+  auto status = linkStore_->Save(config);
+  if (!status.ok()) {
+    LOG_ERROR("IEC104 本地链路配置落盘失败: {}", status.error_message());
+  }
+  return status;
+}
+
+grpc::Status LinkManager::savePointTablesLocked() {
+  if (!persistenceEnabled()) {
+    return grpc::Status::OK;
+  }
+  auto config = dumpPointTablesConfigLocked();
+  auto status = pointTableStore_->Save(config);
+  if (!status.ok()) {
+    LOG_ERROR("IEC104 本地点表配置落盘失败: {}", status.error_message());
+  }
+  return status;
+}
+
+IEC104Proto::LinksConfig LinkManager::dumpLinksConfigLocked() const {
+  IEC104Proto::LinksConfig config;
+  for (const auto &[_, link] : linksByName_) {
+    auto *item = config.add_links();
+    *item->mutable_config() = link.config;
+    item->set_conn_id(link.connId);
+    item->set_pending_delete(link.state == IEC104Proto::LINK_STATE_PENDING_DELETE);
+  }
+  return config;
+}
+
+IEC104Proto::PointTablesConfig LinkManager::dumpPointTablesConfigLocked() const {
+  IEC104Proto::PointTablesConfig config;
+  for (const auto &[connName, link] : linksByName_) {
+    auto *table = config.add_point_tables();
+    link.pointTable.ToProto(connName, table);
+  }
+  return config;
+}
+
+bool LinkManager::persistenceEnabled() const {
+  return linkStore_ != nullptr && pointTableStore_ != nullptr;
+}
+
 grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &request, IEC104Proto::LinkInfo *out) {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
@@ -294,6 +688,11 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
 
       it->second.config = config;
       it->second.lastError.clear();
+      status = saveLinksLocked();
+      if (!status.ok()) {
+        LOG_ERROR("IEC104 更新链路配置落盘失败: conn_name={}, 原因={}", connName, status.error_message());
+        return status;
+      }
       return fillLinkInfoLocked(it->second, out);
     }
 
@@ -382,6 +781,11 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
     } else {
       reservedServerListenByName_.erase(connName);
     }
+    status = saveLinksLocked();
+    if (!status.ok()) {
+      LOG_ERROR("IEC104 更新链路配置落盘失败: conn_name={}, 原因={}", connName, status.error_message());
+      return status;
+    }
     return fillLinkInfoLocked(it->second, out);
   }
 
@@ -389,6 +793,11 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
   it->second.connId = connInfo.conn_id();
   it->second.state = IEC104Proto::LINK_STATE_STOPPED;
   it->second.lastError.clear();
+  status = saveLinksLocked();
+  if (!status.ok()) {
+    LOG_ERROR("IEC104 创建链路配置落盘失败: conn_name={}, 原因={}", connName, status.error_message());
+    return status;
+  }
   return fillLinkInfoLocked(it->second, out);
 }
 
@@ -529,6 +938,10 @@ grpc::Status LinkManager::DeleteLink(const std::string &connName) {
     if (it != linksByName_.end()) {
       it->second.state = IEC104Proto::LINK_STATE_PENDING_DELETE;
       it->second.lastError = dc.error_message();
+      auto saveStatus = saveLinksLocked();
+      if (!saveStatus.ok()) {
+        LOG_ERROR("IEC104 待删除链路配置落盘失败: conn_name={}, 原因={}", connName, saveStatus.error_message());
+      }
     }
     return dc;
   }
@@ -536,6 +949,16 @@ grpc::Status LinkManager::DeleteLink(const std::string &connName) {
   std::lock_guard<std::mutex> lock(mu_);
   linksByName_.erase(connName);
   reservedServerListenByName_.erase(connName);
+  status = saveLinksLocked();
+  if (!status.ok()) {
+    LOG_ERROR("IEC104 删除链路配置落盘失败: conn_name={}, 原因={}", connName, status.error_message());
+    return status;
+  }
+  status = savePointTablesLocked();
+  if (!status.ok()) {
+    LOG_ERROR("IEC104 删除点表配置落盘失败: conn_name={}, 原因={}", connName, status.error_message());
+    return status;
+  }
   return grpc::Status::OK;
 }
 
@@ -584,6 +1007,11 @@ grpc::Status LinkManager::UpsertPointTable(const IEC104Proto::UpsertPointTableRe
   }
   it->second.pointTable = std::move(next);
   it->second.lastReportedByTag.clear();
+  status = savePointTablesLocked();
+  if (!status.ok()) {
+    LOG_ERROR("IEC104 点表配置落盘失败: conn_name={}, 原因={}", request.conn_name(), status.error_message());
+    return status;
+  }
   return grpc::Status::OK;
 }
 

@@ -41,8 +41,8 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
 - `station_role`：站点角色（Master/Slave），决定业务语义；未设置时默认 `ROLE_CLIENT -> MASTER`、`ROLE_SERVER -> SLAVE`；可与 `role` 任意组合
 
 ### DataCenter 交互与路由配置
-- DataCenter 以 `conn_id + tag` 作为路由端点；上位机负责下发连接/点表/路由配置，IEC104 仅负责 Publish/Subscribe 与协议互操作。
-- IEC104 在 `UpsertPointTable` 成功后，会把点表 tags（包含 `time_sync_tag`）同步到 DataCenter 点表，用于路由校验与展示。
+- DataCenter 以 `conn_id + tag` 作为路由端点；上位机负责下发连接/连接标签注册表/路由配置，IEC104 仅负责 Publish/Subscribe 与协议互操作。
+- IEC104 在 `UpsertPointTable` 成功后，会把点表 tags（包含 `time_sync_tag`）同步到 DataCenter 连接标签注册表，用于路由校验、展示与自愈；这不是协议地址映射点表。
 - STATION_ROLE_MASTER：收到 IEC104 点值后 `Publish(conn_id, tag, value)` 到 DataCenter；是否能转发给其他模块由 DataCenter 路由配置决定。
 - STATION_ROLE_SLAVE：通过 `Subscribe(conn_id)` 接收 DataCenter 更新并转为 IEC104 自发上送；总召通过 `GetLatest(conn_id)` 拉取快照。
 - 语义强调：DataCenter 订阅与最新值缓存为 best-effort，可能丢消息；配置落盘失败会返回错误，但内存状态不回滚。
@@ -138,6 +138,30 @@ DataCenter 路由配置示例（触发对时）：
 4. 上位机使用返回的 `conn_id` 调用 DataCenter 配置路由（`UpsertRoutes` 等）
 5. 调用 `StartLink` 启动该连接的 TCP 监听/连接
 
+### 本地配置持久化
+IEC104 会将本地链路配置与点表配置落盘到工作目录下的 `./conf/IEC104/`，用于进程重启后的自动恢复。
+
+文件与策略：
+- 链路主文件：`./conf/IEC104/links.pb`
+- 点表主文件：`./conf/IEC104/point_tables.pb`
+- 备份文件：对应主文件追加 `.bak`
+- 临时文件：对应主文件追加 `.tmp`
+- 隔离文件：对应主文件追加 `.corrupt.<timestamp>`
+
+保存时机与语义：
+- 每次 `UpsertLink` 成功后自动落盘链路配置。
+- 每次 `UpsertPointTable` 成功且已同步 DataCenter 连接标签注册表后自动落盘点表配置。
+- 每次 `DeleteLink` 成功后会同步删除本地链路/点表配置并落盘。
+- 若 `DeleteLink` 因 DataCenter 删除失败而进入 `PENDING_DELETE`，会将待删除状态一并落盘，便于上位机重启后继续重试删除。
+- 落盘失败会返回错误，但内存中的 IEC104 本地配置不会回滚。
+
+启动恢复：
+- 模块启动时先恢复链路配置，再恢复点表配置。
+- 恢复每条链路时会重新向 DataCenter 调用 `GetOrCreateConnection(conn_name)` 对齐当前 `conn_id`；若发现 `conn_id` 变化，会记录 warning，并按需回写本地链路持久化配置。
+- 恢复点表后会调用 `UpsertConnTags(conn_id, tags, true)` 重新同步 tags；单条链路恢复失败只记录日志，不影响其他链路继续恢复。
+- 恢复后链路统一处于 `STOPPED` 或 `PENDING_DELETE`，不会自动启动链路功能。
+- `transport`、订阅线程、`last_error`、运行中的会话状态不会持久化；如需启动链路功能，仍需由上位机调用 `StartLink`。
+
 ## 日志
 - 日志前缀包含模块名 `[IEC104]`，便于与其他模块混合排查。
 - 模块内部线程统一使用 `ModuleManager::StartModuleThread(模块LibInfo.LIB_NAME, ...)` 创建，自动绑定日志模块名上下文。
@@ -149,12 +173,14 @@ DataCenter 路由配置示例（触发对时）：
 
 - `iec104PointTable_test`：覆盖点表更新、双向查询、冲突校验与序列化输出稳定性。
 - `iec104LinkManager_test`：覆盖 LinkManager 与 DataCenter 的交互语义（使用 gMock stub），以及配置校验、点表下发合并、删除语义等边界。
+- `iec104Persistence_test`：覆盖 IEC104 链路配置/点表的本地落盘与重启恢复语义。
 - `iec104TcpSession_test`：覆盖链路层 STARTDT 握手、自动总召与 t2 延迟确认行为。
 
 运行方式：
 ```bash
 ctest --test-dir build -R iec104PointTable_test --output-on-failure
 ctest --test-dir build -R iec104LinkManager_test --output-on-failure
+ctest --test-dir build -R iec104Persistence_test --output-on-failure
 ctest --test-dir build -R iec104TcpSession_test --output-on-failure
 ```
 
@@ -164,7 +190,7 @@ ctest --test-dir build -R iec104TcpSession_test --output-on-failure
 - 报文打包：当前仅覆盖短浮点与单点遥信类型，其他类型未实现
 - 多主站/多会话：Server 模式当前同一 `conn_name` 只保留一个活动连接；多主站并发、会话级隔离策略未实现
 - 点表扩展：当前仅支持短浮点与单点遥信；后续可扩展更多类型与双向映射校验
-- 配置持久化：连接配置/点表/运行态信息未持久化；后续建议落盘到 `./conf/IEC104/` 并采用 tmp/bak/corrupt 策略
+- 配置持久化增强：当前已持久化连接配置、点表配置与 `PENDING_DELETE` 控制面状态；自动启动策略、运行态统计与会话状态未持久化
 - 观测性：已补充逐帧日志，但仍缺少链路状态统计（收发计数、最近一次总召、重连次数等）与可配置采样/汇总
 - 安全：gRPC 与 IEC104 TCP 目前均为明文/无鉴权；TLS、鉴权、白名单等未实现
 - 测试：当前以单元测试覆盖点表与 LinkManager 语义；缺少端到端“主站↔从站”协议互操作测试
