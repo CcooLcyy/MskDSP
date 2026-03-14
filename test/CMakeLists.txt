@@ -266,8 +266,11 @@ add_executable(dlt645LinkManager_test
   dlt645_link_manager_test.cc
   ${CMAKE_SOURCE_DIR}/src/DLT645/DLT645LinkManager.cc
   ${CMAKE_SOURCE_DIR}/src/DLT645/DLT645DataCenterClient.cc
+  ${CMAKE_SOURCE_DIR}/src/DLT645/DLT645LinkStore.cc
   ${CMAKE_SOURCE_DIR}/src/DLT645/DLT645MqttClient.cc
+  ${CMAKE_SOURCE_DIR}/src/DLT645/DLT645MqttStore.cc
   ${CMAKE_SOURCE_DIR}/src/DLT645/DLT645PointTable.cc
+  ${CMAKE_SOURCE_DIR}/src/DLT645/DLT645PointTableStore.cc
 )
 
 target_include_directories(dlt645LinkManager_test PRIVATE

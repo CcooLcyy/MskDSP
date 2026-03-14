@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <future>
 #include <mutex>
 #include <string>
@@ -24,6 +25,43 @@ using DLT645::PointTable;
 
 using ::testing::_;
 using ::testing::Return;
+
+class ScopedTempDir {
+public:
+  ScopedTempDir() {
+    auto base = std::filesystem::current_path();
+    auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    path_ = base / ("dlt645_link_manager_test_tmp_" + std::to_string(ts));
+    std::filesystem::create_directories(path_);
+  }
+
+  ~ScopedTempDir() {
+    std::error_code ec;
+    std::filesystem::remove_all(path_, ec);
+  }
+
+  const std::filesystem::path &path() const { return path_; }
+
+private:
+  std::filesystem::path path_;
+};
+
+class ScopedCwd {
+public:
+  explicit ScopedCwd(const std::filesystem::path &newCwd) :
+    old_(std::filesystem::current_path()) {
+    std::filesystem::current_path(newCwd);
+  }
+
+  ~ScopedCwd() { std::filesystem::current_path(old_); }
+
+  ScopedCwd(const ScopedCwd &) = delete;
+  ScopedCwd &operator=(const ScopedCwd &) = delete;
+
+private:
+  std::filesystem::path old_;
+};
 
 struct ParsedFrame {
   std::vector<uint8_t> address;
@@ -316,6 +354,97 @@ TEST(Dlt645LinkManagerTest, UpsertLinkCreateOnlyRejectsDuplicate) {
   EXPECT_EQ(st.error_code(), grpc::StatusCode::ALREADY_EXISTS);
 }
 
+// 验证：create_only 时若 DataCenter 已存在同名连接，则返回 ALREADY_EXISTS。
+TEST(Dlt645LinkManagerTest, UpsertLinkCreateOnlyRejectsWhenDataCenterAlreadyHasKey) {
+  FakeDataCenterState state;
+  state.AddConnection(88, "DLT645", "dup-dc");
+  auto stub = MakeStub(&state);
+
+  EXPECT_CALL(*stub, GetOrCreateConnection(_, _, _)).Times(0);
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(stub);
+
+  DLT645Proto::UpsertLinkRequest req;
+  *req.mutable_config() = MakeValidLinkConfig("dup-dc", DLT645Proto::COMM_MODE_LORA);
+  req.set_create_only(true);
+  DLT645Proto::LinkInfo out;
+
+  auto st = mgr.UpsertLink(req, &out);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::ALREADY_EXISTS);
+}
+
+// 验证：create_only=false 更新已有链路时保留 conn_id 与点表，且不会再次向 DataCenter 创建连接。
+TEST(Dlt645LinkManagerTest, UpsertLinkUpdatesExistingConfigAndKeepsConnIdAndPointTable) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  EXPECT_CALL(*stub, GetOrCreateConnection(_, _, _)).Times(1);
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(stub);
+
+  DLT645Proto::UpsertLinkRequest req1;
+  *req1.mutable_config() = MakeValidLinkConfig("conn-update", DLT645Proto::COMM_MODE_LORA);
+  DLT645Proto::LinkInfo info1;
+  ASSERT_TRUE(mgr.UpsertLink(req1, &info1).ok());
+
+  DLT645Proto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-update");
+  *ptReq.add_points() = MakePointProto("P", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  DLT645Proto::UpsertLinkRequest req2;
+  *req2.mutable_config() = MakeValidLinkConfig("conn-update", DLT645Proto::COMM_MODE_LORA);
+  req2.mutable_config()->set_poll_interval_ms(2000);
+  DLT645Proto::LinkInfo info2;
+  ASSERT_TRUE(mgr.UpsertLink(req2, &info2).ok());
+  EXPECT_EQ(info2.conn_id(), info1.conn_id());
+  EXPECT_EQ(info2.config().poll_interval_ms(), 2000u);
+
+  DLT645Proto::PointTable table;
+  ASSERT_TRUE(mgr.GetPointTable("conn-update", &table).ok());
+  ASSERT_EQ(table.points_size(), 1);
+  EXPECT_EQ(table.points(0).tag(), "P");
+}
+
+// 验证：运行中或待删除链路不允许通过 UpsertLink 更新配置。
+TEST(Dlt645LinkManagerTest, UpsertLinkRejectsUpdateWhenRunningOrPendingDelete) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(stub);
+
+  DLT645Proto::UpsertLinkRequest createReq;
+  *createReq.mutable_config() = MakeValidLinkConfig("conn-state", DLT645Proto::COMM_MODE_LORA);
+  DLT645Proto::LinkInfo created;
+  ASSERT_TRUE(mgr.UpsertLink(createReq, &created).ok());
+
+  DLT645Proto::UpsertLinkRequest updateReq;
+  *updateReq.mutable_config() = MakeValidLinkConfig("conn-state", DLT645Proto::COMM_MODE_LORA);
+  updateReq.mutable_config()->set_poll_interval_ms(2000);
+  DLT645Proto::LinkInfo out;
+
+  DLT645LinkManagerTestPeer::SetLinkState(mgr, "conn-state", DLT645Proto::LINK_STATE_RUNNING);
+  auto st = mgr.UpsertLink(updateReq, &out);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+
+  DLT645Proto::LinkInfo got;
+  ASSERT_TRUE(mgr.GetLink("conn-state", &got).ok());
+  EXPECT_EQ(got.state(), DLT645Proto::LINK_STATE_RUNNING);
+  EXPECT_NE(got.config().poll_interval_ms(), 2000u);
+
+  DLT645LinkManagerTestPeer::SetLinkState(mgr, "conn-state", DLT645Proto::LINK_STATE_PENDING_DELETE);
+  st = mgr.UpsertLink(updateReq, &out);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+
+  ASSERT_TRUE(mgr.GetLink("conn-state", &got).ok());
+  EXPECT_EQ(got.state(), DLT645Proto::LINK_STATE_PENDING_DELETE);
+  EXPECT_NE(got.config().poll_interval_ms(), 2000u);
+}
+
 // 验证：UpsertLink DataCenter 创建失败会透传错误。
 TEST(Dlt645LinkManagerTest, UpsertLinkPropagatesDataCenterError) {
   auto stub = std::make_shared<DataCenterProto::MockDataCenterServiceStub>();
@@ -378,6 +507,66 @@ TEST(Dlt645LinkManagerTest, DeleteLinkMarksPendingOnDataCenterFailure) {
   ASSERT_TRUE(mgr.GetLink("conn-del", &got).ok());
   EXPECT_EQ(got.state(), DLT645Proto::LINK_STATE_PENDING_DELETE);
   EXPECT_FALSE(got.last_error().empty());
+}
+
+// 验证：DeleteLink 进入 PENDING_DELETE 后会落盘，重启后仍阻止启动连接功能。
+TEST(Dlt645LinkManagerTest, LoadPersistedConfigRestoresPendingDeleteAfterRestart) {
+  ScopedTempDir dir;
+  ScopedCwd cwd(dir.path());
+  std::filesystem::create_directories("conf/DLT645");
+
+  FakeDataCenterState state;
+  state.FailDeleteForConnName("conn-pending-persist");
+  auto stub = MakeStub(&state);
+
+  {
+    LinkManager mgr("DLT645");
+    mgr.setDataCenterStub(stub);
+
+    DLT645Proto::UpsertLinkRequest req;
+    *req.mutable_config() = MakeValidLinkConfig("conn-pending-persist", DLT645Proto::COMM_MODE_LORA);
+    DLT645Proto::LinkInfo info;
+    ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+
+    auto status = mgr.DeleteLink("conn-pending-persist");
+    ASSERT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+  }
+
+  {
+    LinkManager mgr("DLT645");
+    mgr.setDataCenterStub(stub);
+    mgr.LoadPersistedConfig();
+
+    DLT645Proto::LinkInfo info;
+    ASSERT_TRUE(mgr.GetLink("conn-pending-persist", &info).ok());
+    EXPECT_EQ(info.state(), DLT645Proto::LINK_STATE_PENDING_DELETE);
+    EXPECT_TRUE(info.last_error().empty());
+
+    auto status = mgr.StartLink("conn-pending-persist");
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+  }
+}
+
+// 验证：StopLink 不会把 PENDING_DELETE 状态清回 STOPPED。
+TEST(Dlt645LinkManagerTest, StopLinkKeepsPendingDeleteState) {
+  FakeDataCenterState state;
+  state.FailDeleteForConnName("conn-pending-stop");
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(stub);
+
+  DLT645Proto::UpsertLinkRequest req;
+  *req.mutable_config() = MakeValidLinkConfig("conn-pending-stop", DLT645Proto::COMM_MODE_LORA);
+  DLT645Proto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+  ASSERT_EQ(mgr.DeleteLink("conn-pending-stop").error_code(), grpc::StatusCode::INTERNAL);
+
+  ASSERT_TRUE(mgr.StopLink("conn-pending-stop").ok());
+
+  DLT645Proto::LinkInfo got;
+  ASSERT_TRUE(mgr.GetLink("conn-pending-stop", &got).ok());
+  EXPECT_EQ(got.state(), DLT645Proto::LINK_STATE_PENDING_DELETE);
 }
 
 // 验证：StartLink 在未配置 MQTT 时拒绝启动连接。

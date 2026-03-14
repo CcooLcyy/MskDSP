@@ -19,8 +19,11 @@
 
 #include "DLT645.pb.h"
 #include "DLT645DataCenterClient.h"
+#include "DLT645LinkStore.h"
 #include "DLT645MqttClient.h"
+#include "DLT645MqttStore.h"
 #include "DLT645PointTable.h"
+#include "DLT645PointTableStore.h"
 
 namespace DLT645 {
 
@@ -37,6 +40,7 @@ public:
   grpc::Status DeleteLink(const std::string &connName);
   grpc::Status UpsertPointTable(const DLT645Proto::UpsertPointTableRequest &request);
   grpc::Status GetPointTable(const std::string &connName, DLT645Proto::PointTable *out) const;
+  void LoadPersistedConfig();
 
   void setDataCenterServerAddress(std::string address);
   void setDataCenterStub(std::shared_ptr<DataCenterProto::DataCenterService::StubInterface> stub);
@@ -83,6 +87,10 @@ private:
   grpc::Status validateConnName(const std::string &connName) const;
   grpc::Status normalizeLinkConfig(const DLT645Proto::LinkConfig &config, DLT645Proto::LinkConfig *out) const;
   grpc::Status fillLinkInfoLocked(const LinkRuntime &link, DLT645Proto::LinkInfo *out) const;
+  DLT645Proto::LinksConfig dumpLinksConfigLocked() const;
+  DLT645Proto::PointTablesConfig dumpPointTablesConfigLocked() const;
+  grpc::Status saveLinksConfig(const DLT645Proto::LinksConfig &config);
+  grpc::Status savePointTablesConfig(const DLT645Proto::PointTablesConfig &config);
 
   void startPollingLocked(const std::string &connName, const std::shared_ptr<LinkRuntime> &link);
   void stopPollingLocked(LinkRuntime *link);
@@ -144,6 +152,9 @@ private:
   std::unordered_set<std::string> pendingCreateByName_;
   DataCenterClient dataCenter_;
   MqttClient mqttClient_;
+  DLT645MqttStore mqttStore_;
+  DLT645LinkStore linkStore_;
+  DLT645PointTableStore pointTableStore_;
   std::string moduleName_;
   std::atomic<uint64_t> tokenCounter_{0};
   std::mutex loraRequestMutex_;

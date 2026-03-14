@@ -8,11 +8,19 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
 - 设备级点表配置：tag/di/data_len/type/access/scale/offset/deadband。
 - 支持数据块读取：按数据块 DI 读整块数据并拆分发布子点位。
 - 支持通过 MQTTManager 对接 Lora/载波/串口（uartManager）。
-- 点表下发时同步 DataCenter 连接与标签。
+- 点表下发时同步 DataCenter 连接与连接标签注册表。
 
 ## 接口与协议
 - Protobuf：`protobuf/DLT645.proto`
 - gRPC Service：`DLT645Proto::DLT645Service`
+- 接口规划：当前顶层全局配置仅提供 `UpdateConfig` 写接口；后续建议补充 `GetConfig` 或 `GetGlobalConfig` 回读接口，供上位机做界面回显、配置对账与一致性校验；当前版本尚未实现。
+
+### UpsertLink 语义
+- `conn_name` 不存在：创建新链路，并向 DataCenter 绑定 `conn_id`。
+- `conn_name` 已存在且 `create_only=true`：返回 `ALREADY_EXISTS`；同时会检查 DataCenter 注册表中是否已有同名连接。
+- `conn_name` 已存在且 `create_only=false`：仅允许在链路处于 `STOPPED` 时更新配置；更新时保留原 `conn_id` 与点表。
+- 链路处于 `RUNNING` 或 `PENDING_DELETE` 时调用 `UpsertLink(create_only=false)` 会返回 `FAILED_PRECONDITION`。
+- 上位机若需修改运行中链路配置，应先调用 `StopLink` 停止连接功能，再执行 `UpsertLink`。
 
 ## 运行与地址
 - 对外 gRPC：随机选择 `0.0.0.0:<port>`（7001–7999）
@@ -20,9 +28,10 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
 - 运行时可通过管理器 `GetRunningModuleInfo` 查询实际地址
 
 ## 配置与数据
-- 配置来源：由 ConfigPusher 通过 gRPC 下发。
+- 配置来源：默认仍由 ConfigPusher 通过 gRPC 下发。
 - 示例文件：`package/conf/configPusher/DLT645.jsonc`（仅示例）。
 - MQTT 连接参数由 DLT645 在调用 MQTTManager 时携带，配置位于 `dlt645.mqtt`。
+- 当前实现会将已下发的 MQTT/链路/点表配置本地持久化到 `./conf/DLT645/`，用于模块重启后的自动恢复；恢复后的链路状态统一为 `STOPPED` 或 `PENDING_DELETE`，不会自动启动连接功能。
 
 ### 配置结构
 顶层采用 `links` 组织方式，结构与 Modbus/IEC104 类似：
@@ -221,6 +230,31 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
 - `addslaveNode` 在同地址首个连接启动连接功能时触发发送（按地址生命周期一次）；消息默认不保留（retain=false）。
 - 如订阅端在发送之后才订阅，可能错过该消息；建议订阅端使用 QoS 1 + 持久会话（`clean_session=false`）。
 - 若需要再次发送，需先让该地址全部连接停止连接功能，再重新启动任一连接功能触发。
+
+## 配置持久化（当前实现）
+DLT645 会将模块内已生效的配置落盘到工作目录下的 `./conf/DLT645/`，用于进程重启后的自动恢复。
+
+### 文件与策略
+- MQTT 配置：`./conf/DLT645/mqtt.pb`
+- 链路配置：`./conf/DLT645/links.pb`
+- 点表配置：`./conf/DLT645/point_tables.pb`
+- 备份文件：对应主文件的 `.bak`
+- 临时文件：对应主文件的 `.tmp`
+- 隔离文件：对应主文件的 `.corrupt.<timestamp>`
+
+### 保存时机与语义
+- `UpdateConfig` 成功后自动落盘 MQTT 配置。
+- `UpsertLink` 成功后自动落盘链路配置。
+- `DeleteLink` 成功后会同步删除本地链路/点表配置并落盘。
+- 若 `DeleteLink` 因 DataCenter 删除失败而进入 `PENDING_DELETE`，会将待删除状态一并落盘，便于上位机重启后继续重试删除。
+- `UpsertPointTable` 成功后自动落盘点表配置。
+- 落盘失败会返回错误，但内存中的已生效配置不会回滚；上位机或 ConfigPusher 可重试。
+
+### 启动恢复
+- 模块启动时会先加载 `mqtt.pb`、`links.pb`、`point_tables.pb`。
+- 每条链路恢复时会重新向 DataCenter 调用 `GetOrCreateConnection(conn_name)` 绑定当前 `conn_id`，并将点表 tags 重新同步到 DataCenter 连接标签注册表。
+- 若持久化文件损坏，会优先尝试 `.bak`；若主/备均不可用，则跳过该类配置恢复并保留损坏文件的隔离副本。
+- 恢复后的链路状态统一为 `STOPPED` 或 `PENDING_DELETE`，不会自动启动连接功能；如需运行，仍由上位机或 ConfigPusher 触发 `StartLink`。
 
 ### 常见问题排查
 - 启动连接失败且日志显示 `Deadline Exceeded`：通常为 MQTT 短暂断连或订阅/发布阻塞导致；检查 `MQTTManager.log` 是否有 `Disconnected/订阅失败/发布失败`。

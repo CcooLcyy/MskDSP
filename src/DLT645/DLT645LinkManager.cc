@@ -265,6 +265,19 @@ uint32_t serialStopBitsToNumber(DLT645Proto::SerialStopBits stopBits) {
     return 1;
   }
 }
+
+grpc::Status restorePointTableFromProto(const DLT645Proto::PointTable &table, DLT645::PointTable *out) {
+  if (out == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "点表输出参数为空");
+  }
+  DLT645::PointTable next;
+  auto status = next.Upsert(table.points(), table.blocks(), true);
+  if (!status.ok()) {
+    return status;
+  }
+  *out = std::move(next);
+  return grpc::Status::OK;
+}
 }  // namespace
 
 namespace DLT645 {
@@ -273,6 +286,195 @@ LinkManager::LinkManager(std::string moduleName) :
   dataCenter_(moduleName),
   mqttClient_(moduleName),
   moduleName_(std::move(moduleName)) {}
+
+void LinkManager::LoadPersistedConfig() {
+  LOG_INFO("DLT645 开始加载本地持久化配置");
+
+  {
+    DLT645Proto::MqttConfig mqttConfig;
+    auto status = mqttStore_.Load(&mqttConfig);
+    if (!status.ok()) {
+      LOG_ERROR("DLT645 MQTT 持久化配置加载失败: 原因={}", status.error_message());
+    } else if (!mqttConfig.host().empty() && mqttConfig.port() != 0 && !mqttConfig.client_id().empty()) {
+      mqttClient_.setConfig(mqttConfig);
+      LOG_INFO("DLT645 已加载 MQTT 持久化配置: host={}, port={}, client_id={}",
+               mqttConfig.host(), mqttConfig.port(), mqttConfig.client_id());
+    } else {
+      LOG_INFO("DLT645 未找到 MQTT 持久化配置");
+    }
+  }
+
+  DLT645Proto::LinksConfig linksConfig;
+  auto linksStatus = linkStore_.Load(&linksConfig);
+  if (!linksStatus.ok()) {
+    LOG_ERROR("DLT645 链路持久化配置加载失败: 原因={}", linksStatus.error_message());
+    return;
+  }
+
+  DLT645Proto::PointTablesConfig pointTablesConfig;
+  auto pointTablesStatus = pointTableStore_.Load(&pointTablesConfig);
+  if (!pointTablesStatus.ok()) {
+    LOG_ERROR("DLT645 点表持久化配置加载失败: 原因={}", pointTablesStatus.error_message());
+    return;
+  }
+  LOG_INFO("DLT645 持久化配置载入摘要: 链路记录数={}, 点表记录数={}",
+           linksConfig.links_size(),
+           pointTablesConfig.point_tables_size());
+
+  std::unordered_map<std::string, DLT645Proto::PointTable> pointTablesByConn;
+  pointTablesByConn.reserve(static_cast<size_t>(pointTablesConfig.point_tables_size()));
+  for (const auto &table : pointTablesConfig.point_tables()) {
+    pointTablesByConn.emplace(table.conn_name(), table);
+  }
+
+  if (linksConfig.links().empty()) {
+    if (!pointTablesByConn.empty()) {
+      LOG_WARNING("DLT645 未找到链路持久化配置，但存在 {} 条点表持久化配置，准备清理孤立点表", pointTablesByConn.size());
+      auto saveStatus = savePointTablesConfig(DLT645Proto::PointTablesConfig());
+      if (!saveStatus.ok()) {
+        LOG_ERROR("DLT645 清理孤立点表持久化配置失败: 原因={}", saveStatus.error_message());
+      }
+    } else {
+      LOG_INFO("DLT645 未找到链路持久化配置");
+    }
+    return;
+  }
+
+  std::unordered_map<std::string, std::shared_ptr<LinkRuntime>> restoredLinks;
+  restoredLinks.reserve(static_cast<size_t>(linksConfig.links_size()));
+  bool needResaveLinks = false;
+  bool needResavePointTables = false;
+  std::unordered_set<std::string> pointTablesLeftByDataCenterFailure;
+
+  for (const auto &persistedLink : linksConfig.links()) {
+    if (!persistedLink.has_config()) {
+      LOG_WARNING("DLT645 跳过空链路持久化记录");
+      needResaveLinks = true;
+      continue;
+    }
+
+    DLT645Proto::LinkConfig normalized;
+    auto status = normalizeLinkConfig(persistedLink.config(), &normalized);
+    if (!status.ok()) {
+      LOG_ERROR("DLT645 链路持久化配置非法，已跳过: conn_name={}, 原因={}",
+                persistedLink.config().conn_name(), status.error_message());
+      needResaveLinks = true;
+      if (!persistedLink.config().conn_name().empty() && pointTablesByConn.erase(persistedLink.config().conn_name()) > 0) {
+        needResavePointTables = true;
+      }
+      continue;
+    }
+
+    size_t persistedPointCount = 0;
+    size_t persistedBlockCount = 0;
+    if (auto persistedTableIt = pointTablesByConn.find(normalized.conn_name());
+        persistedTableIt != pointTablesByConn.end()) {
+      persistedPointCount = static_cast<size_t>(persistedTableIt->second.points_size());
+      persistedBlockCount = static_cast<size_t>(persistedTableIt->second.blocks_size());
+    }
+    LOG_INFO("DLT645 开始恢复链路持久化记录: conn_name={}, 持久化conn_id={}, 待删除={}, 持久化点数={}, 持久化数据块数={}",
+             normalized.conn_name(),
+             persistedLink.conn_id(),
+             persistedLink.pending_delete(),
+             persistedPointCount,
+             persistedBlockCount);
+
+    DataCenterProto::ConnectionInfo connInfo;
+    status = dataCenter_.GetOrCreateConnection(normalized.conn_name(), &connInfo);
+    if (!status.ok()) {
+      if (persistedPointCount > 0 || persistedBlockCount > 0) {
+        pointTablesLeftByDataCenterFailure.emplace(normalized.conn_name());
+      }
+      LOG_ERROR("DLT645 恢复链路时获取 DataCenter 连接失败: conn_name={}, 原因={}, 本地点表点数={}, 本地点表数据块数={}",
+                normalized.conn_name(),
+                status.error_message(),
+                persistedPointCount,
+                persistedBlockCount);
+      continue;
+    }
+
+    auto runtime = std::make_shared<LinkRuntime>();
+    runtime->config = normalized;
+    runtime->connId = connInfo.conn_id();
+    runtime->state = persistedLink.pending_delete() ? DLT645Proto::LINK_STATE_PENDING_DELETE
+                                                    : DLT645Proto::LINK_STATE_STOPPED;
+
+    size_t pointCount = 0;
+    size_t blockCount = 0;
+    auto tableIt = pointTablesByConn.find(normalized.conn_name());
+    if (tableIt != pointTablesByConn.end()) {
+      status = restorePointTableFromProto(tableIt->second, &runtime->pointTable);
+      if (!status.ok()) {
+        LOG_ERROR("DLT645 恢复点表失败，已跳过该点表: conn_name={}, 原因={}",
+                  normalized.conn_name(), status.error_message());
+        needResavePointTables = true;
+      } else {
+        pointCount = static_cast<size_t>(tableIt->second.points_size());
+        blockCount = static_cast<size_t>(tableIt->second.blocks_size());
+      }
+      pointTablesByConn.erase(tableIt);
+    }
+
+    auto syncStatus = dataCenter_.UpsertConnTags(runtime->connId, runtime->pointTable.Tags(), true);
+    if (!syncStatus.ok()) {
+      LOG_ERROR("DLT645 恢复链路时同步 DataCenter 连接标签注册表失败: conn_name={}, conn_id={}, 原因={}",
+                normalized.conn_name(), runtime->connId, syncStatus.error_message());
+    }
+
+    if (persistedLink.conn_id() != 0 && persistedLink.conn_id() != runtime->connId) {
+      LOG_WARNING("DLT645 恢复链路时发现 conn_id 已变化: conn_name={}, 持久化conn_id={}, 当前conn_id={}",
+                  normalized.conn_name(), persistedLink.conn_id(), runtime->connId);
+      needResaveLinks = true;
+    }
+
+    restoredLinks[normalized.conn_name()] = runtime;
+    LOG_INFO("DLT645 已恢复链路配置: conn_name={}, conn_id={}, 点数={}, 数据块数={}, 状态={}",
+             normalized.conn_name(),
+             runtime->connId,
+             pointCount,
+             blockCount,
+             persistedLink.pending_delete() ? "待删除" : "已停止");
+  }
+
+  for (const auto &[connName, _] : pointTablesByConn) {
+    auto tableIt = pointTablesByConn.find(connName);
+    const size_t pointCount = tableIt == pointTablesByConn.end() ? 0u : static_cast<size_t>(tableIt->second.points_size());
+    const size_t blockCount = tableIt == pointTablesByConn.end() ? 0u : static_cast<size_t>(tableIt->second.blocks_size());
+    LOG_WARNING("DLT645 点表持久化配置未进入本次恢复快照: conn_name={}, 点数={}, 数据块数={}, 原因={}",
+                connName,
+                pointCount,
+                blockCount,
+                pointTablesLeftByDataCenterFailure.contains(connName) ? "链路恢复阶段获取 DataCenter 连接失败" : "未找到对应链路");
+    needResavePointTables = true;
+  }
+
+  DLT645Proto::LinksConfig linksSnapshot;
+  DLT645Proto::PointTablesConfig pointTablesSnapshot;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    linksByName_ = std::move(restoredLinks);
+    linksSnapshot = dumpLinksConfigLocked();
+    pointTablesSnapshot = dumpPointTablesConfigLocked();
+  }
+
+  if (needResaveLinks) {
+    auto status = saveLinksConfig(linksSnapshot);
+    if (!status.ok()) {
+      LOG_ERROR("DLT645 清理链路持久化配置失败: 原因={}", status.error_message());
+    }
+  }
+  if (needResavePointTables) {
+    LOG_WARNING("DLT645 本次恢复将回写点表持久化配置: 恢复后链路数={}, 回写点表记录数={}",
+                linksSnapshot.links_size(),
+                pointTablesSnapshot.point_tables_size());
+    auto status = savePointTablesConfig(pointTablesSnapshot);
+    if (!status.ok()) {
+      LOG_ERROR("DLT645 清理点表持久化配置失败: 原因={}", status.error_message());
+    }
+  }
+
+  LOG_INFO("DLT645 本地持久化配置加载完成: 链路数={}", linksSnapshot.links_size());
+}
 
 void LinkManager::setDataCenterServerAddress(std::string address) {
   dataCenter_.setServerAddress(std::move(address));
@@ -303,6 +505,16 @@ grpc::Status LinkManager::UpdateConfig(const DLT645Proto::UpdateConfigRequest &r
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "MQTT 连接参数不完整");
   }
   mqttClient_.setConfig(mqtt);
+  auto status = mqttStore_.Save(mqtt);
+  if (!status.ok()) {
+    response->set_ok(false);
+    response->set_message("MQTT 配置落盘失败");
+    LOG_ERROR("DLT645 MQTT 配置落盘失败: host={}, port={}, client_id={}, 原因={}",
+              mqtt.host(), mqtt.port(), mqtt.client_id(), status.error_message());
+    return status;
+  }
+  LOG_INFO("DLT645 MQTT 配置已落盘: host={}, port={}, client_id={}",
+           mqtt.host(), mqtt.port(), mqtt.client_id());
   response->set_ok(true);
   response->set_message("MQTT 配置更新成功");
   return grpc::Status::OK;
@@ -321,31 +533,150 @@ grpc::Status LinkManager::UpsertLink(const DLT645Proto::UpsertLinkRequest &reque
     return status;
   }
 
+  const auto connName = normalized.conn_name();
+  LOG_INFO("DLT645 开始创建或更新链路配置: conn_name={}, create_only={}",
+           connName, request.create_only());
+
+  DLT645Proto::LinksConfig linksConfig;
+  DLT645Proto::PointTablesConfig pointTablesConfig;
+  DLT645Proto::LinkInfo info;
+  bool created = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
-    auto it = linksByName_.find(normalized.conn_name());
-    if (it != linksByName_.end() && request.create_only()) {
+    auto it = linksByName_.find(connName);
+    if (it != linksByName_.end()) {
+      if (request.create_only()) {
+        LOG_WARNING("DLT645 创建链路配置失败: conn_name={}, 原因=连接已存在", connName);
+        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "连接已存在");
+      }
+      if (it->second->state == DLT645Proto::LINK_STATE_RUNNING) {
+        LOG_WARNING("DLT645 更新链路配置失败: conn_name={}, 原因=更新配置前请先停止链路", connName);
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "更新配置前请先停止链路");
+      }
+      if (it->second->state == DLT645Proto::LINK_STATE_PENDING_DELETE) {
+        LOG_WARNING("DLT645 更新链路配置失败: conn_name={}, 原因=连接处于待删除状态", connName);
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "连接处于待删除状态");
+      }
+
+      it->second->config = normalized;
+      it->second->lastError.clear();
+      linksConfig = dumpLinksConfigLocked();
+      pointTablesConfig = dumpPointTablesConfigLocked();
+      status = fillLinkInfoLocked(*it->second, &info);
+      if (!status.ok()) {
+        return status;
+      }
+    } else {
+      if (pendingCreateByName_.contains(connName)) {
+        LOG_WARNING("DLT645 创建链路配置失败: conn_name={}, 原因=连接创建中", connName);
+        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "连接已存在");
+      }
+      pendingCreateByName_.insert(connName);
+    }
+  }
+
+  if (info.has_config()) {
+    status = saveLinksConfig(linksConfig);
+    if (!status.ok()) {
+      return status;
+    }
+    status = savePointTablesConfig(pointTablesConfig);
+    if (!status.ok()) {
+      return status;
+    }
+    *out = std::move(info);
+    LOG_INFO("DLT645 更新链路配置成功: conn_name={}, conn_id={}", connName, out->conn_id());
+    return grpc::Status::OK;
+  }
+
+  auto rollbackPendingCreate = [this, &connName]() {
+    std::lock_guard<std::mutex> lock(mu_);
+    pendingCreateByName_.erase(connName);
+  };
+
+  if (request.create_only()) {
+    bool exists = false;
+    status = dataCenter_.ConnectionExists(connName, &exists);
+    if (!status.ok()) {
+      rollbackPendingCreate();
+      LOG_ERROR("DLT645 查询 DataCenter 连接失败: conn_name={}, 原因={}", connName, status.error_message());
+      return status;
+    }
+    if (exists) {
+      rollbackPendingCreate();
+      LOG_WARNING("DLT645 创建链路配置失败: conn_name={}, 原因=DataCenter 中已存在同名连接", connName);
       return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "连接已存在");
     }
   }
 
   DataCenterProto::ConnectionInfo connInfo;
-  status = dataCenter_.GetOrCreateConnection(normalized.conn_name(), &connInfo);
+  status = dataCenter_.GetOrCreateConnection(connName, &connInfo);
   if (!status.ok()) {
+    rollbackPendingCreate();
+    LOG_ERROR("DLT645 获取 DataCenter 连接失败: conn_name={}, 原因={}", connName, status.error_message());
     return status;
   }
-
-  auto runtime = std::make_shared<LinkRuntime>();
-  runtime->config = normalized;
-  runtime->connId = connInfo.conn_id();
-  runtime->state = DLT645Proto::LINK_STATE_STOPPED;
+  if (connInfo.conn_id() == 0) {
+    rollbackPendingCreate();
+    LOG_ERROR("DLT645 获取到的 DataCenter conn_id 无效: conn_name={}", connName);
+    return grpc::Status(grpc::StatusCode::INTERNAL, "DataCenter 返回 conn_id=0");
+  }
 
   {
     std::lock_guard<std::mutex> lock(mu_);
-    linksByName_[normalized.conn_name()] = runtime;
+    pendingCreateByName_.erase(connName);
+    auto [it, inserted] = linksByName_.try_emplace(connName);
+    if (!inserted) {
+      if (request.create_only()) {
+        LOG_WARNING("DLT645 创建链路配置失败: conn_name={}, 原因=连接已存在", connName);
+        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "连接已存在");
+      }
+      if (it->second->state == DLT645Proto::LINK_STATE_RUNNING) {
+        LOG_WARNING("DLT645 更新链路配置失败: conn_name={}, 原因=更新配置前请先停止链路", connName);
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "更新配置前请先停止链路");
+      }
+      if (it->second->state == DLT645Proto::LINK_STATE_PENDING_DELETE) {
+        LOG_WARNING("DLT645 更新链路配置失败: conn_name={}, 原因=连接处于待删除状态", connName);
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "连接处于待删除状态");
+      }
+
+      it->second->config = normalized;
+      it->second->lastError.clear();
+      linksConfig = dumpLinksConfigLocked();
+      pointTablesConfig = dumpPointTablesConfigLocked();
+      status = fillLinkInfoLocked(*it->second, out);
+      if (!status.ok()) {
+        return status;
+      }
+    } else {
+      it->second = std::make_shared<LinkRuntime>();
+      it->second->config = normalized;
+      it->second->connId = connInfo.conn_id();
+      it->second->state = DLT645Proto::LINK_STATE_STOPPED;
+      created = true;
+      linksConfig = dumpLinksConfigLocked();
+      pointTablesConfig = dumpPointTablesConfigLocked();
+      status = fillLinkInfoLocked(*it->second, out);
+      if (!status.ok()) {
+        return status;
+      }
+    }
   }
 
-  return fillLinkInfoLocked(*runtime, out);
+  status = saveLinksConfig(linksConfig);
+  if (!status.ok()) {
+    return status;
+  }
+  status = savePointTablesConfig(pointTablesConfig);
+  if (!status.ok()) {
+    return status;
+  }
+  if (created) {
+    LOG_INFO("DLT645 创建链路配置成功: conn_name={}, conn_id={}", connName, out->conn_id());
+  } else {
+    LOG_INFO("DLT645 更新链路配置成功: conn_name={}, conn_id={}", connName, out->conn_id());
+  }
+  return grpc::Status::OK;
 }
 
 grpc::Status LinkManager::GetLink(const std::string &connName, DLT645Proto::LinkInfo *out) const {
@@ -590,6 +921,7 @@ grpc::Status LinkManager::StopLink(const std::string &connName) {
   const bool useArchive = useArchiveManagement(link->config.comm_mode());
   const std::string archiveKey = useArchive ? makeArchiveKey(link->config) : std::string();
   bool needDeleteArchive = false;
+  bool pendingDelete = false;
   if (useArchive) {
     {
       std::unique_lock<std::mutex> lock(mu_);
@@ -660,10 +992,15 @@ grpc::Status LinkManager::StopLink(const std::string &connName) {
     if (it == linksByName_.end() || it->second.get() != link.get()) {
       return grpc::Status::OK;
     }
+    pendingDelete = (link->state == DLT645Proto::LINK_STATE_PENDING_DELETE);
     stopMqttSubscribeLocked(link.get());
-    link->state = DLT645Proto::LINK_STATE_STOPPED;
+    link->state = pendingDelete ? DLT645Proto::LINK_STATE_PENDING_DELETE : DLT645Proto::LINK_STATE_STOPPED;
   }
-  LOG_INFO("DLT645 停止连接功能完成: conn_name={}", connName);
+  if (pendingDelete) {
+    LOG_INFO("DLT645 停止连接功能完成并保持待删除状态: conn_name={}", connName);
+  } else {
+    LOG_INFO("DLT645 停止连接功能完成: conn_name={}", connName);
+  }
   return grpc::Status::OK;
 }
 
@@ -680,17 +1017,43 @@ grpc::Status LinkManager::DeleteLink(const std::string &connName) {
 
   auto dc = dataCenter_.DeleteConnection(connName);
   if (!dc.ok() && dc.error_code() != grpc::StatusCode::NOT_FOUND) {
-    std::lock_guard<std::mutex> lock(mu_);
-    auto it = linksByName_.find(connName);
-    if (it != linksByName_.end()) {
-      it->second->state = DLT645Proto::LINK_STATE_PENDING_DELETE;
-      it->second->lastError = dc.error_message();
+    DLT645Proto::LinksConfig linksConfig;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = linksByName_.find(connName);
+      if (it != linksByName_.end()) {
+        it->second->state = DLT645Proto::LINK_STATE_PENDING_DELETE;
+        it->second->lastError = dc.error_message();
+        linksConfig = dumpLinksConfigLocked();
+      }
     }
+    if (linksConfig.links_size() > 0) {
+      auto saveStatus = saveLinksConfig(linksConfig);
+      if (!saveStatus.ok()) {
+        LOG_ERROR("DLT645 待删除链路配置落盘失败: conn_name={}, 原因={}", connName, saveStatus.error_message());
+        return saveStatus;
+      }
+    }
+    LOG_WARNING("DLT645 删除连接失败，已标记待删除: conn_name={}, 原因={}", connName, dc.error_message());
     return dc;
   }
 
-  std::lock_guard<std::mutex> lock(mu_);
-  linksByName_.erase(connName);
+  DLT645Proto::LinksConfig linksConfig;
+  DLT645Proto::PointTablesConfig pointTablesConfig;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    linksByName_.erase(connName);
+    linksConfig = dumpLinksConfigLocked();
+    pointTablesConfig = dumpPointTablesConfigLocked();
+  }
+  status = saveLinksConfig(linksConfig);
+  if (!status.ok()) {
+    return status;
+  }
+  status = savePointTablesConfig(pointTablesConfig);
+  if (!status.ok()) {
+    return status;
+  }
   return grpc::Status::OK;
 }
 
@@ -730,12 +1093,20 @@ grpc::Status LinkManager::UpsertPointTable(const DLT645Proto::UpsertPointTableRe
     return status;
   }
 
-  std::lock_guard<std::mutex> lock(mu_);
-  auto it = linksByName_.find(request.conn_name());
-  if (it == linksByName_.end()) {
-    return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接不存在");
+  DLT645Proto::PointTablesConfig pointTablesConfig;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = linksByName_.find(request.conn_name());
+    if (it == linksByName_.end()) {
+      return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接不存在");
+    }
+    it->second->pointTable = std::move(next);
+    pointTablesConfig = dumpPointTablesConfigLocked();
   }
-  it->second->pointTable = std::move(next);
+  status = savePointTablesConfig(pointTablesConfig);
+  if (!status.ok()) {
+    return status;
+  }
   return grpc::Status::OK;
 }
 
@@ -848,6 +1219,74 @@ grpc::Status LinkManager::fillLinkInfoLocked(const LinkRuntime &link, DLT645Prot
   out->set_conn_id(link.connId);
   out->set_state(link.state);
   out->set_last_error(link.lastError);
+  return grpc::Status::OK;
+}
+
+DLT645Proto::LinksConfig LinkManager::dumpLinksConfigLocked() const {
+  DLT645Proto::LinksConfig config;
+  std::vector<std::string> connNames;
+  connNames.reserve(linksByName_.size());
+  for (const auto &[connName, _] : linksByName_) {
+    connNames.push_back(connName);
+  }
+  std::sort(connNames.begin(), connNames.end());
+
+  for (const auto &connName : connNames) {
+    auto it = linksByName_.find(connName);
+    if (it == linksByName_.end() || !it->second) {
+      continue;
+    }
+    auto *link = config.add_links();
+    *link->mutable_config() = it->second->config;
+    link->set_conn_id(it->second->connId);
+    link->set_pending_delete(it->second->state == DLT645Proto::LINK_STATE_PENDING_DELETE);
+  }
+  return config;
+}
+
+DLT645Proto::PointTablesConfig LinkManager::dumpPointTablesConfigLocked() const {
+  DLT645Proto::PointTablesConfig config;
+  std::vector<std::string> connNames;
+  connNames.reserve(linksByName_.size());
+  for (const auto &[connName, _] : linksByName_) {
+    connNames.push_back(connName);
+  }
+  std::sort(connNames.begin(), connNames.end());
+
+  for (const auto &connName : connNames) {
+    auto it = linksByName_.find(connName);
+    if (it == linksByName_.end() || !it->second) {
+      continue;
+    }
+    DLT645Proto::PointTable table;
+    it->second->pointTable.ToProto(connName, &table);
+    if (table.points().empty() && table.blocks().empty()) {
+      continue;
+    }
+    *config.add_point_tables() = std::move(table);
+  }
+  return config;
+}
+
+grpc::Status LinkManager::saveLinksConfig(const DLT645Proto::LinksConfig &config) {
+  auto status = linkStore_.Save(config);
+  if (!status.ok()) {
+    LOG_ERROR("DLT645 链路配置落盘失败: 链路数={}, 原因={}",
+              config.links_size(), status.error_message());
+    return status;
+  }
+  LOG_INFO("DLT645 链路配置已落盘: 链路数={}", config.links_size());
+  return grpc::Status::OK;
+}
+
+grpc::Status LinkManager::savePointTablesConfig(const DLT645Proto::PointTablesConfig &config) {
+  auto status = pointTableStore_.Save(config);
+  if (!status.ok()) {
+    LOG_ERROR("DLT645 点表配置落盘失败: 链路数={}, 原因={}",
+              config.point_tables_size(), status.error_message());
+    return status;
+  }
+  LOG_INFO("DLT645 点表配置已落盘: 链路数={}", config.point_tables_size());
   return grpc::Status::OK;
 }
 
