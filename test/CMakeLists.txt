@@ -510,6 +510,8 @@ add_test(NAME agvcStrategy_test COMMAND agvcStrategy_test)
 add_executable(agcGroupManager_test
   agc_group_manager_test.cc
   ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCGroupManager.cc
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCGroupStore.cc
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCGroupValidation.cc
   ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCControl.cc
 )
 
@@ -522,10 +524,28 @@ target_link_libraries(agcGroupManager_test PRIVATE
   GTest::gtest_main
   GTest::gmock
   agvcCommon
+  dspProto
   moduleManager
 )
 
 add_test(NAME agcGroupManager_test COMMAND agcGroupManager_test)
+
+add_executable(agcGroupStore_test
+  agc_group_store_test.cc
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCGroupStore.cc
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCGroupValidation.cc
+)
+
+target_include_directories(agcGroupStore_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/include
+)
+
+target_link_libraries(agcGroupStore_test PRIVATE
+  GTest::gtest_main
+  dspProto
+)
+
+add_test(NAME agcGroupStore_test COMMAND agcGroupStore_test)
 
 add_executable(agcControl_test
   agc_control_test.cc
@@ -618,10 +638,12 @@ set(MSKDSP_TEST_TARGETS
   dlt645GrpcService_test
   iec104GrpcService_test
   iec104LinkManager_test
+  iec104Persistence_test
   modbusRtuLinkManager_test
   iec104TcpSession_test
   agvcStrategy_test
   agcGroupManager_test
+  agcGroupStore_test
   agcControl_test
   configPusherDataCenter_test
   configPusherConfigLoader_test

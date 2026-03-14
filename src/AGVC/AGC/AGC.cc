@@ -54,6 +54,11 @@ void AGC::start(std::stop_token stopToken) {
   LOG_INFO("AGC 依赖模块: DataCenter, IEC104, ModbusRTU");
   agcService_->getAGC(this);
   grpcServerBuilder(agcService_);
+  LOG_INFO("AGC 开始在模块启动阶段恢复本地控制组配置");
+  auto restoreStatus = groupManager_.RestorePersistedGroups();
+  if (!restoreStatus.ok()) {
+    LOG_ERROR("AGC 恢复本地控制组配置存在错误: {}", restoreStatus.error_message());
+  }
   while (!stopToken.stop_requested()) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }

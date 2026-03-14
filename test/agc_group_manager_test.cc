@@ -1,7 +1,9 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -16,6 +18,27 @@ using AGC::GroupManager;
 
 using ::testing::_;
 using ::testing::Invoke;
+
+class ScopedTempDir {
+public:
+  ScopedTempDir() {
+    auto base = std::filesystem::current_path();
+    auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    path_ = base / ("agc_group_manager_test_tmp_" + std::to_string(ts));
+    std::filesystem::create_directories(path_);
+  }
+
+  ~ScopedTempDir() {
+    std::error_code ec;
+    std::filesystem::remove_all(path_, ec);
+  }
+
+  const std::filesystem::path& path() const { return path_; }
+
+private:
+  std::filesystem::path path_;
+};
 
 AGCProto::UpsertGroupRequest MakeGroupReq(const char* groupName) {
   AGCProto::UpsertGroupRequest req;
@@ -130,13 +153,33 @@ TEST(AgcGroupManagerTest, DeleteGroupFailureMarksPendingDeleteAndKeepsLocal) {
   EXPECT_FALSE(got.last_error().empty());
 }
 
-// 验证：当 ValueSpec 使用 BASE_TAG 时，UpsertGroup 会把 base_tag 一并注册到 DataCenter 点表。
-TEST(AgcGroupManagerTest, UpsertGroupRegistersBaseTagToDataCenterPointTable) {
+// 验证：StopGroup 不会把 PENDING_DELETE 状态清回 STOPPED。
+TEST(AgcGroupManagerTest, StopGroupKeepsPendingDeleteState) {
+  FakeDataCenterState state;
+  state.FailDeleteForConnName("g-pending-stop");
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  auto req = MakeGroupReq("g-pending-stop");
+
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+  ASSERT_EQ(mgr.DeleteGroup("g-pending-stop").error_code(), grpc::StatusCode::INTERNAL);
+  ASSERT_TRUE(mgr.StopGroup("g-pending-stop").ok());
+
+  AGCProto::GroupInfo got;
+  ASSERT_TRUE(mgr.GetGroup("g-pending-stop", &got).ok());
+  EXPECT_EQ(got.state(), AGCProto::GROUP_STATE_PENDING_DELETE);
+}
+
+// 验证：当 ValueSpec 使用 BASE_TAG 时，UpsertGroup 会把 base_tag 一并注册到 DataCenter 连接标签注册表。
+TEST(AgcGroupManagerTest, UpsertGroupRegistersBaseTagToDataCenterConnTags) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
-  EXPECT_CALL(*stub, UpsertPointTable(_, _, _))
-      .WillOnce(Invoke([](grpc::ClientContext*, const DataCenterProto::UpsertPointTableRequest& req, DataCenterProto::Empty*) {
+  EXPECT_CALL(*stub, UpsertConnTags(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext*, const DataCenterProto::UpsertConnTagsRequest& req, DataCenterProto::Empty*) {
         EXPECT_NE(req.conn_id(), 0u);
         EXPECT_TRUE(req.replace());
 
@@ -285,4 +328,93 @@ TEST(AgcGroupManagerTest, StartGroupRejectsWhenPendingDelete) {
 
   auto st = mgr.StartGroup("g-pending");
   EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+}
+
+// 验证：UpsertGroup 会把控制组配置落盘，随后可由新的 GroupManager 恢复为 STOPPED 状态。
+TEST(AgcGroupManagerTest, RestorePersistedGroupsLoadsStoppedGroupsFromLocalStore) {
+  ScopedTempDir dir;
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  const auto groupsPath = dir.path() / "groups.pb";
+
+  {
+    GroupManager writer("AGC", groupsPath);
+    writer.setDataCenterStub(stub);
+
+    auto req = MakeGroupReq("g-persist");
+    AGCProto::GroupInfo info;
+    ASSERT_TRUE(writer.UpsertGroup(req, &info).ok());
+    ASSERT_NE(info.conn_id(), 0u);
+  }
+
+  GroupManager reader("AGC", groupsPath);
+  reader.setDataCenterStub(stub);
+  ASSERT_TRUE(reader.RestorePersistedGroups().ok());
+
+  AGCProto::GroupInfo got;
+  ASSERT_TRUE(reader.GetGroup("g-persist", &got).ok());
+  EXPECT_EQ(got.config().group_name(), "g-persist");
+  EXPECT_EQ(got.state(), AGCProto::GROUP_STATE_STOPPED);
+  EXPECT_TRUE(got.last_error().empty());
+  EXPECT_NE(got.conn_id(), 0u);
+}
+
+// 验证：DeleteGroup 进入 PENDING_DELETE 后会落盘，重启后仍阻止启动控制组。
+TEST(AgcGroupManagerTest, RestorePersistedGroupsLoadsPendingDeleteStateAfterRestart) {
+  ScopedTempDir dir;
+  FakeDataCenterState state;
+  state.FailDeleteForConnName("g-pending-persist");
+  auto stub = MakeStub(&state);
+  const auto groupsPath = dir.path() / "groups.pb";
+
+  {
+    GroupManager writer("AGC", groupsPath);
+    writer.setDataCenterStub(stub);
+
+    auto req = MakeGroupReq("g-pending-persist");
+    AGCProto::GroupInfo info;
+    ASSERT_TRUE(writer.UpsertGroup(req, &info).ok());
+
+    auto status = writer.DeleteGroup("g-pending-persist");
+    ASSERT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+  }
+
+  GroupManager reader("AGC", groupsPath);
+  reader.setDataCenterStub(stub);
+  ASSERT_TRUE(reader.RestorePersistedGroups().ok());
+
+  AGCProto::GroupInfo got;
+  ASSERT_TRUE(reader.GetGroup("g-pending-persist", &got).ok());
+  EXPECT_EQ(got.state(), AGCProto::GROUP_STATE_PENDING_DELETE);
+  EXPECT_TRUE(got.last_error().empty());
+  EXPECT_NE(got.conn_id(), 0u);
+
+  auto status = reader.StartGroup("g-pending-persist");
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+}
+
+// 验证：DeleteGroup 会同步更新本地落盘文件，重启恢复后不会重新出现已删除控制组。
+TEST(AgcGroupManagerTest, DeleteGroupRemovesPersistedConfig) {
+  ScopedTempDir dir;
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  const auto groupsPath = dir.path() / "groups.pb";
+
+  {
+    GroupManager writer("AGC", groupsPath);
+    writer.setDataCenterStub(stub);
+
+    auto req = MakeGroupReq("g-removed");
+    AGCProto::GroupInfo info;
+    ASSERT_TRUE(writer.UpsertGroup(req, &info).ok());
+    ASSERT_TRUE(writer.DeleteGroup("g-removed").ok());
+  }
+
+  GroupManager reader("AGC", groupsPath);
+  reader.setDataCenterStub(stub);
+  ASSERT_TRUE(reader.RestorePersistedGroups().ok());
+
+  AGCProto::GroupInfo got;
+  auto status = reader.GetGroup("g-removed", &got);
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::NOT_FOUND);
 }

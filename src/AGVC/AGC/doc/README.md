@@ -75,7 +75,25 @@ AGC 不直接对接 IEC104/ModbusRTU；上下游均通过 DataCenter 的有向�
 > 注意：路由与点表的具体 `tag`/单位由上位机配置决定；AGC 本身不关心 IEC104/ModbusRTU 的地址映射。
 
 ### 配置持久化（当前实现）
-当前版本的 `GroupConfig`/运行态不落盘：进程重启后需要上位机重新下发 `UpsertGroup` 并重建 DataCenter 路由。
+AGC 会将控制组配置落盘到工作目录下的 `./conf/AGC/groups.pb`，用于进程重启后的自动恢复。
+
+### 文件与策略
+- 主文件：`./conf/AGC/groups.pb`
+- 备份文件：`./conf/AGC/groups.pb.bak`
+- 临时文件：`./conf/AGC/groups.pb.tmp`
+- 隔离文件：`./conf/AGC/groups.pb.corrupt.<timestamp>`
+
+### 保存时机与语义
+- 每次 `UpsertGroup` / `DeleteGroup` 完成本地配置变更后自动落盘。
+- 落盘失败会返回 `INTERNAL`，但内存中的控制组配置不会回滚。
+- `RUNNING/STOPPED` 等瞬时运行态不落盘；若 `DeleteGroup` 因 DataCenter 删除失败而进入 `PENDING_DELETE`，会将待删除控制面状态一并落盘。
+- 订阅线程、控制线程与控制缓存不落盘。
+
+### 启动恢复
+- AGC 启动时会自动加载 `groups.pb`，并按 `group_name` 重新向 DataCenter 调用 `GetOrCreateConnection` 取回稳定 `conn_id`。
+- 恢复后会重新向 DataCenter 注册 AGC 自身连接标签注册表（`replace=true`），用于路由校验、展示与自愈。
+- 恢复出的控制组统一为 `STOPPED` 或 `PENDING_DELETE`，不会自动启动控制组内控制环功能；如需启动仍由上位机调用 `StartGroup`。
+- 因为 DataCenter 已持久化连接/连接标签注册表/路由，正常情况下重启后无需重新下发 AGC 路由。
 
 ### 当前限制/注意事项
 - `StrategyConfig` 目前仅实现加权分配（WeightedStrategy），其他策略为预留。

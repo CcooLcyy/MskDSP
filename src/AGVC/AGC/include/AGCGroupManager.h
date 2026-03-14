@@ -4,6 +4,7 @@
 #include <grpcpp/support/status.h>
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <stop_token>
@@ -14,6 +15,7 @@
 #include <vector>
 
 #include "AGC.pb.h"
+#include "AGCGroupStore.h"
 #include "AgvcDataCenterClient.h"
 #include "AgvcStrategy.h"
 
@@ -21,11 +23,12 @@ namespace AGC {
 
 class GroupManager {
 public:
-  explicit GroupManager(std::string moduleName);
+  explicit GroupManager(std::string moduleName, std::filesystem::path groupsPath = std::filesystem::path("./conf/AGC/groups.pb"));
 
   void setDataCenterServerAddress(std::string address);
   void setDataCenterStub(std::shared_ptr<DataCenterProto::DataCenterService::StubInterface> stub);
 
+  grpc::Status RestorePersistedGroups();
   grpc::Status UpsertGroup(const AGCProto::UpsertGroupRequest& request, AGCProto::GroupInfo* out);
   grpc::Status GetGroup(const std::string& groupName, AGCProto::GroupInfo* out) const;
   grpc::Status ListGroups(AGCProto::ListGroupsResponse* out) const;
@@ -72,6 +75,9 @@ private:
   grpc::Status validateGroupName(const std::string& groupName) const;
   grpc::Status validateGroupConfig(const AGCProto::GroupConfig& config) const;
   grpc::Status fillGroupInfoLocked(const GroupRuntime& g, AGCProto::GroupInfo* out) const;
+  AGCProto::GroupsConfig dumpGroupsConfigLocked() const;
+  grpc::Status saveGroupsLocked();
+  grpc::Status restoreGroupFromConfig(const AGCProto::GroupConfig& config, AGCProto::GroupState restoredState);
 
   void startThreadsLocked(const std::string& groupName, GroupRuntime* g);
 
@@ -85,6 +91,7 @@ private:
 
   mutable std::mutex mu_;
   std::unordered_map<std::string, GroupRuntime> groupsByName_;
+  AGCGroupStore groupStore_;
 
   AGVC::DataCenterClient dataCenter_;
   AGVC::WeightedStrategy weightedStrategy_;

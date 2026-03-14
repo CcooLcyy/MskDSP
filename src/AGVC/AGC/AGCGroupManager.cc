@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "AGCControl.h"
+#include "AGCGroupValidation.h"
 #include "AGCLibInfo.h"
 #include "Logger.h"
 #include "ThreadUtil.hpp"
@@ -28,7 +29,8 @@ grpc::Status makePreconditionFailed(std::string message) {
 }
 }  // namespace
 
-GroupManager::GroupManager(std::string moduleName) :
+GroupManager::GroupManager(std::string moduleName, std::filesystem::path groupsPath) :
+  groupStore_(std::move(groupsPath)),
   dataCenter_(std::move(moduleName)) {}
 
 void GroupManager::setDataCenterServerAddress(std::string address) {
@@ -47,39 +49,7 @@ grpc::Status GroupManager::validateGroupName(const std::string &groupName) const
 }
 
 grpc::Status GroupManager::validateGroupConfig(const AGCProto::GroupConfig &config) const {
-  auto st = validateGroupName(config.group_name());
-  if (!st.ok()) {
-    return st;
-  }
-  if (!config.has_p_cmd() || !config.p_cmd().has_signal()) {
-    return makeInvalid("p_cmd.signal 不能为空");
-  }
-  if (config.p_cmd().signal().tag().empty()) {
-    return makeInvalid("p_cmd.signal.tag 不能为空");
-  }
-  if (config.members_size() <= 0) {
-    return makeInvalid("members 不能为空");
-  }
-
-  std::unordered_set<std::string> memberNames;
-  memberNames.reserve(static_cast<size_t>(config.members_size()));
-  for (const auto &m : config.members()) {
-    if (m.member_name().empty()) {
-      return makeInvalid("members.member_name 不能为空");
-    }
-    if (!memberNames.emplace(m.member_name()).second) {
-      return makeInvalid(std::format("member_name 重复: {}", m.member_name()));
-    }
-    if (!m.has_p_meas() || m.p_meas().tag().empty()) {
-      return makeInvalid(std::format("members[{}].p_meas.tag 不能为空", m.member_name()));
-    }
-    if (m.controllable()) {
-      if (!m.has_p_set() || !m.p_set().has_signal() || m.p_set().signal().tag().empty()) {
-        return makeInvalid(std::format("members[{}].p_set.signal.tag 不能为空（可控成员）", m.member_name()));
-      }
-    }
-  }
-  return grpc::Status::OK;
+  return AGC::ValidateGroupConfig(config);
 }
 
 grpc::Status GroupManager::fillGroupInfoLocked(const GroupRuntime &g, AGCProto::GroupInfo *out) const {
@@ -91,6 +61,144 @@ grpc::Status GroupManager::fillGroupInfoLocked(const GroupRuntime &g, AGCProto::
   out->set_conn_id(g.connId);
   out->set_state(g.state);
   out->set_last_error(g.lastError);
+  return grpc::Status::OK;
+}
+
+AGCProto::GroupsConfig GroupManager::dumpGroupsConfigLocked() const {
+  AGCProto::GroupsConfig config;
+  for (const auto &[_, group] : groupsByName_) {
+    auto* persisted = config.add_persisted_groups();
+    *persisted->mutable_config() = group.config;
+    persisted->set_pending_delete(group.state == AGCProto::GROUP_STATE_PENDING_DELETE);
+  }
+  return config;
+}
+
+grpc::Status GroupManager::saveGroupsLocked() {
+  auto config = dumpGroupsConfigLocked();
+  auto status = groupStore_.Save(config);
+  if (!status.ok()) {
+    LOG_ERROR("AGC 控制组配置落盘失败: 原因={}", status.error_message());
+  }
+  return status;
+}
+
+grpc::Status GroupManager::restoreGroupFromConfig(const AGCProto::GroupConfig &config, AGCProto::GroupState restoredState) {
+  auto status = validateGroupConfig(config);
+  if (!status.ok()) {
+    return status;
+  }
+  LOG_INFO("AGC 开始恢复控制组持久化记录: group_name={}, 状态={}, 成员数={}",
+           config.group_name(),
+           restoredState,
+           config.members_size());
+
+  DataCenterProto::ConnectionInfo connInfo;
+  status = dataCenter_.GetOrCreateConnection(config.group_name(), &connInfo);
+  if (!status.ok()) {
+    LOG_ERROR("AGC 恢复控制组时获取 DataCenter 连接失败: group_name={}, 成员数={}, 原因={}",
+              config.group_name(),
+              config.members_size(),
+              status.error_message());
+    return status;
+  }
+  if (connInfo.conn_id() == 0) {
+    LOG_ERROR("AGC 恢复控制组时 DataCenter 返回无效 conn_id: group_name={}", config.group_name());
+    return grpc::Status(grpc::StatusCode::INTERNAL, "DataCenter 返回 conn_id=0");
+  }
+
+  GroupRuntime runtime;
+  runtime.config = config;
+  runtime.connId = connInfo.conn_id();
+  runtime.state = restoredState;
+  runtime.lastError.clear();
+  rebuildTagCache(&runtime);
+
+  const auto tags = collectAllTags(config);
+  if (!tags.empty()) {
+    std::vector<std::string> tagList;
+    tagList.reserve(tags.size());
+    for (const auto &tag : tags) {
+      tagList.emplace_back(tag);
+    }
+    auto connTagsStatus = dataCenter_.UpsertConnTags(runtime.connId, tagList, true);
+    if (!connTagsStatus.ok()) {
+      runtime.lastError = connTagsStatus.error_message();
+      LOG_ERROR("AGC 恢复控制组时同步 DataCenter 连接标签注册表失败: group_name={}, conn_id={}, 标签数={}, 原因={}",
+                config.group_name(),
+                runtime.connId,
+                tagList.size(),
+                connTagsStatus.error_message());
+    } else {
+      LOG_INFO("AGC 恢复控制组时已同步 DataCenter 连接标签注册表: group_name={}, conn_id={}, 标签数={}",
+               config.group_name(),
+               runtime.connId,
+               tagList.size());
+    }
+    std::lock_guard<std::mutex> lock(mu_);
+    groupsByName_[config.group_name()] = std::move(runtime);
+    return connTagsStatus;
+  }
+
+  std::lock_guard<std::mutex> lock(mu_);
+  groupsByName_[config.group_name()] = std::move(runtime);
+  return grpc::Status::OK;
+}
+
+grpc::Status GroupManager::RestorePersistedGroups() {
+  AGCProto::GroupsConfig config;
+  auto status = groupStore_.Load(&config);
+  if (!status.ok()) {
+    LOG_ERROR("AGC 控制组配置加载失败: 原因={}", status.error_message());
+    return status;
+  }
+  LOG_INFO("AGC 控制组持久化配置载入摘要: persisted_groups={}, legacy_groups={}",
+           config.persisted_groups_size(),
+           config.groups_size());
+  if (config.groups_size() == 0 && config.persisted_groups_size() == 0) {
+    LOG_INFO("AGC 未发现本地控制组配置");
+    return grpc::Status::OK;
+  }
+
+  size_t restored = 0;
+  size_t failed = 0;
+  if (config.persisted_groups_size() > 0) {
+    for (const auto& persisted : config.persisted_groups()) {
+      if (!persisted.has_config()) {
+        ++failed;
+        LOG_ERROR("AGC 恢复控制组失败: group_name=<空>, 原因=持久化记录缺少 config");
+        continue;
+      }
+      const auto restoredState = persisted.pending_delete() ? AGCProto::GROUP_STATE_PENDING_DELETE
+                                                            : AGCProto::GROUP_STATE_STOPPED;
+      status = restoreGroupFromConfig(persisted.config(), restoredState);
+      if (!status.ok()) {
+        ++failed;
+        LOG_ERROR("AGC 恢复控制组失败: group_name={}, 原因={}", persisted.config().group_name(), status.error_message());
+        continue;
+      }
+      ++restored;
+      LOG_INFO("AGC 已恢复控制组配置: group_name={}, 状态={}",
+               persisted.config().group_name(),
+               persisted.pending_delete() ? "待删除" : "已停止");
+    }
+  } else {
+    for (const auto& group : config.groups()) {
+      status = restoreGroupFromConfig(group, AGCProto::GROUP_STATE_STOPPED);
+      if (!status.ok()) {
+        ++failed;
+        LOG_ERROR("AGC 恢复控制组失败: group_name={}, 原因={}", group.group_name(), status.error_message());
+        continue;
+      }
+      ++restored;
+      LOG_INFO("AGC 已恢复控制组配置: group_name={}, 状态=已停止(兼容旧持久化格式)", group.group_name());
+    }
+  }
+
+  LOG_INFO("AGC 控制组配置恢复完成: 成功={}, 失败={}", restored, failed);
+  if (failed > 0) {
+    return grpc::Status(grpc::StatusCode::INTERNAL, "部分控制组恢复失败");
+  }
   return grpc::Status::OK;
 }
 
@@ -153,9 +261,18 @@ grpc::Status GroupManager::UpsertGroup(const AGCProto::UpsertGroupRequest &reque
       rebuildTagCache(&g);
       fillGroupInfoLocked(g, out);
     }
+
+    status = saveGroupsLocked();
+    if (!status.ok()) {
+      auto saveIt = groupsByName_.find(groupName);
+      if (saveIt != groupsByName_.end()) {
+        saveIt->second.lastError = status.error_message();
+      }
+      return status;
+    }
   }
 
-  // 尽力而为：将 tags 注册到 DataCenter 点表（不回滚）。
+  // 尽力而为：将 tags 注册到 DataCenter 连接标签注册表（不回滚）。
   const auto tags = collectAllTags(request.config());
   if (!tags.empty()) {
     uint32_t connId = 0;
@@ -309,6 +426,7 @@ grpc::Status GroupManager::StopGroup(const std::string &groupName) {
 
   std::jthread dcSubscribeThread;
   std::jthread controlThread;
+  bool pendingDelete = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = groupsByName_.find(groupName);
@@ -318,7 +436,8 @@ grpc::Status GroupManager::StopGroup(const std::string &groupName) {
     dcSubscribeThread = std::move(it->second.dcSubscribeThread);
     controlThread = std::move(it->second.controlThread);
     it->second.dcSubscribeContext.reset();
-    it->second.state = AGCProto::GROUP_STATE_STOPPED;
+    pendingDelete = (it->second.state == AGCProto::GROUP_STATE_PENDING_DELETE);
+    it->second.state = pendingDelete ? AGCProto::GROUP_STATE_PENDING_DELETE : AGCProto::GROUP_STATE_STOPPED;
   }
   if (dcSubscribeThread.joinable()) {
     dcSubscribeThread.request_stop();
@@ -328,7 +447,11 @@ grpc::Status GroupManager::StopGroup(const std::string &groupName) {
     controlThread.request_stop();
     controlThread.join();
   }
-  LOG_INFO("AGC 控制组已停止: group_name={}", groupName);
+  if (pendingDelete) {
+    LOG_INFO("AGC 控制组已停止并保持待删除状态: group_name={}", groupName);
+  } else {
+    LOG_INFO("AGC 控制组已停止: group_name={}", groupName);
+  }
   return grpc::Status::OK;
 }
 
@@ -345,17 +468,33 @@ grpc::Status GroupManager::DeleteGroup(const std::string &groupName) {
 
   auto dc = dataCenter_.DeleteConnection(groupName);
   if (!dc.ok() && dc.error_code() != grpc::StatusCode::NOT_FOUND) {
-    std::lock_guard<std::mutex> lock(mu_);
-    auto it = groupsByName_.find(groupName);
-    if (it != groupsByName_.end()) {
-      it->second.state = AGCProto::GROUP_STATE_PENDING_DELETE;
-      it->second.lastError = dc.error_message();
+    AGCProto::GroupsConfig groupsConfig;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = groupsByName_.find(groupName);
+      if (it != groupsByName_.end()) {
+        it->second.state = AGCProto::GROUP_STATE_PENDING_DELETE;
+        it->second.lastError = dc.error_message();
+        groupsConfig = dumpGroupsConfigLocked();
+      }
     }
+    if (groupsConfig.persisted_groups_size() > 0) {
+      auto saveStatus = groupStore_.Save(groupsConfig);
+      if (!saveStatus.ok()) {
+        LOG_ERROR("AGC 待删除控制组配置落盘失败: group_name={}, 原因={}", groupName, saveStatus.error_message());
+        return saveStatus;
+      }
+    }
+    LOG_WARNING("AGC 删除控制组失败，已标记待删除: group_name={}, 原因={}", groupName, dc.error_message());
     return dc;
   }
 
   std::lock_guard<std::mutex> lock(mu_);
   groupsByName_.erase(groupName);
+  status = saveGroupsLocked();
+  if (!status.ok()) {
+    return status;
+  }
   return grpc::Status::OK;
 }
 
