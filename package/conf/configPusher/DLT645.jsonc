@@ -18,7 +18,7 @@
             // conn_name 可使用 {device_no} 占位符，按 device_nos 展开后自动替换
             "conn_name": "模拟DLT645_LORA主站_{device_no}",
             "protocol_variant": "DLT645PCD",
-            "meter_addr": "202601200001",
+            "meter_addr": "123456789011",
             "transport_type": "TRANSPORT_MQTT_UART",
             "comm_mode": "COMM_MODE_LORA",
             // 注意：以下串口参数在 Lora 模式下不会生效，仅用于预置/示例。
@@ -36,8 +36,7 @@
         },
         // 批量设备序号：展开为多条链路，除 device_no 与 conn_name 外其余配置保持一致
         "device_nos": [
-          "01",
-          "02"
+          "01"
         ],
         "point_table": {
           "replace": true,
