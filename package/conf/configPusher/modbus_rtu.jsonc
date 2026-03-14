@@ -8,7 +8,8 @@
   //    因此本文件已写入输入寄存器中的有符号点：无功功率、功率因数。
   // 4. holdingRegisters 中 3000/3001/3002 地址存在重叠；
   //    按“保留前一个占用区间、删除后续冲突起始点”的规则，已删除 3001 起始的“无功功率限值”读回/命令点。
-  // 5. 以下 holdingRegisters 点拆成“读回/命令”两套 tag：
+  // 5. 当前 ModbusRTU 链路固定按主站方式运行。
+  // 6. 以下 holdingRegisters 点拆成“读回/命令”两套 tag：
   //    - “xx-读回” 走 0x03 轮询；
   //    - “xx-命令” 走 0x06/0x10，通过 DataCenter 路由触发写寄存器。
   "modbus_rtu": {
@@ -41,10 +42,9 @@
             "serial_byte_timeout_ms": 100,
             "serial_frame_timeout_ms": 100,
             "serial_est_size": 256,
-            "slave_id": 1,
+            "device_id": 1,
             "poll_interval_ms": 3000,
             "address_base": "ADDRESS_BASE_ZERO",
-            "mode": "LINK_MODE_MASTER",
             "read_plan": {
               "mode": "READ_PLAN_MODE_EXPLICIT",
               "blocks": [
@@ -372,10 +372,9 @@
             "serial_byte_timeout_ms": 100,
             "serial_frame_timeout_ms": 100,
             "serial_est_size": 256,
-            "slave_id": 2,
+            "device_id": 2,
             "poll_interval_ms": 3000,
             "address_base": "ADDRESS_BASE_ZERO",
-            "mode": "LINK_MODE_MASTER",
             "read_plan": {
               "mode": "READ_PLAN_MODE_EXPLICIT",
               "blocks": [
@@ -703,10 +702,9 @@
             "serial_byte_timeout_ms": 100,
             "serial_frame_timeout_ms": 100,
             "serial_est_size": 256,
-            "slave_id": 1,
+            "device_id": 1,
             "poll_interval_ms": 3000,
             "address_base": "ADDRESS_BASE_ZERO",
-            "mode": "LINK_MODE_MASTER",
             "read_plan": {
               "mode": "READ_PLAN_MODE_EXPLICIT",
               "blocks": [
@@ -1034,10 +1032,9 @@
             "serial_byte_timeout_ms": 100,
             "serial_frame_timeout_ms": 100,
             "serial_est_size": 256,
-            "slave_id": 2,
+            "device_id": 2,
             "poll_interval_ms": 3000,
             "address_base": "ADDRESS_BASE_ZERO",
-            "mode": "LINK_MODE_MASTER",
             "read_plan": {
               "mode": "READ_PLAN_MODE_EXPLICIT",
               "blocks": [

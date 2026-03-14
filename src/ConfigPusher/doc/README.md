@@ -58,7 +58,7 @@ ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRT
 - `modbus_rtu.mqtt` 为 ModbusRTU 的 MQTT 全局连接参数，字段为 `host/port/client_id/username/password/keepalive_sec/clean_session/connect_timeout_ms`
 - 当 `modbus_rtu.links[].link.config.transport_type=TRANSPORT_MQTT_UART` 时，`modbus_rtu.mqtt` 必填；ConfigPusher 会先调用 `ModbusRTU.UpdateConfig`，再继续下发链路与点表
 - `TRANSPORT_MQTT_UART` 链路要求配置 `serial_port/request_timeout_ms/serial_byte_timeout_ms/serial_frame_timeout_ms/serial_est_size`
-- `TRANSPORT_MQTT_UART` 路径当前仅支持主站；如需从站，请继续使用 `TRANSPORT_SERIAL`
+- ModbusRTU 链路固定按主站方式运行
 - 当 DLT645 或 ModbusRTU 需要 MQTT 时，ConfigPusher 会按需启动 `MQTTManager`
 - DLT645 配置会启动 DLT645 与 MQTTManager，并先下发 MQTT 全局参数
 
@@ -105,9 +105,8 @@ ModbusRTU MQTT 配置示例：
             "serial_byte_timeout_ms": 100,
             "serial_frame_timeout_ms": 100,
             "serial_est_size": 256,
-            "slave_id": 1,
-            "poll_interval_ms": 1000,
-            "mode": "LINK_MODE_MASTER"
+            "device_id": 1,
+            "poll_interval_ms": 1000
           }
         },
         "point_table": {
@@ -134,7 +133,6 @@ ModbusRTU MQTT 配置示例：
 - 在配置校验阶段直接提示：
   - 缺少 `modbus_rtu.mqtt`
   - 缺少 `serial_port`
-  - `TRANSPORT_MQTT_UART` 当前仅支持主站
 - 启停文案建议写成“启动连接功能/停止连接功能”，避免与“启动模块”混淆。
 
 ### DLT645 批量设备下发（device_nos）

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -16,16 +17,24 @@
 #include "ModbusRTU.pb.h"
 #include "ModbusRTUBus.h"
 #include "ModbusRTUDataCenterClient.h"
+#include "ModbusRTULinkStore.h"
 #include "ModbusRTUMqttClient.h"
 #include "ModbusRTUMqttBus.h"
+#include "ModbusRTUMqttStore.h"
 #include "ModbusRTUPointTable.h"
+#include "ModbusRTUPointTableStore.h"
 #include "ModbusRTUSerialBus.h"
 
 namespace ModbusRTU {
 
 class LinkManager {
 public:
-  explicit LinkManager(std::string moduleName);
+  explicit LinkManager(std::string moduleName,
+                       std::filesystem::path mqttPath = std::filesystem::path("./conf/ModbusRTU/mqtt.pb"),
+                       std::filesystem::path linksPath = std::filesystem::path("./conf/ModbusRTU/links.pb"),
+                       std::filesystem::path pointTablesPath = std::filesystem::path("./conf/ModbusRTU/point_tables.pb"));
+
+  void LoadPersistedConfig();
 
   void setDataCenterServerAddress(std::string address);
   void setDataCenterStub(std::shared_ptr<DataCenterProto::DataCenterService::StubInterface> stub);
@@ -114,46 +123,22 @@ private:
     std::jthread dcCommandThread;
   };
 
-  struct SlaveLinkSnapshot {
-    std::string connName;
-    ModbusRTUProto::LinkConfig config;
-    uint32_t connId = 0;
-    PointTable pointTable;
-  };
-
-  struct SlaveBusRuntime {
-    std::shared_ptr<SerialBus> bus;
-    std::jthread worker;
-    std::unordered_map<uint8_t, std::shared_ptr<SlaveLinkSnapshot>> linksBySlaveId;
-  };
-
   static grpc::Status validateConnName(const std::string& connName);
   static grpc::Status normalizeLinkConfig(const ModbusRTUProto::LinkConfig& config, ModbusRTUProto::LinkConfig* out);
   static SerialKey makeSerialKey(const ModbusRTUProto::SerialConfig& serial);
   static MqttKey makeMqttKey(const ModbusRTUProto::LinkConfig& config);
 
   grpc::Status fillLinkInfoLocked(const LinkRuntime& link, ModbusRTUProto::LinkInfo* out) const;
-  grpc::Status ensureSerialCompatibleLocked(const SerialKey& key,
-                                            const std::string& connName,
-                                            ModbusRTUProto::LinkMode mode) const;
-  grpc::Status ensureMqttCompatibleLocked(const MqttKey& key,
-                                          const std::string& connName,
-                                          ModbusRTUProto::LinkMode mode) const;
+  ModbusRTUProto::LinksConfig dumpLinksConfigLocked() const;
+  ModbusRTUProto::PointTablesConfig dumpPointTablesConfigLocked() const;
+  grpc::Status saveLinksConfig(const ModbusRTUProto::LinksConfig& config);
+  grpc::Status savePointTablesConfig(const ModbusRTUProto::PointTablesConfig& config);
+  grpc::Status ensureSerialCompatibleLocked(const SerialKey& key, const std::string& connName) const;
+  grpc::Status ensureMqttCompatibleLocked(const MqttKey& key, const std::string& connName) const;
   std::shared_ptr<Bus> acquireSerialBusLocked(const SerialKey& key, const ModbusRTUProto::SerialConfig& serial);
   std::shared_ptr<Bus> releaseSerialBusLocked(const SerialKey& key);
   std::shared_ptr<Bus> acquireMqttBusLocked(const MqttKey& key, const ModbusRTUProto::LinkConfig& config);
   std::shared_ptr<Bus> releaseMqttBusLocked(const MqttKey& key);
-
-  grpc::Status startSlaveLink(const std::string& connName,
-                              const ModbusRTUProto::LinkConfig& config,
-                              const PointTable& pointTable,
-                              uint32_t connId,
-                              const SerialKey& serialKey,
-                              std::shared_ptr<SerialBus> bus);
-  grpc::Status stopSlaveLink(const std::string& connName,
-                             const ModbusRTUProto::LinkConfig& config,
-                             const SerialKey& serialKey,
-                             std::shared_ptr<SerialBus> bus);
   void startCommandSubscribeLocked(const std::string& connName, LinkRuntime* link);
   void stopCommandSubscribeLocked(LinkRuntime* link);
   grpc::Status executeWriteCommand(const std::string& connName,
@@ -161,7 +146,6 @@ private:
                                    const PointTable::Point& point,
                                    std::shared_ptr<Bus> bus,
                                    const DataCenterProto::PointUpdate& update);
-  void slaveLoop(SerialKey serialKey, std::shared_ptr<SerialBus> bus, std::stop_token stopToken);
 
   void pollLoop(std::string connName,
                 uint32_t connId,
@@ -175,10 +159,12 @@ private:
   std::unordered_map<std::string, LinkRuntime> linksByName_;
   std::unordered_map<SerialKey, BusEntry, SerialKeyHash> buses_;
   std::unordered_map<MqttKey, BusEntry, MqttKeyHash> mqttBuses_;
-  std::unordered_map<SerialKey, SlaveBusRuntime, SerialKeyHash> slaveBuses_;
   std::unordered_set<std::string> pendingCreateByName_;
   DataCenterClient dataCenter_;
   MqttClient mqttClient_;
+  ModbusRTUMqttStore mqttStore_;
+  ModbusRTULinkStore linkStore_;
+  ModbusRTUPointTableStore pointTableStore_;
 };
 
 }  // namespace ModbusRTU

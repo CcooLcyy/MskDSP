@@ -22,19 +22,19 @@ public:
   grpc::Status Open() override;
   void Close() override;
 
-  grpc::Status ReadCoil(uint8_t slaveId, uint16_t address, bool* out) override;
-  grpc::Status ReadHoldingRegister(uint8_t slaveId, uint16_t address, uint16_t* out) override;
-  grpc::Status ReadHoldingRegisters(uint8_t slaveId,
+  grpc::Status ReadCoil(uint8_t deviceId, uint16_t address, bool* out) override;
+  grpc::Status ReadHoldingRegister(uint8_t deviceId, uint16_t address, uint16_t* out) override;
+  grpc::Status ReadHoldingRegisters(uint8_t deviceId,
                                     uint16_t address,
                                     uint16_t quantity,
                                     std::vector<uint16_t>* out) override;
-  grpc::Status ReadInputRegister(uint8_t slaveId, uint16_t address, uint16_t* out) override;
-  grpc::Status ReadInputRegisters(uint8_t slaveId,
+  grpc::Status ReadInputRegister(uint8_t deviceId, uint16_t address, uint16_t* out) override;
+  grpc::Status ReadInputRegisters(uint8_t deviceId,
                                   uint16_t address,
                                   uint16_t quantity,
                                   std::vector<uint16_t>* out) override;
-  grpc::Status WriteSingleRegister(uint8_t slaveId, uint16_t address, uint16_t value) override;
-  grpc::Status WriteMultipleRegisters(uint8_t slaveId,
+  grpc::Status WriteSingleRegister(uint8_t deviceId, uint16_t address, uint16_t value) override;
+  grpc::Status WriteMultipleRegisters(uint8_t deviceId,
                                       uint16_t address,
                                       const std::vector<uint16_t>& values) override;
 
@@ -42,16 +42,16 @@ private:
   grpc::Status ensureOpenLocked();
   grpc::Status sendFrame(const std::vector<uint8_t>& frame, std::vector<uint8_t>* outFrame);
   grpc::Status parseReadResponse(const std::vector<uint8_t>& frame,
-                                 uint8_t expectedSlaveId,
+                                 uint8_t expectedDeviceId,
                                  uint8_t expectedFunction,
                                  uint16_t quantity,
                                  std::vector<uint8_t>* outData) const;
   grpc::Status parseWriteSingleRegisterResponse(const std::vector<uint8_t>& frame,
-                                                uint8_t expectedSlaveId,
+                                                uint8_t expectedDeviceId,
                                                 uint16_t expectedAddress,
                                                 uint16_t expectedValue) const;
   grpc::Status parseWriteMultipleRegistersResponse(const std::vector<uint8_t>& frame,
-                                                   uint8_t expectedSlaveId,
+                                                   uint8_t expectedDeviceId,
                                                    uint16_t expectedAddress,
                                                    uint16_t expectedQuantity) const;
   std::string requestTopic() const;

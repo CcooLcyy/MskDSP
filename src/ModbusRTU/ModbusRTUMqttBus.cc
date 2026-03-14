@@ -65,7 +65,7 @@ void MqttBus::Close() {
            config_.serial_port());
 }
 
-grpc::Status MqttBus::ReadCoil(uint8_t slaveId, uint16_t address, bool* out) {
+grpc::Status MqttBus::ReadCoil(uint8_t deviceId, uint16_t address, bool* out) {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
@@ -77,7 +77,7 @@ grpc::Status MqttBus::ReadCoil(uint8_t slaveId, uint16_t address, bool* out) {
 
   std::vector<uint8_t> frame;
   frame.reserve(8);
-  frame.push_back(slaveId);
+  frame.push_back(deviceId);
   frame.push_back(kFunctionReadCoils);
   frame.push_back(static_cast<uint8_t>((address >> 8) & 0xFF));
   frame.push_back(static_cast<uint8_t>(address & 0xFF));
@@ -92,7 +92,7 @@ grpc::Status MqttBus::ReadCoil(uint8_t slaveId, uint16_t address, bool* out) {
   }
 
   std::vector<uint8_t> data;
-  status = parseReadResponse(responseFrame, slaveId, kFunctionReadCoils, 1, &data);
+  status = parseReadResponse(responseFrame, deviceId, kFunctionReadCoils, 1, &data);
   if (!status.ok()) {
     return status;
   }
@@ -103,12 +103,12 @@ grpc::Status MqttBus::ReadCoil(uint8_t slaveId, uint16_t address, bool* out) {
   return grpc::Status::OK;
 }
 
-grpc::Status MqttBus::ReadHoldingRegister(uint8_t slaveId, uint16_t address, uint16_t* out) {
+grpc::Status MqttBus::ReadHoldingRegister(uint8_t deviceId, uint16_t address, uint16_t* out) {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   std::vector<uint16_t> values;
-  auto status = ReadHoldingRegisters(slaveId, address, 1, &values);
+  auto status = ReadHoldingRegisters(deviceId, address, 1, &values);
   if (!status.ok()) {
     return status;
   }
@@ -119,7 +119,7 @@ grpc::Status MqttBus::ReadHoldingRegister(uint8_t slaveId, uint16_t address, uin
   return grpc::Status::OK;
 }
 
-grpc::Status MqttBus::ReadHoldingRegisters(uint8_t slaveId,
+grpc::Status MqttBus::ReadHoldingRegisters(uint8_t deviceId,
                                            uint16_t address,
                                            uint16_t quantity,
                                            std::vector<uint16_t>* out) {
@@ -138,7 +138,7 @@ grpc::Status MqttBus::ReadHoldingRegisters(uint8_t slaveId,
 
   std::vector<uint8_t> frame;
   frame.reserve(8);
-  frame.push_back(slaveId);
+  frame.push_back(deviceId);
   frame.push_back(kFunctionReadHoldingRegisters);
   frame.push_back(static_cast<uint8_t>((address >> 8) & 0xFF));
   frame.push_back(static_cast<uint8_t>(address & 0xFF));
@@ -153,7 +153,7 @@ grpc::Status MqttBus::ReadHoldingRegisters(uint8_t slaveId,
   }
 
   std::vector<uint8_t> data;
-  status = parseReadResponse(responseFrame, slaveId, kFunctionReadHoldingRegisters, quantity, &data);
+  status = parseReadResponse(responseFrame, deviceId, kFunctionReadHoldingRegisters, quantity, &data);
   if (!status.ok()) {
     return status;
   }
@@ -177,12 +177,12 @@ grpc::Status MqttBus::ReadHoldingRegisters(uint8_t slaveId,
   return grpc::Status::OK;
 }
 
-grpc::Status MqttBus::ReadInputRegister(uint8_t slaveId, uint16_t address, uint16_t* out) {
+grpc::Status MqttBus::ReadInputRegister(uint8_t deviceId, uint16_t address, uint16_t* out) {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   std::vector<uint16_t> values;
-  auto status = ReadInputRegisters(slaveId, address, 1, &values);
+  auto status = ReadInputRegisters(deviceId, address, 1, &values);
   if (!status.ok()) {
     return status;
   }
@@ -193,7 +193,7 @@ grpc::Status MqttBus::ReadInputRegister(uint8_t slaveId, uint16_t address, uint1
   return grpc::Status::OK;
 }
 
-grpc::Status MqttBus::ReadInputRegisters(uint8_t slaveId,
+grpc::Status MqttBus::ReadInputRegisters(uint8_t deviceId,
                                          uint16_t address,
                                          uint16_t quantity,
                                          std::vector<uint16_t>* out) {
@@ -212,7 +212,7 @@ grpc::Status MqttBus::ReadInputRegisters(uint8_t slaveId,
 
   std::vector<uint8_t> frame;
   frame.reserve(8);
-  frame.push_back(slaveId);
+  frame.push_back(deviceId);
   frame.push_back(kFunctionReadInputRegisters);
   frame.push_back(static_cast<uint8_t>((address >> 8) & 0xFF));
   frame.push_back(static_cast<uint8_t>(address & 0xFF));
@@ -227,7 +227,7 @@ grpc::Status MqttBus::ReadInputRegisters(uint8_t slaveId,
   }
 
   std::vector<uint8_t> data;
-  status = parseReadResponse(responseFrame, slaveId, kFunctionReadInputRegisters, quantity, &data);
+  status = parseReadResponse(responseFrame, deviceId, kFunctionReadInputRegisters, quantity, &data);
   if (!status.ok()) {
     return status;
   }
@@ -251,7 +251,7 @@ grpc::Status MqttBus::ReadInputRegisters(uint8_t slaveId,
   return grpc::Status::OK;
 }
 
-grpc::Status MqttBus::WriteSingleRegister(uint8_t slaveId, uint16_t address, uint16_t value) {
+grpc::Status MqttBus::WriteSingleRegister(uint8_t deviceId, uint16_t address, uint16_t value) {
   std::lock_guard<std::mutex> lock(mu_);
   auto status = ensureOpenLocked();
   if (!status.ok()) {
@@ -260,7 +260,7 @@ grpc::Status MqttBus::WriteSingleRegister(uint8_t slaveId, uint16_t address, uin
 
   std::vector<uint8_t> frame;
   frame.reserve(8);
-  frame.push_back(slaveId);
+  frame.push_back(deviceId);
   frame.push_back(kFunctionWriteSingleRegister);
   frame.push_back(static_cast<uint8_t>((address >> 8) & 0xFF));
   frame.push_back(static_cast<uint8_t>(address & 0xFF));
@@ -273,10 +273,10 @@ grpc::Status MqttBus::WriteSingleRegister(uint8_t slaveId, uint16_t address, uin
   if (!status.ok()) {
     return status;
   }
-  return parseWriteSingleRegisterResponse(responseFrame, slaveId, address, value);
+  return parseWriteSingleRegisterResponse(responseFrame, deviceId, address, value);
 }
 
-grpc::Status MqttBus::WriteMultipleRegisters(uint8_t slaveId,
+grpc::Status MqttBus::WriteMultipleRegisters(uint8_t deviceId,
                                              uint16_t address,
                                              const std::vector<uint16_t>& values) {
   if (values.empty()) {
@@ -295,7 +295,7 @@ grpc::Status MqttBus::WriteMultipleRegisters(uint8_t slaveId,
 
   std::vector<uint8_t> frame;
   frame.reserve(9 + values.size() * 2);
-  frame.push_back(slaveId);
+  frame.push_back(deviceId);
   frame.push_back(kFunctionWriteMultipleRegisters);
   frame.push_back(static_cast<uint8_t>((address >> 8) & 0xFF));
   frame.push_back(static_cast<uint8_t>(address & 0xFF));
@@ -313,7 +313,7 @@ grpc::Status MqttBus::WriteMultipleRegisters(uint8_t slaveId,
   if (!status.ok()) {
     return status;
   }
-  return parseWriteMultipleRegistersResponse(responseFrame, slaveId, address, quantity);
+  return parseWriteMultipleRegistersResponse(responseFrame, deviceId, address, quantity);
 }
 
 grpc::Status MqttBus::ensureOpenLocked() {
@@ -444,7 +444,7 @@ grpc::Status MqttBus::sendFrame(const std::vector<uint8_t>& frame, std::vector<u
 }
 
 grpc::Status MqttBus::parseReadResponse(const std::vector<uint8_t>& frame,
-                                        uint8_t expectedSlaveId,
+                                        uint8_t expectedDeviceId,
                                         uint8_t expectedFunction,
                                         uint16_t quantity,
                                         std::vector<uint8_t>* outData) const {
@@ -457,8 +457,8 @@ grpc::Status MqttBus::parseReadResponse(const std::vector<uint8_t>& frame,
   if (frame.size() < 5) {
     return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应帧过短");
   }
-  if (frame[0] != expectedSlaveId) {
-    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应 slave_id 不匹配");
+  if (frame[0] != expectedDeviceId) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应设备地址不匹配");
   }
 
   const uint8_t function = frame[1];
@@ -500,14 +500,14 @@ grpc::Status MqttBus::parseReadResponse(const std::vector<uint8_t>& frame,
 }
 
 grpc::Status MqttBus::parseWriteSingleRegisterResponse(const std::vector<uint8_t>& frame,
-                                                       uint8_t expectedSlaveId,
+                                                       uint8_t expectedDeviceId,
                                                        uint16_t expectedAddress,
                                                        uint16_t expectedValue) const {
   if (frame.size() < 5) {
     return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应帧过短");
   }
-  if (frame[0] != expectedSlaveId) {
-    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应 slave_id 不匹配");
+  if (frame[0] != expectedDeviceId) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应设备地址不匹配");
   }
 
   const uint8_t function = frame[1];
@@ -548,14 +548,14 @@ grpc::Status MqttBus::parseWriteSingleRegisterResponse(const std::vector<uint8_t
 }
 
 grpc::Status MqttBus::parseWriteMultipleRegistersResponse(const std::vector<uint8_t>& frame,
-                                                          uint8_t expectedSlaveId,
+                                                          uint8_t expectedDeviceId,
                                                           uint16_t expectedAddress,
                                                           uint16_t expectedQuantity) const {
   if (frame.size() < 5) {
     return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应帧过短");
   }
-  if (frame[0] != expectedSlaveId) {
-    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应 slave_id 不匹配");
+  if (frame[0] != expectedDeviceId) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应设备地址不匹配");
   }
 
   const uint8_t function = frame[1];

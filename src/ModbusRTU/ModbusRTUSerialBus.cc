@@ -18,7 +18,6 @@ constexpr uint8_t kFunctionReadCoils = 0x01;
 constexpr uint8_t kFunctionReadHoldingRegisters = 0x03;
 constexpr uint8_t kFunctionReadInputRegisters = 0x04;
 constexpr uint8_t kFunctionWriteSingleRegister = 0x06;
-constexpr uint8_t kFunctionWriteMultipleCoils = 0x0F;
 constexpr uint8_t kFunctionWriteMultipleRegisters = 0x10;
 constexpr char kHexDigits[] = "0123456789ABCDEF";
 constexpr size_t kMaxConsecutiveTimeouts = 3;
@@ -70,7 +69,7 @@ void SerialBus::Close() {
   opened_ = false;
 }
 
-grpc::Status SerialBus::ReadCoil(uint8_t slaveId, uint16_t address, bool* out) {
+grpc::Status SerialBus::ReadCoil(uint8_t deviceId, uint16_t address, bool* out) {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
@@ -82,7 +81,7 @@ grpc::Status SerialBus::ReadCoil(uint8_t slaveId, uint16_t address, bool* out) {
 
   std::vector<uint8_t> frame;
   frame.reserve(8);
-  frame.push_back(slaveId);
+  frame.push_back(deviceId);
   frame.push_back(kFunctionReadCoils);
   frame.push_back(static_cast<uint8_t>((address >> 8) & 0xFF));
   frame.push_back(static_cast<uint8_t>(address & 0xFF));
@@ -96,7 +95,7 @@ grpc::Status SerialBus::ReadCoil(uint8_t slaveId, uint16_t address, bool* out) {
   }
 
   std::vector<uint8_t> data;
-  status = readResponseLocked(slaveId, kFunctionReadCoils, 1, &data);
+  status = readResponseLocked(deviceId, kFunctionReadCoils, 1, &data);
   if (!status.ok()) {
     return status;
   }
@@ -107,12 +106,12 @@ grpc::Status SerialBus::ReadCoil(uint8_t slaveId, uint16_t address, bool* out) {
   return grpc::Status::OK;
 }
 
-grpc::Status SerialBus::ReadHoldingRegister(uint8_t slaveId, uint16_t address, uint16_t* out) {
+grpc::Status SerialBus::ReadHoldingRegister(uint8_t deviceId, uint16_t address, uint16_t* out) {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   std::vector<uint16_t> values;
-  auto status = ReadHoldingRegisters(slaveId, address, 1, &values);
+  auto status = ReadHoldingRegisters(deviceId, address, 1, &values);
   if (!status.ok()) {
     return status;
   }
@@ -123,7 +122,7 @@ grpc::Status SerialBus::ReadHoldingRegister(uint8_t slaveId, uint16_t address, u
   return grpc::Status::OK;
 }
 
-grpc::Status SerialBus::ReadHoldingRegisters(uint8_t slaveId,
+grpc::Status SerialBus::ReadHoldingRegisters(uint8_t deviceId,
                                              uint16_t address,
                                              uint16_t quantity,
                                              std::vector<uint16_t>* out) {
@@ -142,7 +141,7 @@ grpc::Status SerialBus::ReadHoldingRegisters(uint8_t slaveId,
 
   std::vector<uint8_t> frame;
   frame.reserve(8);
-  frame.push_back(slaveId);
+  frame.push_back(deviceId);
   frame.push_back(kFunctionReadHoldingRegisters);
   frame.push_back(static_cast<uint8_t>((address >> 8) & 0xFF));
   frame.push_back(static_cast<uint8_t>(address & 0xFF));
@@ -156,7 +155,7 @@ grpc::Status SerialBus::ReadHoldingRegisters(uint8_t slaveId,
   }
 
   std::vector<uint8_t> data;
-  status = readResponseLocked(slaveId, kFunctionReadHoldingRegisters, quantity, &data);
+  status = readResponseLocked(deviceId, kFunctionReadHoldingRegisters, quantity, &data);
   if (!status.ok()) {
     return status;
   }
@@ -179,12 +178,12 @@ grpc::Status SerialBus::ReadHoldingRegisters(uint8_t slaveId,
   return grpc::Status::OK;
 }
 
-grpc::Status SerialBus::ReadInputRegister(uint8_t slaveId, uint16_t address, uint16_t* out) {
+grpc::Status SerialBus::ReadInputRegister(uint8_t deviceId, uint16_t address, uint16_t* out) {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
   std::vector<uint16_t> values;
-  auto status = ReadInputRegisters(slaveId, address, 1, &values);
+  auto status = ReadInputRegisters(deviceId, address, 1, &values);
   if (!status.ok()) {
     return status;
   }
@@ -195,7 +194,7 @@ grpc::Status SerialBus::ReadInputRegister(uint8_t slaveId, uint16_t address, uin
   return grpc::Status::OK;
 }
 
-grpc::Status SerialBus::ReadInputRegisters(uint8_t slaveId,
+grpc::Status SerialBus::ReadInputRegisters(uint8_t deviceId,
                                            uint16_t address,
                                            uint16_t quantity,
                                            std::vector<uint16_t>* out) {
@@ -214,7 +213,7 @@ grpc::Status SerialBus::ReadInputRegisters(uint8_t slaveId,
 
   std::vector<uint8_t> frame;
   frame.reserve(8);
-  frame.push_back(slaveId);
+  frame.push_back(deviceId);
   frame.push_back(kFunctionReadInputRegisters);
   frame.push_back(static_cast<uint8_t>((address >> 8) & 0xFF));
   frame.push_back(static_cast<uint8_t>(address & 0xFF));
@@ -228,7 +227,7 @@ grpc::Status SerialBus::ReadInputRegisters(uint8_t slaveId,
   }
 
   std::vector<uint8_t> data;
-  status = readResponseLocked(slaveId, kFunctionReadInputRegisters, quantity, &data);
+  status = readResponseLocked(deviceId, kFunctionReadInputRegisters, quantity, &data);
   if (!status.ok()) {
     return status;
   }
@@ -251,7 +250,7 @@ grpc::Status SerialBus::ReadInputRegisters(uint8_t slaveId,
   return grpc::Status::OK;
 }
 
-grpc::Status SerialBus::WriteSingleRegister(uint8_t slaveId, uint16_t address, uint16_t value) {
+grpc::Status SerialBus::WriteSingleRegister(uint8_t deviceId, uint16_t address, uint16_t value) {
   std::lock_guard<std::mutex> lock(mu_);
   auto status = ensureOpenLocked();
   if (!status.ok()) {
@@ -260,7 +259,7 @@ grpc::Status SerialBus::WriteSingleRegister(uint8_t slaveId, uint16_t address, u
 
   std::vector<uint8_t> frame;
   frame.reserve(8);
-  frame.push_back(slaveId);
+  frame.push_back(deviceId);
   frame.push_back(kFunctionWriteSingleRegister);
   frame.push_back(static_cast<uint8_t>((address >> 8) & 0xFF));
   frame.push_back(static_cast<uint8_t>(address & 0xFF));
@@ -272,10 +271,10 @@ grpc::Status SerialBus::WriteSingleRegister(uint8_t slaveId, uint16_t address, u
   if (!status.ok()) {
     return status;
   }
-  return readWriteSingleRegisterResponseLocked(slaveId, address, value);
+  return readWriteSingleRegisterResponseLocked(deviceId, address, value);
 }
 
-grpc::Status SerialBus::WriteMultipleRegisters(uint8_t slaveId,
+grpc::Status SerialBus::WriteMultipleRegisters(uint8_t deviceId,
                                                uint16_t address,
                                                const std::vector<uint16_t>& values) {
   if (values.empty()) {
@@ -294,7 +293,7 @@ grpc::Status SerialBus::WriteMultipleRegisters(uint8_t slaveId,
 
   std::vector<uint8_t> frame;
   frame.reserve(9 + values.size() * 2);
-  frame.push_back(slaveId);
+  frame.push_back(deviceId);
   frame.push_back(kFunctionWriteMultipleRegisters);
   frame.push_back(static_cast<uint8_t>((address >> 8) & 0xFF));
   frame.push_back(static_cast<uint8_t>(address & 0xFF));
@@ -311,92 +310,7 @@ grpc::Status SerialBus::WriteMultipleRegisters(uint8_t slaveId,
   if (!status.ok()) {
     return status;
   }
-  return readWriteMultipleRegistersResponseLocked(slaveId, address, quantity);
-}
-
-grpc::Status SerialBus::ReadRequest(RtuRequest* out) {
-  if (out == nullptr) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
-  }
-
-  std::lock_guard<std::mutex> lock(mu_);
-  auto status = ensureOpenLocked();
-  if (!status.ok()) {
-    return status;
-  }
-
-  const auto timeout = std::chrono::milliseconds(config_.read_timeout_ms());
-  std::array<uint8_t, 2> header{};
-  status = readExactLocked(header.data(), header.size(), timeout, false);
-  if (!status.ok()) {
-    return status;
-  }
-
-  std::array<uint8_t, 4> body{};
-  status = readExactLocked(body.data(), body.size(), timeout, false);
-  if (!status.ok()) {
-    return status;
-  }
-
-  std::vector<uint8_t> frame;
-  frame.reserve(8);
-  frame.insert(frame.end(), header.begin(), header.end());
-  frame.insert(frame.end(), body.begin(), body.end());
-
-  const uint8_t function = header[1];
-  if (function == kFunctionWriteMultipleCoils || function == kFunctionWriteMultipleRegisters) {
-    uint8_t byteCount = 0;
-    status = readExactLocked(&byteCount, 1, timeout, false);
-    if (!status.ok()) {
-      return status;
-    }
-    frame.push_back(byteCount);
-    std::vector<uint8_t> tail(static_cast<size_t>(byteCount) + 2, 0);
-    status = readExactLocked(tail.data(), tail.size(), timeout, false);
-    if (!status.ok()) {
-      return status;
-    }
-    frame.insert(frame.end(), tail.begin(), tail.end());
-  } else {
-    std::array<uint8_t, 2> crcBytes{};
-    status = readExactLocked(crcBytes.data(), crcBytes.size(), timeout, false);
-    if (!status.ok()) {
-      return status;
-    }
-    frame.insert(frame.end(), crcBytes.begin(), crcBytes.end());
-  }
-
-  if (frame.size() < 4) {
-    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "请求帧过短");
-  }
-  const uint16_t expectCrc = computeCrc(frame.data(), frame.size() - 2);
-  const uint16_t gotCrc = static_cast<uint16_t>(frame[frame.size() - 2]) |
-      (static_cast<uint16_t>(frame[frame.size() - 1]) << 8);
-  if (expectCrc != gotCrc) {
-    LOG_WARNING("ModbusRTU 请求 CRC 校验失败: device={}, 功能码={}",
-                config_.device(), static_cast<unsigned int>(function));
-    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "请求 CRC 不匹配");
-  }
-
-  out->slaveId = header[0];
-  out->function = function;
-  out->address = static_cast<uint16_t>((static_cast<uint16_t>(body[0]) << 8) | body[1]);
-  out->quantity = static_cast<uint16_t>((static_cast<uint16_t>(body[2]) << 8) | body[3]);
-  out->frame = std::move(frame);
-  LOG_INFO("ModbusRTU 报文接收: 设备={}, 长度={}, 数据={}",
-           config_.device(),
-           out->frame.size(),
-           bytesToHex(out->frame));
-  return grpc::Status::OK;
-}
-
-grpc::Status SerialBus::WriteFrame(const std::vector<uint8_t>& frame) {
-  std::lock_guard<std::mutex> lock(mu_);
-  auto status = ensureOpenLocked();
-  if (!status.ok()) {
-    return status;
-  }
-  return writeRequestLocked(frame);
+  return readWriteMultipleRegistersResponseLocked(deviceId, address, quantity);
 }
 
 grpc::Status SerialBus::ensureOpenLocked() {
@@ -551,7 +465,7 @@ grpc::Status SerialBus::readExactLocked(uint8_t* data,
 }
 
 grpc::Status SerialBus::readResponseLocked(
-    uint8_t expectedSlaveId,
+    uint8_t expectedDeviceId,
     uint8_t expectedFunction,
     uint16_t quantity,
     std::vector<uint8_t>* outData) {
@@ -569,8 +483,8 @@ grpc::Status SerialBus::readResponseLocked(
     return status;
   }
 
-  if (header[0] != expectedSlaveId) {
-    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应 slave_id 不匹配");
+  if (header[0] != expectedDeviceId) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应设备地址不匹配");
   }
 
   const uint8_t function = header[1];
@@ -632,7 +546,7 @@ grpc::Status SerialBus::readResponseLocked(
 }
 
 grpc::Status SerialBus::readWriteSingleRegisterResponseLocked(
-    uint8_t expectedSlaveId,
+    uint8_t expectedDeviceId,
     uint16_t expectedAddress,
     uint16_t expectedValue) {
   const auto timeout = std::chrono::milliseconds(config_.read_timeout_ms());
@@ -684,8 +598,8 @@ grpc::Status SerialBus::readWriteSingleRegisterResponseLocked(
   if (crc != respCrc) {
     return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应 CRC 不匹配");
   }
-  if (frame[0] != expectedSlaveId) {
-    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应 slave_id 不匹配");
+  if (frame[0] != expectedDeviceId) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应设备地址不匹配");
   }
   if (frame[1] != kFunctionWriteSingleRegister) {
     return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应功能码不匹配");
@@ -702,7 +616,7 @@ grpc::Status SerialBus::readWriteSingleRegisterResponseLocked(
 }
 
 grpc::Status SerialBus::readWriteMultipleRegistersResponseLocked(
-    uint8_t expectedSlaveId,
+    uint8_t expectedDeviceId,
     uint16_t expectedAddress,
     uint16_t expectedQuantity) {
   const auto timeout = std::chrono::milliseconds(config_.read_timeout_ms());
@@ -754,8 +668,8 @@ grpc::Status SerialBus::readWriteMultipleRegistersResponseLocked(
   if (crc != respCrc) {
     return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应 CRC 不匹配");
   }
-  if (frame[0] != expectedSlaveId) {
-    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应 slave_id 不匹配");
+  if (frame[0] != expectedDeviceId) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应设备地址不匹配");
   }
   if (frame[1] != kFunctionWriteMultipleRegisters) {
     return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应功能码不匹配");

@@ -1,5 +1,6 @@
 #include "ModbusRTULinkManager.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -26,17 +27,12 @@ constexpr uint32_t kDefaultRequestTimeoutMs = 3000;
 constexpr uint32_t kDefaultSerialByteTimeoutMs = 100;
 constexpr uint32_t kDefaultSerialFrameTimeoutMs = 100;
 constexpr uint32_t kDefaultSerialEstSize = 256;
-constexpr uint16_t kMaxReadCoilsQuantity = 2000;
 constexpr uint16_t kMaxReadHoldingRegistersQuantity = 125;
 constexpr uint16_t kMaxReadInputRegistersQuantity = 125;
 constexpr uint16_t kMaxWriteMultipleRegistersQuantity = 123;
 constexpr uint8_t kFunctionReadCoils = 0x01;
 constexpr uint8_t kFunctionReadHoldingRegisters = 0x03;
 constexpr uint8_t kFunctionReadInputRegisters = 0x04;
-constexpr uint8_t kExceptionIllegalFunction = 0x01;
-constexpr uint8_t kExceptionIllegalDataAddress = 0x02;
-constexpr uint8_t kExceptionIllegalDataValue = 0x03;
-constexpr uint8_t kExceptionSlaveDeviceFailure = 0x04;
 
 bool is16BitRegisterType(ModbusRTUProto::DataType type) {
   return type == ModbusRTUProto::DATA_TYPE_UINT16 || type == ModbusRTUProto::DATA_TYPE_INT16;
@@ -44,10 +40,6 @@ bool is16BitRegisterType(ModbusRTUProto::DataType type) {
 
 bool is32BitRegisterType(ModbusRTUProto::DataType type) {
   return type == ModbusRTUProto::DATA_TYPE_UINT32 || type == ModbusRTUProto::DATA_TYPE_INT32;
-}
-
-bool isSignedRegisterType(ModbusRTUProto::DataType type) {
-  return type == ModbusRTUProto::DATA_TYPE_INT16 || type == ModbusRTUProto::DATA_TYPE_INT32;
 }
 
 bool isReadRegisterFunction(ModbusRTUProto::FunctionCode function) {
@@ -120,6 +112,10 @@ bool shouldReport(double value, double deadband, const std::optional<double>& la
   return std::fabs(value - last.value()) >= deadband;
 }
 
+bool hasUsableMqttConfig(const ModbusRTUProto::MqttConfig& config) {
+  return !config.host().empty() && config.port() != 0 && !config.client_id().empty();
+}
+
 bool pointValueToDouble(const DataCenterProto::PointValue& value, double* out) {
   if (out == nullptr) {
     return false;
@@ -156,24 +152,6 @@ bool reverseScale(double eng, double scale, double offset, double* out) {
 
 grpc::Status makeNotFound(const std::string& connName) {
   return grpc::Status(grpc::StatusCode::NOT_FOUND, std::format("未找到链路: {}", connName));
-}
-
-bool hasSignedRegisterPoints(const PointTable& pointTable) {
-  for (const auto& point : pointTable.Points()) {
-    if (!isWriteRegisterFunction(point.function) && isSignedRegisterType(point.type)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-bool hasWriteRegisterPoints(const PointTable& pointTable) {
-  for (const auto& point : pointTable.Points()) {
-    if (isWriteRegisterFunction(point.function)) {
-      return true;
-    }
-  }
-  return false;
 }
 
 std::string formatRegisterWords(const std::vector<uint16_t>& values) {
@@ -259,9 +237,215 @@ grpc::Status encodeWriteRegisters(const PointTable::Point& point, double engValu
 }
 }  // namespace
 
-LinkManager::LinkManager(std::string moduleName) :
+LinkManager::LinkManager(std::string moduleName,
+                         std::filesystem::path mqttPath,
+                         std::filesystem::path linksPath,
+                         std::filesystem::path pointTablesPath) :
   dataCenter_(moduleName),
-  mqttClient_(std::move(moduleName)) {}
+  mqttClient_(std::move(moduleName)),
+  mqttStore_(std::move(mqttPath)),
+  linkStore_(std::move(linksPath)),
+  pointTableStore_(std::move(pointTablesPath)) {}
+
+void LinkManager::LoadPersistedConfig() {
+  LOG_INFO("ModbusRTU 开始加载本地持久化配置");
+
+  {
+    ModbusRTUProto::MqttConfig mqttConfig;
+    auto status = mqttStore_.Load(&mqttConfig);
+    if (!status.ok()) {
+      LOG_ERROR("ModbusRTU MQTT 持久化配置加载失败: 原因={}", status.error_message());
+    } else if (hasUsableMqttConfig(mqttConfig)) {
+      mqttClient_.setConfig(mqttConfig);
+      LOG_INFO("ModbusRTU 已加载 MQTT 持久化配置: host={}, port={}, client_id={}",
+               mqttConfig.host(),
+               mqttConfig.port(),
+               mqttConfig.client_id());
+    } else {
+      LOG_INFO("ModbusRTU 未找到 MQTT 持久化配置");
+    }
+  }
+
+  ModbusRTUProto::LinksConfig linksConfig;
+  auto linksStatus = linkStore_.Load(&linksConfig);
+  if (!linksStatus.ok()) {
+    LOG_ERROR("ModbusRTU 链路持久化配置加载失败: 原因={}", linksStatus.error_message());
+    return;
+  }
+
+  ModbusRTUProto::PointTablesConfig pointTablesConfig;
+  auto pointTablesStatus = pointTableStore_.Load(&pointTablesConfig);
+  if (!pointTablesStatus.ok()) {
+    LOG_ERROR("ModbusRTU 点表持久化配置加载失败: 原因={}", pointTablesStatus.error_message());
+    return;
+  }
+  LOG_INFO("ModbusRTU 持久化配置载入摘要: 链路记录数={}, 点表记录数={}",
+           linksConfig.links_size(),
+           pointTablesConfig.point_tables_size());
+
+  std::unordered_map<std::string, ModbusRTUProto::PointTable> pointTablesByConn;
+  pointTablesByConn.reserve(static_cast<size_t>(pointTablesConfig.point_tables_size()));
+  for (const auto& table : pointTablesConfig.point_tables()) {
+    pointTablesByConn.emplace(table.conn_name(), table);
+  }
+
+  if (linksConfig.links_size() == 0) {
+    if (!pointTablesByConn.empty()) {
+      LOG_WARNING("ModbusRTU 未找到链路持久化配置，但存在 {} 条点表持久化配置，准备清理孤立点表",
+                  pointTablesByConn.size());
+      auto saveStatus = savePointTablesConfig(ModbusRTUProto::PointTablesConfig());
+      if (!saveStatus.ok()) {
+        LOG_ERROR("ModbusRTU 清理孤立点表持久化配置失败: 原因={}", saveStatus.error_message());
+      }
+    } else {
+      LOG_INFO("ModbusRTU 未找到链路持久化配置");
+    }
+    return;
+  }
+
+  std::unordered_map<std::string, LinkRuntime> restoredLinks;
+  restoredLinks.reserve(static_cast<size_t>(linksConfig.links_size()));
+  bool needResaveLinks = false;
+  bool needResavePointTables = false;
+  std::unordered_set<std::string> pointTablesLeftByDataCenterFailure;
+
+  for (const auto& persistedLink : linksConfig.links()) {
+    if (!persistedLink.has_config()) {
+      LOG_WARNING("ModbusRTU 跳过空链路持久化记录");
+      needResaveLinks = true;
+      continue;
+    }
+
+    ModbusRTUProto::LinkConfig normalized;
+    auto status = normalizeLinkConfig(persistedLink.config(), &normalized);
+    if (!status.ok()) {
+      LOG_ERROR("ModbusRTU 链路持久化配置非法，已跳过: conn_name={}, 原因={}",
+                persistedLink.config().conn_name(),
+                status.error_message());
+      needResaveLinks = true;
+      if (!persistedLink.config().conn_name().empty() &&
+          pointTablesByConn.erase(persistedLink.config().conn_name()) > 0) {
+        needResavePointTables = true;
+      }
+      continue;
+    }
+
+    size_t persistedPointCount = 0;
+    if (auto persistedTableIt = pointTablesByConn.find(normalized.conn_name());
+        persistedTableIt != pointTablesByConn.end()) {
+      persistedPointCount = static_cast<size_t>(persistedTableIt->second.points_size());
+    }
+    LOG_INFO("ModbusRTU 开始恢复链路持久化记录: conn_name={}, 持久化conn_id={}, 待删除={}, 持久化点数={}",
+             normalized.conn_name(),
+             persistedLink.conn_id(),
+             persistedLink.pending_delete(),
+             persistedPointCount);
+
+    DataCenterProto::ConnectionInfo connInfo;
+    status = dataCenter_.GetOrCreateConnection(normalized.conn_name(), &connInfo);
+    if (!status.ok()) {
+      if (persistedPointCount > 0) {
+        pointTablesLeftByDataCenterFailure.emplace(normalized.conn_name());
+      }
+      LOG_ERROR("ModbusRTU 恢复链路时获取 DataCenter 连接失败: conn_name={}, 原因={}, 本地点表点数={}",
+                normalized.conn_name(),
+                status.error_message(),
+                persistedPointCount);
+      continue;
+    }
+
+    LinkRuntime runtime;
+    runtime.config = normalized;
+    if (normalized.transport_type() == ModbusRTUProto::TRANSPORT_SERIAL) {
+      runtime.serialKey = makeSerialKey(normalized.serial());
+    } else {
+      runtime.mqttKey = makeMqttKey(normalized);
+    }
+    runtime.connId = connInfo.conn_id();
+    runtime.state = persistedLink.pending_delete() ? ModbusRTUProto::LINK_STATE_PENDING_DELETE
+                                                   : ModbusRTUProto::LINK_STATE_STOPPED;
+
+    size_t pointCount = 0;
+    auto tableIt = pointTablesByConn.find(normalized.conn_name());
+    if (tableIt != pointTablesByConn.end()) {
+      PointTable pointTable;
+      status = pointTable.Upsert(tableIt->second.points(), true);
+      if (!status.ok()) {
+        LOG_ERROR("ModbusRTU 恢复点表失败，已跳过该点表: conn_name={}, 原因={}",
+                  normalized.conn_name(),
+                  status.error_message());
+        needResavePointTables = true;
+      } else {
+        runtime.pointTable = std::move(pointTable);
+        pointCount = static_cast<size_t>(tableIt->second.points_size());
+      }
+      pointTablesByConn.erase(tableIt);
+    }
+
+    auto syncStatus = dataCenter_.UpsertConnTags(runtime.connId, runtime.pointTable.Tags(), true);
+    if (!syncStatus.ok()) {
+      LOG_ERROR("ModbusRTU 恢复链路时同步 DataCenter 连接标签注册表失败: conn_name={}, conn_id={}, 原因={}",
+                normalized.conn_name(),
+                runtime.connId,
+                syncStatus.error_message());
+    }
+
+    if (persistedLink.conn_id() != 0 && persistedLink.conn_id() != runtime.connId) {
+      LOG_WARNING("ModbusRTU 恢复链路时发现 conn_id 已变化: conn_name={}, 持久化conn_id={}, 当前conn_id={}",
+                  normalized.conn_name(),
+                  persistedLink.conn_id(),
+                  runtime.connId);
+      needResaveLinks = true;
+    }
+
+    restoredLinks[normalized.conn_name()] = std::move(runtime);
+    LOG_INFO("ModbusRTU 已恢复链路配置: conn_name={}, conn_id={}, 点数={}, 状态={}",
+             normalized.conn_name(),
+             connInfo.conn_id(),
+             pointCount,
+             persistedLink.pending_delete() ? "待删除" : "已停止");
+  }
+
+  for (const auto& [connName, _] : pointTablesByConn) {
+    auto tableIt = pointTablesByConn.find(connName);
+    const size_t pointCount = tableIt == pointTablesByConn.end() ? 0u : static_cast<size_t>(tableIt->second.points_size());
+    LOG_WARNING("ModbusRTU 点表持久化配置未进入本次恢复快照: conn_name={}, 点数={}, 原因={}",
+                connName,
+                pointCount,
+                pointTablesLeftByDataCenterFailure.contains(connName) ? "链路恢复阶段获取 DataCenter 连接失败" : "未找到对应链路");
+    needResavePointTables = true;
+  }
+
+  ModbusRTUProto::LinksConfig linksSnapshot;
+  ModbusRTUProto::PointTablesConfig pointTablesSnapshot;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    linksByName_ = std::move(restoredLinks);
+    buses_.clear();
+    mqttBuses_.clear();
+    pendingCreateByName_.clear();
+    linksSnapshot = dumpLinksConfigLocked();
+    pointTablesSnapshot = dumpPointTablesConfigLocked();
+  }
+
+  if (needResaveLinks) {
+    auto status = saveLinksConfig(linksSnapshot);
+    if (!status.ok()) {
+      LOG_ERROR("ModbusRTU 清理链路持久化配置失败: 原因={}", status.error_message());
+    }
+  }
+  if (needResavePointTables) {
+    LOG_WARNING("ModbusRTU 本次恢复将回写点表持久化配置: 恢复后链路数={}, 回写点表记录数={}",
+                linksSnapshot.links_size(),
+                pointTablesSnapshot.point_tables_size());
+    auto status = savePointTablesConfig(pointTablesSnapshot);
+    if (!status.ok()) {
+      LOG_ERROR("ModbusRTU 清理点表持久化配置失败: 原因={}", status.error_message());
+    }
+  }
+
+  LOG_INFO("ModbusRTU 本地持久化配置加载完成: 链路数={}", linksSnapshot.links_size());
+}
 
 void LinkManager::setDataCenterServerAddress(std::string address) {
   dataCenter_.setServerAddress(std::move(address));
@@ -293,6 +477,21 @@ grpc::Status LinkManager::UpdateConfig(const ModbusRTUProto::UpdateConfigRequest
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "MQTT 连接参数不完整");
   }
   mqttClient_.setConfig(mqtt);
+  auto status = mqttStore_.Save(mqtt);
+  if (!status.ok()) {
+    response->set_ok(false);
+    response->set_message("MQTT 配置落盘失败");
+    LOG_ERROR("ModbusRTU MQTT 配置落盘失败: host={}, port={}, client_id={}, 原因={}",
+              mqtt.host(),
+              mqtt.port(),
+              mqtt.client_id(),
+              status.error_message());
+    return status;
+  }
+  LOG_INFO("ModbusRTU MQTT 配置已落盘: host={}, port={}, client_id={}",
+           mqtt.host(),
+           mqtt.port(),
+           mqtt.client_id());
   response->set_ok(true);
   response->set_message("MQTT 配置更新成功");
   return grpc::Status::OK;
@@ -363,9 +562,6 @@ grpc::Status LinkManager::normalizeLinkConfig(const ModbusRTUProto::LinkConfig& 
   if (out->address_base() == ModbusRTUProto::ADDRESS_BASE_UNSPECIFIED) {
     out->set_address_base(ModbusRTUProto::ADDRESS_BASE_ZERO);
   }
-  if (out->mode() == ModbusRTUProto::LINK_MODE_UNSPECIFIED) {
-    out->set_mode(ModbusRTUProto::LINK_MODE_MASTER);
-  }
   if (out->transport_type() == ModbusRTUProto::TRANSPORT_SERIAL) {
     if (serial->device().empty()) {
       return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "TRANSPORT_SERIAL 要求 serial.device 不能为空");
@@ -378,9 +574,6 @@ grpc::Status LinkManager::normalizeLinkConfig(const ModbusRTUProto::LinkConfig& 
     out->set_transport_type(ModbusRTUProto::TRANSPORT_MQTT_UART);
     if (out->serial_port().empty()) {
       return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "TRANSPORT_MQTT_UART 要求 serial_port 不能为空");
-    }
-    if (out->mode() != ModbusRTUProto::LINK_MODE_MASTER) {
-      return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "TRANSPORT_MQTT_UART 当前仅支持主站模式");
     }
     if (out->request_timeout_ms() == 0) {
       out->set_request_timeout_ms(kDefaultRequestTimeoutMs);
@@ -420,12 +613,8 @@ grpc::Status LinkManager::normalizeLinkConfig(const ModbusRTUProto::LinkConfig& 
       out->address_base() != ModbusRTUProto::ADDRESS_BASE_ONE) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "address_base 非法");
   }
-  if (out->mode() != ModbusRTUProto::LINK_MODE_MASTER &&
-      out->mode() != ModbusRTUProto::LINK_MODE_SLAVE) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "link mode 非法");
-  }
-  if (out->slave_id() == 0 || out->slave_id() > 247) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "slave_id 必须在 [1,247] 范围内");
+  if (out->device_id() == 0 || out->device_id() > 247) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "设备地址(device_id) 必须在 [1,247] 范围内");
   }
   if (out->has_read_plan()) {
     auto *plan = out->mutable_read_plan();
@@ -434,9 +623,6 @@ grpc::Status LinkManager::normalizeLinkConfig(const ModbusRTUProto::LinkConfig& 
                                              : ModbusRTUProto::READ_PLAN_MODE_POINT);
     }
     if (plan->mode() == ModbusRTUProto::READ_PLAN_MODE_EXPLICIT) {
-      if (out->mode() != ModbusRTUProto::LINK_MODE_MASTER) {
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "read_plan 仅支持主站模式");
-      }
       if (plan->blocks_size() == 0) {
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "read_plan.blocks 不能为空");
       }
@@ -516,8 +702,77 @@ grpc::Status LinkManager::fillLinkInfoLocked(const LinkRuntime& link, ModbusRTUP
   return grpc::Status::OK;
 }
 
-grpc::Status LinkManager::ensureSerialCompatibleLocked(
-    const SerialKey& key, const std::string& connName, ModbusRTUProto::LinkMode mode) const {
+ModbusRTUProto::LinksConfig LinkManager::dumpLinksConfigLocked() const {
+  ModbusRTUProto::LinksConfig config;
+  std::vector<std::string> connNames;
+  connNames.reserve(linksByName_.size());
+  for (const auto& [connName, _] : linksByName_) {
+    connNames.push_back(connName);
+  }
+  std::sort(connNames.begin(), connNames.end());
+
+  for (const auto& connName : connNames) {
+    auto it = linksByName_.find(connName);
+    if (it == linksByName_.end()) {
+      continue;
+    }
+    auto* item = config.add_links();
+    *item->mutable_config() = it->second.config;
+    item->set_conn_id(it->second.connId);
+    item->set_pending_delete(it->second.state == ModbusRTUProto::LINK_STATE_PENDING_DELETE);
+  }
+  return config;
+}
+
+ModbusRTUProto::PointTablesConfig LinkManager::dumpPointTablesConfigLocked() const {
+  ModbusRTUProto::PointTablesConfig config;
+  std::vector<std::string> connNames;
+  connNames.reserve(linksByName_.size());
+  for (const auto& [connName, _] : linksByName_) {
+    connNames.push_back(connName);
+  }
+  std::sort(connNames.begin(), connNames.end());
+
+  for (const auto& connName : connNames) {
+    auto it = linksByName_.find(connName);
+    if (it == linksByName_.end()) {
+      continue;
+    }
+    ModbusRTUProto::PointTable table;
+    it->second.pointTable.ToProto(connName, &table);
+    if (table.points_size() == 0) {
+      continue;
+    }
+    *config.add_point_tables() = std::move(table);
+  }
+  return config;
+}
+
+grpc::Status LinkManager::saveLinksConfig(const ModbusRTUProto::LinksConfig& config) {
+  auto status = linkStore_.Save(config);
+  if (!status.ok()) {
+    LOG_ERROR("ModbusRTU 链路配置落盘失败: 链路数={}, 原因={}",
+              config.links_size(),
+              status.error_message());
+    return status;
+  }
+  LOG_INFO("ModbusRTU 链路配置已落盘: 链路数={}", config.links_size());
+  return grpc::Status::OK;
+}
+
+grpc::Status LinkManager::savePointTablesConfig(const ModbusRTUProto::PointTablesConfig& config) {
+  auto status = pointTableStore_.Save(config);
+  if (!status.ok()) {
+    LOG_ERROR("ModbusRTU 点表配置落盘失败: 链路数={}, 原因={}",
+              config.point_tables_size(),
+              status.error_message());
+    return status;
+  }
+  LOG_INFO("ModbusRTU 点表配置已落盘: 链路数={}", config.point_tables_size());
+  return grpc::Status::OK;
+}
+
+grpc::Status LinkManager::ensureSerialCompatibleLocked(const SerialKey& key, const std::string& connName) const {
   for (const auto& [name, link] : linksByName_) {
     if (name == connName) {
       continue;
@@ -531,15 +786,11 @@ grpc::Status LinkManager::ensureSerialCompatibleLocked(
     if (!(link.serialKey == key)) {
       return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "串口配置与现有链路冲突");
     }
-    if (link.config.mode() != mode) {
-      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "串口链路模式与现有链路冲突");
-    }
   }
   return grpc::Status::OK;
 }
 
-grpc::Status LinkManager::ensureMqttCompatibleLocked(
-    const MqttKey& key, const std::string& connName, ModbusRTUProto::LinkMode mode) const {
+grpc::Status LinkManager::ensureMqttCompatibleLocked(const MqttKey& key, const std::string& connName) const {
   for (const auto& [name, link] : linksByName_) {
     if (name == connName) {
       continue;
@@ -552,9 +803,6 @@ grpc::Status LinkManager::ensureMqttCompatibleLocked(
     }
     if (!(link.mqttKey == key)) {
       return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "远端串口配置与现有链路冲突");
-    }
-    if (link.config.mode() != mode) {
-      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "远端串口链路模式与现有链路冲突");
     }
   }
   return grpc::Status::OK;
@@ -620,91 +868,6 @@ std::shared_ptr<Bus> LinkManager::releaseMqttBusLocked(const MqttKey& key) {
   return nullptr;
 }
 
-grpc::Status LinkManager::startSlaveLink(const std::string& connName,
-                                         const ModbusRTUProto::LinkConfig& config,
-                                         const PointTable& pointTable,
-                                         uint32_t connId,
-                                         const SerialKey& serialKey,
-                                         std::shared_ptr<SerialBus> bus) {
-  std::lock_guard<std::mutex> lock(mu_);
-  auto it = linksByName_.find(connName);
-  if (it == linksByName_.end()) {
-    return makeNotFound(connName);
-  }
-  if (it->second.state == ModbusRTUProto::LINK_STATE_PENDING_DELETE) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路处于待删除状态");
-  }
-  if (it->second.state == ModbusRTUProto::LINK_STATE_RUNNING) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路已在运行");
-  }
-
-  auto& slaveBus = slaveBuses_[serialKey];
-  if (!slaveBus.bus) {
-    slaveBus.bus = bus;
-  }
-  const auto slaveId = static_cast<uint8_t>(config.slave_id());
-  if (slaveBus.linksBySlaveId.contains(slaveId)) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "该串口上的 slave_id 已在运行");
-  }
-  auto snapshot = std::make_shared<SlaveLinkSnapshot>();
-  snapshot->connName = connName;
-  snapshot->config = config;
-  snapshot->connId = connId;
-  snapshot->pointTable = pointTable;
-  slaveBus.linksBySlaveId.emplace(slaveId, std::move(snapshot));
-
-  if (!slaveBus.worker.joinable()) {
-    slaveBus.worker = ModuleManager::StartModuleThread(
-        ModbusRTULibInfo.LIB_NAME,
-        [this, serialKey, bus](std::stop_token stopToken) { slaveLoop(serialKey, bus, stopToken); });
-  }
-
-  it->second.bus = bus;
-  it->second.state = ModbusRTUProto::LINK_STATE_RUNNING;
-  it->second.lastError.clear();
-  return grpc::Status::OK;
-}
-
-grpc::Status LinkManager::stopSlaveLink(const std::string& connName,
-                                        const ModbusRTUProto::LinkConfig& config,
-                                        const SerialKey& serialKey,
-                                        std::shared_ptr<SerialBus> bus) {
-  std::jthread worker;
-  std::shared_ptr<SerialBus> releasedBus;
-  bool shouldStopWorker = false;
-  bool removed = false;
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    auto it = slaveBuses_.find(serialKey);
-    if (it != slaveBuses_.end()) {
-      const auto slaveId = static_cast<uint8_t>(config.slave_id());
-      removed = (it->second.linksBySlaveId.erase(slaveId) > 0);
-      if (it->second.linksBySlaveId.empty()) {
-        worker = std::move(it->second.worker);
-        slaveBuses_.erase(it);
-        shouldStopWorker = true;
-      }
-    }
-    if (bus) {
-      releasedBus = std::dynamic_pointer_cast<SerialBus>(releaseSerialBusLocked(serialKey));
-    }
-  }
-
-  if (!removed) {
-    LOG_DEBUG("ModbusRTU 从站响应未找到: conn_name={}", connName);
-  }
-  if (shouldStopWorker && worker.joinable()) {
-    worker.request_stop();
-    worker.join();
-  }
-
-  if (releasedBus) {
-    releasedBus->Close();
-  }
-
-  return grpc::Status::OK;
-}
-
 void LinkManager::stopCommandSubscribeLocked(LinkRuntime* link) {
   if (link == nullptr) {
     return;
@@ -721,7 +884,7 @@ void LinkManager::stopCommandSubscribeLocked(LinkRuntime* link) {
 }
 
 void LinkManager::startCommandSubscribeLocked(const std::string& connName, LinkRuntime* link) {
-  if (link == nullptr || link->config.mode() != ModbusRTUProto::LINK_MODE_MASTER || !link->bus) {
+  if (link == nullptr || !link->bus) {
     return;
   }
   stopCommandSubscribeLocked(link);
@@ -844,19 +1007,19 @@ grpc::Status LinkManager::executeWriteCommand(const std::string& connName,
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "写多寄存器数量不能超过 123");
   }
 
-  const auto slaveId = static_cast<uint8_t>(config.slave_id());
+  const auto deviceId = static_cast<uint8_t>(config.device_id());
   if (point.function == ModbusRTUProto::FUNCTION_WRITE_SINGLE_REGISTER) {
     if (values.size() != 1) {
       return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "写单寄存器编码数量异常");
     }
-    LOG_INFO("ModbusRTU 触发写单寄存器: conn_name={}, tag={}, slave_id={}, address={}, value={}, raw={}",
+    LOG_INFO("ModbusRTU 触发写单寄存器: conn_name={}, tag={}, device_id={}, address={}, value={}, raw={}",
              connName,
              point.tag,
-             config.slave_id(),
+             config.device_id(),
              address,
              engValue,
              formatRegisterWords(values));
-    status = bus->WriteSingleRegister(slaveId, static_cast<uint16_t>(address), values.front());
+    status = bus->WriteSingleRegister(deviceId, static_cast<uint16_t>(address), values.front());
     if (status.ok()) {
       LOG_INFO("ModbusRTU 写单寄存器成功: conn_name={}, tag={}, address={}",
                connName,
@@ -866,15 +1029,15 @@ grpc::Status LinkManager::executeWriteCommand(const std::string& connName,
     return status;
   }
 
-  LOG_INFO("ModbusRTU 触发写多寄存器: conn_name={}, tag={}, slave_id={}, address={}, quantity={}, value={}, raw={}",
+  LOG_INFO("ModbusRTU 触发写多寄存器: conn_name={}, tag={}, device_id={}, address={}, quantity={}, value={}, raw={}",
            connName,
            point.tag,
-           config.slave_id(),
+           config.device_id(),
            address,
            values.size(),
            engValue,
            formatRegisterWords(values));
-  status = bus->WriteMultipleRegisters(slaveId, static_cast<uint16_t>(address), values);
+  status = bus->WriteMultipleRegisters(deviceId, static_cast<uint16_t>(address), values);
   if (status.ok()) {
     LOG_INFO("ModbusRTU 写多寄存器成功: conn_name={}, tag={}, address={}, quantity={}",
              connName,
@@ -885,442 +1048,12 @@ grpc::Status LinkManager::executeWriteCommand(const std::string& connName,
   return status;
 }
 
-void LinkManager::slaveLoop(SerialKey serialKey, std::shared_ptr<SerialBus> bus, std::stop_token stopToken) {
-  LOG_INFO("ModbusRTU 从站监听启动: device={}", serialKey.device);
-  while (!stopToken.stop_requested()) {
-    SerialBus::RtuRequest request;
-    auto status = bus->ReadRequest(&request);
-    if (!status.ok()) {
-      if (status.error_code() != grpc::StatusCode::DEADLINE_EXCEEDED) {
-        LOG_WARNING("ModbusRTU 从站读取请求失败: device={}, 原因={}", serialKey.device, status.error_message());
-      }
-      continue;
-    }
-
-    if (stopToken.stop_requested()) {
-      break;
-    }
-
-    if (request.slaveId == 0) {
-      LOG_DEBUG("ModbusRTU 从站忽略广播请求: device={}", serialKey.device);
-      continue;
-    }
-
-    std::shared_ptr<SlaveLinkSnapshot> link;
-    {
-      std::lock_guard<std::mutex> lock(mu_);
-      auto busIt = slaveBuses_.find(serialKey);
-      if (busIt == slaveBuses_.end()) {
-        continue;
-      }
-      auto it = busIt->second.linksBySlaveId.find(request.slaveId);
-      if (it == busIt->second.linksBySlaveId.end()) {
-        LOG_DEBUG("ModbusRTU 未匹配到从站地址: device={}, slave_id={}", serialKey.device, request.slaveId);
-        continue;
-      }
-      link = it->second;
-    }
-
-    auto sendException = [&](uint8_t exceptionCode, std::string_view reason) {
-      std::vector<uint8_t> resp;
-      resp.reserve(5);
-      resp.push_back(request.slaveId);
-      resp.push_back(static_cast<uint8_t>(request.function | 0x80));
-      resp.push_back(exceptionCode);
-      SerialBus::appendCrc(&resp);
-      auto sendStatus = bus->WriteFrame(resp);
-      if (!sendStatus.ok()) {
-        LOG_ERROR("ModbusRTU 从站异常响应发送失败: conn_name={}, 原因={}", link->connName, sendStatus.error_message());
-        updateLastError(link->connName, sendStatus.error_message());
-      } else {
-        LOG_WARNING("ModbusRTU 从站返回异常: conn_name={}, 功能码=0x{:02X}, 异常码=0x{:02X}, 原因={}",
-                    link->connName,
-                    static_cast<unsigned int>(request.function),
-                    static_cast<unsigned int>(exceptionCode),
-                    reason);
-        updateLastError(link->connName, std::string(reason));
-      }
-    };
-
-    if (request.function == kFunctionReadCoils) {
-      if (request.quantity == 0 || request.quantity > kMaxReadCoilsQuantity) {
-        sendException(kExceptionIllegalDataValue, "线圈数量非法");
-        continue;
-      }
-      if (static_cast<uint32_t>(request.address) + request.quantity - 1 > 0xFFFF) {
-        sendException(kExceptionIllegalDataAddress, "线圈地址超出范围");
-        continue;
-      }
-
-      struct CoilSlot {
-        bool hasPoint = false;
-        std::string tag;
-        std::optional<bool> defaultValue;
-      };
-      std::vector<CoilSlot> slots;
-      slots.resize(request.quantity);
-      std::vector<std::string> tags;
-      tags.reserve(request.quantity);
-
-      bool addressOverflow = false;
-      for (uint16_t i = 0; i < request.quantity; ++i) {
-        uint32_t reqAddr = static_cast<uint32_t>(request.address) + i;
-        uint32_t lookupAddr = reqAddr;
-        if (link->config.address_base() == ModbusRTUProto::ADDRESS_BASE_ONE) {
-          if (reqAddr == 0xFFFF) {
-            addressOverflow = true;
-            break;
-          }
-          lookupAddr = reqAddr + 1;
-        }
-        auto point = link->pointTable.FindByAddress(ModbusRTUProto::FUNCTION_READ_COILS, lookupAddr);
-        if (!point.has_value()) {
-          continue;
-        }
-        slots[i].hasPoint = true;
-        slots[i].tag = point->tag;
-        slots[i].defaultValue = point->defaultBool;
-        tags.push_back(point->tag);
-      }
-
-      if (addressOverflow) {
-        sendException(kExceptionIllegalDataAddress, "线圈地址溢出");
-        continue;
-      }
-
-      std::unordered_map<std::string, std::optional<bool>> valuesByTag;
-      bool dcOk = true;
-      if (!tags.empty()) {
-        DataCenterProto::GetLatestResponse resp;
-        auto dcStatus = dataCenter_.GetLatest(link->connId, tags, &resp);
-        if (!dcStatus.ok()) {
-          dcOk = false;
-          LOG_WARNING("ModbusRTU 从站获取 DataCenter 最新值失败: conn_name={}, 原因={}",
-                      link->connName, dcStatus.error_message());
-          updateLastError(link->connName, dcStatus.error_message());
-        } else {
-          for (const auto& update : resp.updates()) {
-            if (update.value().kind_case() == DataCenterProto::PointValue::kBoolValue) {
-              valuesByTag[update.dst_tag()] = update.value().bool_value();
-            } else {
-              valuesByTag[update.dst_tag()] = std::nullopt;
-              LOG_WARNING("ModbusRTU 从站点值类型不匹配: conn_name={}, tag={}",
-                          link->connName, update.dst_tag());
-            }
-          }
-        }
-      }
-
-      const size_t byteCount = (static_cast<size_t>(request.quantity) + 7) / 8;
-      std::vector<uint8_t> coilBytes(byteCount, 0);
-      bool missingValue = false;
-
-      for (uint16_t i = 0; i < request.quantity; ++i) {
-        bool value = false;
-        if (!slots[i].hasPoint) {
-          value = false;
-        } else if (dcOk) {
-          auto it = valuesByTag.find(slots[i].tag);
-          if (it != valuesByTag.end() && it->second.has_value()) {
-            value = it->second.value();
-          } else if (slots[i].defaultValue.has_value()) {
-            value = slots[i].defaultValue.value();
-          } else {
-            missingValue = true;
-          }
-        } else {
-          if (slots[i].defaultValue.has_value()) {
-            value = slots[i].defaultValue.value();
-          } else {
-            missingValue = true;
-          }
-        }
-
-        if (missingValue) {
-          break;
-        }
-        if (value) {
-          coilBytes[static_cast<size_t>(i / 8)] |= static_cast<uint8_t>(1u << (i % 8));
-        }
-      }
-
-      if (missingValue) {
-        sendException(kExceptionSlaveDeviceFailure, "线圈值缺失");
-        continue;
-      }
-
-      std::vector<uint8_t> response;
-      response.reserve(3 + coilBytes.size() + 2);
-      response.push_back(request.slaveId);
-      response.push_back(kFunctionReadCoils);
-      response.push_back(static_cast<uint8_t>(coilBytes.size()));
-      response.insert(response.end(), coilBytes.begin(), coilBytes.end());
-      SerialBus::appendCrc(&response);
-
-      auto sendStatus = bus->WriteFrame(response);
-      if (!sendStatus.ok()) {
-        LOG_ERROR("ModbusRTU 从站响应发送失败: conn_name={}, 原因={}", link->connName, sendStatus.error_message());
-        updateLastError(link->connName, sendStatus.error_message());
-      }
-      continue;
-    }
-
-    if (request.function == kFunctionReadHoldingRegisters || request.function == kFunctionReadInputRegisters) {
-      const auto pointFunction = request.function == kFunctionReadInputRegisters
-          ? ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS
-          : ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS;
-      const auto registerName = request.function == kFunctionReadInputRegisters ? "输入寄存器" : "保持寄存器";
-      const auto maxQuantity = request.function == kFunctionReadInputRegisters
-          ? kMaxReadInputRegistersQuantity
-          : kMaxReadHoldingRegistersQuantity;
-
-      if (request.quantity == 0 || request.quantity > maxQuantity) {
-        sendException(kExceptionIllegalDataValue, std::string(registerName) + "数量非法");
-        continue;
-      }
-      if (static_cast<uint32_t>(request.address) + request.quantity - 1 > 0xFFFF) {
-        sendException(kExceptionIllegalDataAddress, std::string(registerName) + "地址超出范围");
-        continue;
-      }
-
-      struct RegisterSlot {
-        bool hasPoint = false;
-        std::string tag;
-        ModbusRTUProto::DataType type = ModbusRTUProto::DATA_TYPE_UNSPECIFIED;
-        uint32_t wordIndex = 0;
-      };
-
-      struct PointMeta {
-        ModbusRTUProto::DataType type = ModbusRTUProto::DATA_TYPE_UNSPECIFIED;
-        uint32_t regCount = 1;
-        ModbusRTUProto::WordOrder wordOrder = ModbusRTUProto::WORD_ORDER_HL;
-        ModbusRTUProto::ByteOrder byteOrder = ModbusRTUProto::BYTE_ORDER_AB;
-        double scale = 1.0;
-        double offset = 0.0;
-        std::optional<uint32_t> defaultValue;
-      };
-
-      std::vector<RegisterSlot> slots(request.quantity);
-      std::unordered_map<std::string, PointMeta> metaByTag;
-      metaByTag.reserve(request.quantity);
-
-      bool addressOverflow = false;
-      for (uint16_t i = 0; i < request.quantity; ++i) {
-        uint32_t reqAddr = static_cast<uint32_t>(request.address) + i;
-        uint32_t lookupAddr = reqAddr;
-        if (link->config.address_base() == ModbusRTUProto::ADDRESS_BASE_ONE) {
-          if (reqAddr == 0xFFFF) {
-            addressOverflow = true;
-            break;
-          }
-          lookupAddr = reqAddr + 1;
-        }
-        auto point = link->pointTable.FindRegisterByAddress(pointFunction, lookupAddr);
-        if (!point) {
-          continue;
-        }
-        slots[i].hasPoint = true;
-        slots[i].tag = point->point.tag;
-        slots[i].type = point->point.type;
-        slots[i].wordIndex = point->wordIndex;
-        if (metaByTag.find(point->point.tag) == metaByTag.end()) {
-          PointMeta meta;
-          meta.type = point->point.type;
-          meta.regCount = point->point.regCount;
-          meta.wordOrder = point->point.wordOrder;
-          meta.byteOrder = point->point.byteOrder;
-          meta.scale = point->point.scale;
-          meta.offset = point->point.offset;
-          if (point->point.defaultUInt16.has_value()) {
-            meta.defaultValue = point->point.defaultUInt16.value();
-          } else if (point->point.defaultUInt32.has_value()) {
-            meta.defaultValue = point->point.defaultUInt32.value();
-          }
-          metaByTag.emplace(point->point.tag, meta);
-        }
-      }
-
-      if (addressOverflow) {
-        sendException(kExceptionIllegalDataAddress, std::string(registerName) + "地址溢出");
-        continue;
-      }
-
-      std::vector<std::string> tags;
-      tags.reserve(metaByTag.size());
-      for (const auto& [tag, _] : metaByTag) {
-        tags.push_back(tag);
-      }
-
-      std::unordered_map<std::string, std::optional<double>> valuesByTag;
-      bool dcOk = true;
-      if (!tags.empty()) {
-        DataCenterProto::GetLatestResponse resp;
-        auto dcStatus = dataCenter_.GetLatest(link->connId, tags, &resp);
-        if (!dcStatus.ok()) {
-          dcOk = false;
-          LOG_WARNING("ModbusRTU 从站获取 DataCenter 最新值失败: conn_name={}, 原因={}",
-                      link->connName, dcStatus.error_message());
-          updateLastError(link->connName, dcStatus.error_message());
-        } else {
-          for (const auto& update : resp.updates()) {
-            if (update.value().kind_case() == DataCenterProto::PointValue::kDoubleValue) {
-              valuesByTag[update.dst_tag()] = update.value().double_value();
-            } else if (update.value().kind_case() == DataCenterProto::PointValue::kIntValue) {
-              valuesByTag[update.dst_tag()] = static_cast<double>(update.value().int_value());
-            } else {
-              valuesByTag[update.dst_tag()] = std::nullopt;
-              LOG_WARNING("ModbusRTU 从站点值类型不匹配: conn_name={}, tag={}",
-                          link->connName, update.dst_tag());
-            }
-          }
-        }
-      }
-
-      std::unordered_map<std::string, std::optional<uint32_t>> rawByTag;
-      rawByTag.reserve(metaByTag.size());
-      bool missingValue = false;
-
-      for (const auto& [tag, meta] : metaByTag) {
-        uint32_t value = 0;
-        bool hasValue = false;
-        if (dcOk) {
-          auto it = valuesByTag.find(tag);
-          if (it != valuesByTag.end() && it->second.has_value()) {
-            const double engValue = it->second.value();
-            const double scale = meta.scale == 0.0 ? 1.0 : meta.scale;
-            const double rawValue = (engValue - meta.offset) / scale;
-            if (!std::isfinite(rawValue)) {
-              LOG_WARNING("ModbusRTU 从站点值无法反向缩放: conn_name={}, tag={}, value={}",
-                          link->connName, tag, engValue);
-              missingValue = true;
-            } else {
-              long long rounded = std::llround(rawValue);
-              const unsigned long long maxValue =
-                  meta.type == ModbusRTUProto::DATA_TYPE_UINT32 ? 0xFFFFFFFFull : 0xFFFFull;
-              if (rounded < 0) {
-                LOG_WARNING("ModbusRTU 从站点值超出范围已截断: conn_name={}, tag={}, raw={}",
-                            link->connName, tag, rounded);
-                rounded = 0;
-              } else if (static_cast<unsigned long long>(rounded) > maxValue) {
-                LOG_WARNING("ModbusRTU 从站点值超出范围已截断: conn_name={}, tag={}, raw={}",
-                            link->connName, tag, rounded);
-                rounded = static_cast<long long>(maxValue);
-              }
-              value = static_cast<uint32_t>(rounded);
-              hasValue = true;
-            }
-          }
-        }
-        if (!hasValue && meta.defaultValue.has_value()) {
-          value = meta.defaultValue.value();
-          hasValue = true;
-        }
-        if (!hasValue) {
-          missingValue = true;
-        } else {
-          rawByTag[tag] = value;
-        }
-        if (missingValue) {
-          break;
-        }
-      }
-
-      if (missingValue) {
-        sendException(kExceptionSlaveDeviceFailure, std::string(registerName) + "值缺失");
-        continue;
-      }
-
-      std::unordered_map<std::string, std::array<uint16_t, 2>> wordsByTag;
-      wordsByTag.reserve(metaByTag.size());
-      for (const auto& [tag, meta] : metaByTag) {
-        if (meta.type != ModbusRTUProto::DATA_TYPE_UINT32) {
-          continue;
-        }
-        auto rawIt = rawByTag.find(tag);
-        if (rawIt == rawByTag.end() || !rawIt->second.has_value()) {
-          missingValue = true;
-          break;
-        }
-        auto words = encodeUint32(rawIt->second.value(), meta.wordOrder, meta.byteOrder);
-        wordsByTag.emplace(tag, words);
-        LOG_DEBUG("ModbusRTU 从站32位寄存器编码: conn_name={}, tag={}, raw={}, reg0={}, reg1={}, word_order={}, byte_order={}",
-                  link->connName,
-                  tag,
-                  rawIt->second.value(),
-                  words[0],
-                  words[1],
-                  static_cast<int>(meta.wordOrder),
-                  static_cast<int>(meta.byteOrder));
-      }
-
-      if (missingValue) {
-        sendException(kExceptionSlaveDeviceFailure, std::string(registerName) + "值缺失");
-        continue;
-      }
-
-      const size_t byteCount = static_cast<size_t>(request.quantity) * 2;
-      std::vector<uint8_t> registerBytes(byteCount, 0);
-      for (uint16_t i = 0; i < request.quantity; ++i) {
-        uint16_t value = 0;
-        if (!slots[i].hasPoint) {
-          value = 0;
-        } else {
-          auto rawIt = rawByTag.find(slots[i].tag);
-          if (rawIt == rawByTag.end() || !rawIt->second.has_value()) {
-            missingValue = true;
-          } else if (slots[i].type == ModbusRTUProto::DATA_TYPE_UINT32) {
-            auto wordsIt = wordsByTag.find(slots[i].tag);
-            if (wordsIt == wordsByTag.end() || slots[i].wordIndex >= wordsIt->second.size()) {
-              missingValue = true;
-            } else {
-              value = wordsIt->second[slots[i].wordIndex];
-            }
-          } else {
-            value = static_cast<uint16_t>(rawIt->second.value());
-            auto metaIt = metaByTag.find(slots[i].tag);
-            if (metaIt != metaByTag.end() && metaIt->second.byteOrder == ModbusRTUProto::BYTE_ORDER_BA) {
-              value = swapWordBytes(value);
-            }
-          }
-        }
-        if (missingValue) {
-          break;
-        }
-        const auto offset = static_cast<size_t>(i) * 2;
-        registerBytes[offset] = static_cast<uint8_t>((value >> 8) & 0xFF);
-        registerBytes[offset + 1] = static_cast<uint8_t>(value & 0xFF);
-      }
-
-      if (missingValue) {
-        sendException(kExceptionSlaveDeviceFailure, std::string(registerName) + "值缺失");
-        continue;
-      }
-
-      std::vector<uint8_t> response;
-      response.reserve(3 + registerBytes.size() + 2);
-      response.push_back(request.slaveId);
-      response.push_back(request.function);
-      response.push_back(static_cast<uint8_t>(registerBytes.size()));
-      response.insert(response.end(), registerBytes.begin(), registerBytes.end());
-      SerialBus::appendCrc(&response);
-
-      auto sendStatus = bus->WriteFrame(response);
-      if (!sendStatus.ok()) {
-        LOG_ERROR("ModbusRTU 从站响应发送失败: conn_name={}, 原因={}", link->connName, sendStatus.error_message());
-        updateLastError(link->connName, sendStatus.error_message());
-      }
-      continue;
-    }
-
-    sendException(kExceptionIllegalFunction, "不支持的功能码");
-  }
-
-  LOG_INFO("ModbusRTU 从站监听结束: device={}", serialKey.device);
-}
-
 grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& request, ModbusRTUProto::LinkInfo* out) {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
+  }
+  if (!request.has_config()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "config 不能为空");
   }
   ModbusRTUProto::LinkConfig normalized;
   auto status = normalizeLinkConfig(request.config(), &normalized);
@@ -1332,6 +1065,9 @@ grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& re
   const auto isSerial = normalized.transport_type() == ModbusRTUProto::TRANSPORT_SERIAL;
   const auto serialKey = isSerial ? makeSerialKey(normalized.serial()) : SerialKey{};
   const auto mqttKey = !isSerial ? makeMqttKey(normalized) : MqttKey{};
+  ModbusRTUProto::LinksConfig linksConfig;
+  ModbusRTUProto::PointTablesConfig pointTablesConfig;
+  ModbusRTUProto::LinkInfo info;
 
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -1347,41 +1083,51 @@ grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& re
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路处于待删除状态");
       }
       if (isSerial) {
-        status = ensureSerialCompatibleLocked(serialKey, connName, normalized.mode());
+        status = ensureSerialCompatibleLocked(serialKey, connName);
       } else {
-        status = ensureMqttCompatibleLocked(mqttKey, connName, normalized.mode());
+        status = ensureMqttCompatibleLocked(mqttKey, connName);
       }
       if (!status.ok()) {
         return status;
-      }
-      if (normalized.mode() == ModbusRTUProto::LINK_MODE_SLAVE && hasWriteRegisterPoints(it->second.pointTable)) {
-        LOG_WARNING("ModbusRTU 更新链路模式被拒绝: conn_name={}, 原因=从站模式暂不支持写寄存器点位", connName);
-        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "从站模式暂不支持写寄存器点位");
-      }
-      if (normalized.mode() == ModbusRTUProto::LINK_MODE_SLAVE && hasSignedRegisterPoints(it->second.pointTable)) {
-        LOG_WARNING("ModbusRTU 更新链路模式被拒绝: conn_name={}, 原因=从站模式暂不支持 INT16/INT32 点位", connName);
-        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "从站模式暂不支持 INT16/INT32 点位");
       }
 
       it->second.config = normalized;
       it->second.serialKey = serialKey;
       it->second.mqttKey = mqttKey;
       it->second.lastError.clear();
-      return fillLinkInfoLocked(it->second, out);
-    }
-
-    if (pendingCreateByName_.contains(connName)) {
-      return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name 已存在");
-    }
-    if (isSerial) {
-      status = ensureSerialCompatibleLocked(serialKey, connName, normalized.mode());
+      linksConfig = dumpLinksConfigLocked();
+      pointTablesConfig = dumpPointTablesConfigLocked();
+      status = fillLinkInfoLocked(it->second, &info);
+      if (!status.ok()) {
+        return status;
+      }
     } else {
-      status = ensureMqttCompatibleLocked(mqttKey, connName, normalized.mode());
+      if (pendingCreateByName_.contains(connName)) {
+        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name 已存在");
+      }
+      if (isSerial) {
+        status = ensureSerialCompatibleLocked(serialKey, connName);
+      } else {
+        status = ensureMqttCompatibleLocked(mqttKey, connName);
+      }
+      if (!status.ok()) {
+        return status;
+      }
+      pendingCreateByName_.insert(connName);
     }
+  }
+
+  if (info.has_config()) {
+    status = saveLinksConfig(linksConfig);
     if (!status.ok()) {
       return status;
     }
-    pendingCreateByName_.insert(connName);
+    status = savePointTablesConfig(pointTablesConfig);
+    if (!status.ok()) {
+      return status;
+    }
+    *out = std::move(info);
+    return grpc::Status::OK;
   }
 
   auto rollbackPendingCreate = [this, &connName]() {
@@ -1431,8 +1177,23 @@ grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& re
     if (!inserted) {
       return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name 已存在");
     }
-    return fillLinkInfoLocked(it->second, out);
+    linksConfig = dumpLinksConfigLocked();
+    pointTablesConfig = dumpPointTablesConfigLocked();
+    status = fillLinkInfoLocked(it->second, out);
+    if (!status.ok()) {
+      return status;
+    }
   }
+
+  status = saveLinksConfig(linksConfig);
+  if (!status.ok()) {
+    return status;
+  }
+  status = savePointTablesConfig(pointTablesConfig);
+  if (!status.ok()) {
+    return status;
+  }
+  return grpc::Status::OK;
 }
 
 grpc::Status LinkManager::GetLink(const std::string& connName, ModbusRTUProto::LinkInfo* out) const {
@@ -1505,17 +1266,6 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
       }
     }
   }
-  if (config.mode() == ModbusRTUProto::LINK_MODE_SLAVE && hasWriteRegisterPoints(pointTable)) {
-    updateLastError(connName, "从站模式暂不支持写寄存器点位");
-    LOG_WARNING("ModbusRTU 启动从站响应被拒绝: conn_name={}, 原因=从站模式暂不支持写寄存器点位", connName);
-    return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "从站模式暂不支持写寄存器点位");
-  }
-  if (config.mode() == ModbusRTUProto::LINK_MODE_SLAVE && hasSignedRegisterPoints(pointTable)) {
-    updateLastError(connName, "从站模式暂不支持 INT16/INT32 点位");
-    LOG_WARNING("ModbusRTU 启动从站响应被拒绝: conn_name={}, 原因=从站模式暂不支持 INT16/INT32 点位", connName);
-    return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "从站模式暂不支持 INT16/INT32 点位");
-  }
-
   const bool isSerial = config.transport_type() == ModbusRTUProto::TRANSPORT_SERIAL;
   if (!isSerial && !mqttClient_.hasConfig()) {
     return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "MQTT 连接参数未配置");
@@ -1548,46 +1298,6 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
     return status;
   }
 
-  if (config.mode() == ModbusRTUProto::LINK_MODE_SLAVE) {
-    auto serialBus = std::dynamic_pointer_cast<SerialBus>(bus);
-    if (!serialBus) {
-      {
-        std::lock_guard<std::mutex> lock(mu_);
-        auto released = releaseSerialBusLocked(serialKey);
-        if (released) {
-          released->Close();
-        }
-        auto it = linksByName_.find(connName);
-        if (it != linksByName_.end()) {
-          it->second.lastError = "从站串口总线类型错误";
-        }
-      }
-      LOG_ERROR("ModbusRTU 启动从站响应失败: conn_name={}, 原因=从站串口总线类型错误", connName);
-      return grpc::Status(grpc::StatusCode::INTERNAL, "从站串口总线类型错误");
-    }
-    status = startSlaveLink(connName, config, pointTable, connId, serialKey, serialBus);
-    if (!status.ok()) {
-      const auto errorMessage = status.error_message();
-      const auto device = config.serial().device();
-      {
-        std::lock_guard<std::mutex> lock(mu_);
-        auto released = releaseSerialBusLocked(serialKey);
-        if (released) {
-          released->Close();
-        }
-        auto it = linksByName_.find(connName);
-        if (it != linksByName_.end()) {
-          it->second.lastError = errorMessage;
-        }
-      }
-      LOG_ERROR("ModbusRTU 启动从站响应失败: conn_name={}, device={}, 原因={}", connName, device, errorMessage);
-      return status;
-    }
-    LOG_INFO("ModbusRTU 已启动从站响应: conn_name={}, slave_id={}, device={}",
-             connName, config.slave_id(), config.serial().device());
-    return grpc::Status::OK;
-  }
-
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = linksByName_.find(connName);
@@ -1618,14 +1328,14 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
   }
 
   if (isSerial) {
-    LOG_INFO("ModbusRTU 已启动轮询: conn_name={}, slave_id={}, device={}",
+    LOG_INFO("ModbusRTU 已启动轮询: conn_name={}, device_id={}, device={}",
              connName,
-             config.slave_id(),
+             config.device_id(),
              config.serial().device());
   } else {
-    LOG_INFO("ModbusRTU 已启动 MQTT 透传轮询: conn_name={}, slave_id={}, serial_port={}",
+    LOG_INFO("ModbusRTU 已启动 MQTT 透传轮询: conn_name={}, device_id={}, serial_port={}",
              connName,
-             config.slave_id(),
+             config.device_id(),
              config.serial_port());
   }
   return grpc::Status::OK;
@@ -1645,7 +1355,6 @@ grpc::Status LinkManager::StopLink(const std::string& connName) {
   std::shared_ptr<grpc::ClientContext> commandContext;
   bool pendingDelete = false;
   ModbusRTUProto::LinkConfig config;
-  ModbusRTUProto::LinkMode mode = ModbusRTUProto::LINK_MODE_UNSPECIFIED;
 
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -1658,7 +1367,6 @@ grpc::Status LinkManager::StopLink(const std::string& connName) {
     commandContext = std::move(it->second.dcCommandContext);
     pollThread = std::move(it->second.pollThread);
     config = it->second.config;
-    mode = it->second.config.mode();
     serialKey = it->second.serialKey;
     mqttKey = it->second.mqttKey;
     bus = it->second.bus;
@@ -1673,12 +1381,6 @@ grpc::Status LinkManager::StopLink(const std::string& connName) {
     LOG_INFO("ModbusRTU 停止 DataCenter 命令订阅: conn_name={}", connName);
     commandThread.request_stop();
     commandThread.join();
-  }
-
-  if (mode == ModbusRTUProto::LINK_MODE_SLAVE) {
-    stopSlaveLink(connName, config, serialKey, std::dynamic_pointer_cast<SerialBus>(bus));
-    LOG_INFO("ModbusRTU 已停止从站响应: conn_name={}", connName);
-    return grpc::Status::OK;
   }
 
   if (pollThread.joinable()) {
@@ -1722,17 +1424,41 @@ grpc::Status LinkManager::DeleteLink(const std::string& connName) {
 
   grpc::Status dc = dataCenter_.DeleteConnection(connName);
   if (!dc.ok() && dc.error_code() != grpc::StatusCode::NOT_FOUND) {
-    std::lock_guard<std::mutex> lock(mu_);
-    auto it = linksByName_.find(connName);
-    if (it != linksByName_.end()) {
-      it->second.state = ModbusRTUProto::LINK_STATE_PENDING_DELETE;
-      it->second.lastError = dc.error_message();
+    ModbusRTUProto::LinksConfig linksConfig;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = linksByName_.find(connName);
+      if (it != linksByName_.end()) {
+        it->second.state = ModbusRTUProto::LINK_STATE_PENDING_DELETE;
+        it->second.lastError = dc.error_message();
+        linksConfig = dumpLinksConfigLocked();
+      }
+    }
+    if (linksConfig.links_size() > 0) {
+      auto saveStatus = saveLinksConfig(linksConfig);
+      if (!saveStatus.ok()) {
+        return saveStatus;
+      }
     }
     return dc;
   }
 
-  std::lock_guard<std::mutex> lock(mu_);
-  linksByName_.erase(connName);
+  ModbusRTUProto::LinksConfig linksConfig;
+  ModbusRTUProto::PointTablesConfig pointTablesConfig;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    linksByName_.erase(connName);
+    linksConfig = dumpLinksConfigLocked();
+    pointTablesConfig = dumpPointTablesConfigLocked();
+  }
+  status = saveLinksConfig(linksConfig);
+  if (!status.ok()) {
+    return status;
+  }
+  status = savePointTablesConfig(pointTablesConfig);
+  if (!status.ok()) {
+    return status;
+  }
   return grpc::Status::OK;
 }
 
@@ -1744,7 +1470,7 @@ grpc::Status LinkManager::UpsertPointTable(const ModbusRTUProto::UpsertPointTabl
 
   uint32_t connId = 0;
   PointTable current;
-  ModbusRTUProto::LinkConfig config;
+  ModbusRTUProto::PointTablesConfig pointTablesConfig;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = linksByName_.find(request.conn_name());
@@ -1759,21 +1485,12 @@ grpc::Status LinkManager::UpsertPointTable(const ModbusRTUProto::UpsertPointTabl
     }
     connId = it->second.connId;
     current = it->second.pointTable;
-    config = it->second.config;
   }
 
   PointTable next = current;
   status = next.Upsert(request.points(), request.replace());
   if (!status.ok()) {
     return status;
-  }
-  if (config.mode() == ModbusRTUProto::LINK_MODE_SLAVE && hasWriteRegisterPoints(next)) {
-    LOG_WARNING("ModbusRTU 点表更新被拒绝: conn_name={}, 原因=从站模式暂不支持写寄存器点位", request.conn_name());
-    return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "从站模式暂不支持写寄存器点位");
-  }
-  if (config.mode() == ModbusRTUProto::LINK_MODE_SLAVE && hasSignedRegisterPoints(next)) {
-    LOG_WARNING("ModbusRTU 点表更新被拒绝: conn_name={}, 原因=从站模式暂不支持 INT16/INT32 点位", request.conn_name());
-    return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "从站模式暂不支持 INT16/INT32 点位");
   }
 
   auto tags = next.Tags();
@@ -1782,12 +1499,19 @@ grpc::Status LinkManager::UpsertPointTable(const ModbusRTUProto::UpsertPointTabl
     return status;
   }
 
-  std::lock_guard<std::mutex> lock(mu_);
-  auto it = linksByName_.find(request.conn_name());
-  if (it == linksByName_.end()) {
-    return makeNotFound(request.conn_name());
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = linksByName_.find(request.conn_name());
+    if (it == linksByName_.end()) {
+      return makeNotFound(request.conn_name());
+    }
+    it->second.pointTable = std::move(next);
+    pointTablesConfig = dumpPointTablesConfigLocked();
   }
-  it->second.pointTable = std::move(next);
+  status = savePointTablesConfig(pointTablesConfig);
+  if (!status.ok()) {
+    return status;
+  }
   return grpc::Status::OK;
 }
 
@@ -1820,8 +1544,7 @@ void LinkManager::pollLoop(std::string connName,
   std::unordered_map<std::string, double> lastReportedByTag;
   lastReportedByTag.reserve(points.size());
   const auto readPlanMode = config.has_read_plan() ? config.read_plan().mode() : ModbusRTUProto::READ_PLAN_MODE_POINT;
-  const bool useExplicitPlan = (config.mode() == ModbusRTUProto::LINK_MODE_MASTER &&
-                                readPlanMode == ModbusRTUProto::READ_PLAN_MODE_EXPLICIT &&
+  const bool useExplicitPlan = (readPlanMode == ModbusRTUProto::READ_PLAN_MODE_EXPLICIT &&
                                 config.read_plan().blocks_size() > 0);
   if (useExplicitPlan) {
     LOG_INFO("ModbusRTU 轮询使用显式抄读方案: conn_name={}, blocks={}, interval={}ms",
@@ -1854,7 +1577,7 @@ void LinkManager::pollLoop(std::string connName,
         grpc::Status status;
         if (point.function == ModbusRTUProto::FUNCTION_READ_COILS) {
           bool value = false;
-          status = bus->ReadCoil(static_cast<uint8_t>(config.slave_id()), static_cast<uint16_t>(address), &value);
+          status = bus->ReadCoil(static_cast<uint8_t>(config.device_id()), static_cast<uint16_t>(address), &value);
           if (status.ok()) {
             auto dc = dataCenter_.PublishBool(connId, point.tag, value, DataCenterProto::QUALITY_GOOD, 0);
             if (!dc.ok()) {
@@ -1869,10 +1592,10 @@ void LinkManager::pollLoop(std::string connName,
           if (is16BitRegisterType(point.type)) {
             uint16_t value = 0;
             status = isInputRegisters
-                ? bus->ReadInputRegister(static_cast<uint8_t>(config.slave_id()),
+                ? bus->ReadInputRegister(static_cast<uint8_t>(config.device_id()),
                                          static_cast<uint16_t>(address),
                                          &value)
-                : bus->ReadHoldingRegister(static_cast<uint8_t>(config.slave_id()),
+                : bus->ReadHoldingRegister(static_cast<uint8_t>(config.device_id()),
                                            static_cast<uint16_t>(address),
                                            &value);
             if (status.ok()) {
@@ -1899,11 +1622,11 @@ void LinkManager::pollLoop(std::string connName,
           } else if (is32BitRegisterType(point.type)) {
             std::vector<uint16_t> values;
             status = isInputRegisters
-                ? bus->ReadInputRegisters(static_cast<uint8_t>(config.slave_id()),
+                ? bus->ReadInputRegisters(static_cast<uint8_t>(config.device_id()),
                                           static_cast<uint16_t>(address),
                                           2,
                                           &values)
-                : bus->ReadHoldingRegisters(static_cast<uint8_t>(config.slave_id()),
+                : bus->ReadHoldingRegisters(static_cast<uint8_t>(config.device_id()),
                                             static_cast<uint16_t>(address),
                                             2,
                                             &values);
@@ -2120,11 +1843,11 @@ void LinkManager::pollLoop(std::string connName,
 
       std::vector<uint16_t> values;
       auto status = isInputRegisters
-          ? bus->ReadInputRegisters(static_cast<uint8_t>(config.slave_id()),
+          ? bus->ReadInputRegisters(static_cast<uint8_t>(config.device_id()),
                                     static_cast<uint16_t>(start),
                                     static_cast<uint16_t>(block.quantity()),
                                     &values)
-          : bus->ReadHoldingRegisters(static_cast<uint8_t>(config.slave_id()),
+          : bus->ReadHoldingRegisters(static_cast<uint8_t>(config.device_id()),
                                       static_cast<uint16_t>(start),
                                       static_cast<uint16_t>(block.quantity()),
                                       &values);
@@ -2283,7 +2006,7 @@ void LinkManager::pollLoop(std::string connName,
         break;
       }
       bool value = false;
-      auto status = bus->ReadCoil(static_cast<uint8_t>(config.slave_id()),
+      auto status = bus->ReadCoil(static_cast<uint8_t>(config.device_id()),
                                   static_cast<uint16_t>(point.address),
                                   &value);
       if (status.ok()) {

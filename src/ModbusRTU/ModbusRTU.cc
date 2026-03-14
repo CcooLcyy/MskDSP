@@ -43,6 +43,7 @@ ModbusRTU::ModbusRTU() :
 ModbusRTU::~ModbusRTU() {}
 void ModbusRTU::start(std::stop_token stopToken) {
   LOG_INFO("ModbusRTU 模块启动");
+  linkManager_.LoadPersistedConfig();
   modbusRTUService_->setModbusRTU(this);
   LOG_INFO("ModbusRTU 服务实例绑定完成");
   grpcServerBuilder(modbusRTUService_);

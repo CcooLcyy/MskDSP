@@ -25,9 +25,6 @@ public:
     double scale = 1.0;
     double offset = 0.0;
     double deadband = 0.0;
-    std::optional<bool> defaultBool;
-    std::optional<uint16_t> defaultUInt16;
-    std::optional<uint32_t> defaultUInt32;
   };
 
   struct RegisterLookup {

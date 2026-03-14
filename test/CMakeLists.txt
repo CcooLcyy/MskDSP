@@ -470,9 +470,12 @@ add_executable(modbusRtuLinkManager_test
   modbus_rtu_serial_bus_test.cc
   ${CMAKE_SOURCE_DIR}/src/ModbusRTU/ModbusRTUDataCenterClient.cc
   ${CMAKE_SOURCE_DIR}/src/ModbusRTU/ModbusRTULinkManager.cc
+  ${CMAKE_SOURCE_DIR}/src/ModbusRTU/ModbusRTULinkStore.cc
   ${CMAKE_SOURCE_DIR}/src/ModbusRTU/ModbusRTUMqttBus.cc
   ${CMAKE_SOURCE_DIR}/src/ModbusRTU/ModbusRTUMqttClient.cc
+  ${CMAKE_SOURCE_DIR}/src/ModbusRTU/ModbusRTUMqttStore.cc
   ${CMAKE_SOURCE_DIR}/src/ModbusRTU/ModbusRTUPointTable.cc
+  ${CMAKE_SOURCE_DIR}/src/ModbusRTU/ModbusRTUPointTableStore.cc
   ${CMAKE_SOURCE_DIR}/src/ModbusRTU/ModbusRTUSerialBus.cc
 )
 

@@ -95,22 +95,6 @@ grpc::Status PointTable::validatePoint(const ModbusRTUProto::Point &point) const
   if (!isValidByteOrder(point.byte_order())) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "byte_order 非法");
   }
-  if (point.default_value_case() == ModbusRTUProto::Point::kDefaultBool &&
-      point.type() != ModbusRTUProto::DATA_TYPE_BOOL) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "default_bool 需要 BOOL 类型");
-  }
-  if (point.default_value_case() == ModbusRTUProto::Point::kDefaultUint16 &&
-      point.type() != ModbusRTUProto::DATA_TYPE_UINT16) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "default_uint16 需要 UINT16 类型");
-  }
-  if (point.default_value_case() == ModbusRTUProto::Point::kDefaultUint32 &&
-      point.type() != ModbusRTUProto::DATA_TYPE_UINT32) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "default_uint32 需要 UINT32 类型");
-  }
-  if (point.default_value_case() == ModbusRTUProto::Point::kDefaultUint16 &&
-      point.default_uint16() > 0xFFFFu) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "default_uint16 必须 <= 65535");
-  }
   uint32_t regCount = point.reg_count();
   if (regCount == 0) {
     regCount = defaultRegCount(point.type());
@@ -172,23 +156,6 @@ grpc::Status PointTable::insertOrUpdatePoint(const ModbusRTUProto::Point &point)
   }
   p.offset = point.offset();
   p.deadband = point.deadband();
-  if (point.default_value_case() == ModbusRTUProto::Point::kDefaultBool) {
-    p.defaultBool = point.default_bool();
-    p.defaultUInt16.reset();
-    p.defaultUInt32.reset();
-  } else if (point.default_value_case() == ModbusRTUProto::Point::kDefaultUint16) {
-    p.defaultUInt16 = static_cast<uint16_t>(point.default_uint16());
-    p.defaultBool.reset();
-    p.defaultUInt32.reset();
-  } else if (point.default_value_case() == ModbusRTUProto::Point::kDefaultUint32) {
-    p.defaultUInt32 = point.default_uint32();
-    p.defaultBool.reset();
-    p.defaultUInt16.reset();
-  } else {
-    p.defaultBool.reset();
-    p.defaultUInt16.reset();
-    p.defaultUInt32.reset();
-  }
 
   std::vector<PointKey> keys;
   keys.reserve(p.regCount);
@@ -310,13 +277,6 @@ void PointTable::ToProto(const std::string &connName, ModbusRTUProto::PointTable
     dst->set_scale(point.scale);
     dst->set_offset(point.offset);
     dst->set_deadband(point.deadband);
-    if (point.defaultBool.has_value()) {
-      dst->set_default_bool(point.defaultBool.value());
-    } else if (point.defaultUInt16.has_value()) {
-      dst->set_default_uint16(point.defaultUInt16.value());
-    } else if (point.defaultUInt32.has_value()) {
-      dst->set_default_uint32(point.defaultUInt32.value());
-    }
   }
 }
 

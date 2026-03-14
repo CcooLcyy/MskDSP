@@ -33,7 +33,7 @@ ConfigPusherProto::ModbusRtuConfig MakeMqttModbusConfig(bool start, bool withMqt
   serial->set_parity(ModbusRTUProto::PARITY_NONE);
   serial->set_stop_bits(ModbusRTUProto::STOP_BITS_ONE);
   linkCfg->set_serial_port("RS485-1");
-  linkCfg->set_slave_id(1);
+  linkCfg->set_device_id(1);
   linkCfg->set_poll_interval_ms(1000);
   linkCfg->set_request_timeout_ms(3000);
   linkCfg->set_serial_byte_timeout_ms(100);

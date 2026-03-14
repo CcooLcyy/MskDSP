@@ -17,22 +17,9 @@ ModbusRTUProto::Point MakePoint(const char* tag,
   return p;
 }
 
-ModbusRTUProto::Point MakeCoilPointWithDefault(const char* tag, uint32_t address, bool value) {
-  auto p = MakePoint(tag, ModbusRTUProto::FUNCTION_READ_COILS, address, ModbusRTUProto::DATA_TYPE_BOOL);
-  p.set_default_bool(value);
-  return p;
-}
-
-ModbusRTUProto::Point MakeRegisterPointWithDefault(const char* tag, uint32_t address, uint16_t value) {
-  auto p = MakePoint(tag, ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS, address, ModbusRTUProto::DATA_TYPE_UINT16);
-  p.set_default_uint16(value);
-  return p;
-}
-
-ModbusRTUProto::Point MakeRegisterPointWithDefault32(const char* tag, uint32_t address, uint32_t value) {
+ModbusRTUProto::Point MakeUint32RegisterPoint(const char* tag, uint32_t address) {
   auto p = MakePoint(tag, ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS, address, ModbusRTUProto::DATA_TYPE_UINT32);
   p.set_reg_count(2);
-  p.set_default_uint32(value);
   return p;
 }
 
@@ -134,13 +121,13 @@ TEST(ModbusRtuPointTableTest, RejectsConflictingMappings) {
   EXPECT_EQ(st.error_code(), grpc::StatusCode::ALREADY_EXISTS);
 }
 
-// 验证：default_value 能写入点表，并可按地址查找/序列化。
-TEST(ModbusRtuPointTableTest, AcceptsDefaultValuesAndFindByAddress) {
+// 验证：点表支持按功能码与地址查找，并保持序列化后的点信息。
+TEST(ModbusRtuPointTableTest, FindsConfiguredPointsByAddress) {
   PointTable table;
 
   ModbusRTUProto::UpsertPointTableRequest req;
-  *req.add_points() = MakeCoilPointWithDefault("A", 10, true);
-  *req.add_points() = MakeRegisterPointWithDefault("B", 20, 1234);
+  *req.add_points() = MakePoint("A", ModbusRTUProto::FUNCTION_READ_COILS, 10, ModbusRTUProto::DATA_TYPE_BOOL);
+  *req.add_points() = MakePoint("B", ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS, 20, ModbusRTUProto::DATA_TYPE_UINT16);
   req.set_replace(true);
 
   ASSERT_TRUE(table.Upsert(req.points(), req.replace()).ok());
@@ -148,55 +135,16 @@ TEST(ModbusRtuPointTableTest, AcceptsDefaultValuesAndFindByAddress) {
   auto coil = table.FindByAddress(ModbusRTUProto::FUNCTION_READ_COILS, 10);
   ASSERT_TRUE(coil.has_value());
   EXPECT_EQ(coil->tag, "A");
-  ASSERT_TRUE(coil->defaultBool.has_value());
-  EXPECT_TRUE(coil->defaultBool.value());
 
   auto reg = table.FindByAddress(ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS, 20);
   ASSERT_TRUE(reg.has_value());
   EXPECT_EQ(reg->tag, "B");
-  ASSERT_TRUE(reg->defaultUInt16.has_value());
-  EXPECT_EQ(reg->defaultUInt16.value(), 1234);
 
   ModbusRTUProto::PointTable out;
   table.ToProto("conn-1", &out);
   ASSERT_EQ(out.points_size(), 2);
-  EXPECT_EQ(out.points(0).default_value_case(), ModbusRTUProto::Point::kDefaultBool);
-  EXPECT_EQ(out.points(1).default_value_case(), ModbusRTUProto::Point::kDefaultUint16);
-}
-
-// 验证：default_value 与数据类型不匹配时拒绝。
-TEST(ModbusRtuPointTableTest, RejectsDefaultValueTypeMismatch) {
-  PointTable table;
-
-  ModbusRTUProto::UpsertPointTableRequest req;
-  auto p1 = MakePoint("A", ModbusRTUProto::FUNCTION_READ_COILS, 1, ModbusRTUProto::DATA_TYPE_BOOL);
-  p1.set_default_uint16(10);
-  *req.add_points() = p1;
-  req.set_replace(true);
-  auto st = table.Upsert(req.points(), req.replace());
-  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
-
-  ModbusRTUProto::UpsertPointTableRequest req2;
-  auto p2 = MakePoint("B", ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS, 2, ModbusRTUProto::DATA_TYPE_UINT16);
-  p2.set_default_bool(true);
-  *req2.add_points() = p2;
-  req2.set_replace(true);
-  st = table.Upsert(req2.points(), req2.replace());
-  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
-}
-
-// 验证：default_uint16 超过 65535 时拒绝。
-TEST(ModbusRtuPointTableTest, RejectsDefaultUint16OutOfRange) {
-  PointTable table;
-
-  ModbusRTUProto::UpsertPointTableRequest req;
-  auto p = MakePoint("A", ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS, 1, ModbusRTUProto::DATA_TYPE_UINT16);
-  p.set_default_uint16(70000);
-  *req.add_points() = p;
-  req.set_replace(true);
-
-  auto st = table.Upsert(req.points(), req.replace());
-  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  EXPECT_EQ(out.points(0).tag(), "A");
+  EXPECT_EQ(out.points(1).tag(), "B");
 }
 
 // 验证：replace=false 时支持合并并更新已有点的 scale/offset。
@@ -301,7 +249,7 @@ TEST(ModbusRtuPointTableTest, AcceptsUint32PointAndRegisterLookup) {
   PointTable table;
 
   ModbusRTUProto::UpsertPointTableRequest req;
-  auto p = MakeRegisterPointWithDefault32("P32", 100, 0x12345678u);
+  auto p = MakeUint32RegisterPoint("P32", 100);
   p.set_word_order(ModbusRTUProto::WORD_ORDER_LH);
   p.set_byte_order(ModbusRTUProto::BYTE_ORDER_BA);
   *req.add_points() = p;
@@ -324,8 +272,6 @@ TEST(ModbusRtuPointTableTest, AcceptsUint32PointAndRegisterLookup) {
   EXPECT_EQ(stored->regCount, 2u);
   EXPECT_EQ(stored->wordOrder, ModbusRTUProto::WORD_ORDER_LH);
   EXPECT_EQ(stored->byteOrder, ModbusRTUProto::BYTE_ORDER_BA);
-  ASSERT_TRUE(stored->defaultUInt32.has_value());
-  EXPECT_EQ(stored->defaultUInt32.value(), 0x12345678u);
 
   ModbusRTUProto::PointTable out;
   table.ToProto("conn-1", &out);
@@ -334,8 +280,6 @@ TEST(ModbusRtuPointTableTest, AcceptsUint32PointAndRegisterLookup) {
   EXPECT_EQ(out.points(0).reg_count(), 2u);
   EXPECT_EQ(out.points(0).word_order(), ModbusRTUProto::WORD_ORDER_LH);
   EXPECT_EQ(out.points(0).byte_order(), ModbusRTUProto::BYTE_ORDER_BA);
-  EXPECT_EQ(out.points(0).default_value_case(), ModbusRTUProto::Point::kDefaultUint32);
-  EXPECT_EQ(out.points(0).default_uint32(), 0x12345678u);
 }
 
 // 验证：输入寄存器点位支持 UINT16/UINT32，并按独立功能码地址查找。
@@ -344,12 +288,10 @@ TEST(ModbusRtuPointTableTest, AcceptsInputRegisterPoints) {
 
   ModbusRTUProto::UpsertPointTableRequest req;
   auto p16 = MakeInputRegisterPoint("IR16", 400, ModbusRTUProto::DATA_TYPE_UINT16);
-  p16.set_default_uint16(321);
   *req.add_points() = p16;
 
   auto p32 = MakeInputRegisterPoint("IR32", 500, ModbusRTUProto::DATA_TYPE_UINT32);
   p32.set_reg_count(2);
-  p32.set_default_uint32(0x12345678u);
   *req.add_points() = p32;
   req.set_replace(true);
 
@@ -358,8 +300,6 @@ TEST(ModbusRtuPointTableTest, AcceptsInputRegisterPoints) {
   auto p16Stored = table.FindByAddress(ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS, 400);
   ASSERT_TRUE(p16Stored.has_value());
   EXPECT_EQ(p16Stored->tag, "IR16");
-  ASSERT_TRUE(p16Stored->defaultUInt16.has_value());
-  EXPECT_EQ(p16Stored->defaultUInt16.value(), 321);
 
   auto p32First = table.FindRegisterByAddress(ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS, 500);
   ASSERT_TRUE(p32First.has_value());
@@ -372,7 +312,7 @@ TEST(ModbusRtuPointTableTest, AcceptsInputRegisterPoints) {
   EXPECT_EQ(p32Second->wordIndex, 1u);
 }
 
-// 验证：主站寄存器点位支持 INT16/INT32，并保留寄存器配置参数。
+// 验证：寄存器点位支持 INT16/INT32，并保留寄存器配置参数。
 TEST(ModbusRtuPointTableTest, AcceptsSignedRegisterPoints) {
   PointTable table;
 

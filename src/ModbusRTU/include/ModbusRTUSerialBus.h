@@ -17,31 +17,20 @@ namespace ModbusRTU {
 
 class SerialBus : public Bus {
 public:
-  struct RtuRequest {
-    uint8_t slaveId = 0;
-    uint8_t function = 0;
-    uint16_t address = 0;
-    uint16_t quantity = 0;
-    std::vector<uint8_t> frame;
-  };
-
   explicit SerialBus(ModbusRTUProto::SerialConfig config);
 
   grpc::Status Open() override;
   void Close() override;
 
-  grpc::Status ReadCoil(uint8_t slaveId, uint16_t address, bool* out) override;
-  grpc::Status ReadHoldingRegister(uint8_t slaveId, uint16_t address, uint16_t* out) override;
-  grpc::Status ReadHoldingRegisters(uint8_t slaveId, uint16_t address, uint16_t quantity, std::vector<uint16_t>* out) override;
-  grpc::Status ReadInputRegister(uint8_t slaveId, uint16_t address, uint16_t* out) override;
-  grpc::Status ReadInputRegisters(uint8_t slaveId, uint16_t address, uint16_t quantity, std::vector<uint16_t>* out) override;
-  grpc::Status WriteSingleRegister(uint8_t slaveId, uint16_t address, uint16_t value) override;
-  grpc::Status WriteMultipleRegisters(uint8_t slaveId,
+  grpc::Status ReadCoil(uint8_t deviceId, uint16_t address, bool* out) override;
+  grpc::Status ReadHoldingRegister(uint8_t deviceId, uint16_t address, uint16_t* out) override;
+  grpc::Status ReadHoldingRegisters(uint8_t deviceId, uint16_t address, uint16_t quantity, std::vector<uint16_t>* out) override;
+  grpc::Status ReadInputRegister(uint8_t deviceId, uint16_t address, uint16_t* out) override;
+  grpc::Status ReadInputRegisters(uint8_t deviceId, uint16_t address, uint16_t quantity, std::vector<uint16_t>* out) override;
+  grpc::Status WriteSingleRegister(uint8_t deviceId, uint16_t address, uint16_t value) override;
+  grpc::Status WriteMultipleRegisters(uint8_t deviceId,
                                       uint16_t address,
                                       const std::vector<uint16_t>& values) override;
-
-  grpc::Status ReadRequest(RtuRequest* out);
-  grpc::Status WriteFrame(const std::vector<uint8_t>& frame);
 
   static uint16_t computeCrc(const uint8_t* data, size_t len);
   static void appendCrc(std::vector<uint8_t>* frame);
@@ -56,16 +45,16 @@ private:
                                std::chrono::milliseconds timeout,
                                bool countTimeout = true);
   grpc::Status readResponseLocked(
-      uint8_t expectedSlaveId,
+      uint8_t expectedDeviceId,
       uint8_t expectedFunction,
       uint16_t quantity,
       std::vector<uint8_t>* outData);
   grpc::Status readWriteSingleRegisterResponseLocked(
-      uint8_t expectedSlaveId,
+      uint8_t expectedDeviceId,
       uint16_t expectedAddress,
       uint16_t expectedValue);
   grpc::Status readWriteMultipleRegistersResponseLocked(
-      uint8_t expectedSlaveId,
+      uint8_t expectedDeviceId,
       uint16_t expectedAddress,
       uint16_t expectedQuantity);
 
