@@ -11,6 +11,45 @@ die() {
   exit 1
 }
 
+extract_version_from_tar() {
+  local tar_path="$1"
+  local repo_tag=""
+  if ! repo_tag="$(
+    python3 - "${tar_path}" <<'PY'
+import json
+import sys
+import tarfile
+
+tar_path = sys.argv[1]
+with tarfile.open(tar_path, "r:*") as tf:
+    try:
+        mf = tf.extractfile("manifest.json")
+    except KeyError:
+        mf = None
+    if mf is None:
+        sys.exit(1)
+    manifest = json.load(mf)
+
+if not isinstance(manifest, list) or not manifest:
+    sys.exit(1)
+
+repo_tags = manifest[0].get("RepoTags") or []
+if not repo_tags or not repo_tags[0]:
+    sys.exit(1)
+
+print(repo_tags[0])
+PY
+  )"; then
+    die "无法从 tar 包中提取镜像标签: ${tar_path}"
+  fi
+
+  if [[ "${repo_tag}" != *:* ]]; then
+    die "tar 包中的镜像标签格式不正确: ${repo_tag}"
+  fi
+
+  printf '%s\n' "${repo_tag##*:}"
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
@@ -51,11 +90,11 @@ echo "清理旧的 package/log 和 package/socket 目录"
 rm -rf ../package/debug
 echo "清理旧的 package/debug 目录"
 
-OUTPUT_PATH="${PROJECT_ROOT}/images/mskdsp"
-
 INPUT_TAR=""
+VERSION=""
 if [[ -f "${INPUT_ARG}" ]]; then
   INPUT_TAR="${INPUT_ARG}"
+  VERSION="$(extract_version_from_tar "${INPUT_TAR}")"
 else
   if [[ "${INPUT_ARG}" == *"/"* || "${INPUT_ARG}" == *.tar ]]; then
     die "Input tar not found: ${INPUT_ARG}"
@@ -71,6 +110,8 @@ else
     die "Generated tar not found: ${INPUT_TAR}"
   fi
 fi
+
+OUTPUT_PATH="${PROJECT_ROOT}/images/mskdsp-${VERSION}"
 
 mkdir -p "$(dirname "${OUTPUT_PATH}")"
 

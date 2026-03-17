@@ -5,7 +5,7 @@
 ## make_exe.sh（生成自解压脚本）
 
 ### 用途
-将单个镜像 `tar` 打包为自解压脚本，生成固定输出 `images/mskdsp`，用于在目标机器上导入镜像并启动/停止容器。
+将单个镜像 `tar` 打包为自解压脚本，生成输出 `images/mskdsp-<version>`，用于在目标机器上导入镜像并启动/停止容器。
 
 ### 用法
 指定镜像 tar：
@@ -16,19 +16,19 @@ bash script/make_exe.sh /path/to/mskdsp.tar
 ```
 bash script/make_exe.sh <version>
 ```
-输出固定为：
+输出为：
 ```
-images/mskdsp
+images/mskdsp-<version>
 ```
 
 ### 生成脚本的使用
 启动容器：
 ```
-./images/mskdsp start [-- <docker run 额外参数>]
+./images/mskdsp-<version> start [-- <docker run 额外参数>]
 ```
 停止并删除容器：
 ```
-./images/mskdsp stop
+./images/mskdsp-<version> stop
 ```
 
 ### 运行行为说明
@@ -52,13 +52,13 @@ images/mskdsp
   - `--name mskdsp`
 - 额外参数透传到 `docker run`，需用 `--` 分隔，例如：
 ```
-./images/mskdsp start -- -e FOO=bar
+./images/mskdsp-<version> start -- -e FOO=bar
 ```
 
 ### 依赖与注意事项
 - 运行环境需具备 `docker` 与 `python3`。
 - `--privileged` 赋予容器更高权限，后续可按需改为 `--device` 等更细粒度配置。
-- 若你修改了 tar，请重新执行 `make_exe.sh` 生成新的 `images/mskdsp`。
+- 若你修改了 tar，请重新执行 `make_exe.sh` 生成新的 `images/mskdsp-<version>`。
 - 使用版本号模式时会调用 `make_image.sh`，因此需要 `podman`、`podman buildx` 及相关构建环境。
 
 ## make_image.sh（构建并导出镜像）
