@@ -29,6 +29,7 @@ public:
   explicit LinkManager(std::string moduleName,
                        std::filesystem::path linksPath = {},
                        std::filesystem::path pointTablesPath = {});
+  ~LinkManager();
 
   void setDataCenterServerAddress(std::string address);
   void setDataCenterStub(std::shared_ptr<DataCenterProto::DataCenterService::StubInterface> stub);

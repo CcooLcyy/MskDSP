@@ -53,6 +53,8 @@ LinkManager::LinkManager(std::string moduleName, std::filesystem::path linksPath
   loadPersistedConfig("构造阶段");
 }
 
+LinkManager::~LinkManager() = default;
+
 void LinkManager::setDataCenterServerAddress(std::string address) {
   dataCenter_.setServerAddress(std::move(address));
   bool needReload = false;
@@ -320,9 +322,9 @@ void LinkManager::loadPersistedConfig(std::string_view trigger) {
   auto removePointTableForConn = [&](const std::string &connName) {
     auto indexIt = pointTableIndexByConn.find(connName);
     if (indexIt != pointTableIndexByConn.end()) {
-      auto &keep = keepPointTables[static_cast<size_t>(indexIt->second)];
-      if (keep) {
-        keep = false;
+      const auto keepIndex = static_cast<size_t>(indexIt->second);
+      if (keepPointTables[keepIndex]) {
+        keepPointTables[keepIndex] = false;
         needResavePointTables = true;
       }
     }
@@ -493,9 +495,9 @@ void LinkManager::loadPersistedConfig(std::string_view trigger) {
                 pointCount);
     auto indexIt = pointTableIndexByConn.find(connName);
     if (indexIt != pointTableIndexByConn.end()) {
-      auto &keep = keepPointTables[static_cast<size_t>(indexIt->second)];
-      if (keep) {
-        keep = false;
+      const auto keepIndex = static_cast<size_t>(indexIt->second);
+      if (keepPointTables[keepIndex]) {
+        keepPointTables[keepIndex] = false;
         needResavePointTables = true;
       }
     }
