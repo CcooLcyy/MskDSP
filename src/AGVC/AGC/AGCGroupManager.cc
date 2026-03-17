@@ -27,6 +27,20 @@ grpc::Status makeInvalid(std::string message) {
 grpc::Status makePreconditionFailed(std::string message) {
   return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::move(message));
 }
+
+const char *groupStateToString(AGCProto::GroupState state) {
+  switch (state) {
+    case AGCProto::GROUP_STATE_RUNNING:
+      return "运行中";
+    case AGCProto::GROUP_STATE_PENDING_DELETE:
+      return "待删除";
+    case AGCProto::GROUP_STATE_STOPPED:
+      return "已停止";
+    case AGCProto::GROUP_STATE_UNSPECIFIED:
+    default:
+      return "未指定";
+  }
+}
 }  // namespace
 
 GroupManager::GroupManager(std::string moduleName, std::filesystem::path groupsPath) :
@@ -90,7 +104,7 @@ grpc::Status GroupManager::restoreGroupFromConfig(const AGCProto::GroupConfig &c
   }
   LOG_INFO("AGC 开始恢复控制组持久化记录: group_name={}, 状态={}, 成员数={}",
            config.group_name(),
-           restoredState,
+           groupStateToString(restoredState),
            config.members_size());
 
   DataCenterProto::ConnectionInfo connInfo;
@@ -180,7 +194,7 @@ grpc::Status GroupManager::RestorePersistedGroups() {
       ++restored;
       LOG_INFO("AGC 已恢复控制组配置: group_name={}, 状态={}",
                persisted.config().group_name(),
-               persisted.pending_delete() ? "待删除" : "已停止");
+               groupStateToString(restoredState));
     }
   } else {
     for (const auto& group : config.groups()) {
