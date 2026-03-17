@@ -118,11 +118,13 @@ add_executable(dataCenterPointTableStore_test
 
 target_include_directories(dataCenterPointTableStore_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/DataCenter/include
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
 )
 
 target_link_libraries(dataCenterPointTableStore_test PRIVATE
   GTest::gtest_main
   dspProto
+  moduleManager
 )
 
 add_test(NAME dataCenterPointTableStore_test COMMAND dataCenterPointTableStore_test)
