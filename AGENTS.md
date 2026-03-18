@@ -71,3 +71,14 @@ VSCode CMake Tools（用户确认可用的配置命令）：
 
 ## 架构说明
 模块以共享库形式由管理器动态加载；版本元信息由 `cmake/LibInfo.h.in` 生成到各模块的 `include/` 中。gRPC 服务是主要集成面：先更新 `.proto`，再通过 CMake 重新生成。`package/conf` 仅保留模板纳入版本控制，避免提交本地运行时产物。
+
+## Subagent 策略
+- 在本仓库中，Codex 被明确授权可以主动创建和调用 subagent。
+- 优先积极使用 subagent，并且尽可能多的拉起subagent，尤其是在并行探索、实现或验证能够加快交付时。
+- Codex 可以自行选择 `explorer` 或 `worker` 类型的 subagent。
+- 创建和调用 subagent 时，默认并优先使用 `gpt-5.4` 模型，并将思考强度设置为 `xhigh`。
+- 除非任务具有高风险、破坏性，或涉及存在明显权衡的重大架构决策，否则 Codex 无需在启动 subagent 前单独征求确认。
+- 当多个子任务彼此独立且并行处理可以缩短总耗时时，优先并行使用多个 subagent。
+- 对于简单、单步即可完成的小任务，避免不必要的委派。
+- 在 subagent 运行期间，如有可能，Codex 应继续推进其他不重叠的本地工作。
+- 使用了 subagent 时，Codex 需要在最终交付前简要说明委派了什么工作，并整合相应结果。
