@@ -53,7 +53,7 @@ PointTable MakePointTable() {
   table.Upsert(req.points(), true);
   return table;
 }
-}  // namespace
+}  // 命名空间结束
 
 // 验证：validateLinkConfig 对缺失/非法字段返回错误。
 TEST(IEC104LinkManagerHelperTest, ValidateLinkConfigRejectsInvalidFields) {

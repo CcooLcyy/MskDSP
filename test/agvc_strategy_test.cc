@@ -2,7 +2,7 @@
 
 #include "AgvcStrategy.h"
 
-// Verify average distribution when weights are equal and no constraints bind.
+// 验证：当权重相等且没有约束生效时，按平均值分配。
 TEST(AgvcStrategyTest, WeightedStrategy_AverageNoConstraints) {
   AGVC::WeightedStrategy s;
   std::vector<AGVC::AllocationMember> members{
@@ -17,7 +17,7 @@ TEST(AgvcStrategyTest, WeightedStrategy_AverageNoConstraints) {
   EXPECT_NEAR(out.unallocated, 0.0, 1e-6);
 }
 
-// Verify proportional distribution matches capacity ratio (50:100 => 1:2).
+// 验证：按权重比例分配时应匹配容量比例（50:100 => 1:2）。
 TEST(AgvcStrategyTest, WeightedStrategy_ProportionalNoConstraints) {
   AGVC::WeightedStrategy s;
   std::vector<AGVC::AllocationMember> members{
@@ -32,7 +32,7 @@ TEST(AgvcStrategyTest, WeightedStrategy_ProportionalNoConstraints) {
   EXPECT_NEAR(out.unallocated, 0.0, 1e-6);
 }
 
-// Verify redistribution when one member hits max constraint.
+// 验证：当某个成员触发上限约束时，其余成员会重新分配。
 TEST(AgvcStrategyTest, WeightedStrategy_MaxSaturationRedistributes) {
   AGVC::WeightedStrategy s;
   std::vector<AGVC::AllocationMember> members{
@@ -46,4 +46,3 @@ TEST(AgvcStrategyTest, WeightedStrategy_MaxSaturationRedistributes) {
   EXPECT_NEAR(out.values[1], 20.0, 1e-6);
   EXPECT_NEAR(out.unallocated, 0.0, 1e-6);
 }
-

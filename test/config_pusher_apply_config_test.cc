@@ -15,14 +15,14 @@ using ::testing::Invoke;
 using ::testing::Return;
 
 using ConfigPusherClass = ConfigPusher::ConfigPusher;
-}  // namespace
+}  // 命名空间结束
 
 namespace ConfigPusher {
 class ConfigPusherTestPeer {
 public:
   static void ApplyConfig(ConfigPusher &pusher) { pusher.applyConfig(); }
 };
-}  // namespace ConfigPusher
+}  // ConfigPusher 命名空间结束
 
 namespace {
 using ConfigPusher::ConfigPusherTestPeer;
@@ -45,7 +45,7 @@ ModuleManagerProto::ModuleInfo MakeModuleInfo(const std::string &name) {
   return info;
 }
 
-}  // namespace
+}  // 命名空间结束
 
 // 验证：无配置文件时直接返回，不触发模块管理请求。
 TEST(ConfigPusherApplyConfigTest, NoConfigReturnsEarly) {

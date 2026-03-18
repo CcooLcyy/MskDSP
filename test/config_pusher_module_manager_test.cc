@@ -196,7 +196,7 @@ private:
   grpc::Status getRunningInfoStatus_ = grpc::Status::OK;
   grpc::Status startModuleStatus_ = grpc::Status::OK;
 };
-}  // namespace
+}  // 命名空间结束
 
 // 验证：获取模块信息成功时返回列表内容。
 TEST(ConfigPusherModuleManagerTest, FetchModuleInfosSuccess) {

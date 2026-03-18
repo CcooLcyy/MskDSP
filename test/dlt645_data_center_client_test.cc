@@ -8,7 +8,7 @@
 
 namespace {
 using DLT645::DataCenterClient;
-}  // namespace
+}  // 命名空间结束
 
 // 验证：ConnectionExists 入参为空时返回错误。
 TEST(Dlt645DataCenterClientTest, ConnectionExistsRejectsEmptyName) {

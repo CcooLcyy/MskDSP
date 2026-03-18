@@ -36,7 +36,7 @@ DLT645Proto::BlockItem MakeBlockItem(const char* tag,
   item.set_deadband(0.0);
   return item;
 }
-}  // namespace
+}  // 命名空间结束
 
 // 验证：数据块按顺序拼接生成 offset，trim_right_space 默认裁剪且可显式关闭。
 TEST(Dlt645PointTableTest, BlockOffsetsAndTrimFlags) {

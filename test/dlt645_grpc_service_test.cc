@@ -7,7 +7,7 @@
 namespace {
 using DLT645Module = DLT645::DLT645;
 using DLT645Service = DLT645::DLT645GrpcServiceImpl;
-}  // namespace
+}  // 命名空间结束
 
 // 验证：模块未就绪时所有 RPC 返回 FAILED_PRECONDITION。
 TEST(Dlt645GrpcServiceTest, RejectsWhenModuleNotReady) {

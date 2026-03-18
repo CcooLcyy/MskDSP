@@ -35,7 +35,7 @@ ConfigPusherProto::DataCenterConfig MakeConfig(const char* srcModule,
   route->mutable_dst()->set_tag("P_CMD");
   return config;
 }
-}  // namespace
+}  // 命名空间结束
 
 // 验证：当路由引用不存在连接时，DataCenter 配置不会继续下发。
 TEST(ConfigPusherDataCenterTest, AbortWhenConnectionMissing) {

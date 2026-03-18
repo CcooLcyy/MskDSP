@@ -58,7 +58,7 @@ private:
 class DataCenterGrpcServiceTest : public ::testing::Test {
 protected:
   void SetUp() override {
-    // Keep Logger output stable (avoid per-test CWD affecting log destination).
+    // 保持 Logger 输出路径稳定，避免每个测试切换工作目录后影响日志落点。
     ModuleManager::Logger::init("./log", "data_center_grpc_service_test.log");
 
     tmpDir_ = std::make_unique<ScopedTempDir>();
@@ -142,7 +142,7 @@ protected:
   std::shared_ptr<grpc::Channel> channel_;
   std::unique_ptr<DataCenterProto::DataCenterService::Stub> stub_;
 };
-}  // namespace
+}  // 命名空间结束
 
 // 验证：连接生命周期（创建/重命名/删除）与 UpsertConnection 的冲突/未分配错误能正确返回。
 TEST_F(DataCenterGrpcServiceTest, ConnectionLifecycleAndUpsertConnectionValidations) {

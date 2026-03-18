@@ -87,7 +87,7 @@ std::string Base64Encode(const std::vector<uint8_t> &data) {
   return out;
 }
 
-}  // namespace
+}  // 命名空间结束
 
 namespace DLT645 {
 class DLT645LinkManagerTestPeer {
@@ -147,7 +147,7 @@ public:
     return mgr.sendMonitorRequest(it->second.get(), frame, outPayloadBase64, outStatus);
   }
 };
-}  // namespace DLT645
+}  // DLT645 命名空间结束
 namespace {
 
 using DLT645::DLT645LinkManagerTestPeer;
@@ -200,7 +200,7 @@ DLT645Proto::Point MakePointProto(const char *tag, const char *di, uint32_t data
   p.set_deadband(0.0);
   return p;
 }
-}  // namespace
+}  // 命名空间结束
 
 // 验证：UpdateConfig 响应为空时返回参数错误。
 TEST(Dlt645LinkManagerTest, UpdateConfigRejectsNullResponse) {

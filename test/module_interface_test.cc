@@ -48,7 +48,7 @@ std::string LoopbackAddress(const std::string &addr) {
   }
   return std::string("127.0.0.1") + addr.substr(pos);
 }
-}  // namespace
+}  // 命名空间结束
 
 // 验证：initLibInfo 会创建 socket 目录，并在存在同名 sock 文件时将其删除后再生成 inner_grpc_server。
 TEST(ModuleInterfaceTest, InitLibInfoCreatesSocketDirAndRemovesExistingSockFile) {

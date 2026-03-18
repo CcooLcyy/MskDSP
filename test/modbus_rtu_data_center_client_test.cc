@@ -13,9 +13,9 @@ using ModbusRTU::DataCenterClient;
 
 using ::testing::_;
 using ::testing::Invoke;
-}  // namespace
+}  // 命名空间结束
 
-// Verifies ConnectionExists matches the target module/conn.
+// 验证：ConnectionExists 能匹配到目标模块和连接。
 TEST(ModbusRtuDataCenterClientTest, ConnectionExistsFindsMatch) {
   FakeDataCenterState state;
   state.AddConnection(7, "ModbusRTU", "conn-1");
@@ -29,7 +29,7 @@ TEST(ModbusRtuDataCenterClientTest, ConnectionExistsFindsMatch) {
   EXPECT_TRUE(exists);
 }
 
-// Verifies ConnectionExists rejects empty conn_name.
+// 验证：ConnectionExists 会拒绝空的 conn_name。
 TEST(ModbusRtuDataCenterClientTest, ConnectionExistsRejectsEmptyName) {
   DataCenterClient client("ModbusRTU");
   bool exists = false;
@@ -37,7 +37,7 @@ TEST(ModbusRtuDataCenterClientTest, ConnectionExistsRejectsEmptyName) {
   EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
 }
 
-// Verifies GetLatest forwards the request and returns updates.
+// 验证：GetLatest 会正确转发请求并返回更新结果。
 TEST(ModbusRtuDataCenterClientTest, GetLatestReturnsUpdates) {
   auto stub = std::make_shared<DataCenterProto::MockDataCenterServiceStub>();
   DataCenterClient client("ModbusRTU");
@@ -66,7 +66,7 @@ TEST(ModbusRtuDataCenterClientTest, GetLatestReturnsUpdates) {
   EXPECT_TRUE(resp.updates(0).value().bool_value());
 }
 
-// Verifies PublishBool sets bool_value and metadata.
+// 验证：PublishBool 会设置 bool_value 并携带元信息。
 TEST(ModbusRtuDataCenterClientTest, PublishBoolBuildsRequest) {
   auto stub = std::make_shared<DataCenterProto::MockDataCenterServiceStub>();
   DataCenterClient client("ModbusRTU");
@@ -89,7 +89,7 @@ TEST(ModbusRtuDataCenterClientTest, PublishBoolBuildsRequest) {
   EXPECT_TRUE(st.ok());
 }
 
-// Verifies PublishUInt16 uses int_value for unsigned register values.
+// 验证：PublishUInt16 会使用 int_value 表示无符号寄存器值。
 TEST(ModbusRtuDataCenterClientTest, PublishUInt16BuildsRequest) {
   auto stub = std::make_shared<DataCenterProto::MockDataCenterServiceStub>();
   DataCenterClient client("ModbusRTU");

@@ -53,7 +53,7 @@ DataCenterProto::RoutesConfig MakeConfig(std::initializer_list<std::tuple<uint32
   }
   return cfg;
 }
-}  // namespace
+}  // 命名空间结束
 
 // 验证：当路由配置文件不存在时，Load 返回空配置且不报错。
 TEST(DataCenterRouteStoreTest, LoadReturnsEmptyWhenNoFiles) {

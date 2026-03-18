@@ -36,7 +36,7 @@ DataCenterProto::ConnectionInfo MakeConnInfo(uint32_t connId, std::string module
   info.set_conn_name(std::move(connName));
   return info;
 }
-}  // namespace
+}  // 命名空间结束
 
 // 验证：GetOrCreateConnection 对相同 (module_name, conn_name) 返回稳定的 conn_id。
 TEST(DataCenterCoreTest, GetOrCreateConnectionReturnsStableConnIdByKey) {

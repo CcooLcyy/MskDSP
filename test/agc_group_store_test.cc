@@ -88,7 +88,7 @@ bool IsPendingDelete(const AGCProto::GroupsConfig& config, const std::string& gr
   return false;
 }
 
-}  // namespace
+}  // 命名空间结束
 
 // 验证：当控制组配置文件不存在时，Load 返回空配置且不报错。
 TEST(AgcGroupStoreTest, LoadReturnsEmptyWhenNoFiles) {

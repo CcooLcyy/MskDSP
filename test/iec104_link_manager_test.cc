@@ -77,7 +77,7 @@ IEC104Proto::Point MakeBoolPoint(const char* tag, uint32_t ioa) {
   p.set_type(IEC104Proto::POINT_TYPE_SINGLE);
   return p;
 }
-}  // namespace
+}  // 命名空间结束
 
 namespace IEC104 {
 class IEC104LinkManagerTestPeer {
@@ -98,11 +98,11 @@ public:
     return mgr.buildInterrogationSnapshot(connName);
   }
 };
-}  // namespace IEC104
+}  // IEC104 命名空间结束
 
 namespace {
 using IEC104::IEC104LinkManagerTestPeer;
-}  // namespace
+}  // 命名空间结束
 
 // 验证：create_only UpsertLink 会向 DataCenter 取/建 conn_id，并回填到 LinkInfo。
 TEST(IEC104LinkManagerTest, UpsertLinkCreateOnlyReturnsConnId) {
@@ -214,7 +214,7 @@ TEST(IEC104LinkManagerTest, UpsertLinkServerRejectsPortConflictBeforeDataCenterC
   ASSERT_TRUE(mgr.UpsertLink(req1, &info1).ok());
   EXPECT_TRUE(state.HasConnection("IEC104", "server-1"));
 
-  // Second link with the same port should be rejected before any DataCenter RPC.
+  // 第二条使用相同端口的链路应在任何 DataCenter RPC 之前就被拒绝。
   EXPECT_CALL(*stub, ListConnections(_, _, _)).Times(0);
   EXPECT_CALL(*stub, GetOrCreateConnection(_, _, _)).Times(0);
 

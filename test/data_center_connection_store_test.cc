@@ -53,7 +53,7 @@ DataCenterProto::ConnectionsConfig MakeConfig(uint32_t nextConnId, std::initiali
   }
   return cfg;
 }
-}  // namespace
+}  // 命名空间结束
 
 // 验证：当连接配置文件不存在时，Load 返回空配置且不报错。
 TEST(DataCenterConnectionStoreTest, LoadReturnsEmptyWhenNoFiles) {

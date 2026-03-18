@@ -26,7 +26,7 @@ ModbusRTUProto::Point MakeUint32RegisterPoint(const char* tag, uint32_t address)
 ModbusRTUProto::Point MakeInputRegisterPoint(const char* tag, uint32_t address, ModbusRTUProto::DataType type) {
   return MakePoint(tag, ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS, address, type);
 }
-}  // namespace
+}  // 命名空间结束
 
 // 验证：点表 replace 更新与 tag 查询、ToProto 输出排序。
 TEST(ModbusRtuPointTableTest, ReplaceAndLookup) {

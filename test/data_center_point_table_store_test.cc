@@ -54,7 +54,7 @@ DataCenterProto::ConnTagsConfig MakeConfig(std::initializer_list<std::pair<uint3
   }
   return cfg;
 }
-}  // namespace
+}  // 命名空间结束
 
 // 验证：当连接标签注册表配置文件不存在时，Load 返回空配置且不报错。
 TEST(DataCenterConnTagsStoreTest, LoadReturnsEmptyWhenNoFiles) {

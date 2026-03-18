@@ -98,7 +98,7 @@ protected:
     boost::log::core::get()->flush();
   }
 };
-}  // namespace
+}  // 命名空间结束
 
 // 验证：初始化后日志仍保留已有内容，并继续追加写入新日志。
 TEST_F(LoggerTest, KeepsExistingLogContentOnInit) {

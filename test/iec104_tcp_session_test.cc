@@ -199,9 +199,9 @@ IEC104Proto::LinkConfig MakeConfig(const std::string& name,
   apci->set_t3(t3);
   return config;
 }
-}  // namespace
+}  // 命名空间结束
 
-// Verifies client sends interrogation after STARTDT confirmation.
+// 验证：客户端在收到 STARTDT 确认后会自动发送总召。
 TEST(IEC104TcpSessionTest, ClientAutoInterrogationAfterStartDt) {
   auto io = std::make_shared<boost::asio::io_context>();
   auto sockets = MakeConnectedSockets(*io);
@@ -234,7 +234,7 @@ TEST(IEC104TcpSessionTest, ClientAutoInterrogationAfterStartDt) {
   io->stop();
 }
 
-// Verifies delayed S-frame acknowledgement is triggered by t2 timeout.
+// 验证：延迟的 S 帧确认会由 t2 超时触发。
 TEST(IEC104TcpSessionTest, DelayedAckUsesT2Timer) {
   auto io = std::make_shared<boost::asio::io_context>();
   auto sockets = MakeConnectedSockets(*io);

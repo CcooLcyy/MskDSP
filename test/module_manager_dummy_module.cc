@@ -17,13 +17,13 @@ const LibInfo kDummyLibInfo{
     .LIB_NAME = "Dummy",
 };
 
-// A minimal module used by unit tests. It intentionally does not start any
-// gRPC server to keep tests deterministic and fast.
+// 供单元测试使用的最小模块实现。它不会主动启动任何 gRPC 服务，
+// 以保持测试稳定且执行迅速。
 class DummyModule final : public ModuleInterface::ModuleInterface {
 public:
   DummyModule() {
-    // Keep the metadata consistent with the produced shared library name so
-    // ModuleManager can load/unload it by lib_name.
+    // 保持元数据与生成出的共享库文件名一致，
+    // 这样 ModuleManager 才能按 lib_name 正确加载和卸载。
     initLibInfo(kDummyLibInfo);
   }
 
@@ -50,7 +50,7 @@ const std::string &GetSerializedManifest() {
   }();
   return kSerialized;
 }
-}  // namespace
+}  // 命名空间结束
 
 extern "C" BOOST_SYMBOL_EXPORT ModuleInterface::ModuleInterface *create() {
   return new DummyModule();

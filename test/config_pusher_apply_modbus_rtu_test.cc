@@ -49,7 +49,7 @@ ConfigPusherProto::ModbusRtuConfig MakeMqttModbusConfig(bool start, bool withMqt
   task->set_start(start);
   return config;
 }
-}  // namespace
+}  // 命名空间结束
 
 // 验证：ModbusRTU gRPC stub 为空时下发失败。
 TEST(ConfigPusherApplyModbusRtuTest, NullStubReturnsFalse) {

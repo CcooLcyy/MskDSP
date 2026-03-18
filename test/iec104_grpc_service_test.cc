@@ -7,7 +7,7 @@
 namespace {
 using IEC104Module = IEC104::IEC104;
 using IEC104Service = IEC104::IEC104GrpcServiceImpl;
-}  // namespace
+}  // 命名空间结束
 
 // 验证：IEC104 服务未就绪时返回 FAILED_PRECONDITION。
 TEST(IEC104GrpcServiceTest, RejectsWhenModuleNotReady) {

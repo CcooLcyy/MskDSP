@@ -113,7 +113,7 @@ private:
 public:
   LinkManager mgr;
 };
-}  // namespace
+}  // 命名空间结束
 
 // 验证：create_only UpsertLink 会向 DataCenter 取/建 conn_id，并回填到 LinkInfo。
 TEST(ModbusRtuLinkManagerTest, UpsertLinkCreateOnlyReturnsConnId) {

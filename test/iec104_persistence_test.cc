@@ -74,7 +74,7 @@ bool LoadLinksConfigFromFile(const std::filesystem::path& path, IEC104Proto::Lin
   out->Clear();
   return out->ParseFromString(data);
 }
-}  // namespace
+}  // 命名空间结束
 
 // 验证：链路配置与点表在落盘后可被新 LinkManager 实例恢复，且恢复后保持 STOPPED。
 TEST(IEC104PersistenceTest, LoadsPersistedLinkAndPointTableAfterRestart) {

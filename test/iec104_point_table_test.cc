@@ -12,7 +12,7 @@ IEC104Proto::Point MakePoint(const char* tag, uint32_t ioa) {
   p.set_type(IEC104Proto::POINT_TYPE_FLOAT);
   return p;
 }
-}  // namespace
+}  // 命名空间结束
 
 // 验证：点表 replace 更新与双向查询（tag->ioa、ioa->tag）以及稳定输出顺序。
 TEST(IEC104PointTableTest, ReplaceAndLookup) {

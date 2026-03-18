@@ -38,14 +38,13 @@ std::string FindDummyLibFileName() {
 }
 
 void CleanTestEnvKeepDummyLib() {
-  // Fresh conf/socket/log so that code paths for directory creation are covered.
+  // 清理并重建 conf/socket/log，覆盖目录创建相关代码路径。
   fs::remove_all(ConfDir());
   fs::remove_all(SocketDir());
   fs::remove_all(LogDir());
   fs::create_directories(ConfDir());
 
-  // Keep the dummy module shared library (and its symlink chain), remove any
-  // other artifacts created by tests.
+  // 保留假模块共享库及其符号链接链路，移除测试过程中产生的其他产物。
   fs::create_directories(LibDir());
   const auto prefix = DummyLibPrefix();
   for (const auto &entry : fs::directory_iterator(LibDir())) {
@@ -93,16 +92,16 @@ protected:
         << "未在 `./module` 找到假模块共享库（期望前缀: " << DummyLibPrefix() << ")";
   }
 };
-}  // namespace
+}  // 命名空间结束
 
 // 验证：getModuleInfos 会扫描 ./module 中的模块，并读取 manifest 与 manifest_error。
 TEST_F(ModuleManagerTest, GetModuleInfosScansLibDirAndParsesVersion) {
-  // Create extra entries to cover scan filters/branches.
+  // 额外创建若干条目，覆盖扫描过滤与分支逻辑。
   std::ofstream(LibDir() / "libNoVersion.so").put('\n');
-  std::ofstream(LibDir() / "ab.so.0.0.1").put('\n');  // ".so" is too early, should be ignored.
-  fs::create_directory(LibDir() / "libDir.so.0.0.1");  // Not a regular file, should be ignored.
+  std::ofstream(LibDir() / "ab.so.0.0.1").put('\n');  // ".so" 出现过早，应被忽略。
+  fs::create_directory(LibDir() / "libDir.so.0.0.1");  // 不是普通文件，应被忽略。
 
-  // A symlink should be ignored.
+  // 符号链接应被忽略。
   const auto dummyFile = FindDummyLibFileName();
   ASSERT_FALSE(dummyFile.empty());
   fs::create_symlink(dummyFile, LibDir() / "libSymlink.so.0.0.1");
@@ -126,7 +125,7 @@ TEST_F(ModuleManagerTest, GetModuleInfosScansLibDirAndParsesVersion) {
   EXPECT_TRUE(noVerInfo.version().patch().empty());
   EXPECT_FALSE(noVerInfo.manifest_error().empty());
 
-  // Ensure filtered entries are not included.
+  // 确认被过滤的条目不会出现在结果中。
   EXPECT_FALSE(HasModuleInfoByName(infos, "Symlink"));
   EXPECT_FALSE(HasModuleInfoByName(infos, "Dir"));
 }
@@ -163,7 +162,7 @@ TEST_F(ModuleManagerTest, LoadAndUnloadModuleUpdatesRunningInfos) {
   EXPECT_TRUE(stopResult.ok());
   EXPECT_EQ(mgr.getModuleRunningInfos().module_running_info_size(), 0);
 
-  // Unloading a non-running module should be a no-op.
+  // 卸载未运行的模块应是空操作。
   auto stopAgain = mgr.unloadModule(dummyInfo);
   EXPECT_TRUE(stopAgain.ok());
 }

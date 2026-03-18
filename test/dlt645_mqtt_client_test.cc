@@ -23,7 +23,7 @@ DLT645Proto::MqttConfig MakeConfig() {
   cfg.set_connect_timeout_ms(1000);
   return cfg;
 }
-}  // namespace
+}  // 命名空间结束
 
 // 验证：未配置 MQTT 时拒绝发布。
 TEST(Dlt645MqttClientTest, PublishRejectsWithoutConfig) {
