@@ -19,6 +19,7 @@ ConfigPusherProto::AgcConfig MakeAgcConfig(bool start) {
   group->mutable_p_cmd()->mutable_signal()->set_tag("P_CMD");
   group->mutable_p_cmd()->mutable_signal()->set_unit("kW");
   group->mutable_p_cmd()->set_mode(AGCProto::VALUE_MODE_ABSOLUTE);
+  group->mutable_strategy()->mutable_weighted();
 
   auto* member = group->add_members();
   member->set_member_name("inv-1");
@@ -32,7 +33,7 @@ ConfigPusherProto::AgcConfig MakeAgcConfig(bool start) {
   task->set_start(start);
   return config;
 }
-}  // namespace
+}  // 命名空间结束
 
 // 验证：AGC gRPC stub 为空时下发失败。
 TEST(ConfigPusherApplyAgcTest, NullStubReturnsFalse) {
@@ -50,6 +51,9 @@ TEST(ConfigPusherApplyAgcTest, UpsertAndStartGroupSuccess) {
                           const AGCProto::UpsertGroupRequest& req,
                           AGCProto::GroupInfo* resp) {
         EXPECT_EQ(req.config().group_name(), "g-1");
+        EXPECT_TRUE(req.config().has_strategy());
+        EXPECT_TRUE(req.config().strategy().has_weighted());
+        EXPECT_EQ(req.config().members_size(), 1);
         resp->mutable_config()->set_group_name(req.config().group_name());
         resp->set_conn_id(100);
         return grpc::Status::OK;
@@ -75,4 +79,23 @@ TEST(ConfigPusherApplyAgcTest, UpsertFailureSkipsStartGroup) {
   EXPECT_CALL(*stub, StartGroup(_, _, _)).Times(0);
 
   EXPECT_FALSE(ConfigPusher::applyAgcConfig(config, stub.get()));
+}
+
+// 验证：AGC 配置任务在 start=false 时仅下发 UpsertGroup，不会启动控制组功能。
+TEST(ConfigPusherApplyAgcTest, UpsertWithoutStartGroup) {
+  auto config = MakeAgcConfig(false);
+  auto stub = std::make_unique<AGCProto::MockAGCServiceStub>();
+
+  EXPECT_CALL(*stub, UpsertGroup(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext*,
+                          const AGCProto::UpsertGroupRequest& req,
+                          AGCProto::GroupInfo* resp) {
+        EXPECT_EQ(req.config().group_name(), "g-1");
+        resp->mutable_config()->set_group_name(req.config().group_name());
+        resp->set_conn_id(101);
+        return grpc::Status::OK;
+      }));
+  EXPECT_CALL(*stub, StartGroup(_, _, _)).Times(0);
+
+  EXPECT_TRUE(ConfigPusher::applyAgcConfig(config, stub.get()));
 }

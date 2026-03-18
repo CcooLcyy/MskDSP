@@ -52,7 +52,10 @@ ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRT
 - IEC104 可选下发点值上送参数（`point_batch_window_ms/point_max_asdu_bytes/point_use_standard_limit/point_dedupe/point_with_time`；默认不带时标）
 - IEC104 可选下发对时触发 tag（`time_sync_tag`；为空时默认 `__time_sync__`）
 - IEC104 点表类型支持 `POINT_TYPE_FLOAT` 与 `POINT_TYPE_SINGLE`
-- AGC 配置使用 `agc.groups[].upsert` 下发控制组，`agc.groups[].start=true` 时会启动控制组内控制环功能
+- AGC 配置使用 `agc.groups[].upsert` 下发控制组，`agc.groups[].start=true` 时会启动控制组内事件触发控制功能
+- AGC 控制组配置已不再包含 `loop`、`kp`、`deadband_kw`、`max_step_kw` 等旧闭环参数；ConfigPusher 只接受当前 `GroupConfig` 结构
+- AGC 会在 `p_cmd`、成员量测或 `base_tag` 等相关输入点变化时，直接按 `p_cmd` 计算出的目标总功率进行成员分配；成员上下限、不可控成员扣减、`ABSOLUTE/DELTA` 与 `DELTA_BASE_LAST_TARGET` 等语义保持不变
+- 若 JSONC 里仍保留旧 `loop` 字段，ConfigPusher 会在解析阶段直接报错，避免继续向 AGC 下发过期配置
 - DataCenter 配置要求连接已存在（由模块或上位机创建）；若 `point_tables/routes` 引用连接不存在，则该次 DataCenter 配置不下发。注意：这里的 `point_tables` 配置项当前仍沿用历史字段名，实际对应 DataCenter 的连接标签注册表 `ConnTags`。
 - `replace=true` 表示覆盖配置；`replace=false` 表示增量追加
 - ModbusRTU 支持双传输并存：`TRANSPORT_SERIAL` 保留本地串口直连；`TRANSPORT_MQTT_UART` 通过 `MQTTManager + uartManager` 做串口透传
@@ -191,6 +194,12 @@ DLT645 批量下发示例：
   - `device_no` 非 2 位十六进制；
   - 非 `DLT645PCD` 却配置 `device_nos`；
   - 展开后连接名重复。
+
+### 上位机对接建议（AGC）
+- AGC 界面与配置模板中不要再展示 `loop`、`kp`、`deadband_kw`、`max_step_kw` 等旧参数。
+- 建议将 AGC 总目标描述为“相关输入变化时直接按目标总功率分配”，避免继续使用“分步逼近”“步长限制”“固定周期轮询”之类旧文案。
+- 若成员设定值使用 `VALUE_MODE_DELTA + DELTA_BASE_LAST_TARGET`，建议在界面上明确提示其基准是 AGC 记忆的上一轮期望目标，而不是旧闭环输出步长。
+- 建议在配置校验阶段直接提示“存在已废弃的 AGC loop 字段”，避免用户把旧版模板继续下发到 ConfigPusher。
 
 DataCenter 示例：
 ```jsonc

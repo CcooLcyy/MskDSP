@@ -38,6 +38,10 @@ bool applyAgcConfig(const ConfigPusherProto::AgcConfig& config,
       ok = false;
       continue;
     }
+    LOG_INFO("处理 AGC 控制组任务: 控制组名={}, 成员数={}, 下发后是否启动控制组功能={}",
+             groupConfig.group_name(),
+             groupConfig.members_size(),
+             task.start());
 
     AGCProto::UpsertGroupRequest upsertReq = task.upsert();
     LOG_INFO("发送 AGC 控制组配置请求报文: {}", formatProtoForLog(upsertReq));
@@ -53,9 +57,10 @@ bool applyAgcConfig(const ConfigPusherProto::AgcConfig& config,
       continue;
     }
     LOG_INFO("收到 AGC 控制组配置响应报文: {}", formatProtoForLog(upsertResp));
-    LOG_INFO("AGC 控制组配置成功: 控制组名={}, conn_id={}",
+    LOG_INFO("AGC 控制组配置成功: 控制组名={}, conn_id={}, 成员数={}",
              upsertResp.config().group_name(),
-             upsertResp.conn_id());
+             upsertResp.conn_id(),
+             groupConfig.members_size());
 
     if (task.start()) {
       AGCProto::StartGroupRequest startReq;

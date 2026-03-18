@@ -17,13 +17,7 @@
               "mode": "VALUE_MODE_ABSOLUTE",
               "delta_base": "DELTA_BASE_UNSPECIFIED"
             },
-            // 当前按 1s 周期做简单闭环；如现场希望动作更快，可适当减小 period_ms。
-            "loop": {
-              "period_ms": 1000,
-              "deadband_kw": 2.0,
-              "max_step_kw": 20.0,
-              "kp": 1.0
-            },
+            // AGC 会在相关输入点变化时直接按总有功目标做成员分配，不再配置步长限制/逐步逼近参数。
             "strategy": {
               "weighted": {}
             },
@@ -147,7 +141,7 @@
             }
           }
         },
-        // true 表示下发后启动控制组内控制环功能。
+        // true 表示下发后启动控制组内事件触发控制功能。
         "start": true
       }
     ]

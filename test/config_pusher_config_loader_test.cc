@@ -45,7 +45,7 @@ void WriteFile(const std::filesystem::path &path, const std::string &content) {
   std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
   ofs << content;
 }
-}  // namespace
+}  // 命名空间结束
 
 // 验证：加载配置时支持 JSONC 注释并转换 ModbusRTU 十六进制功能码。
 TEST(ConfigPusherConfigLoaderTest, LoadConfigWithCommentsAndHexFunction) {
@@ -148,6 +148,9 @@ TEST(ConfigPusherConfigLoaderTest, LoadAgcConfigFile) {
               "signal": { "tag": "P_CMD", "unit": "kW" },
               "mode": "VALUE_MODE_ABSOLUTE"
             },
+            "strategy": {
+              "weighted": {}
+            },
             "members": [
               {
                 "member_name": "inv-1",
@@ -178,8 +181,51 @@ TEST(ConfigPusherConfigLoaderTest, LoadAgcConfigFile) {
   ASSERT_TRUE(task.upsert().config().has_p_cmd());
   EXPECT_EQ(task.upsert().config().p_cmd().signal().tag(), "P_CMD");
   EXPECT_EQ(task.upsert().config().p_cmd().mode(), AGCProto::VALUE_MODE_ABSOLUTE);
+  ASSERT_TRUE(task.upsert().config().has_strategy());
+  EXPECT_TRUE(task.upsert().config().strategy().has_weighted());
   ASSERT_EQ(task.upsert().config().members_size(), 1);
   EXPECT_TRUE(task.start());
+}
+
+// 验证：加载 AGC 配置时若仍包含已废弃的 loop 字段，会直接解析失败。
+TEST(ConfigPusherConfigLoaderTest, RejectAgcDeprecatedLoopField) {
+  InitLoggerOnce();
+  ScopedTempDir dir;
+  const auto path = dir.path() / "agc.jsonc";
+  const std::string content = R"json(
+{
+  "agc": {
+    "groups": [
+      {
+        "upsert": {
+          "config": {
+            "group_name": "g-1",
+            "p_cmd": {
+              "signal": { "tag": "P_CMD", "unit": "kW" },
+              "mode": "VALUE_MODE_ABSOLUTE"
+            },
+            "loop": {
+              "period_ms": 1000
+            },
+            "members": [
+              {
+                "member_name": "inv-1",
+                "controllable": true,
+                "p_meas": { "tag": "INV1_P_MEAS", "unit": "kW" },
+                "p_set": { "signal": { "tag": "INV1_P_SET", "unit": "kW" }, "mode": "VALUE_MODE_ABSOLUTE" }
+              }
+            ]
+          }
+        }
+      }
+    ]
+  }
+}
+)json";
+  WriteFile(path, content);
+
+  auto loaded = ConfigPusher::LoadConfigFile(path);
+  EXPECT_FALSE(loaded.has_value());
 }
 
 // 验证：加载 DLT645 配置时支持解析 device_nos 批量设备序号字段。
