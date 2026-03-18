@@ -48,9 +48,11 @@ private:
   std::string moduleName_;
   mutable std::mutex mu_;
   bool hasConfig_{false};
+  bool hasInjectedStub_{false};
   DLT645Proto::MqttConfig config_;
   std::string serverAddress_;
   std::shared_ptr<grpc::Channel> channel_;
+  std::shared_ptr<MQTTManagerProto::MQTTManagerService::StubInterface> injectedStub_;
   std::shared_ptr<MQTTManagerProto::MQTTManagerService::StubInterface> stub_;
 };
 

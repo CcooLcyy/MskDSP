@@ -23,15 +23,28 @@ void MqttClient::setConfig(const DLT645Proto::MqttConfig& config) {
   std::lock_guard<std::mutex> lock(mu_);
   config_ = config;
   hasConfig_ = true;
+  if (hasInjectedStub_ && injectedStub_) {
+    stub_ = injectedStub_;
+    channel_.reset();
+    LOG_INFO("DLT645 MQTT 配置已更新，保留已注入 Stub 供后续请求继续复用");
+    return;
+  }
   channel_.reset();
   stub_.reset();
+  LOG_INFO("DLT645 MQTT 配置已更新，已清理 MQTT 连接缓存，后续请求将重建真实 Stub");
 }
 
 void MqttClient::setStub(std::shared_ptr<MQTTManagerProto::MQTTManagerService::StubInterface> stub) {
   std::lock_guard<std::mutex> lock(mu_);
-  stub_ = std::move(stub);
+  injectedStub_ = std::move(stub);
+  hasInjectedStub_ = static_cast<bool>(injectedStub_);
+  stub_ = injectedStub_;
   channel_.reset();
-  LOG_INFO("DLT645 MQTT Stub 已设置");
+  if (hasInjectedStub_) {
+    LOG_INFO("DLT645 MQTT Stub 已设置，后续请求将优先使用注入 Stub");
+  } else {
+    LOG_INFO("DLT645 MQTT Stub 已清除，后续请求将使用真实连接");
+  }
 }
 
 bool MqttClient::hasConfig() const {
@@ -215,11 +228,21 @@ MQTTManagerProto::ConnectionInfo MqttClient::makeConnection() const {
 
 std::shared_ptr<MQTTManagerProto::MQTTManagerService::StubInterface> MqttClient::getStub() {
   std::lock_guard<std::mutex> lock(mu_);
+  if (hasInjectedStub_ && injectedStub_) {
+    if (stub_ != injectedStub_) {
+      stub_ = injectedStub_;
+    }
+    return injectedStub_;
+  }
   ensureStubLocked();
   return stub_;
 }
 
 void MqttClient::ensureStubLocked() {
+  if (hasInjectedStub_ && injectedStub_) {
+    stub_ = injectedStub_;
+    return;
+  }
   if (stub_) {
     return;
   }
