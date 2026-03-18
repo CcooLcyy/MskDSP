@@ -2,10 +2,8 @@
 
 #include <grpcpp/client_context.h>
 
-#include <chrono>
 #include <cmath>
 #include <format>
-#include <thread>
 #include <utility>
 
 #include "AGCControl.h"
@@ -40,6 +38,12 @@ const char *groupStateToString(AGCProto::GroupState state) {
     default:
       return "未指定";
   }
+}
+
+constexpr double kValueChangeEps = 1e-6;
+
+bool sameValue(double lhs, double rhs) {
+  return std::fabs(lhs - rhs) <= kValueChangeEps;
 }
 }  // namespace
 
@@ -357,8 +361,31 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
   const auto connId = g->connId;
   auto tags = g->subscribeTags;
   if (connId == 0 || tags.empty()) {
+    LOG_WARNING("AGC 控制组启动事件触发控制功能失败: group_name={}, conn_id={}, 原因=订阅标签为空或连接无效",
+                groupName,
+                connId);
     return;
   }
+
+  g->controlTrigger = std::make_shared<ControlTrigger>();
+  auto trigger = g->controlTrigger;
+
+  g->controlThread = ModuleManager::StartModuleThread(
+      AGCLibInfo.LIB_NAME,
+      [this, groupName, trigger](std::stop_token st) {
+        std::stop_callback cb(st, [trigger]() { trigger->signal.release(); });
+
+        while (true) {
+          trigger->signal.acquire();
+          if (st.stop_requested()) {
+            break;
+          }
+          if (!trigger->pending.exchange(false)) {
+            continue;
+          }
+          controlTick(groupName);
+        }
+      });
 
   g->dcSubscribeContext = std::make_shared<grpc::ClientContext>();
   auto ctx = g->dcSubscribeContext;
@@ -368,8 +395,9 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
       [this, groupName, ctx, connId, tags](std::stop_token st) {
     std::stop_callback cb(st, [&ctx]() { ctx->TryCancel(); });
 
-    auto reader = dataCenter_.Subscribe(ctx.get(), connId, tags, true);
+    auto reader = dataCenter_.Subscribe(ctx.get(), connId, tags, false);
     if (!reader) {
+      LOG_ERROR("AGC 建立 DataCenter 订阅失败: group_name={}, conn_id={}, 标签数={}", groupName, connId, tags.size());
       return;
     }
 
@@ -380,7 +408,9 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
       if (it == groupsByName_.end()) {
         break;
       }
-      handleUpdateLocked(&it->second, update);
+      if (handleUpdateLocked(&it->second, update)) {
+        requestControlLocked(groupName, &it->second, "订阅输入点更新", update.dst_tag());
+      }
     }
 
     auto finishStatus = reader->Finish();
@@ -392,21 +422,10 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
       }
     }
   });
-
-  // 控制组运行期间缓存控制周期。
-  uint32_t periodMs = g->config.has_loop() ? g->config.loop().period_ms() : 0;
-  if (periodMs == 0) {
-    periodMs = 200;
-  }
-
-  g->controlThread = ModuleManager::StartModuleThread(
-      AGCLibInfo.LIB_NAME,
-      [this, groupName, periodMs](std::stop_token st) {
-        while (!st.stop_requested()) {
-          controlTick(groupName);
-          std::this_thread::sleep_for(std::chrono::milliseconds(periodMs));
-        }
-      });
+  LOG_INFO("AGC 控制组已启用事件触发控制功能: group_name={}, conn_id={}, 订阅标签数={}",
+           groupName,
+           connId,
+           tags.size());
 }
 
 grpc::Status GroupManager::StartGroup(const std::string &groupName) {
@@ -415,20 +434,24 @@ grpc::Status GroupManager::StartGroup(const std::string &groupName) {
     return status;
   }
 
-  std::lock_guard<std::mutex> lock(mu_);
-  auto it = groupsByName_.find(groupName);
-  if (it == groupsByName_.end()) {
-    return makeNotFound(groupName);
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end()) {
+      return makeNotFound(groupName);
+    }
+    if (it->second.state == AGCProto::GROUP_STATE_PENDING_DELETE) {
+      return makePreconditionFailed("控制组处于待删除状态");
+    }
+    if (it->second.state == AGCProto::GROUP_STATE_RUNNING) {
+      return makePreconditionFailed("控制组已在运行");
+    }
+    startThreadsLocked(groupName, &it->second);
+    it->second.state = AGCProto::GROUP_STATE_RUNNING;
+    it->second.lastError.clear();
   }
-  if (it->second.state == AGCProto::GROUP_STATE_PENDING_DELETE) {
-    return makePreconditionFailed("控制组处于待删除状态");
-  }
-  if (it->second.state == AGCProto::GROUP_STATE_RUNNING) {
-    return makePreconditionFailed("控制组已在运行");
-  }
-  startThreadsLocked(groupName, &it->second);
-  it->second.state = AGCProto::GROUP_STATE_RUNNING;
-  it->second.lastError.clear();
+  primeControlInputs(groupName);
+  LOG_INFO("AGC 控制组已启动事件触发控制功能: group_name={}", groupName);
   return grpc::Status::OK;
 }
 
@@ -440,6 +463,7 @@ grpc::Status GroupManager::StopGroup(const std::string &groupName) {
 
   std::jthread dcSubscribeThread;
   std::jthread controlThread;
+  std::shared_ptr<ControlTrigger> controlTrigger;
   bool pendingDelete = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -449,16 +473,24 @@ grpc::Status GroupManager::StopGroup(const std::string &groupName) {
     }
     dcSubscribeThread = std::move(it->second.dcSubscribeThread);
     controlThread = std::move(it->second.controlThread);
+    controlTrigger = std::move(it->second.controlTrigger);
     it->second.dcSubscribeContext.reset();
     pendingDelete = (it->second.state == AGCProto::GROUP_STATE_PENDING_DELETE);
     it->second.state = pendingDelete ? AGCProto::GROUP_STATE_PENDING_DELETE : AGCProto::GROUP_STATE_STOPPED;
   }
   if (dcSubscribeThread.joinable()) {
     dcSubscribeThread.request_stop();
-    dcSubscribeThread.join();
   }
   if (controlThread.joinable()) {
     controlThread.request_stop();
+  }
+  if (controlTrigger) {
+    controlTrigger->signal.release();
+  }
+  if (dcSubscribeThread.joinable()) {
+    dcSubscribeThread.join();
+  }
+  if (controlThread.joinable()) {
     controlThread.join();
   }
   if (pendingDelete) {
@@ -612,36 +644,120 @@ void GroupManager::rebuildTagCache(GroupRuntime *g) {
   }
 }
 
-void GroupManager::handleUpdateLocked(GroupRuntime *g, const DataCenterProto::PointUpdate &update) {
-  if (g == nullptr) {
+void GroupManager::primeControlInputs(const std::string &groupName) {
+  uint32_t connId = 0;
+  std::vector<std::string> tags;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end() || it->second.state != AGCProto::GROUP_STATE_RUNNING) {
+      return;
+    }
+    connId = it->second.connId;
+    tags = it->second.subscribeTags;
+  }
+
+  if (connId == 0 || tags.empty()) {
+    LOG_DEBUG("AGC 启动控制组时跳过初始输入快照加载: group_name={}, conn_id={}, 标签数={}",
+              groupName,
+              connId,
+              tags.size());
     return;
+  }
+
+  DataCenterProto::GetLatestResponse resp;
+  auto status = dataCenter_.GetLatest(connId, tags, &resp);
+  if (!status.ok()) {
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = groupsByName_.find(groupName);
+      if (it != groupsByName_.end()) {
+        it->second.lastError = status.error_message();
+      }
+    }
+    LOG_WARNING("AGC 启动控制组时读取初始输入快照失败: group_name={}, conn_id={}, 标签数={}, 原因={}",
+                groupName,
+                connId,
+                tags.size(),
+                status.error_message());
+    return;
+  }
+
+  size_t changed = 0;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end() || it->second.state != AGCProto::GROUP_STATE_RUNNING) {
+      return;
+    }
+    for (const auto &update : resp.updates()) {
+      if (handleUpdateLocked(&it->second, update)) {
+        ++changed;
+      }
+    }
+    if (resp.updates_size() > 0) {
+      requestControlLocked(groupName, &it->second, "启动时加载初始输入快照", "");
+    }
+  }
+
+  LOG_INFO("AGC 启动控制组时已加载初始输入快照: group_name={}, conn_id={}, updates={}, changed={}",
+           groupName,
+           connId,
+           resp.updates_size(),
+           changed);
+}
+
+void GroupManager::requestControlLocked(
+    const std::string &groupName, GroupRuntime *g, std::string_view reason, std::string_view tag) {
+  if (g == nullptr || g->state != AGCProto::GROUP_STATE_RUNNING || !g->controlTrigger) {
+    return;
+  }
+  if (!g->controlTrigger->pending.exchange(true)) {
+    g->controlTrigger->signal.release();
+    if (tag.empty()) {
+      LOG_DEBUG("AGC 控制组已请求一次事件触发控制: group_name={}, 原因={}", groupName, reason);
+    } else {
+      LOG_DEBUG("AGC 控制组已请求一次事件触发控制: group_name={}, 原因={}, tag={}", groupName, reason, tag);
+    }
+  }
+}
+
+bool GroupManager::handleUpdateLocked(GroupRuntime *g, const DataCenterProto::PointUpdate &update) {
+  if (g == nullptr) {
+    return false;
   }
   const auto &tag = update.dst_tag();
   double raw = 0.0;
   if (!pointValueToDouble(update.value(), &raw)) {
-    return;
+    return false;
   }
 
   if (!g->cmdTag.empty() && tag == g->cmdTag) {
+    const auto changed = !g->hasCmdRaw || !sameValue(g->cmdRaw, raw);
     g->cmdRaw = raw;
     g->hasCmdRaw = true;
-    return;
+    return changed;
   }
 
   if (g->baseTags.contains(tag)) {
+    auto it = g->baseRawByTag.find(tag);
+    const auto changed = (it == g->baseRawByTag.end()) || !sameValue(it->second, raw);
     g->baseRawByTag[tag] = raw;
-    return;
+    return changed;
   }
 
   auto it = g->memberIndexByMeasTag.find(tag);
   if (it != g->memberIndexByMeasTag.end()) {
     const auto idx = it->second;
     if (idx < g->memberMeasRaw.size()) {
+      const auto changed = !g->hasMemberMeasRaw[idx] || !sameValue(g->memberMeasRaw[idx], raw);
       g->memberMeasRaw[idx] = raw;
       g->hasMemberMeasRaw[idx] = true;
+      return changed;
     }
-    return;
+    return false;
   }
+  return false;
 }
 
 void GroupManager::controlTick(const std::string &groupName) {
@@ -670,8 +786,6 @@ void GroupManager::controlTick(const std::string &groupName) {
     input.lastMemberTargetKw = it->second.lastMemberTargetKw;
     input.hasLastDesiredTotalKw = it->second.hasLastDesiredTotalKw;
     input.lastDesiredTotalKw = it->second.lastDesiredTotalKw;
-    input.hasLastTotalTargetKw = it->second.hasLastTotalTargetKw;
-    input.lastTotalTargetKw = it->second.lastTotalTargetKw;
   }
 
   if (connId == 0) {
@@ -727,8 +841,6 @@ void GroupManager::controlTick(const std::string &groupName) {
 
     it->second.hasLastDesiredTotalKw = output.hasLastDesiredTotalKw;
     it->second.lastDesiredTotalKw = output.nextLastDesiredTotalKw;
-    it->second.hasLastTotalTargetKw = output.hasLastTotalTargetKw;
-    it->second.lastTotalTargetKw = output.nextLastTotalTargetKw;
     it->second.hasLastMemberTargetKw = output.hasLastMemberTargetKw;
     it->second.lastMemberTargetKw = output.nextLastMemberTargetKw;
 

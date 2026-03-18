@@ -3,12 +3,15 @@
 #include <grpcpp/client_context.h>
 #include <grpcpp/support/status.h>
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <semaphore>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -37,6 +40,11 @@ public:
   grpc::Status DeleteGroup(const std::string& groupName);
 
 private:
+  struct ControlTrigger {
+    std::atomic<bool> pending{false};
+    std::counting_semaphore<1024> signal{0};
+  };
+
   struct GroupRuntime {
     AGCProto::GroupConfig config;
     uint32_t connId{0};
@@ -46,6 +54,7 @@ private:
     std::shared_ptr<grpc::ClientContext> dcSubscribeContext;
     std::jthread dcSubscribeThread;
     std::jthread controlThread;
+    std::shared_ptr<ControlTrigger> controlTrigger;
 
     // 由配置派生的缓存 tags（供订阅线程使用）。
     std::string cmdTag;
@@ -62,9 +71,6 @@ private:
     bool hasLastDesiredTotalKw{false};
     double lastDesiredTotalKw{0.0};
 
-    bool hasLastTotalTargetKw{false};
-    double lastTotalTargetKw{0.0};
-
     std::vector<bool> hasLastMemberTargetKw;
     std::vector<double> lastMemberTargetKw;
 
@@ -80,8 +86,10 @@ private:
   grpc::Status restoreGroupFromConfig(const AGCProto::GroupConfig& config, AGCProto::GroupState restoredState);
 
   void startThreadsLocked(const std::string& groupName, GroupRuntime* g);
+  void primeControlInputs(const std::string& groupName);
+  void requestControlLocked(const std::string& groupName, GroupRuntime* g, std::string_view reason, std::string_view tag);
 
-  void handleUpdateLocked(GroupRuntime* g, const DataCenterProto::PointUpdate& update);
+  bool handleUpdateLocked(GroupRuntime* g, const DataCenterProto::PointUpdate& update);
   void controlTick(const std::string& groupName);
 
   static bool pointValueToDouble(const DataCenterProto::PointValue& v, double* out);

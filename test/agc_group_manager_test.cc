@@ -2,10 +2,12 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -76,7 +78,54 @@ AGCProto::UpsertGroupRequest MakeGroupReq(const char* groupName) {
 
   return req;
 }
-}  // namespace
+
+void PublishDoublePoint(FakeDataCenterState* state, uint32_t connId, const char* tag, double value) {
+  ASSERT_NE(state, nullptr);
+  DataCenterProto::PublishRequest req;
+  req.set_conn_id(connId);
+  req.set_tag(tag);
+  req.mutable_value()->set_double_value(value);
+  req.set_quality(DataCenterProto::QUALITY_GOOD);
+  ASSERT_TRUE(state->Publish(req).ok());
+}
+
+bool WaitForLatestDouble(const FakeDataCenterState& state, uint32_t connId, const char* tag, double expected) {
+  for (int i = 0; i < 50; ++i) {
+    DataCenterProto::GetLatestRequest req;
+    req.set_conn_id(connId);
+    req.add_tags(tag);
+
+    DataCenterProto::GetLatestResponse resp;
+    if (state.GetLatest(req, &resp).ok() && resp.updates_size() == 1 && resp.updates(0).value().has_double_value()) {
+      if (std::fabs(resp.updates(0).value().double_value() - expected) <= 1e-6) {
+        return true;
+      }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return false;
+}
+
+bool WaitForPublishCount(const FakeDataCenterState& state, uint32_t connId, const char* tag, size_t expected) {
+  for (int i = 0; i < 50; ++i) {
+    if (state.GetPublishCount(connId, tag) >= expected) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return false;
+}
+
+bool WaitForSubscriptionCount(const FakeDataCenterState& state, uint32_t connId, size_t expected) {
+  for (int i = 0; i < 50; ++i) {
+    if (state.GetSubscriptionCount(connId) >= expected) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return false;
+}
+}  // 命名空间结束
 
 // 验证：create_only UpsertGroup 会向 DataCenter 取/建 conn_id，并回填到 GroupInfo。
 TEST(AgcGroupManagerTest, UpsertGroupCreateOnlyReturnsConnId) {
@@ -328,6 +377,143 @@ TEST(AgcGroupManagerTest, StartGroupRejectsWhenPendingDelete) {
 
   auto st = mgr.StartGroup("g-pending");
   EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+}
+
+// 验证：StartGroup 会读取初始输入快照触发一次控制，并且不会按固定周期重复下发。
+TEST(AgcGroupManagerTest, StartGroupUsesInitialSnapshotWithoutPeriodicRepublish) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  auto req = MakeGroupReq("g-initial-snapshot");
+
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+  PublishDoublePoint(&state, info.conn_id(), "P_CMD", 60.0);
+  PublishDoublePoint(&state, info.conn_id(), "INV1_P_MEAS", 10.0);
+  PublishDoublePoint(&state, info.conn_id(), "INV2_P_MEAS", 20.0);
+
+  ASSERT_TRUE(mgr.StartGroup("g-initial-snapshot").ok());
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "P_TOTAL", 30.0));
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV1_P_SET", 20.0));
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV2_P_SET", 40.0));
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(350));
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "P_TOTAL"), 1u);
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV1_P_SET"), 1u);
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV2_P_SET"), 1u);
+
+  ASSERT_TRUE(mgr.StopGroup("g-initial-snapshot").ok());
+}
+
+// 验证：控制组重新启动时，即使初始快照值未变化，也会重新触发一次事件控制。
+TEST(AgcGroupManagerTest, RestartGroupReusesInitialSnapshotWithoutWaitingForNewInput) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  auto req = MakeGroupReq("g-restart-snapshot");
+
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+  PublishDoublePoint(&state, info.conn_id(), "P_CMD", 60.0);
+  PublishDoublePoint(&state, info.conn_id(), "INV1_P_MEAS", 10.0);
+  PublishDoublePoint(&state, info.conn_id(), "INV2_P_MEAS", 20.0);
+
+  ASSERT_TRUE(mgr.StartGroup("g-restart-snapshot").ok());
+  ASSERT_TRUE(WaitForPublishCount(state, info.conn_id(), "INV1_P_SET", 1u));
+  ASSERT_TRUE(mgr.StopGroup("g-restart-snapshot").ok());
+
+  ASSERT_TRUE(mgr.StartGroup("g-restart-snapshot").ok());
+  EXPECT_TRUE(WaitForPublishCount(state, info.conn_id(), "INV1_P_SET", 2u));
+  EXPECT_TRUE(WaitForPublishCount(state, info.conn_id(), "INV2_P_SET", 2u));
+
+  ASSERT_TRUE(mgr.StopGroup("g-restart-snapshot").ok());
+}
+
+// 验证：控制组启动后，运行中收到新的总设定输入会触发一次控制发布。
+TEST(AgcGroupManagerTest, RuntimeCommandUpdateTriggersControlAfterStart) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  auto req = MakeGroupReq("g-runtime-cmd");
+
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+  PublishDoublePoint(&state, info.conn_id(), "INV1_P_MEAS", 10.0);
+  PublishDoublePoint(&state, info.conn_id(), "INV2_P_MEAS", 20.0);
+
+  ASSERT_TRUE(mgr.StartGroup("g-runtime-cmd").ok());
+  ASSERT_TRUE(WaitForSubscriptionCount(state, info.conn_id(), 1u));
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV1_P_SET"), 0u);
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV2_P_SET"), 0u);
+
+  PublishDoublePoint(&state, info.conn_id(), "P_CMD", 60.0);
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "P_TOTAL", 30.0));
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV1_P_SET", 20.0));
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV2_P_SET", 40.0));
+
+  ASSERT_TRUE(mgr.StopGroup("g-runtime-cmd").ok());
+}
+
+// 验证：控制组运行中收到新的成员量测输入时，会重新触发一次控制计算。
+TEST(AgcGroupManagerTest, RuntimeMeasurementUpdateTriggersRecalculation) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  auto req = MakeGroupReq("g-runtime-meas");
+
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+  PublishDoublePoint(&state, info.conn_id(), "P_CMD", 60.0);
+  PublishDoublePoint(&state, info.conn_id(), "INV1_P_MEAS", 10.0);
+  PublishDoublePoint(&state, info.conn_id(), "INV2_P_MEAS", 20.0);
+
+  ASSERT_TRUE(mgr.StartGroup("g-runtime-meas").ok());
+  ASSERT_TRUE(WaitForPublishCount(state, info.conn_id(), "P_TOTAL", 1u));
+  ASSERT_TRUE(WaitForSubscriptionCount(state, info.conn_id(), 1u));
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "P_TOTAL", 30.0));
+
+  PublishDoublePoint(&state, info.conn_id(), "INV1_P_MEAS", 15.0);
+  EXPECT_TRUE(WaitForPublishCount(state, info.conn_id(), "P_TOTAL", 2u));
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "P_TOTAL", 35.0));
+
+  ASSERT_TRUE(mgr.StopGroup("g-runtime-meas").ok());
+}
+
+// 验证：控制组运行中收到重复的同值输入时，不会重复触发控制发布。
+TEST(AgcGroupManagerTest, DuplicateRuntimeCommandDoesNotRepublish) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  auto req = MakeGroupReq("g-duplicate-cmd");
+
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+  PublishDoublePoint(&state, info.conn_id(), "P_CMD", 60.0);
+  PublishDoublePoint(&state, info.conn_id(), "INV1_P_MEAS", 10.0);
+  PublishDoublePoint(&state, info.conn_id(), "INV2_P_MEAS", 20.0);
+
+  ASSERT_TRUE(mgr.StartGroup("g-duplicate-cmd").ok());
+  ASSERT_TRUE(WaitForPublishCount(state, info.conn_id(), "INV1_P_SET", 1u));
+  ASSERT_TRUE(WaitForPublishCount(state, info.conn_id(), "INV2_P_SET", 1u));
+  ASSERT_TRUE(WaitForSubscriptionCount(state, info.conn_id(), 1u));
+
+  PublishDoublePoint(&state, info.conn_id(), "P_CMD", 60.0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(120));
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV1_P_SET"), 1u);
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV2_P_SET"), 1u);
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "P_TOTAL"), 1u);
+
+  ASSERT_TRUE(mgr.StopGroup("g-duplicate-cmd").ok());
 }
 
 // 验证：UpsertGroup 会把控制组配置落盘，随后可由新的 GroupManager 恢复为 STOPPED 状态。

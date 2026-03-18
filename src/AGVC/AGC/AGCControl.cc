@@ -1,8 +1,9 @@
 #include "AGCControl.h"
 
 #include <algorithm>
-#include <cmath>
 #include <numeric>
+
+#include "Logger.h"
 
 namespace AGC {
 namespace {
@@ -29,19 +30,6 @@ double toRawDelta(const AGCProto::SignalSpec& s, double physicalDelta) {
   const auto scale = effectiveScale(s);
   return physicalDelta / scale;
 }
-
-double clampAbs(double v, double maxAbs) {
-  if (maxAbs <= 0.0) {
-    return v;
-  }
-  if (v > maxAbs) {
-    return maxAbs;
-  }
-  if (v < -maxAbs) {
-    return -maxAbs;
-  }
-  return v;
-}
 }  // namespace
 
 std::optional<ControlOutput> ComputeControlOutput(
@@ -49,14 +37,17 @@ std::optional<ControlOutput> ComputeControlOutput(
     const ControlInput& input,
     const AGVC::WeightedStrategy& strategy) {
   if (!config.has_p_cmd() || !config.p_cmd().has_signal()) {
+    LOG_DEBUG("AGC 控制计算跳过: group_name={}, 原因=缺少总设定点配置", config.group_name());
     return std::nullopt;
   }
   if (!input.hasCmdRaw) {
+    LOG_DEBUG("AGC 控制计算跳过: group_name={}, 原因=尚未收到总设定输入", config.group_name());
     return std::nullopt;
   }
 
   const auto memberCount = static_cast<size_t>(config.members_size());
   if (memberCount == 0) {
+    LOG_WARNING("AGC 控制计算跳过: group_name={}, 原因=成员列表为空", config.group_name());
     return std::nullopt;
   }
 
@@ -116,23 +107,7 @@ std::optional<ControlOutput> ComputeControlOutput(
     }
   }
 
-  const auto kp = (config.has_loop() && config.loop().kp() != 0.0) ? config.loop().kp() : 1.0;
-  const auto maxStepKw = config.has_loop() ? config.loop().max_step_kw() : 0.0;
-  const auto deadbandKw = config.has_loop() ? config.loop().deadband_kw() : 0.0;
-
-  double stepKw = 0.0;
-  if (!(deadbandKw > 0.0 && std::fabs(out.totalErrorKw) <= deadbandKw)) {
-    stepKw = clampAbs(kp * out.totalErrorKw, maxStepKw);
-  }
-
-  const double currentTargetKw = input.hasLastTotalTargetKw ? input.lastTotalTargetKw : out.totalMeasKw;
-  double nextTargetKw = currentTargetKw + stepKw;
-  if (stepKw > 0.0) {
-    nextTargetKw = std::min(nextTargetKw, desiredTotalKw);
-  }
-  if (stepKw < 0.0) {
-    nextTargetKw = std::max(nextTargetKw, desiredTotalKw);
-  }
+  const double nextTargetKw = desiredTotalKw;
 
   double passiveKw = 0.0;
   for (size_t i = 0; i < memberCount; ++i) {
@@ -178,6 +153,16 @@ std::optional<ControlOutput> ComputeControlOutput(
     }
   }
   out.actualTargetKw = actualTargetKw;
+
+  LOG_DEBUG(
+      "AGC 控制计算完成: group_name={}, total_meas_kw={}, desired_total_kw={}, target_controllable_kw={}, passive_kw={}, actual_target_kw={}, unallocated_kw={}",
+      config.group_name(),
+      out.totalMeasKw,
+      out.desiredTotalKw,
+      out.targetControllableKw,
+      out.passiveKw,
+      out.actualTargetKw,
+      out.unallocatedKw);
 
   if (config.has_outputs()) {
     const auto& o = config.outputs();
@@ -238,8 +223,6 @@ std::optional<ControlOutput> ComputeControlOutput(
 
   out.hasLastDesiredTotalKw = true;
   out.nextLastDesiredTotalKw = desiredTotalKw;
-  out.hasLastTotalTargetKw = true;
-  out.nextLastTotalTargetKw = actualTargetKw;
   out.hasLastMemberTargetKw.assign(memberCount, false);
   out.nextLastMemberTargetKw.assign(memberCount, 0.0);
   for (size_t i = 0; i < memberCount; ++i) {

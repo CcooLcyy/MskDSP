@@ -7,7 +7,7 @@ AGC（Automatic Generation Control）自动功率控制模块：从 DataCenter �
 - 按连接管理控制组：一个 `group_name` 对应 DataCenter 的一条连接 `(module_name="AGC", conn_name=group_name) -> conn_id`
 - 总设定拆分：将一个总有功设定值按策略（平均/按容量比例）分解为多个成员设定点
 - 多轮分配：成员触顶/触底时自动再分配剩余量，尽量满足总目标
-- 多次调节（周期闭环）：按周期计算总功率偏差并分步逼近目标（避免一次到位失败/设备响应慢）
+- 事件触发直接分配：在总设定、成员量测或 `base_tag` 等输入变化时，直接按 `desiredTotalKw` 计算成员目标，不再做组总目标的分步逼近
 - 派生点：台区总实时有功/总目标/偏差等由 AGC 计算发布，可转发给主站或其他模块
 - 不可控成员支持：不可控成员只参与量测汇总，作为“被动出力”从总目标中扣除后再分配给可控成员
 
@@ -45,16 +45,17 @@ AGC 不直接对接 IEC104/ModbusRTU；上下游均通过 DataCenter 的有向�
 
 > 说明：AGC 内部统一用“kW 绝对值”做计算；当输出配置为 `DELTA` 时，AGC 会在发布前将目标值转换为增量值。
 
-### 控制环（多次调节）
-`ControlLoopConfig` 当前实现为“比例 + 步长限制”的分步逼近：
-- 每周期计算 `error = desired_total - total_meas`
-- `step = clamp(kp * error, -max_step_kw, +max_step_kw)`，并应用 `deadband_kw`
-- 目标总值按 `step` 逐步逼近 `desired_total`，然后再拆分到各成员
-> 说明：若未配置 `period_ms`，默认 200ms。
+### 控制计算（事件触发直接分配）
+每次控制触发的计算过程如下：
+- 读取当前总设定输入 `p_cmd`、成员量测以及 `base_tag`
+- 按 `ABSOLUTE/DELTA` 与 `DELTA_BASE_*` 语义计算 `desiredTotalKw`
+- 直接以 `desiredTotalKw` 作为本轮组总目标，不再应用 `kp`、`max_step_kw`、`deadband_kw` 之类的渐进推进参数
+- 先扣减不可控成员的被动出力，再把剩余目标按 weighted 策略和成员 `min_kw/max_kw` 约束分配给可控成员
+- 若成员约束导致无法完全分配，记录 `unallocated` 并输出告警日志；`outputs.p_total_target` 发布的是本轮实际可下发的总目标值
 
 #### 计算示例
-- total_meas=30, desired_total=60, kp=1, max_step=0 → target=60 → 按权重 1:2 分配为 [20, 40]
-- deadband=10 且 |error|<=10 → step=0 → target=last_total_target（若有）或 total_meas
+- total_meas=30, desired_total=60 → target=60 → 按权重 1:2 分配为 [20, 40]
+- total_meas=100, last_total_target=90, desired_total=105 → 本轮仍直接按 105 分配，不再从 90 逐步逼近
 
 ### 不可控成员建议
 对不可控成员（`controllable=false`）：
@@ -70,9 +71,10 @@ AGC 不直接对接 IEC104/ModbusRTU；上下游均通过 DataCenter 的有向�
    - 成员量测（ModbusRTU conn）→ AGC：`(conn_id_inv1, P_MEAS) -> (conn_id_agc, members[0].p_meas.tag)`（依次类推）
    - AGC 成员设点 → 成员控制点：`(conn_id_agc, members[0].p_set.signal.tag) -> (conn_id_inv1, P_SET)`（依次类推）
    - 台区总实时 → 主站：`(conn_id_agc, outputs.p_total_meas.tag) -> (conn_id_104, P_TOTAL_DST)`
-4. 调用 `StartGroup` 启动控制组
+4. 调用 `StartGroup` 启动控制组内事件触发控制功能
 
 > 注意：路由与点表的具体 `tag`/单位由上位机配置决定；AGC 本身不关心 IEC104/ModbusRTU 的地址映射。
+> 上位机建议：`GroupConfig` 不再支持 `kp`、`max_step_kw`、`deadband_kw`、`period_ms` 等控制环参数；若上位机仍需要限幅、缓升缓降或分步给定，请在 AGC 上游先生成更细粒度的总设定，再通过 `p_cmd` 下发。
 
 ### 配置持久化（当前实现）
 AGC 会将控制组配置落盘到工作目录下的 `./conf/AGC/groups.pb`，用于进程重启后的自动恢复。
@@ -87,17 +89,18 @@ AGC 会将控制组配置落盘到工作目录下的 `./conf/AGC/groups.pb`，�
 - 每次 `UpsertGroup` / `DeleteGroup` 完成本地配置变更后自动落盘。
 - 落盘失败会返回 `INTERNAL`，但内存中的控制组配置不会回滚。
 - `RUNNING/STOPPED` 等瞬时运行态不落盘；若 `DeleteGroup` 因 DataCenter 删除失败而进入 `PENDING_DELETE`，会将待删除控制面状态一并落盘。
-- 订阅线程、控制线程与控制缓存不落盘。
+- 订阅线程、事件控制线程与控制缓存不落盘。
 
 ### 启动恢复
 - AGC 启动时会自动加载 `groups.pb`，并按 `group_name` 重新向 DataCenter 调用 `GetOrCreateConnection` 取回稳定 `conn_id`。
 - 恢复后会重新向 DataCenter 注册 AGC 自身连接标签注册表（`replace=true`），用于路由校验、展示与自愈。
-- 恢复出的控制组统一为 `STOPPED` 或 `PENDING_DELETE`，不会自动启动控制组内控制环功能；如需启动仍由上位机调用 `StartGroup`。
+- 恢复出的控制组统一为 `STOPPED` 或 `PENDING_DELETE`，不会自动启动控制组内事件触发控制功能；如需启动仍由上位机调用 `StartGroup`。
 - 因为 DataCenter 已持久化连接/连接标签注册表/路由，正常情况下重启后无需重新下发 AGC 路由。
 
 ### 当前限制/注意事项
 - `StrategyConfig` 目前仅实现加权分配（WeightedStrategy），其他策略为预留。
 - `DELTA_BASE_LAST_TARGET` 的基准为“上一轮期望总目标值”（`desired_total`）。
+- `GroupConfig` 不再暴露控制环/步长限制参数；旧版 `loop` 字段配置需要从上位机与配置下发链路中移除。
 - 当成员约束导致目标无法完全分配时，会记录 `unallocated` 并输出告警日志。
 - DataCenter 订阅流异常中断时仅记录 `last_error`，需上位机或外部机制触发重试。
 - 可在 `package/log` 查看关键告警（如 `AGC 分配受限`）。

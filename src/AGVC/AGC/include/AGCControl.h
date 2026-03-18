@@ -20,9 +20,6 @@ struct ControlInput {
   bool hasLastDesiredTotalKw{false};
   double lastDesiredTotalKw{0.0};
 
-  bool hasLastTotalTargetKw{false};
-  double lastTotalTargetKw{0.0};
-
   std::vector<bool> hasLastMemberTargetKw;
   std::vector<double> lastMemberTargetKw;
 };
@@ -50,9 +47,6 @@ struct ControlOutput {
 
   bool hasLastDesiredTotalKw{false};
   double nextLastDesiredTotalKw{0.0};
-
-  bool hasLastTotalTargetKw{false};
-  double nextLastTotalTargetKw{0.0};
 
   std::vector<bool> hasLastMemberTargetKw;
   std::vector<double> nextLastMemberTargetKw;

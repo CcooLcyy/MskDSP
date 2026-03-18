@@ -2,7 +2,11 @@
 
 #include <gmock/gmock.h>
 
+#include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -33,19 +37,46 @@ struct ConnKeyHash {
 
 class FakeDataCenterState {
 public:
+  static constexpr auto kSubscriptionIdleTimeout = std::chrono::milliseconds(200);
+
+  struct SubscriptionState {
+    explicit SubscriptionState(uint32_t connIdIn, std::vector<std::string> tagsIn) :
+        connId(connIdIn),
+        tags(std::move(tagsIn)) {}
+
+    bool Matches(const std::string& tag) const {
+      return tags.empty() || std::find(tags.begin(), tags.end(), tag) != tags.end();
+    }
+
+    uint32_t connId{0};
+    std::vector<std::string> tags;
+    mutable std::mutex mu;
+    std::condition_variable cv;
+    std::deque<DataCenterProto::PointUpdate> queue;
+    bool closed{false};
+  };
+
   class FakePointUpdateReader : public grpc::ClientReaderInterface<DataCenterProto::PointUpdate> {
   public:
-    explicit FakePointUpdateReader(std::vector<DataCenterProto::PointUpdate> updates)
-        : updates_(std::move(updates)) {}
+    explicit FakePointUpdateReader(std::shared_ptr<SubscriptionState> subscription)
+        : subscription_(std::move(subscription)) {}
 
     bool Read(DataCenterProto::PointUpdate* msg) override {
       if (msg == nullptr) {
         return false;
       }
-      if (index_ >= updates_.size()) {
+      std::unique_lock<std::mutex> lock(subscription_->mu);
+      while (subscription_->queue.empty() && !subscription_->closed) {
+        if (subscription_->cv.wait_for(lock, kSubscriptionIdleTimeout) == std::cv_status::timeout) {
+          subscription_->closed = true;
+          return false;
+        }
+      }
+      if (subscription_->queue.empty()) {
         return false;
       }
-      *msg = updates_[index_++];
+      *msg = std::move(subscription_->queue.front());
+      subscription_->queue.pop_front();
       return true;
     }
 
@@ -53,21 +84,26 @@ public:
       if (sz == nullptr) {
         return false;
       }
-      if (index_ >= updates_.size()) {
+      std::lock_guard<std::mutex> lock(subscription_->mu);
+      if (subscription_->queue.empty()) {
         *sz = 0;
         return false;
       }
-      *sz = static_cast<uint32_t>(updates_[index_].ByteSizeLong());
+      *sz = static_cast<uint32_t>(subscription_->queue.front().ByteSizeLong());
       return true;
     }
 
     void WaitForInitialMetadata() override {}
 
-    grpc::Status Finish() override { return grpc::Status::OK; }
+    grpc::Status Finish() override {
+      std::lock_guard<std::mutex> lock(subscription_->mu);
+      subscription_->closed = true;
+      subscription_->cv.notify_all();
+      return grpc::Status::OK;
+    }
 
   private:
-    std::vector<DataCenterProto::PointUpdate> updates_;
-    size_t index_{0};
+    std::shared_ptr<SubscriptionState> subscription_;
   };
 
   void AddConnection(uint32_t connId, std::string module, std::string conn) {
@@ -108,6 +144,34 @@ public:
   bool HasConnection(const std::string& module, const std::string& conn) const {
     std::lock_guard<std::mutex> lock(mu_);
     return conns_.contains(ConnKey{module, conn});
+  }
+
+  size_t GetPublishCount(uint32_t connId, const std::string& tag) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto connIt = publishCountByConnId_.find(connId);
+    if (connIt == publishCountByConnId_.end()) {
+      return 0;
+    }
+    auto tagIt = connIt->second.find(tag);
+    if (tagIt == connIt->second.end()) {
+      return 0;
+    }
+    return tagIt->second;
+  }
+
+  size_t GetSubscriptionCount(uint32_t connId) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = subscriptionsByConnId_.find(connId);
+    if (it == subscriptionsByConnId_.end()) {
+      return 0;
+    }
+    size_t active = 0;
+    for (const auto& weak : it->second) {
+      if (!weak.expired()) {
+        ++active;
+      }
+    }
+    return active;
   }
 
   grpc::Status ListConnections(DataCenterProto::ListConnectionsResponse* response) const {
@@ -206,8 +270,34 @@ public:
     update.set_ts_ms(request.ts_ms());
     update.set_quality(request.quality());
 
-    std::lock_guard<std::mutex> lock(mu_);
-    latestByConnId_[request.conn_id()][request.tag()] = update;
+    std::vector<std::shared_ptr<SubscriptionState>> subscriptions;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      latestByConnId_[request.conn_id()][request.tag()] = update;
+      publishCountByConnId_[request.conn_id()][request.tag()] += 1;
+      auto& watchers = subscriptionsByConnId_[request.conn_id()];
+      for (auto it = watchers.begin(); it != watchers.end();) {
+        if (auto sub = it->lock()) {
+          subscriptions.push_back(std::move(sub));
+          ++it;
+        } else {
+          it = watchers.erase(it);
+        }
+      }
+    }
+    for (const auto& sub : subscriptions) {
+      if (!sub->Matches(request.tag())) {
+        continue;
+      }
+      {
+        std::lock_guard<std::mutex> lock(sub->mu);
+        if (sub->closed) {
+          continue;
+        }
+        sub->queue.push_back(update);
+      }
+      sub->cv.notify_one();
+    }
     return grpc::Status::OK;
   }
 
@@ -251,26 +341,33 @@ public:
     if (request.conn_id() == 0) {
       return nullptr;
     }
-    std::vector<DataCenterProto::PointUpdate> updates;
+    auto subscription = std::make_shared<SubscriptionState>(
+        request.conn_id(),
+        std::vector<std::string>(request.tags().begin(), request.tags().end()));
     if (request.snapshot()) {
       std::lock_guard<std::mutex> lock(mu_);
       auto it = latestByConnId_.find(request.conn_id());
       if (it != latestByConnId_.end()) {
         if (request.tags().empty()) {
           for (const auto& [_, update] : it->second) {
-            updates.push_back(update);
+            subscription->queue.push_back(update);
           }
         } else {
           for (const auto& tag : request.tags()) {
             auto tagIt = it->second.find(tag);
             if (tagIt != it->second.end()) {
-              updates.push_back(tagIt->second);
+              subscription->queue.push_back(tagIt->second);
             }
           }
         }
       }
+      subscriptionsByConnId_[request.conn_id()].push_back(subscription);
     }
-    return std::make_unique<FakePointUpdateReader>(std::move(updates));
+    if (!request.snapshot()) {
+      std::lock_guard<std::mutex> lock(mu_);
+      subscriptionsByConnId_[request.conn_id()].push_back(subscription);
+    }
+    return std::make_unique<FakePointUpdateReader>(std::move(subscription));
   }
 
 private:
@@ -281,6 +378,8 @@ private:
   std::unordered_set<std::string> failPublishTags_;
   std::unordered_set<uint32_t> failGetLatestConnIds_;
   std::unordered_map<uint32_t, std::unordered_map<std::string, DataCenterProto::PointUpdate>> latestByConnId_;
+  std::unordered_map<uint32_t, std::unordered_map<std::string, size_t>> publishCountByConnId_;
+  mutable std::unordered_map<uint32_t, std::vector<std::weak_ptr<SubscriptionState>>> subscriptionsByConnId_;
 };
 
 inline std::shared_ptr<DataCenterProto::MockDataCenterServiceStub> MakeStub(FakeDataCenterState* state) {
