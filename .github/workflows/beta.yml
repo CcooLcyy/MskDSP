@@ -25,6 +25,8 @@ jobs:
     name: x64 Debug 校验
     runs-on: ubuntu-24.04
     if: ${{ github.event_name != 'schedule' || vars.MSKDSP_ACTIVE_BETA_REF != '' }}
+    env:
+      VCPKG_BINARY_CACHE_DIR: ${{ github.workspace }}/.cache/vcpkg/x64-linux-dynamic
     steps:
       - name: 计算目标分支
         id: ref
@@ -54,6 +56,22 @@ jobs:
           ref: ${{ steps.ref.outputs.target_ref }}
           fetch-depth: 0
           submodules: false
+
+      - name: 恢复 vcpkg 二进制缓存
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_BINARY_CACHE_DIR }}
+          key: vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          restore-keys: |
+            vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-
+
+      - name: 准备 vcpkg 二进制缓存环境
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${VCPKG_BINARY_CACHE_DIR}"
+          echo "VCPKG_DEFAULT_BINARY_CACHE=${VCPKG_BINARY_CACHE_DIR}" >> "${GITHUB_ENV}"
+          echo "VCPKG_BINARY_SOURCES=clear;files,${VCPKG_BINARY_CACHE_DIR},readwrite" >> "${GITHUB_ENV}"
 
       - name: 准备 protobuf 子模块访问
         shell: bash
@@ -145,6 +163,8 @@ jobs:
     needs:
       - x64-verify
     if: ${{ github.event_name != 'schedule' || vars.MSKDSP_ACTIVE_BETA_REF != '' }}
+    env:
+      VCPKG_BINARY_CACHE_DIR: ${{ github.workspace }}/.cache/vcpkg/arm64-linux-dynamic
     steps:
       - name: 计算目标分支
         id: ref
@@ -174,6 +194,22 @@ jobs:
           ref: ${{ steps.ref.outputs.target_ref }}
           fetch-depth: 0
           submodules: false
+
+      - name: 恢复 vcpkg 二进制缓存
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_BINARY_CACHE_DIR }}
+          key: vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          restore-keys: |
+            vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-
+
+      - name: 准备 vcpkg 二进制缓存环境
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${VCPKG_BINARY_CACHE_DIR}"
+          echo "VCPKG_DEFAULT_BINARY_CACHE=${VCPKG_BINARY_CACHE_DIR}" >> "${GITHUB_ENV}"
+          echo "VCPKG_BINARY_SOURCES=clear;files,${VCPKG_BINARY_CACHE_DIR},readwrite" >> "${GITHUB_ENV}"
 
       - name: 生成构建元数据
         id: meta

@@ -49,12 +49,10 @@ bash script/new_module.sh <NewModule>
 - 模块模板内置中文日志（模块启动/停止、Ping 请求）。
 - 模块文档骨架包含“线程与日志”约定说明。
 
-## 模块依赖与上位机使用
-ModuleManager 使用模块 manifest 构建依赖图，并自动处理依赖启动/级联停止。上位机侧建议遵循以下流程：
-- 先调用 `GetModuleInfo`，过滤 `manifest_error` 非空的模块（表示不可用或依赖配置错误）。
-- 用户点击启动 A 模块时，直接调用 `StartModule(A)`；管理器会按拓扑顺序自动拉起依赖。
-- 若 `StartModule` 返回错误，展示返回的错误信息（依赖缺失/循环/版本不满足等）。
-- 获取运行时地址时使用 `GetRunningModuleInfo`，如连接失败应重新刷新地址。
+## 模块依赖与启动
+ModuleManager 使用模块 manifest 构建依赖图，并自动处理依赖启动/级联停止。
+
+涉及上位机菜单结构、页面职责与操作流程的统一设计说明，已收口到 `doc/上位机设计指导.md`。
 
 ## 目录结构
 - `src/`：核心与模块源码（`core/ModuleManager`、`DataCenter`、`IEC104` 等）
