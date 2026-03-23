@@ -33,6 +33,7 @@ images/*
 *.pdf
 
 # 协议原始表格
+doc
 doc/锦浪逆变器协议/RS485_MODBUS锦浪光伏并网逆变器通信协议.xlsx
 
 # 测试配置
