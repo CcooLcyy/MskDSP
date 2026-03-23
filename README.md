@@ -140,7 +140,8 @@ cmake --build build-cov --parallel
 - `package/conf/`：配置与生成文件（如运行时保存的 `modConf.bin`）
 
 ## 开发约定
-统一规范见 `AGENTS.md`（项目结构、编码风格、测试与提交/PR 约定等）。
+统一规范见 `AGENTS.md`（项目结构、编码风格、开发方式、测试与提交/PR 约定等）。
+其中新增功能、业务需求与缺陷修复默认遵循“文档 -> 测试 -> 实现”的闭环推进方式。
 
 ## 相关文档
 - [模块管理器说明](./src/core/ModuleManager/doc/README.md)
