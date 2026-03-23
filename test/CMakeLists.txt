@@ -405,6 +405,23 @@ target_link_libraries(configPusherApplyDlt645_test PRIVATE
 
 mskdsp_add_isolated_test(configPusherApplyDlt645_test)
 
+add_executable(configPusherApplyIec104_test
+  config_pusher_apply_iec104_test.cc
+)
+
+target_include_directories(configPusherApplyIec104_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/ConfigPusher/include
+)
+
+target_link_libraries(configPusherApplyIec104_test PRIVATE
+  GTest::gtest_main
+  GTest::gmock
+  dspProto
+  ConfigPusher
+)
+
+mskdsp_add_isolated_test(configPusherApplyIec104_test)
+
 add_executable(iec104LinkManager_test
   iec104_link_manager_test.cc
   iec104_link_manager_helper_test.cc

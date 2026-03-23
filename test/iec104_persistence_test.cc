@@ -1,7 +1,12 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/ip/address_v4.hpp>
+#include <boost/asio/ip/tcp.hpp>
+
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -51,6 +56,30 @@ IEC104Proto::UpsertLinkRequest MakeClientLinkReq(const char* connName) {
   return req;
 }
 
+uint16_t AllocateFreeTcpPort() {
+  namespace asio = boost::asio;
+  using tcp = asio::ip::tcp;
+
+  asio::io_context io;
+  tcp::acceptor acceptor(io);
+  acceptor.open(tcp::v4());
+  acceptor.bind(tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+  return acceptor.local_endpoint().port();
+}
+
+IEC104Proto::UpsertLinkRequest MakeServerLinkReq(const char* connName, uint16_t port) {
+  IEC104Proto::UpsertLinkRequest req;
+  auto* cfg = req.mutable_config();
+  cfg->set_conn_name(connName);
+  cfg->set_role(IEC104Proto::ROLE_SERVER);
+  cfg->mutable_local()->set_ip("127.0.0.1");
+  cfg->mutable_local()->set_port(port);
+  cfg->set_ca(1);
+  cfg->set_oa(1);
+  req.set_create_only(true);
+  return req;
+}
+
 IEC104Proto::Point MakePoint(const char* tag, uint32_t ioa) {
   IEC104Proto::Point point;
   point.set_tag(tag);
@@ -76,11 +105,12 @@ bool LoadLinksConfigFromFile(const std::filesystem::path& path, IEC104Proto::Lin
 }
 }  // 命名空间结束
 
-// 验证：链路配置与点表在落盘后可被新 LinkManager 实例恢复，且恢复后保持 STOPPED。
+// 验证：链路配置与点表在落盘后可被新 LinkManager 实例恢复，且恢复后会自动启动链路功能。
 TEST(IEC104PersistenceTest, LoadsPersistedLinkAndPointTableAfterRestart) {
   ScopedTempDir dir;
   const auto linksPath = dir.path() / "links.pb";
   const auto pointTablesPath = dir.path() / "point_tables.pb";
+  const auto port = AllocateFreeTcpPort();
 
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
@@ -90,7 +120,7 @@ TEST(IEC104PersistenceTest, LoadsPersistedLinkAndPointTableAfterRestart) {
     LinkManager mgr("IEC104", linksPath, pointTablesPath);
     mgr.setDataCenterStub(stub);
 
-    auto linkReq = MakeClientLinkReq("conn-persist");
+    auto linkReq = MakeServerLinkReq("conn-persist", port);
     IEC104Proto::LinkInfo info;
     ASSERT_TRUE(mgr.UpsertLink(linkReq, &info).ok());
     connId = info.conn_id();
@@ -109,8 +139,8 @@ TEST(IEC104PersistenceTest, LoadsPersistedLinkAndPointTableAfterRestart) {
     IEC104Proto::LinkInfo info;
     ASSERT_TRUE(mgr.GetLink("conn-persist", &info).ok());
     EXPECT_EQ(info.conn_id(), connId);
-    EXPECT_EQ(info.state(), IEC104Proto::LINK_STATE_STOPPED);
-    EXPECT_EQ(info.config().station_role(), IEC104Proto::STATION_ROLE_MASTER);
+    EXPECT_EQ(info.state(), IEC104Proto::LINK_STATE_RUNNING);
+    EXPECT_EQ(info.config().station_role(), IEC104Proto::STATION_ROLE_SLAVE);
     EXPECT_EQ(info.config().time_sync_tag(), "__time_sync__");
     EXPECT_TRUE(info.last_error().empty());
 
@@ -119,6 +149,8 @@ TEST(IEC104PersistenceTest, LoadsPersistedLinkAndPointTableAfterRestart) {
     ASSERT_EQ(pointTable.points_size(), 1);
     EXPECT_EQ(pointTable.points(0).tag(), "telemetry_a");
     EXPECT_EQ(pointTable.points(0).ioa(), 100u);
+
+    ASSERT_TRUE(mgr.StopLink("conn-persist").ok());
   }
 }
 
@@ -163,6 +195,8 @@ TEST(IEC104PersistenceTest, ContinuesRestoringOtherLinksWhenSingleLinkFails) {
   ScopedTempDir dir;
   const auto linksPath = dir.path() / "links.pb";
   const auto pointTablesPath = dir.path() / "point_tables.pb";
+  const auto goodPort = AllocateFreeTcpPort();
+  const auto badPort = AllocateFreeTcpPort();
 
   FakeDataCenterState initialState;
   auto initialStub = MakeStub(&initialState);
@@ -172,8 +206,8 @@ TEST(IEC104PersistenceTest, ContinuesRestoringOtherLinksWhenSingleLinkFails) {
     mgr.setDataCenterStub(initialStub);
 
     IEC104Proto::LinkInfo info;
-    ASSERT_TRUE(mgr.UpsertLink(MakeClientLinkReq("conn-good"), &info).ok());
-    ASSERT_TRUE(mgr.UpsertLink(MakeClientLinkReq("conn-bad"), &info).ok());
+    ASSERT_TRUE(mgr.UpsertLink(MakeServerLinkReq("conn-good", goodPort), &info).ok());
+    ASSERT_TRUE(mgr.UpsertLink(MakeServerLinkReq("conn-bad", badPort), &info).ok());
 
     IEC104Proto::UpsertPointTableRequest pointReq;
     pointReq.set_conn_name("conn-good");
@@ -201,7 +235,7 @@ TEST(IEC104PersistenceTest, ContinuesRestoringOtherLinksWhenSingleLinkFails) {
 
     IEC104Proto::LinkInfo good;
     ASSERT_TRUE(mgr.GetLink("conn-good", &good).ok());
-    EXPECT_EQ(good.state(), IEC104Proto::LINK_STATE_STOPPED);
+    EXPECT_EQ(good.state(), IEC104Proto::LINK_STATE_RUNNING);
 
     IEC104Proto::PointTable pointTable;
     ASSERT_TRUE(mgr.GetPointTable("conn-good", &pointTable).ok());
@@ -211,6 +245,8 @@ TEST(IEC104PersistenceTest, ContinuesRestoringOtherLinksWhenSingleLinkFails) {
     IEC104Proto::LinkInfo bad;
     auto status = mgr.GetLink("conn-bad", &bad);
     EXPECT_EQ(status.error_code(), grpc::StatusCode::NOT_FOUND);
+
+    ASSERT_TRUE(mgr.StopLink("conn-good").ok());
   }
 }
 
@@ -219,6 +255,7 @@ TEST(IEC104PersistenceTest, ReloadsWithReassignedConnIdFromDataCenter) {
   ScopedTempDir dir;
   const auto linksPath = dir.path() / "links.pb";
   const auto pointTablesPath = dir.path() / "point_tables.pb";
+  const auto port = AllocateFreeTcpPort();
 
   FakeDataCenterState initialState;
   auto initialStub = MakeStub(&initialState);
@@ -228,7 +265,7 @@ TEST(IEC104PersistenceTest, ReloadsWithReassignedConnIdFromDataCenter) {
     LinkManager mgr("IEC104", linksPath, pointTablesPath);
     mgr.setDataCenterStub(initialStub);
 
-    auto linkReq = MakeClientLinkReq("conn-reassigned");
+    auto linkReq = MakeServerLinkReq("conn-reassigned", port);
     IEC104Proto::LinkInfo info;
     ASSERT_TRUE(mgr.UpsertLink(linkReq, &info).ok());
     oldConnId = info.conn_id();
@@ -271,8 +308,11 @@ TEST(IEC104PersistenceTest, ReloadsWithReassignedConnIdFromDataCenter) {
     newConnId = info.conn_id();
     EXPECT_NE(newConnId, oldConnId);
     EXPECT_EQ(newConnId, oldConnId + 10);
+    EXPECT_EQ(info.state(), IEC104Proto::LINK_STATE_RUNNING);
     ASSERT_FALSE(syncedConnIds.empty());
     EXPECT_EQ(syncedConnIds.front(), newConnId);
+
+    ASSERT_TRUE(mgr.StopLink("conn-reassigned").ok());
 
     IEC104Proto::UpsertPointTableRequest pointReq;
     pointReq.set_conn_name("conn-reassigned");

@@ -79,6 +79,21 @@ void LinkManager::setDataCenterStub(std::shared_ptr<DataCenterProto::DataCenterS
   }
 }
 
+void LinkManager::RecoverPersistedConfigOnModuleStart() {
+  bool canReload = false;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    canReload = persistenceEnabled();
+  }
+  if (canReload) {
+    LOG_INFO("IEC104 模块启动阶段准备重新加载本地持久化配置，以最终恢复结果为准");
+    loadPersistedConfig("模块启动阶段重试");
+  } else {
+    LOG_INFO("IEC104 模块启动阶段未启用本地持久化恢复，跳过重载");
+  }
+  TryAutoStartReadyLinks("模块启动后恢复检查");
+}
+
 grpc::Status LinkManager::validateConnName(const std::string &connName) {
   if (connName.empty()) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_name 不能为空");
@@ -256,6 +271,83 @@ grpc::Status LinkManager::fillLinkInfoLocked(const LinkRuntime &link, IEC104Prot
   out->set_state(link.state);
   out->set_last_error(link.lastError);
   return grpc::Status::OK;
+}
+
+grpc::Status LinkManager::checkStartPreconditionsLocked(const LinkRuntime &link) const {
+  if (link.state == IEC104Proto::LINK_STATE_PENDING_DELETE) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路处于待删除状态");
+  }
+  const auto pointCount = link.pointTable.Tags().size();
+  if (!link.pointTableConfigured || pointCount == 0) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                        "链路点表未就绪，当前规则要求链路非待删除且至少存在 1 条通过校验的点表记录后才启动连接功能");
+  }
+  return grpc::Status::OK;
+}
+
+grpc::Status LinkManager::tryAutoStartLink(const std::string &connName, std::string_view trigger) {
+  size_t pointCount = 0;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = linksByName_.find(connName);
+    if (it == linksByName_.end()) {
+      return makeNotFound(connName);
+    }
+    pointCount = it->second.pointTable.Tags().size();
+    if (it->second.state == IEC104Proto::LINK_STATE_RUNNING) {
+      LOG_INFO("IEC104 自动启动链路跳过: conn_name={}, 触发来源={}, 原因=链路已在运行",
+               connName,
+               trigger);
+      return grpc::Status::OK;
+    }
+    auto status = checkStartPreconditionsLocked(it->second);
+    if (!status.ok()) {
+      it->second.lastError = status.error_message();
+      LOG_INFO("IEC104 自动启动链路跳过: conn_name={}, 触发来源={}, 点数={}, 原因={}",
+               connName,
+               trigger,
+               pointCount,
+               status.error_message());
+      return status;
+    }
+  }
+
+  LOG_INFO("IEC104 自动启动链路: conn_name={}, 触发来源={}, 规则=链路非待删除且至少存在 1 条有效点表记录, 点数={}",
+           connName,
+           trigger,
+           pointCount);
+  auto status = StartLink(connName);
+  if (!status.ok()) {
+    LOG_WARNING("IEC104 自动启动链路失败: conn_name={}, 触发来源={}, 原因={}",
+                connName,
+                trigger,
+                status.error_message());
+  } else {
+    LOG_INFO("IEC104 自动启动链路成功: conn_name={}, 触发来源={}", connName, trigger);
+  }
+  return status;
+}
+
+void LinkManager::TryAutoStartReadyLinks(std::string_view trigger) {
+  std::vector<std::string> connNames;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    connNames.reserve(linksByName_.size());
+    for (const auto &[connName, link] : linksByName_) {
+      if (link.state == IEC104Proto::LINK_STATE_STOPPED || link.state == IEC104Proto::LINK_STATE_RUNNING) {
+        connNames.push_back(connName);
+      }
+    }
+  }
+
+  if (connNames.empty()) {
+    LOG_INFO("IEC104 自动启动检查完成: 触发来源={}, 当前无可评估链路", trigger);
+    return;
+  }
+
+  for (const auto &connName : connNames) {
+    (void)tryAutoStartLink(connName, trigger);
+  }
 }
 
 void LinkManager::loadPersistedConfig(std::string_view trigger) {
@@ -460,9 +552,12 @@ void LinkManager::loadPersistedConfig(std::string_view trigger) {
         removePointTableForConn(connName);
       } else {
         runtime.pointTable = std::move(pointTable);
+        runtime.pointTableConfigured = true;
         pointCount = static_cast<size_t>(tableIt->second.points_size());
         pointTablesByConn.erase(tableIt);
       }
+    } else {
+      LOG_WARNING("IEC104 恢复链路时未找到对应点表，链路将保持已停止等待后续补全: conn_name={}", connName);
     }
 
     auto tags = buildDataCenterTags(runtime.pointTable, runtime.config);
@@ -559,6 +654,7 @@ void LinkManager::loadPersistedConfig(std::string_view trigger) {
            failedCount,
            dataCenterFailureCount,
            restoredCount);
+  TryAutoStartReadyLinks(trigger);
 }
 
 grpc::Status LinkManager::saveLinksLocked() {
@@ -599,6 +695,9 @@ IEC104Proto::LinksConfig LinkManager::dumpLinksConfigLocked() const {
 IEC104Proto::PointTablesConfig LinkManager::dumpPointTablesConfigLocked() const {
   IEC104Proto::PointTablesConfig config;
   for (const auto &[connName, link] : linksByName_) {
+    if (!link.pointTableConfigured) {
+      continue;
+    }
     auto *table = config.add_point_tables();
     link.pointTable.ToProto(connName, table);
   }
@@ -633,6 +732,7 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
   const auto connName = config.conn_name();
   const bool isServer = (config.role() == IEC104Proto::ROLE_SERVER);
   ListenEndpoint desiredListen;
+  bool updated = false;
   if (isServer) {
     status = makeListenEndpoint(config.local(), &desiredListen);
     if (!status.ok()) {
@@ -695,29 +795,43 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
         LOG_ERROR("IEC104 更新链路配置落盘失败: conn_name={}, 原因={}", connName, status.error_message());
         return status;
       }
-      return fillLinkInfoLocked(it->second, out);
-    }
-
-    if (pendingCreateByName_.contains(connName) || reservedServerListenByName_.contains(connName)) {
-      return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name 已存在");
-    }
-
-    if (isServer) {
-      for (const auto &[otherName, otherListen] : reservedServerListenByName_) {
-        if (listenEndpointsConflict(otherListen, desiredListen)) {
-          return grpc::Status(
-              grpc::StatusCode::ALREADY_EXISTS,
-              std::format("监听端点 {} 与 {} 冲突 ({})", listenEndpointToString(desiredListen), otherName, listenEndpointToString(otherListen)));
-        }
-      }
-      status = checkSystemListenAvailable(desiredListen);
+      status = fillLinkInfoLocked(it->second, out);
       if (!status.ok()) {
         return status;
       }
-      // 提前预留，避免调用 DataCenter 时发生竞态。
-      reservedServerListenByName_[connName] = desiredListen;
+      updated = true;
+    } else {
+      if (pendingCreateByName_.contains(connName) || reservedServerListenByName_.contains(connName)) {
+        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name 已存在");
+      }
+
+      if (isServer) {
+        for (const auto &[otherName, otherListen] : reservedServerListenByName_) {
+          if (listenEndpointsConflict(otherListen, desiredListen)) {
+            return grpc::Status(
+                grpc::StatusCode::ALREADY_EXISTS,
+                std::format("监听端点 {} 与 {} 冲突 ({})", listenEndpointToString(desiredListen), otherName, listenEndpointToString(otherListen)));
+          }
+        }
+        status = checkSystemListenAvailable(desiredListen);
+        if (!status.ok()) {
+          return status;
+        }
+        // 提前预留，避免调用 DataCenter 时发生竞态。
+        reservedServerListenByName_[connName] = desiredListen;
+      }
+      pendingCreateByName_.emplace(connName);
     }
-    pendingCreateByName_.emplace(connName);
+  }
+
+  if (updated) {
+    (void)tryAutoStartLink(connName, "链路配置更新成功");
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = linksByName_.find(connName);
+    if (it == linksByName_.end()) {
+      return makeNotFound(connName);
+    }
+    return fillLinkInfoLocked(it->second, out);
   }
 
   auto rollbackPendingCreate = [this, &connName, isServer]() {
@@ -752,55 +866,70 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
     return grpc::Status(grpc::StatusCode::INTERNAL, "DataCenter 返回 conn_id=0");
   }
 
-  std::lock_guard<std::mutex> lock(mu_);
-  pendingCreateByName_.erase(connName);
-  auto [it, inserted] = linksByName_.try_emplace(connName);
-  if (!inserted) {
-    // 另一个 UpsertLink 与此请求并发并已创建链路。
-    if (request.create_only()) {
-      if (isServer && it->second.config.role() != IEC104Proto::ROLE_SERVER) {
-        reservedServerListenByName_.erase(connName);
+  std::string autoStartTrigger;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    pendingCreateByName_.erase(connName);
+    auto [it, inserted] = linksByName_.try_emplace(connName);
+    if (!inserted) {
+      // 另一个 UpsertLink 与此请求并发并已创建链路。
+      if (request.create_only()) {
+        if (isServer && it->second.config.role() != IEC104Proto::ROLE_SERVER) {
+          reservedServerListenByName_.erase(connName);
+        }
+        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name 已存在");
       }
-      return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name 已存在");
-    }
-    if (it->second.state == IEC104Proto::LINK_STATE_RUNNING) {
-      if (isServer && it->second.config.role() != IEC104Proto::ROLE_SERVER) {
-        reservedServerListenByName_.erase(connName);
+      if (it->second.state == IEC104Proto::LINK_STATE_RUNNING) {
+        if (isServer && it->second.config.role() != IEC104Proto::ROLE_SERVER) {
+          reservedServerListenByName_.erase(connName);
+        }
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "更新配置前请先停止链路");
       }
-      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "更新配置前请先停止链路");
-    }
-    if (it->second.state == IEC104Proto::LINK_STATE_PENDING_DELETE) {
-      if (isServer && it->second.config.role() != IEC104Proto::ROLE_SERVER) {
-        reservedServerListenByName_.erase(connName);
+      if (it->second.state == IEC104Proto::LINK_STATE_PENDING_DELETE) {
+        if (isServer && it->second.config.role() != IEC104Proto::ROLE_SERVER) {
+          reservedServerListenByName_.erase(connName);
+        }
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路处于待删除状态");
       }
-      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路处于待删除状态");
-    }
 
-    it->second.config = config;
-    it->second.lastError.clear();
-    if (isServer) {
-      reservedServerListenByName_[connName] = desiredListen;
+      it->second.config = config;
+      it->second.lastError.clear();
+      if (isServer) {
+        reservedServerListenByName_[connName] = desiredListen;
+      } else {
+        reservedServerListenByName_.erase(connName);
+      }
+      status = saveLinksLocked();
+      if (!status.ok()) {
+        LOG_ERROR("IEC104 更新链路配置落盘失败: conn_name={}, 原因={}", connName, status.error_message());
+        return status;
+      }
+      status = fillLinkInfoLocked(it->second, out);
+      if (!status.ok()) {
+        return status;
+      }
+      autoStartTrigger = "链路配置更新成功";
     } else {
-      reservedServerListenByName_.erase(connName);
+      it->second.config = config;
+      it->second.connId = connInfo.conn_id();
+      it->second.state = IEC104Proto::LINK_STATE_STOPPED;
+      it->second.lastError.clear();
+      status = saveLinksLocked();
+      if (!status.ok()) {
+        LOG_ERROR("IEC104 创建链路配置落盘失败: conn_name={}, 原因={}", connName, status.error_message());
+        return status;
+      }
+      status = fillLinkInfoLocked(it->second, out);
+      if (!status.ok()) {
+        return status;
+      }
+      autoStartTrigger = "链路配置创建成功";
     }
-    status = saveLinksLocked();
-    if (!status.ok()) {
-      LOG_ERROR("IEC104 更新链路配置落盘失败: conn_name={}, 原因={}", connName, status.error_message());
-      return status;
-    }
-    return fillLinkInfoLocked(it->second, out);
   }
-
-  it->second.config = config;
-  it->second.connId = connInfo.conn_id();
-  it->second.state = IEC104Proto::LINK_STATE_STOPPED;
-  it->second.lastError.clear();
-  status = saveLinksLocked();
-  if (!status.ok()) {
-    LOG_ERROR("IEC104 创建链路配置落盘失败: conn_name={}, 原因={}", connName, status.error_message());
-    return status;
+  if (!autoStartTrigger.empty()) {
+    (void)tryAutoStartLink(connName, autoStartTrigger);
   }
-  return fillLinkInfoLocked(it->second, out);
+  return grpc::Status::OK;
 }
 
 grpc::Status LinkManager::GetLink(const std::string &connName, IEC104Proto::LinkInfo *out) const {
@@ -865,11 +994,15 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
     return makeNotFound(connName);
   }
   auto &link = it->second;
-  if (link.state == IEC104Proto::LINK_STATE_PENDING_DELETE) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路处于待删除状态");
-  }
   if (link.state == IEC104Proto::LINK_STATE_RUNNING) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路已在运行");
+    LOG_INFO("IEC104 启动连接请求幂等成功: conn_name={}, 原因=链路已在运行", connName);
+    return grpc::Status::OK;
+  }
+
+  status = checkStartPreconditionsLocked(link);
+  if (!status.ok()) {
+    link.lastError = status.error_message();
+    return status;
   }
 
   link.lastReportedByTag.clear();
@@ -1002,18 +1135,22 @@ grpc::Status LinkManager::UpsertPointTable(const IEC104Proto::UpsertPointTableRe
     return status;
   }
 
-  std::lock_guard<std::mutex> lock(mu_);
-  auto it = linksByName_.find(request.conn_name());
-  if (it == linksByName_.end()) {
-    return makeNotFound(request.conn_name());
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = linksByName_.find(request.conn_name());
+    if (it == linksByName_.end()) {
+      return makeNotFound(request.conn_name());
+    }
+    it->second.pointTable = std::move(next);
+    it->second.pointTableConfigured = true;
+    it->second.lastReportedByTag.clear();
+    status = savePointTablesLocked();
+    if (!status.ok()) {
+      LOG_ERROR("IEC104 点表配置落盘失败: conn_name={}, 原因={}", request.conn_name(), status.error_message());
+      return status;
+    }
   }
-  it->second.pointTable = std::move(next);
-  it->second.lastReportedByTag.clear();
-  status = savePointTablesLocked();
-  if (!status.ok()) {
-    LOG_ERROR("IEC104 点表配置落盘失败: conn_name={}, 原因={}", request.conn_name(), status.error_message());
-    return status;
-  }
+  (void)tryAutoStartLink(request.conn_name(), "点表更新成功");
   return grpc::Status::OK;
 }
 

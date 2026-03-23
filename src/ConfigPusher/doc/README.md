@@ -6,7 +6,7 @@ ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRT
 ## 能力清单
 - 自动通过 ModuleManager 启动 DataCenter 与 IEC104/ModbusRTU/DLT645/AGC
 - 解析 JSONC（支持 `//` 与 `/* */` 注释）
-- 下发 IEC104 配置：UpsertLink / UpsertPointTable / StartLink
+- 下发 IEC104 配置：UpsertLink / UpsertPointTable
 - 下发 ModbusRTU 配置：UpdateConfig / UpsertLink / UpsertPointTable / StartLink
 - 下发 DLT645 配置：UpdateConfig / UpsertLink / UpsertPointTable / StartLink
 - 下发 AGC 配置：UpsertGroup / StartGroup

@@ -23,6 +23,7 @@ using IEC104::PointValue;
 using IEC104::CommandValue;
 
 using ::testing::_;
+using ::testing::InSequence;
 using ::testing::Invoke;
 
 IEC104Proto::UpsertLinkRequest MakeClientLinkReq(const char* connName) {
@@ -273,26 +274,93 @@ TEST(IEC104LinkManagerTest, DeleteLinkReleasesReservedServerPort) {
   ASSERT_TRUE(mgr.UpsertLink(req2, &info2).ok());
 }
 
-// 验证：点表增量更新会合并并同步完整 tags 到 DataCenter。
-TEST(IEC104LinkManagerTest, UpsertPointTableMergesAndSendsTags) {
+// 验证：链路配置与点表达到最小可运行条件后，模块会自动启动链路功能。
+TEST(IEC104LinkManagerTest, UpsertPointTableAutoStartsWhenLinkReady) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
   LinkManager mgr("IEC104");
   mgr.setDataCenterStub(stub);
 
-  auto req = MakeClientLinkReq("conn-pt");
+  auto req = MakeServerLinkReq("conn-auto", "0.0.0.0", AllocateFreeTcpPort());
+  IEC104Proto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+
+  IEC104Proto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-auto");
+  *ptReq.add_points() = MakePoint("A", 100);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  IEC104Proto::LinkInfo got;
+  ASSERT_TRUE(mgr.GetLink("conn-auto", &got).ok());
+  EXPECT_EQ(got.state(), IEC104Proto::LINK_STATE_RUNNING);
+  EXPECT_TRUE(got.last_error().empty());
+
+  ASSERT_TRUE(mgr.StopLink("conn-auto").ok());
+}
+
+// 验证：运行态链路更新点表会被拒绝，调用方需先停止链路。
+TEST(IEC104LinkManagerTest, UpsertPointTableRejectsWhenLinkRunning) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeServerLinkReq("conn-running", "0.0.0.0", AllocateFreeTcpPort());
   IEC104Proto::LinkInfo info;
   ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
 
   IEC104Proto::UpsertPointTableRequest pt1;
-  pt1.set_conn_name("conn-pt");
+  pt1.set_conn_name("conn-running");
   *pt1.add_points() = MakePoint("A", 100);
-  *pt1.add_points() = MakePoint("B", 101);
   pt1.set_replace(true);
   ASSERT_TRUE(mgr.UpsertPointTable(pt1).ok());
 
+  EXPECT_CALL(*stub, UpsertConnTags(_, _, _)).Times(0);
+
+  IEC104Proto::UpsertPointTableRequest pt2;
+  pt2.set_conn_name("conn-running");
+  *pt2.add_points() = MakePoint("B", 101);
+  pt2.set_replace(false);
+
+  auto st = mgr.UpsertPointTable(pt2);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+  EXPECT_EQ(st.error_message(), "更新点表前请先停止链路");
+
+  IEC104Proto::PointTable out;
+  ASSERT_TRUE(mgr.GetPointTable("conn-running", &out).ok());
+  ASSERT_EQ(out.points_size(), 1);
+  EXPECT_EQ(out.points(0).tag(), "A");
+
+  ASSERT_TRUE(mgr.StopLink("conn-running").ok());
+}
+
+// 验证：停止态链路的点表增量更新会合并并同步完整 tags 到 DataCenter。
+TEST(IEC104LinkManagerTest, UpsertPointTableMergesAndSendsTagsWhenStopped) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeServerLinkReq("conn-pt", "0.0.0.0", AllocateFreeTcpPort());
+  IEC104Proto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+
   const auto connId = info.conn_id();
+  InSequence seq;
+  EXPECT_CALL(*stub, UpsertConnTags(_, _, _))
+      .WillOnce(Invoke([connId](grpc::ClientContext*,
+                                const DataCenterProto::UpsertConnTagsRequest& req,
+                                DataCenterProto::Empty*) {
+        EXPECT_EQ(req.conn_id(), connId);
+        EXPECT_TRUE(req.replace());
+        std::vector<std::string> tags(req.tags().begin(), req.tags().end());
+        EXPECT_THAT(tags, ::testing::ElementsAre("A", "B", "__time_sync__"));
+        return grpc::Status::OK;
+      }));
   EXPECT_CALL(*stub, UpsertConnTags(_, _, _))
       .WillOnce(Invoke([connId](grpc::ClientContext*,
                                 const DataCenterProto::UpsertConnTagsRequest& req,
@@ -303,6 +371,15 @@ TEST(IEC104LinkManagerTest, UpsertPointTableMergesAndSendsTags) {
         EXPECT_THAT(tags, ::testing::ElementsAre("A", "B", "C", "__time_sync__"));
         return grpc::Status::OK;
       }));
+
+  IEC104Proto::UpsertPointTableRequest pt1;
+  pt1.set_conn_name("conn-pt");
+  *pt1.add_points() = MakePoint("A", 100);
+  *pt1.add_points() = MakePoint("B", 101);
+  pt1.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(pt1).ok());
+
+  ASSERT_TRUE(mgr.StopLink("conn-pt").ok());
 
   IEC104Proto::UpsertPointTableRequest pt2;
   pt2.set_conn_name("conn-pt");

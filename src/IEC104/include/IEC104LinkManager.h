@@ -34,6 +34,7 @@ public:
   void setDataCenterServerAddress(std::string address);
   void setDataCenterStub(std::shared_ptr<DataCenterProto::DataCenterService::StubInterface> stub);
 
+  void RecoverPersistedConfigOnModuleStart();
   grpc::Status UpsertLink(const IEC104Proto::UpsertLinkRequest &request, IEC104Proto::LinkInfo *out);
   grpc::Status GetLink(const std::string &connName, IEC104Proto::LinkInfo *out) const;
   grpc::Status ListLinks(IEC104Proto::ListLinksResponse *out) const;
@@ -41,6 +42,7 @@ public:
   grpc::Status StopLink(const std::string &connName);
   grpc::Status DeleteLink(const std::string &connName);
   grpc::Status SendTimeSync(const std::string &connName, int64_t tsMs);
+  void TryAutoStartReadyLinks(std::string_view trigger);
 
   grpc::Status UpsertPointTable(const IEC104Proto::UpsertPointTableRequest &request);
   grpc::Status GetPointTable(const std::string &connName, IEC104Proto::PointTable *out) const;
@@ -63,6 +65,7 @@ private:
     IEC104Proto::LinkState state = IEC104Proto::LINK_STATE_STOPPED;
     std::string lastError;
     PointTable pointTable;
+    bool pointTableConfigured = false;
     std::unordered_map<std::string, double> lastReportedByTag;
 
     std::unique_ptr<TcpLink> transport;
@@ -91,6 +94,8 @@ private:
   static grpc::Status checkSystemListenAvailable(const ListenEndpoint &ep);
 
   grpc::Status fillLinkInfoLocked(const LinkRuntime &link, IEC104Proto::LinkInfo *out) const;
+  grpc::Status checkStartPreconditionsLocked(const LinkRuntime &link) const;
+  grpc::Status tryAutoStartLink(const std::string &connName, std::string_view trigger);
   void loadPersistedConfig(std::string_view trigger);
   grpc::Status saveLinksLocked();
   grpc::Status savePointTablesLocked();
