@@ -2,12 +2,9 @@
 
 #include <google/protobuf/message.h>
 
-#include <atomic>
 #include <cctype>
-#include <chrono>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -132,18 +129,12 @@ bool buildPointTableRequest(const ConfigPusherProto::Dlt645LinkTask &task,
 }  // namespace
 
 bool applyDlt645Config(const ConfigPusherProto::Dlt645Config &config, DLT645Proto::DLT645Service::StubInterface *stub) {
-  struct PendingStartLink {
-    std::string connName;
-    DLT645Proto::StartLinkRequest request;
-  };
-
   if (stub == nullptr) {
     LOG_ERROR("DLT645 gRPC stub 为空");
     return false;
   }
 
   bool ok = true;
-  std::vector<PendingStartLink> pendingStarts;
   if (config.has_mqtt()) {
     DLT645Proto::UpdateConfigRequest req;
     *req.mutable_mqtt() = config.mqtt();
@@ -220,49 +211,12 @@ bool applyDlt645Config(const ConfigPusherProto::Dlt645Config &config, DLT645Prot
       }
 
       if (task.start()) {
-        DLT645Proto::StartLinkRequest startReq;
-        startReq.set_conn_name(expandedConnNames[i]);
-        LOG_INFO("DLT645 连接已加入启动连接功能队列: 连接名={}, 请求={}",
-                 expandedConnNames[i], formatProtoForLog(startReq));
-        pendingStarts.push_back(PendingStartLink{expandedConnNames[i], std::move(startReq)});
+        LOG_INFO("DLT645 配置任务声明 start=true，当前版本仅保留兼容日志，不再额外调用 StartLink: 连接名={}",
+                 expandedConnNames[i]);
       }
+      LOG_INFO("DLT645 配置任务下发完成，后续是否启动连接功能将由模块依据当前配置自动判定: 连接名={}",
+               expandedConnNames[i]);
     }
-  }
-
-  if (pendingStarts.empty()) {
-    LOG_INFO("DLT645 无需启动连接功能");
-    return ok;
-  }
-
-  LOG_INFO("开始并发启动 DLT645 连接功能: 数量={}", pendingStarts.size());
-  std::atomic<bool> startAllOk{true};
-  std::vector<std::thread> startWorkers;
-  startWorkers.reserve(pendingStarts.size());
-  for (const auto &item : pendingStarts) {
-    startWorkers.emplace_back([stub, &startAllOk, item]() {
-      constexpr auto kStartTimeout = std::chrono::seconds(10);
-      DLT645Proto::Empty startResp;
-      grpc::ClientContext startCtx;
-      startCtx.set_deadline(std::chrono::system_clock::now() + kStartTimeout);
-      LOG_INFO("发送 DLT645 启动连接功能请求报文: 连接名={}, 请求={}", item.connName, formatProtoForLog(item.request));
-      auto status = stub->StartLink(&startCtx, item.request, &startResp);
-      if (!status.ok()) {
-        LOG_ERROR("DLT645 启动连接功能失败: 连接名={}, 请求={}, 原因={}", item.connName, formatProtoForLog(item.request), status.error_message());
-        startAllOk.store(false);
-        return;
-      }
-      LOG_INFO("收到 DLT645 启动连接功能响应报文: 连接名={}, 响应={}", item.connName, formatProtoForLog(startResp));
-      LOG_INFO("DLT645 启动连接功能成功: 连接名={}", item.connName);
-    });
-  }
-
-  for (auto &worker : startWorkers) {
-    if (worker.joinable()) {
-      worker.join();
-    }
-  }
-  if (!startAllOk.load()) {
-    ok = false;
   }
   return ok;
 }

@@ -426,8 +426,14 @@ void LinkManager::LoadPersistedConfig() {
       } else {
         pointCount = static_cast<size_t>(tableIt->second.points_size());
         blockCount = static_cast<size_t>(tableIt->second.blocks_size());
+        runtime->pointTableConfigured = pointCount > 0 || blockCount > 0;
+        if (!runtime->pointTableConfigured) {
+          LOG_WARNING("DLT645 恢复到空点表和空数据块，链路将保持已停止等待后续补全: conn_name={}", normalized.conn_name());
+        }
       }
       pointTablesByConn.erase(tableIt);
+    } else {
+      LOG_WARNING("DLT645 恢复链路时未找到对应点表，链路将保持已停止等待后续补全: conn_name={}", normalized.conn_name());
     }
 
     auto syncStatus = dataCenter_.UpsertConnTags(runtime->connId, runtime->pointTable.Tags(), true);
@@ -489,6 +495,7 @@ void LinkManager::LoadPersistedConfig() {
   }
 
   LOG_INFO("DLT645 本地持久化配置加载完成: 链路数={}", linksSnapshot.links_size());
+  TryAutoStartReadyLinks("持久化恢复完成后");
 }
 
 void LinkManager::setDataCenterServerAddress(std::string address) {
@@ -532,6 +539,7 @@ grpc::Status LinkManager::UpdateConfig(const DLT645Proto::UpdateConfigRequest &r
            mqtt.host(), mqtt.port(), mqtt.client_id());
   response->set_ok(true);
   response->set_message("MQTT 配置更新成功");
+  autoStartEligibleLinks("MQTT 配置更新后");
   return grpc::Status::OK;
 }
 
@@ -599,7 +607,18 @@ grpc::Status LinkManager::UpsertLink(const DLT645Proto::UpsertLinkRequest &reque
     if (!status.ok()) {
       return status;
     }
-    *out = std::move(info);
+    (void)maybeAutoStartLink(connName, "链路配置更新后");
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = linksByName_.find(connName);
+      if (it == linksByName_.end() || !it->second) {
+        return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接不存在");
+      }
+      status = fillLinkInfoLocked(*it->second, out);
+      if (!status.ok()) {
+        return status;
+      }
+    }
     LOG_INFO("DLT645 更新链路配置成功: conn_name={}, conn_id={}", connName, out->conn_id());
     return grpc::Status::OK;
   }
@@ -686,6 +705,18 @@ grpc::Status LinkManager::UpsertLink(const DLT645Proto::UpsertLinkRequest &reque
   if (!status.ok()) {
     return status;
   }
+  (void)maybeAutoStartLink(connName, created ? "链路配置创建后" : "链路配置更新后");
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = linksByName_.find(connName);
+    if (it == linksByName_.end() || !it->second) {
+      return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接不存在");
+    }
+    status = fillLinkInfoLocked(*it->second, out);
+    if (!status.ok()) {
+      return status;
+    }
+  }
   if (created) {
     LOG_INFO("DLT645 创建链路配置成功: conn_name={}, conn_id={}", connName, out->conn_id());
   } else {
@@ -729,9 +760,6 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
     return status;
   }
   LOG_INFO("DLT645 开始启动连接功能: conn_name={}", connName);
-  if (!mqttClient_.hasConfig()) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "MQTT 连接参数未配置");
-  }
 
   std::shared_ptr<LinkRuntime> link;
   {
@@ -754,10 +782,13 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
       return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接不存在");
     }
     if (link->state == DLT645Proto::LINK_STATE_RUNNING) {
-      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "连接已在运行");
+      LOG_INFO("DLT645 启动连接功能跳过: conn_name={}, 原因=连接已在运行", connName);
+      return grpc::Status::OK;
     }
-    if (link->state == DLT645Proto::LINK_STATE_PENDING_DELETE) {
-      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "连接处于待删除状态");
+    std::string reason;
+    if (!isLinkAutoStartReadyLocked(*link, &reason)) {
+      link->lastError = reason;
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, reason);
     }
   }
 
@@ -1116,12 +1147,15 @@ grpc::Status LinkManager::UpsertPointTable(const DLT645Proto::UpsertPointTableRe
       return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接不存在");
     }
     it->second->pointTable = std::move(next);
+    it->second->pointTableConfigured =
+        !it->second->pointTable.Points().empty() || !it->second->pointTable.Blocks().empty();
     pointTablesConfig = dumpPointTablesConfigLocked();
   }
   status = savePointTablesConfig(pointTablesConfig);
   if (!status.ok()) {
     return status;
   }
+  (void)maybeAutoStartLink(request.conn_name(), "点表配置更新后");
   return grpc::Status::OK;
 }
 
@@ -1306,6 +1340,76 @@ grpc::Status LinkManager::savePointTablesConfig(const DLT645Proto::PointTablesCo
   }
   LOG_INFO("DLT645 点表配置已落盘: 链路数={}", config.point_tables_size());
   return grpc::Status::OK;
+}
+
+bool LinkManager::isLinkAutoStartReadyLocked(const LinkRuntime &link, std::string *reason) const {
+  auto setReason = [reason](std::string text) {
+    if (reason != nullptr) {
+      *reason = std::move(text);
+    }
+    return false;
+  };
+
+  if (link.state == DLT645Proto::LINK_STATE_RUNNING) {
+    return setReason("连接已在运行");
+  }
+  if (link.state == DLT645Proto::LINK_STATE_PENDING_DELETE) {
+    return setReason("连接处于待删除状态");
+  }
+  if (link.connId == 0) {
+    return setReason("conn_id 无效");
+  }
+  if (!link.pointTableConfigured) {
+    return setReason("链路点表未就绪，当前规则要求链路配置和点表都成功恢复或下发后才启动连接功能");
+  }
+  if (!mqttClient_.hasConfig()) {
+    return setReason("MQTT 全局配置未就绪，当前规则要求 MQTT 配置成功恢复或下发后才启动连接功能");
+  }
+  return true;
+}
+
+grpc::Status LinkManager::maybeAutoStartLink(const std::string &connName, std::string_view trigger) {
+  std::string reason;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = linksByName_.find(connName);
+    if (it == linksByName_.end() || !it->second) {
+      return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接不存在");
+    }
+    if (!isLinkAutoStartReadyLocked(*it->second, &reason)) {
+      it->second->lastError = reason;
+      LOG_INFO("DLT645 暂不自动启动连接: conn_name={}, 触发来源={}, 原因={}", connName, trigger, reason);
+      return grpc::Status::OK;
+    }
+  }
+
+  LOG_INFO("DLT645 检测到连接已满足最小可运行条件，准备自动启动: conn_name={}, 触发来源={}", connName, trigger);
+  auto status = StartLink(connName);
+  if (!status.ok()) {
+    LOG_WARNING("DLT645 自动启动连接失败: conn_name={}, 触发来源={}, 原因={}", connName, trigger, status.error_message());
+    return status;
+  }
+  LOG_INFO("DLT645 自动启动连接完成: conn_name={}, 触发来源={}", connName, trigger);
+  return grpc::Status::OK;
+}
+
+void LinkManager::autoStartEligibleLinks(std::string_view trigger) {
+  std::vector<std::string> connNames;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    connNames.reserve(linksByName_.size());
+    for (const auto &[connName, _] : linksByName_) {
+      connNames.emplace_back(connName);
+    }
+  }
+  std::sort(connNames.begin(), connNames.end());
+  for (const auto &connName : connNames) {
+    (void)maybeAutoStartLink(connName, trigger);
+  }
+}
+
+void LinkManager::TryAutoStartReadyLinks(std::string_view trigger) {
+  autoStartEligibleLinks(trigger);
 }
 
 void LinkManager::startPollingLocked(const std::string &connName, const std::shared_ptr<LinkRuntime> &link) {

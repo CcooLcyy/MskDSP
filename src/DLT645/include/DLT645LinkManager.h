@@ -12,6 +12,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -41,6 +42,7 @@ public:
   grpc::Status UpsertPointTable(const DLT645Proto::UpsertPointTableRequest &request);
   grpc::Status GetPointTable(const std::string &connName, DLT645Proto::PointTable *out) const;
   void LoadPersistedConfig();
+  void TryAutoStartReadyLinks(std::string_view trigger);
 
   void setDataCenterServerAddress(std::string address);
   void setDataCenterStub(std::shared_ptr<DataCenterProto::DataCenterService::StubInterface> stub);
@@ -64,6 +66,7 @@ private:
     DLT645Proto::LinkState state = DLT645Proto::LINK_STATE_STOPPED;
     std::string lastError;
     PointTable pointTable;
+    bool pointTableConfigured = false;
 
     std::shared_ptr<grpc::ClientContext> mqttSubscribeContext;
     std::jthread mqttSubscribeThread;
@@ -91,6 +94,9 @@ private:
   DLT645Proto::PointTablesConfig dumpPointTablesConfigLocked() const;
   grpc::Status saveLinksConfig(const DLT645Proto::LinksConfig &config);
   grpc::Status savePointTablesConfig(const DLT645Proto::PointTablesConfig &config);
+  bool isLinkAutoStartReadyLocked(const LinkRuntime &link, std::string *reason) const;
+  grpc::Status maybeAutoStartLink(const std::string &connName, std::string_view trigger);
+  void autoStartEligibleLinks(std::string_view trigger);
 
   void startPollingLocked(const std::string &connName, const std::shared_ptr<LinkRuntime> &link);
   void stopPollingLocked(LinkRuntime *link);

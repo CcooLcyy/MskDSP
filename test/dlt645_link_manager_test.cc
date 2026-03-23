@@ -127,6 +127,14 @@ public:
     it->second->state = state;
   }
 
+  static void SetPointTableConfigured(LinkManager &mgr, const std::string &connName, bool configured) {
+    auto it = mgr.linksByName_.find(connName);
+    if (it == mgr.linksByName_.end()) {
+      return;
+    }
+    it->second->pointTableConfigured = configured;
+  }
+
   static std::vector<uint8_t> EncodeAddress(const std::string &addr) {
     return LinkManager::encodeAddress(addr);
   }
@@ -512,7 +520,7 @@ TEST(Dlt645LinkManagerTest, DeleteLinkMarksPendingOnDataCenterFailure) {
   EXPECT_FALSE(got.last_error().empty());
 }
 
-// 验证：DeleteLink 进入 PENDING_DELETE 后会落盘，重启后仍阻止启动连接功能。
+// 验证：DeleteLink 进入 PENDING_DELETE 后会落盘，重启后仍保留错误原因并阻止启动连接功能。
 TEST(Dlt645LinkManagerTest, LoadPersistedConfigRestoresPendingDeleteAfterRestart) {
   ScopedTempDir dir;
   ScopedCwd cwd(dir.path());
@@ -543,7 +551,7 @@ TEST(Dlt645LinkManagerTest, LoadPersistedConfigRestoresPendingDeleteAfterRestart
     DLT645Proto::LinkInfo info;
     ASSERT_TRUE(mgr.GetLink("conn-pending-persist", &info).ok());
     EXPECT_EQ(info.state(), DLT645Proto::LINK_STATE_PENDING_DELETE);
-    EXPECT_TRUE(info.last_error().empty());
+    EXPECT_THAT(info.last_error(), ::testing::HasSubstr("待删除"));
 
     auto status = mgr.StartLink("conn-pending-persist");
     EXPECT_EQ(status.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
@@ -584,12 +592,14 @@ TEST(Dlt645LinkManagerTest, StartLinkRejectsWithoutMqttConfig) {
   *req.mutable_config() = MakeValidLinkConfig("conn-start", DLT645Proto::COMM_MODE_LORA);
   DLT645Proto::LinkInfo info;
   ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+  DLT645LinkManagerTestPeer::SetPointTableConfigured(mgr, "conn-start", true);
 
   auto st = mgr.StartLink("conn-start");
   EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+  EXPECT_THAT(st.error_message(), ::testing::HasSubstr("MQTT"));
 }
 
-// 验证：StartLink 在运行中/待删除时拒绝启动。
+// 验证：StartLink 在运行中幂等成功，在待删除时拒绝启动。
 TEST(Dlt645LinkManagerTest, StartLinkRejectsWhenRunningOrPendingDelete) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
@@ -604,7 +614,7 @@ TEST(Dlt645LinkManagerTest, StartLinkRejectsWhenRunningOrPendingDelete) {
 
   DLT645LinkManagerTestPeer::SetLinkState(mgr, "conn-running", DLT645Proto::LINK_STATE_RUNNING);
   auto st = mgr.StartLink("conn-running");
-  EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+  EXPECT_TRUE(st.ok());
 
   DLT645LinkManagerTestPeer::SetLinkState(mgr, "conn-running", DLT645Proto::LINK_STATE_PENDING_DELETE);
   st = mgr.StartLink("conn-running");
@@ -627,6 +637,7 @@ TEST(Dlt645LinkManagerTest, StartLinkSerialModeStartsSuccessfully) {
   *req.mutable_config() = MakeValidLinkConfig("conn-serial", DLT645Proto::COMM_MODE_SERIAL);
   DLT645Proto::LinkInfo info;
   ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+  DLT645LinkManagerTestPeer::SetPointTableConfigured(mgr, "conn-serial", true);
 
   auto st = mgr.StartLink("conn-serial");
   EXPECT_TRUE(st.ok());
@@ -725,11 +736,13 @@ TEST(Dlt645LinkManagerTest, StartLinkLoraBlockedDoesNotBlockUart) {
   *loraReq.mutable_config() = MakeValidLinkConfig("conn-lora", DLT645Proto::COMM_MODE_LORA);
   DLT645Proto::LinkInfo loraInfo;
   ASSERT_TRUE(mgr.UpsertLink(loraReq, &loraInfo).ok());
+  DLT645LinkManagerTestPeer::SetPointTableConfigured(mgr, "conn-lora", true);
 
   DLT645Proto::UpsertLinkRequest uartReq;
   *uartReq.mutable_config() = MakeValidLinkConfig("conn-uart", DLT645Proto::COMM_MODE_SERIAL);
   DLT645Proto::LinkInfo uartInfo;
   ASSERT_TRUE(mgr.UpsertLink(uartReq, &uartInfo).ok());
+  DLT645LinkManagerTestPeer::SetPointTableConfigured(mgr, "conn-uart", true);
 
   std::mutex gateMu;
   std::condition_variable gateCv;
@@ -1010,11 +1023,13 @@ TEST(Dlt645LinkManagerTest, StartStopLoraSameAddrSharesArchiveLifecycle) {
   *reqA.mutable_config() = MakeValidLinkConfig("conn-share-a", DLT645Proto::COMM_MODE_LORA);
   DLT645Proto::LinkInfo infoA;
   ASSERT_TRUE(mgr.UpsertLink(reqA, &infoA).ok());
+  DLT645LinkManagerTestPeer::SetPointTableConfigured(mgr, "conn-share-a", true);
 
   DLT645Proto::UpsertLinkRequest reqB;
   *reqB.mutable_config() = MakeValidLinkConfig("conn-share-b", DLT645Proto::COMM_MODE_LORA);
   DLT645Proto::LinkInfo infoB;
   ASSERT_TRUE(mgr.UpsertLink(reqB, &infoB).ok());
+  DLT645LinkManagerTestPeer::SetPointTableConfigured(mgr, "conn-share-b", true);
 
   std::atomic<int> addCount{0};
   std::atomic<int> delCount{0};

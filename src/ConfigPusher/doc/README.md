@@ -8,11 +8,12 @@ ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRT
 - 解析 JSONC（支持 `//` 与 `/* */` 注释）
 - 下发 IEC104 配置：UpsertLink / UpsertPointTable
 - 下发 ModbusRTU 配置：UpdateConfig / UpsertLink / UpsertPointTable
-- 下发 DLT645 配置：UpdateConfig / UpsertLink / UpsertPointTable / StartLink
-- 下发 AGC 配置：UpsertGroup / StartGroup
+- 下发 DLT645 配置：UpdateConfig / UpsertLink / UpsertPointTable
+- 下发 AGC 配置：UpsertGroup
 - 下发 DataCenter 配置：UpsertConnTags / UpsertRoutes（仅对已存在连接生效）
 - 下发流程记录请求/响应报文日志（ModuleManager/IEC104/ModbusRTU/DLT645/AGC/DataCenter）
 - 失败记录日志（当前不做重试）
+- 对 `start` 字段仅保留兼容日志，不再额外调用 `StartLink/StartGroup`
 
 ## 接口与协议
 - Protobuf：`protobuf/ConfigPusher.proto`
@@ -144,7 +145,7 @@ ModbusRTU MQTT 配置示例：
 - 适用场景：一个协议转换器（同一 `meter_addr`）下挂多台逆变器，仅 `device_no` 不同。
 - 配置入口：`dlt645.links[].device_nos`（数组）。
 - 展开规则：
-  - 每个 `device_no` 会展开为一条独立 DLT645 连接任务（独立 UpsertLink/UpsertPointTable/StartLink）。
+  - 每个 `device_no` 会展开为一条独立 DLT645 连接任务（独立 UpsertLink/UpsertPointTable；是否启动连接功能由模块自动判定）。
   - 除 `device_no` 与 `conn_name` 外，其余配置保持一致。
   - `conn_name` 包含 `{device_no}` 时按值替换；不包含时自动追加 `_{device_no}`。
   - `point_table.conn_name` 为空时，默认使用展开后的连接名。
@@ -186,6 +187,9 @@ DLT645 批量下发示例：
   }
 }
 ```
+
+说明：
+- 示例中的 `start` 字段仅用于兼容旧模板；当前版本不会因此额外调用 `StartLink/StartGroup`，模块会在配置达到可运行条件后自动启动模块内功能。
 
 ### 上位机对接建议（DLT645 批量设备）
 - 建议上位机提供“公共模板 + 设备序号列表”建模，避免为每台逆变器维护整份重复 JSON。

@@ -47,11 +47,11 @@ DLT645::DLT645() :
 DLT645::~DLT645() {}
 void DLT645::start(std::stop_token stopToken) {
   LOG_INFO("DLT645 模块启动");
-  linkManager_.LoadPersistedConfig();
   dlt645Service_->getDLT645(this);
   LOG_INFO("DLT645 服务实例绑定完成");
   grpcServerBuilder(dlt645Service_);
   LOG_INFO("DLT645 gRPC 服务已启动");
+  linkManager_.LoadPersistedConfig();
   while (!stopToken.stop_requested()) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }

@@ -20,7 +20,7 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
 - `conn_name` 已存在且 `create_only=true`：返回 `ALREADY_EXISTS`；同时会检查 DataCenter 注册表中是否已有同名连接。
 - `conn_name` 已存在且 `create_only=false`：仅允许在链路处于 `STOPPED` 时更新配置；更新时保留原 `conn_id` 与点表。
 - 链路处于 `RUNNING` 或 `PENDING_DELETE` 时调用 `UpsertLink(create_only=false)` 会返回 `FAILED_PRECONDITION`。
-- 上位机若需修改运行中链路配置，应先调用 `StopLink` 停止连接功能，再执行 `UpsertLink`。
+- 若需修改运行中链路配置，应先调用 `StopLink` 让链路退出运行态，再执行 `UpsertLink`。
 
 ## 运行与地址
 - 对外 gRPC：随机选择 `0.0.0.0:<port>`（7001–7999）
@@ -28,10 +28,10 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
 - 运行时可通过管理器 `GetRunningModuleInfo` 查询实际地址
 
 ## 配置与数据
-- 配置来源：默认仍由 ConfigPusher 通过 gRPC 下发。
+- 配置来源：支持上位机直连下发，也支持由 ConfigPusher 批量下发；后者更适合作为初始化导入方式。
 - 示例文件：`package/conf/configPusher/DLT645.jsonc`（仅示例）。
 - MQTT 连接参数由 DLT645 在调用 MQTTManager 时携带，配置位于 `dlt645.mqtt`。
-- 当前实现会将已下发的 MQTT/链路/点表配置本地持久化到 `./conf/DLT645/`，用于模块重启后的自动恢复；恢复后的链路状态统一为 `STOPPED` 或 `PENDING_DELETE`，不会自动启动连接功能。
+- 当前实现会将已下发的 MQTT/链路/点表配置本地持久化到 `./conf/DLT645/`，用于模块重启后的自动恢复；恢复出的链路若满足当前最小可运行条件，会由模块自动让链路进入运行态。
 
 ### 配置结构
 顶层采用 `links` 组织方式，结构与 Modbus/IEC104 类似：
@@ -256,7 +256,8 @@ DLT645 会将模块内已生效的配置落盘到工作目录下的 `./conf/DLT6
 - 模块启动时会先加载 `mqtt.pb`、`links.pb`、`point_tables.pb`。
 - 每条链路恢复时会重新向 DataCenter 调用 `GetOrCreateConnection(conn_name)` 绑定当前 `conn_id`，并将点表 tags 重新同步到 DataCenter 连接标签注册表。
 - 若持久化文件损坏，会优先尝试 `.bak`；若主/备均不可用，则跳过该类配置恢复并保留损坏文件的隔离副本。
-- 恢复后的链路状态统一为 `STOPPED` 或 `PENDING_DELETE`，不会自动启动连接功能；如需运行，仍由上位机或 ConfigPusher 触发 `StartLink`。
+- DLT645 当前采用的“可运行最小条件”为：链路对象状态不是 `PENDING_DELETE`、已经恢复出有效 `conn_id`、链路对应的点表对象已经成功恢复或下发并通过当前校验，同时 MQTT 全局配置也已经恢复或下发成功。
+- 模块启动后，恢复出的链路若满足上述最小条件，会自动进入运行态；模块已经启动后，若上位机补齐 MQTT、点表或数据块配置并达到上述条件，也会自动再次尝试让链路进入运行态。
 
 ### 常见问题排查
 - 启动连接失败且日志显示 `Deadline Exceeded`：通常为 MQTT 短暂断连或订阅/发布阻塞导致；检查 `MQTTManager.log` 是否有 `Disconnected/订阅失败/发布失败`。
