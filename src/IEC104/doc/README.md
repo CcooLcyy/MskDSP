@@ -131,12 +131,8 @@ DataCenter 路由配置示例（触发对时）：
 }
 ```
 
-### 上位机推荐流程
-1. 通过 ModuleManager 启动 `DataCenter` 与 `IEC104`，并用 `GetRunningModuleInfo` 获取 IEC104 的 `outer_grpc_server`
-2. 连接 IEC104 gRPC，调用 `UpsertLink(create_only=true)` 配置连接并获取 `conn_id`（ROLE_SERVER 会在配置阶段检查 `local.ip/local.port`：本模块内冲突返回 `ALREADY_EXISTS`；端口被系统占用返回 `FAILED_PRECONDITION`）
-3. 调用 `UpsertPointTable(replace=true)` 下发点表（`tag <-> IOA`）
-4. 上位机使用返回的 `conn_id` 调用 DataCenter 配置路由（`UpsertRoutes` 等）
-5. 调用 `StartLink` 启动该连接的 TCP 监听/连接
+### 集成说明
+跨模块的上位机页面结构、配置顺序与操作流程，统一见 `doc/上位机设计指导.md`。IEC104 模块内的字段语义、点表约束、删除语义与对时语义仍以本文档和 `protobuf/IEC104.proto` 为准。
 
 ### 本地配置持久化
 IEC104 会将本地链路配置与点表配置落盘到工作目录下的 `./conf/IEC104/`，用于进程重启后的自动恢复。
@@ -200,18 +196,18 @@ ctest --test-dir build -R iec104TcpSession_test --output-on-failure
 
 ## grpc接口
 ### 删除语义（最佳实践）
-上位机删除一条连接时，调用 `DeleteLink(conn_name)`：
+删除一条连接时，调用 `DeleteLink(conn_name)`：
 - IEC104 会先停止该连接，再调用 DataCenter `DeleteConnection(module_name="IEC104", conn_name)` 清理 `conn_id` 相关配置/缓存
-- 若 DataCenter 删除失败（例如 `UNAVAILABLE/INTERNAL`），IEC104 会保留本地配置并标记为 `PENDING_DELETE`，上位机应提示用户重试
+- 若 DataCenter 删除失败（例如 `UNAVAILABLE/INTERNAL`），IEC104 会保留本地配置并标记为 `PENDING_DELETE`
 - DataCenter 返回 `NOT_FOUND` 时视为“已删除”，`DeleteLink` 幂等返回 OK
 
 ### 对时
-上位机主动对时时，调用 `SendTimeSync(conn_name, ts_ms)`：
+主动对时时，调用 `SendTimeSync(conn_name, ts_ms)`：
 - 仅 STATION_ROLE_MASTER 允许主动对时；非主站会返回 `FAILED_PRECONDITION`
 - `ts_ms<=0` 时使用当前本地时间
 - IEC104 会发送 `C_CS_NA_1` 并记录日志；不会修改系统时间
 
-### 上位机请求示例
+### 请求示例
 IEC104 `UpsertLink`（ROLE_CLIENT + STATION_ROLE_MASTER）：
 ```jsonc
 {

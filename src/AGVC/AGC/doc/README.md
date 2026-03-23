@@ -63,18 +63,15 @@ AGC 不直接对接 IEC104/ModbusRTU；上下游均通过 DataCenter 的有向�
 - 不参与拆分分配
 - 拆分时将其量测视为“被动出力”从总目标中扣除，再把剩余目标分给可控成员
 
-### 上位机推荐流程（典型闭环）
-1. 启动 `DataCenter` 与 `AGC`，用 `GetRunningModuleInfo` 获取 AGC 的 `outer_grpc_server`
-2. 上位机连接 AGC gRPC，调用 `UpsertGroup(create_only=true)` 创建控制组并获取 `conn_id`
-3. 在 DataCenter 配置路由（示例）：
-   - 主站设点（IEC104 conn）→ AGC：`(conn_id_104, P_CMD_SRC) -> (conn_id_agc, p_cmd.signal.tag)`
-   - 成员量测（ModbusRTU conn）→ AGC：`(conn_id_inv1, P_MEAS) -> (conn_id_agc, members[0].p_meas.tag)`（依次类推）
-   - AGC 成员设点 → 成员控制点：`(conn_id_agc, members[0].p_set.signal.tag) -> (conn_id_inv1, P_SET)`（依次类推）
-   - 台区总实时 → 主站：`(conn_id_agc, outputs.p_total_meas.tag) -> (conn_id_104, P_TOTAL_DST)`
-4. 调用 `StartGroup` 启动控制组内事件触发控制功能
+### 典型数据闭环（示例）
+涉及上位机页面结构、控制组编辑流程与交互约束的统一说明，见 `doc/上位机设计指导.md`。下面仅保留 AGC 典型路由关系示例：
 
-> 注意：路由与点表的具体 `tag`/单位由上位机配置决定；AGC 本身不关心 IEC104/ModbusRTU 的地址映射。
-> 上位机建议：`GroupConfig` 不再支持 `kp`、`max_step_kw`、`deadband_kw`、`period_ms` 等控制环参数；若上位机仍需要限幅、缓升缓降或分步给定，请在 AGC 上游先生成更细粒度的总设定，再通过 `p_cmd` 下发。
+- 主站设点（IEC104 conn）→ AGC：`(conn_id_104, P_CMD_SRC) -> (conn_id_agc, p_cmd.signal.tag)`
+- 成员量测（ModbusRTU conn）→ AGC：`(conn_id_inv1, P_MEAS) -> (conn_id_agc, members[0].p_meas.tag)`（依次类推）
+- AGC 成员设点 → 成员控制点：`(conn_id_agc, members[0].p_set.signal.tag) -> (conn_id_inv1, P_SET)`（依次类推）
+- 台区总实时 → 主站：`(conn_id_agc, outputs.p_total_meas.tag) -> (conn_id_104, P_TOTAL_DST)`
+
+> 路由与点表的具体 `tag`/单位由集成侧配置决定；AGC 本身不关心 IEC104/ModbusRTU 的地址映射。
 
 ### 配置持久化（当前实现）
 AGC 会将控制组配置落盘到工作目录下的 `./conf/AGC/groups.pb`，用于进程重启后的自动恢复。

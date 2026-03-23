@@ -104,20 +104,13 @@ extern "C" BOOST_SYMBOL_EXPORT bool GetModuleManifestPb(const uint8_t **data, si
 - `SaveModuleStartConfig`：保存模块启动配置到 `./conf/modConf.bin`（当前实现仅保存，未看到启动时自动读取逻辑）。
 - `UploadModule`/`DeleteModule`：上传/删除模块当前未实现（no-op），优先级较低，后续再补齐。
 
-## 上位机对接建议
-本项目有配套上位机/配置工具，建议按以下方式对接模块生命周期与地址发现。
+## 地址发现与容错说明
+涉及上位机页面结构、菜单组织与完整操作流程的统一说明，见 `doc/上位机设计指导.md`。本节仅保留模块管理器对接时必须关注的事实性约束。
 
 ### 入口与地址
 - 上位机入口：连接模块管理器对外地址 `0.0.0.0:7000`。
 - `inner_grpc_server`（unix socket）：用于进程内模块间互联；一般不建议上位机使用。
 - `outer_grpc_server`（TCP）：用于上位机调用；普通模块端口为随机 7001–7999，重启后可能变化。
-
-### 推荐调用流程
-1. `GetModuleInfo`：发现可用模块（从 `./module` 扫描），过滤 `manifest_error` 非空的模块。
-2. `StartModule`：启动所需模块（会自动拉起依赖模块，例如 `DataCenter`）。
-3. `GetRunningModuleInfo`：获取已启动模块的 `outer_grpc_server`，上位机据此建立到各模块的 gRPC 连接并进行后续配置/运行期调用。
-
-> 若启用了 `./conf/module_manager.jsonc` 的自启动列表，可跳过 `StartModule`，直接通过 `GetRunningModuleInfo` 获取已启动模块信息。
 
 ### 稳定性与容错
 - 模块重启/Stop 后其 `outer_grpc_server` 可能变化，上位机应在连接失败时重新调用 `GetRunningModuleInfo` 刷新地址并重连。

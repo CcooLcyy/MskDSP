@@ -50,7 +50,7 @@ ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRT
   - 每项需为 2 位十六进制字符串（如 `01`、`0A`）
   - `link.config.conn_name` 包含 `{device_no}` 时替换占位符；不包含时自动追加 `_{device_no}`
   - `point_table.conn_name` 为空时自动使用展开后的连接名
-- 上位机对接建议：对同一协议转换器维护一份公共链路模板 + `device_nos` 列表，通过 `{device_no}` 生成连接名，避免为每个逆变器重复维护整份配置
+- 若需要为同一协议转换器批量生成多条连接，可通过 `{device_no}` 与 `device_nos` 做统一展开。
 - IEC104 可选下发点值上送参数（`point_batch_window_ms/point_max_asdu_bytes/point_use_standard_limit/point_dedupe/point_with_time`；默认不带时标）
 - IEC104 可选下发对时触发 tag（`time_sync_tag`；为空时默认 `__time_sync__`）
 - IEC104 点表类型支持 `POINT_TYPE_FLOAT` 与 `POINT_TYPE_SINGLE`
@@ -67,6 +67,8 @@ ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRT
 - ModbusRTU 链路固定按主站方式运行
 - 当 DLT645 或 ModbusRTU 需要 MQTT 时，ConfigPusher 会按需启动 `MQTTManager`
 - DLT645 配置会启动 DLT645 与 MQTTManager，并先下发 MQTT 全局参数
+
+涉及上位机页面结构、模板建模、交互校验与导入流程的统一说明，见 `doc/上位机设计指导.md`。本节以下内容仅保留 ConfigPusher 的字段语义、展开规则与校验约束。
 
 ### ModbusRTU MQTT 串口透传配置
 - 适用场景：需要通过远端 `uartManager` 操作串口，但同时保留本地串口直连能力。
@@ -133,14 +135,6 @@ ModbusRTU MQTT 配置示例：
 }
 ```
 
-### 上位机对接建议（ModbusRTU MQTT）
-- 在界面上将 `transport_type` 作为显式选项，避免把本地串口与远端串口透传混为一类。
-- 当用户选择 `TRANSPORT_MQTT_UART` 时，直接联动显示顶层 `mqtt` 配置区与链路级 `serial_port` 配置区。
-- 在配置校验阶段直接提示：
-  - 缺少 `modbus_rtu.mqtt`
-  - 缺少 `serial_port`
-- 启停文案建议写成“启动连接功能/停止连接功能”，避免与“启动模块”混淆。
-
 ### DLT645 批量设备下发（device_nos）
 - 适用场景：一个协议转换器（同一 `meter_addr`）下挂多台逆变器，仅 `device_no` 不同。
 - 配置入口：`dlt645.links[].device_nos`（数组）。
@@ -190,21 +184,6 @@ DLT645 批量下发示例：
 
 说明：
 - 示例中的 `start` 字段仅用于兼容旧模板；当前版本不会因此额外调用 `StartLink/StartGroup`，模块会在配置达到可运行条件后自动启动模块内功能。
-
-### 上位机对接建议（DLT645 批量设备）
-- 建议上位机提供“公共模板 + 设备序号列表”建模，避免为每台逆变器维护整份重复 JSON。
-- 建议在界面保存并展示“展开预览”（最终连接名列表），防止连接名冲突。
-- 建议默认使用 `conn_name` 占位符 `{device_no}`，便于问题定位与日志检索。
-- 建议在配置校验阶段直接提示以下错误：
-  - `device_no` 非 2 位十六进制；
-  - 非 `DLT645PCD` 却配置 `device_nos`；
-  - 展开后连接名重复。
-
-### 上位机对接建议（AGC）
-- AGC 界面与配置模板中不要再展示 `loop`、`kp`、`deadband_kw`、`max_step_kw` 等旧参数。
-- 建议将 AGC 总目标描述为“相关输入变化时直接按目标总功率分配”，避免继续使用“分步逼近”“步长限制”“固定周期轮询”之类旧文案。
-- 若成员设定值使用 `VALUE_MODE_DELTA + DELTA_BASE_LAST_TARGET`，建议在界面上明确提示其基准是 AGC 记忆的上一轮期望目标，而不是旧闭环输出步长。
-- 建议在配置校验阶段直接提示“存在已废弃的 AGC loop 字段”，避免用户把旧版模板继续下发到 ConfigPusher。
 
 DataCenter 示例：
 ```jsonc

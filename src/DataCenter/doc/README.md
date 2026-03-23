@@ -87,33 +87,25 @@ DataCenter 对外提供一组面向“连接/连接标签注册表/路由/转发
   - `snapshot=true` 时，会先 best-effort 推送一次 `GetLatest` 的结果，再推送实时更新。
   - 说明：订阅端消费过慢时，服务端会丢弃过旧消息以避免无限堆积（best-effort，不保证每条更新都可达）。
 
-## 配置与使用流程（建议）
-1. 在各协议模块（IEC104/ModbusRTU/DLT645/…）配置阶段，通过 DataCenter 的 `GetOrCreateConnection(module_name, conn_name)` 获取 `connId`（全局唯一且持久化），并将该 `connId` 写入该连接的配置；为每个点配置 `tag`（逻辑点名，可中文）。
-2. 在 DataCenter 中为源/目的两侧连接下发连接标签注册表（可选但建议）：`UpsertConnTags(connId, tags...)`。
-3. 在 DataCenter 中配置路由方向（有向绑定）：基于源/目的两侧连接标签注册表中已知的 `connId + tag` 建立 `src -> dst` 规则（支持一对多）。
-4. 启动模块：通过管理器启动 DataCenter 与各协议模块；采集端向 DataCenter 发布数据，上送端订阅/获取对应 `tag` 的更新进行上报。
-
-## 上位机设计建议
-上位机在设计 DataCenter 的配置/联调流程时，建议优先遵循以下约束，以降低“重启/重连/改名”带来的配置漂移与联调成本。
+## 集成约束与关键语义
+涉及上位机页面结构、配置流程与操作顺序的统一说明，见 `doc/上位机设计指导.md`。本节仅保留 DataCenter 本身的连接主键、路由校验与订阅语义。
 
 ### 1) 连接主键与命名
 - `ConnectionKey = (module_name, conn_name)` 是 `connId` 分配的唯一主键：两者都应当稳定且可预测，避免运行期随机字符串。
 - `module_name` 建议与模块标识保持一致（例如 `IEC104`、`ModbusRTU`），用于区分不同协议模块空间。
-- `conn_name` 建议由上位机统一规划并保证同一 `module_name` 内唯一（例如 `104-主站A`、`ModbusRTU-1#RTU`）。
+- `conn_name` 建议由集成侧统一规划并保证同一 `module_name` 内唯一（例如 `104-主站A`、`ModbusRTU-1#RTU`）。
 
-### 2) connId 分配策略（推荐）
-- 上位机/协议模块在“配置阶段”先调用 `GetOrCreateConnection` 获取 `connId`，并将返回的 `connId` 固化到该连接配置中（后续运行期 `Publish/Subscribe` 使用同一 `connId`）。
+### 2) connId 分配与删除语义
+- 集成侧或协议模块在“配置阶段”先调用 `GetOrCreateConnection` 获取 `connId`，并将返回的 `connId` 固化到该连接配置中（后续运行期 `Publish/Subscribe` 使用同一 `connId`）。
 - `RenameConnection` 用于仅修改主键（`connId` 不变）：因此路由、连接标签注册表不需要改写，只需更新显示/引用主键即可。
-- `DeleteConnection` 为破坏性操作：会清理该 `connId` 的连接标签注册表/路由/最新值缓存，并关闭该 `connId` 的订阅者连接（best-effort）；上位机应在 UI 上做二次确认，并按需重建配置。
+- `DeleteConnection` 为破坏性操作：会清理该 `connId` 的连接标签注册表/路由/最新值缓存，并关闭该 `connId` 的订阅者连接（best-effort）。
 
-### 3) 配置幂等与下发顺序
-- 建议在上位机侧把“连接、连接标签注册表、路由”都做成幂等下发：配置工具反复点击/重复下发不应产生副作用。
-- 推荐顺序：先 `GetOrCreateConnection` → 再 `UpsertConnTags`（如启用连接标签注册表校验）→ 再 `UpsertRoutes`。
+### 3) 标签注册表与路由校验
 - 当连接标签注册表存在时，路由会校验 `tag` 必须在注册表中；因此连接标签注册表/路由的 UI 编辑可通过 `GetConnTags` / `ListRoutes` 做回读校验与展示。
 
-### 4) 数据接收侧建议
+### 4) 实时值与订阅语义
 - 接收方启动后若希望“先拿到当前值再跟随实时更新”，建议使用 `Subscribe(snapshot=true)`；若只关心一次性拉取，则使用 `GetLatest`。
-- 订阅为 best-effort：消费过慢时服务端会丢弃过旧消息以限制队列增长；上位机若需要强一致/不丢数据，需要引入独立的历史存储或 ACK/重传机制（不在 DataCenter 当前范围内）。
+- 订阅为 best-effort：消费过慢时服务端会丢弃过旧消息以限制队列增长；如需强一致或历史回放，需要引入独立的历史存储或 ACK/重传机制（不在 DataCenter 当前范围内）。
 
 ## 连接注册表持久化（当前实现）
 DataCenter 会将连接注册表落盘到工作目录下的 `./conf/dataCenter/connections.pb`，用于 `connId` 的稳定分配与重启后的自动恢复。

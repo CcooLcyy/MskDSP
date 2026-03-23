@@ -153,15 +153,13 @@ ModbusRTU 模块负责管理 ModbusRTU 链路与点表，当前同时支持两�
 - 一个 `TRANSPORT_SERIAL` 本地串口主站示例。
 - 一个 `TRANSPORT_MQTT_UART` 远端串口主站示例。
 
-## 上位机对接建议
-- 配置 MQTT UART 链路时，界面上应同时展示顶层 `mqtt` 与链路级 `serial_port/serial.*` 参数。
-- 启停文案建议明确为“启动连接功能/停止连接功能”，避免与“启动模块”混淆。
-- 无需展示 `mode` 字段；链路固定按主站方式运行。
-- 若点位类型选择 `INT16/INT32`，应限制为主站寄存器场景（`0x03/0x04/0x10`）。
-- 若点位功能码选择 `0x06`，应限制为单个 16 位寄存器写入；若选择 `0x10`，应允许 16/32 位寄存器写入。
-- 建议把“采集点 tag”和“控制点 tag”分开配置；控制命令通过 DataCenter 路由写入 ModbusRTU 的控制点 tag，不需要额外调用写寄存器 gRPC。
-- 建议将 `transport_type` 暴露为显式选项，便于本地串口和远端串口透传共存配置。
-- 对接调试时优先查看 ModbusRTU 日志中的 JSON payload 与 RTU 十六进制报文，快速定位是 MQTT 通道问题还是设备响应问题。
+## 集成说明
+涉及上位机页面结构、控件布局、参数校验与操作流程的统一说明，见 `doc/上位机设计指导.md`。本模块集成时需额外注意以下事实约束：
+
+- `TRANSPORT_MQTT_UART` 模式下，顶层 `mqtt` 与链路级 `serial_port`/`serial.*` 必须成组提供。
+- 链路固定按主站方式运行，无需额外引入独立 `mode` 选项。
+- `FUNCTION_WRITE_SINGLE_REGISTER` 仅允许单个 16 位寄存器写入；`FUNCTION_WRITE_MULTIPLE_REGISTERS` 允许 16/32 位寄存器写入。
+- 控制命令通过 DataCenter 路由写入 ModbusRTU 的控制点 `tag`，不需要额外调用独立“写寄存器 gRPC”。
 
 ## 报文日志
 - 串口直连与 MQTT UART 两条路径都输出收发报文日志。
