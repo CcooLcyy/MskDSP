@@ -121,3 +121,58 @@ TEST(ConfigPusherApplyDlt645Test, InvalidDeviceNoStopsApply) {
 
   EXPECT_FALSE(ConfigPusher::applyDlt645Config(config, stub.get()));
 }
+
+// 验证：point_table.conn_name 含 {device_no} 占位符时，会按每个设备序号分别展开。
+TEST(ConfigPusherApplyDlt645Test, ExpandsPointTableConnNamePlaceholderPerDeviceNo) {
+  auto config = MakeDlt645Config(false);
+  config.mutable_links(0)->mutable_point_table()->set_conn_name("pt_{device_no}");
+  auto stub = std::make_unique<DLT645Proto::MockDLT645ServiceStub>();
+
+  InSequence seq;
+  EXPECT_CALL(*stub, UpdateConfig(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext *,
+                          const DLT645Proto::UpdateConfigRequest &req,
+                          DLT645Proto::UpdateConfigResponse *resp) {
+        EXPECT_EQ(req.mqtt().client_id(), "dlt645-test");
+        resp->set_ok(true);
+        resp->set_message("成功");
+        return grpc::Status::OK;
+      }));
+  EXPECT_CALL(*stub, UpsertLink(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext *,
+                          const DLT645Proto::UpsertLinkRequest &req,
+                          DLT645Proto::LinkInfo *resp) {
+        EXPECT_EQ(req.config().conn_name(), "conv_01");
+        EXPECT_EQ(req.config().poll_item_interval_ms(), 200u);
+        resp->set_conn_id(201);
+        return grpc::Status::OK;
+      }));
+  EXPECT_CALL(*stub, UpsertPointTable(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext *,
+                          const DLT645Proto::UpsertPointTableRequest &req,
+                          DLT645Proto::Empty *) {
+        EXPECT_EQ(req.conn_name(), "pt_01");
+        EXPECT_EQ(req.points_size(), 1);
+        return grpc::Status::OK;
+      }));
+  EXPECT_CALL(*stub, UpsertLink(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext *,
+                          const DLT645Proto::UpsertLinkRequest &req,
+                          DLT645Proto::LinkInfo *resp) {
+        EXPECT_EQ(req.config().conn_name(), "conv_0A");
+        EXPECT_EQ(req.config().poll_item_interval_ms(), 200u);
+        resp->set_conn_id(202);
+        return grpc::Status::OK;
+      }));
+  EXPECT_CALL(*stub, UpsertPointTable(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext *,
+                          const DLT645Proto::UpsertPointTableRequest &req,
+                          DLT645Proto::Empty *) {
+        EXPECT_EQ(req.conn_name(), "pt_0A");
+        EXPECT_EQ(req.points_size(), 1);
+        return grpc::Status::OK;
+      }));
+  EXPECT_CALL(*stub, StartLink(_, _, _)).Times(0);
+
+  EXPECT_TRUE(ConfigPusher::applyDlt645Config(config, stub.get()));
+}

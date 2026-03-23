@@ -102,7 +102,8 @@ bool buildPointTableRequest(const ConfigPusherProto::Dlt645LinkTask &task,
     LOG_ERROR("DLT645 点表展开失败: 输出参数为空");
     return false;
   }
-  if (!task.has_point_table() || task.point_table().points_size() == 0) {
+  if (!task.has_point_table() ||
+      (task.point_table().points_size() == 0 && task.point_table().blocks_size() == 0)) {
     return false;
   }
 
@@ -194,7 +195,8 @@ bool applyDlt645Config(const ConfigPusherProto::Dlt645Config &config, DLT645Prot
       LOG_INFO("收到 DLT645 连接配置响应报文: {}", formatProtoForLog(linkInfo));
       LOG_INFO("DLT645 连接配置成功: 连接名={}, 连接ID={}", expandedConnNames[i], linkInfo.conn_id());
 
-      if (task.has_point_table() && task.point_table().points_size() > 0) {
+      if (task.has_point_table() &&
+          (task.point_table().points_size() > 0 || task.point_table().blocks_size() > 0)) {
         DLT645Proto::UpsertPointTableRequest ptReq;
         if (!buildPointTableRequest(task, expandedConnNames[i], deviceNo, &ptReq)) {
           ok = false;
@@ -211,7 +213,10 @@ bool applyDlt645Config(const ConfigPusherProto::Dlt645Config &config, DLT645Prot
           continue;
         }
         LOG_INFO("收到 DLT645 点表响应报文: {}", formatProtoForLog(ptResp));
-        LOG_INFO("DLT645 点表下发成功: 连接名={}, 点数={}", ptReq.conn_name(), ptReq.points_size());
+        LOG_INFO("DLT645 点表下发成功: 连接名={}, 点数={}, 数据块数={}",
+                 ptReq.conn_name(),
+                 ptReq.points_size(),
+                 ptReq.blocks_size());
       }
 
       if (task.start()) {
