@@ -334,6 +334,7 @@ TEST(Dlt645LinkManagerTest, UpsertLinkSerialFillsDefaultParams) {
   EXPECT_EQ(out.config().serial_byte_timeout_ms(), 100);
   EXPECT_EQ(out.config().serial_frame_timeout_ms(), 100);
   EXPECT_EQ(out.config().serial_est_size(), 256);
+  EXPECT_EQ(out.config().poll_item_interval_ms(), 0u);
 }
 
 // 验证：create_only 重复创建时返回 ALREADY_EXISTS。
@@ -398,10 +399,12 @@ TEST(Dlt645LinkManagerTest, UpsertLinkUpdatesExistingConfigAndKeepsConnIdAndPoin
   DLT645Proto::UpsertLinkRequest req2;
   *req2.mutable_config() = MakeValidLinkConfig("conn-update", DLT645Proto::COMM_MODE_LORA);
   req2.mutable_config()->set_poll_interval_ms(2000);
+  req2.mutable_config()->set_poll_item_interval_ms(200);
   DLT645Proto::LinkInfo info2;
   ASSERT_TRUE(mgr.UpsertLink(req2, &info2).ok());
   EXPECT_EQ(info2.conn_id(), info1.conn_id());
   EXPECT_EQ(info2.config().poll_interval_ms(), 2000u);
+  EXPECT_EQ(info2.config().poll_item_interval_ms(), 200u);
 
   DLT645Proto::PointTable table;
   ASSERT_TRUE(mgr.GetPointTable("conn-update", &table).ok());
@@ -630,6 +633,78 @@ TEST(Dlt645LinkManagerTest, StartLinkSerialModeStartsSuccessfully) {
   DLT645Proto::LinkInfo got;
   ASSERT_TRUE(mgr.GetLink("conn-serial", &got).ok());
   EXPECT_EQ(got.state(), DLT645Proto::LINK_STATE_RUNNING);
+}
+
+// 验证：配置 poll_item_interval_ms 后，单次点抄收发之间会按配置等待。
+TEST(Dlt645LinkManagerTest, PollingHonorsPollItemIntervalBetweenRequests) {
+  FakeDataCenterState state;
+  auto dcStub = MakeStub(&state);
+  auto mqttStub = std::make_shared<MQTTManagerProto::MockMQTTManagerServiceStub>();
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(dcStub);
+  mgr.setMqttStub(mqttStub);
+
+  DLT645Proto::UpsertLinkRequest linkReq;
+  *linkReq.mutable_config() = MakeValidLinkConfig("conn-gap", DLT645Proto::COMM_MODE_SERIAL);
+  linkReq.mutable_config()->set_poll_interval_ms(5000);
+  linkReq.mutable_config()->set_poll_item_interval_ms(200);
+  DLT645Proto::LinkInfo linkInfo;
+  ASSERT_TRUE(mgr.UpsertLink(linkReq, &linkInfo).ok());
+
+  DLT645Proto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-gap");
+  *ptReq.add_points() = MakePointProto("P1", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16);
+  *ptReq.add_points() = MakePointProto("P2", "02010200", 2, DLT645Proto::DATA_TYPE_UINT16);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  std::mutex recordMu;
+  std::condition_variable recordCv;
+  std::vector<std::chrono::steady_clock::time_point> monitorTimes;
+  ON_CALL(*mqttStub, RequestAndWait(_, _, _))
+      .WillByDefault(::testing::Invoke([&recordMu, &recordCv, &monitorTimes](
+                                           grpc::ClientContext *,
+                                           const MQTTManagerProto::RequestAndWaitRequest &req,
+                                           MQTTManagerProto::RequestAndWaitResponse *resp) {
+        if (resp == nullptr) {
+          return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
+        }
+        resp->set_ok(true);
+        resp->set_message("成功");
+        if (req.request_topic().find("uartManager") != std::string::npos) {
+          {
+            std::lock_guard<std::mutex> lock(recordMu);
+            monitorTimes.push_back(std::chrono::steady_clock::now());
+          }
+          recordCv.notify_all();
+          resp->set_payload("{\"status\":0,\"data\":\"AQ==\"}");
+          return grpc::Status::OK;
+        }
+        resp->set_payload("{\"status\":0}");
+        return grpc::Status::OK;
+      }));
+
+  auto updateReq = MakeMqttUpdateRequest("127.0.0.1", 1883, "c-gap");
+  DLT645Proto::UpdateConfigResponse updateResp;
+  ASSERT_TRUE(mgr.UpdateConfig(updateReq, &updateResp).ok());
+
+  {
+    std::unique_lock<std::mutex> lock(recordMu);
+    ASSERT_TRUE(recordCv.wait_for(lock, std::chrono::seconds(3), [&monitorTimes]() { return monitorTimes.size() >= 2; }));
+  }
+
+  ASSERT_TRUE(mgr.StopLink("conn-gap").ok());
+
+  std::vector<std::chrono::steady_clock::time_point> capturedTimes;
+  {
+    std::lock_guard<std::mutex> lock(recordMu);
+    capturedTimes = monitorTimes;
+  }
+  ASSERT_GE(capturedTimes.size(), 2u);
+  const auto intervalMs =
+      std::chrono::duration_cast<std::chrono::milliseconds>(capturedTimes[1] - capturedTimes[0]).count();
+  EXPECT_GE(intervalMs, 150);
 }
 
 // 验证：Lora 链路启动连接功能阻塞时，不会阻塞 UART 链路启动连接功能。

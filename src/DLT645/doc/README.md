@@ -45,7 +45,8 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
   - `device_no`：PCD 专用，十六进制字符串（例如 `0A` 表示第 10 个设备）。
   - `transport_type`：传输类型；为空时默认 `TRANSPORT_MQTT_UART`。
   - `comm_mode`：通信方式：`COMM_MODE_LORA`/`COMM_MODE_CARRIER`/`COMM_MODE_SERIAL`。
-  - `poll_interval_ms`：轮询周期（毫秒，0 使用默认值）。
+  - `poll_interval_ms`：整轮扫描完成后的等待间隔（毫秒，0 使用默认值）。
+  - `poll_item_interval_ms`：单次点抄收发完成后，到下一次点抄收发开始前的等待间隔（毫秒，0 表示无额外等待）。
   - `request_timeout_ms`：请求超时（毫秒，0 使用默认值）。
   - `serial_port`：串口标识（`COMM_MODE_SERIAL` 必填，例如 `RS485-1`）。
   - `serial_baud_rate`：串口波特率（`COMM_MODE_SERIAL`，0 使用默认值 `9600`）。
@@ -106,6 +107,7 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
             "transport_type": "TRANSPORT_MQTT_UART",
             "comm_mode": "COMM_MODE_LORA",
             "poll_interval_ms": 1000,
+            "poll_item_interval_ms": 200,
             "request_timeout_ms": 3000
           }
         },

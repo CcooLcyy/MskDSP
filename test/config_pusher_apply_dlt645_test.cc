@@ -23,6 +23,7 @@ ConfigPusherProto::Dlt645Config MakeDlt645Config(bool start) {
   linkCfg->set_meter_addr("202601200001");
   linkCfg->set_transport_type(DLT645Proto::TRANSPORT_MQTT_UART);
   linkCfg->set_comm_mode(DLT645Proto::COMM_MODE_LORA);
+  linkCfg->set_poll_item_interval_ms(200);
   task->add_device_nos("01");
   task->add_device_nos("0A");
 
@@ -65,6 +66,7 @@ TEST(ConfigPusherApplyDlt645Test, ExpandDeviceNosForLinkAndPointTable) {
                           DLT645Proto::LinkInfo *resp) {
         EXPECT_EQ(req.config().conn_name(), "conv_01");
         EXPECT_EQ(req.config().device_no(), "01");
+        EXPECT_EQ(req.config().poll_item_interval_ms(), 200u);
         resp->set_conn_id(101);
         return grpc::Status::OK;
       }));
@@ -82,6 +84,7 @@ TEST(ConfigPusherApplyDlt645Test, ExpandDeviceNosForLinkAndPointTable) {
                           DLT645Proto::LinkInfo *resp) {
         EXPECT_EQ(req.config().conn_name(), "conv_0A");
         EXPECT_EQ(req.config().device_no(), "0A");
+        EXPECT_EQ(req.config().poll_item_interval_ms(), 200u);
         resp->set_conn_id(102);
         return grpc::Status::OK;
       }));

@@ -268,6 +268,7 @@ add_executable(dlt645LinkManager_test
   ${CMAKE_SOURCE_DIR}/src/DLT645/DLT645PointTable.cc
   ${CMAKE_SOURCE_DIR}/src/DLT645/DLT645PointTableStore.cc
 )
+add_dependencies(dlt645LinkManager_test dspProto)
 
 target_include_directories(dlt645LinkManager_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/DLT645/include
@@ -391,6 +392,7 @@ mskdsp_add_isolated_test(configPusherApplyAgc_test)
 add_executable(configPusherApplyDlt645_test
   config_pusher_apply_dlt645_test.cc
 )
+add_dependencies(configPusherApplyDlt645_test dspProto)
 
 target_include_directories(configPusherApplyDlt645_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/ConfigPusher/include

@@ -29,6 +29,7 @@ constexpr uint8_t kReadControl = 0x11;
 constexpr uint8_t kWriteControl = 0x14;
 constexpr uint8_t kDefaultQos = 1;
 constexpr uint32_t kDefaultPollIntervalMs = 1000;
+constexpr uint32_t kDefaultPollItemIntervalMs = 0;
 constexpr uint32_t kDefaultRequestTimeoutMs = 3000;
 constexpr const char *kAppName = "AGVC";
 constexpr const char *kAppTypeLora = "loraManager";
@@ -240,6 +241,20 @@ int32_t parseStatusCode(const boost::json::value &value, bool *ok) {
     *ok = true;
   }
   return 1;
+}
+
+bool sleepWithStop(std::stop_token st, std::chrono::milliseconds total) {
+  constexpr auto kSlice = std::chrono::milliseconds(100);
+  auto left = total;
+  while (left > std::chrono::milliseconds::zero()) {
+    if (st.stop_requested()) {
+      return false;
+    }
+    const auto step = std::min(left, kSlice);
+    std::this_thread::sleep_for(step);
+    left -= step;
+  }
+  return !st.stop_requested();
 }
 
 std::string serialParityToText(DLT645Proto::SerialParity parity) {
@@ -1170,6 +1185,9 @@ grpc::Status LinkManager::normalizeLinkConfig(const DLT645Proto::LinkConfig &con
     if (out->poll_interval_ms() == 0) {
       out->set_poll_interval_ms(kDefaultPollIntervalMs);
     }
+    if (out->poll_item_interval_ms() == 0) {
+      out->set_poll_item_interval_ms(kDefaultPollItemIntervalMs);
+    }
     if (out->request_timeout_ms() == 0) {
       out->set_request_timeout_ms(kDefaultRequestTimeoutMs);
     }
@@ -1296,14 +1314,26 @@ void LinkManager::startPollingLocked(const std::string &connName, const std::sha
   }
   stopPollingLocked(link.get());
 
-  const auto interval = std::chrono::milliseconds(link->config.poll_interval_ms());
+  const auto roundInterval = std::chrono::milliseconds(link->config.poll_interval_ms());
+  const auto itemInterval = std::chrono::milliseconds(link->config.poll_item_interval_ms());
+  LOG_INFO("DLT645 启动轮询线程: conn_name={}, 整轮间隔={}ms, 单次收发间隔={}ms", connName, link->config.poll_interval_ms(), link->config.poll_item_interval_ms());
   link->pollThread = ModuleManager::StartModuleThread(
       moduleName_,
-      [this, connName, link, interval](std::stop_token st) {
+      [this, connName, link, roundInterval, itemInterval](std::stop_token st) {
+        bool needGapBeforeNextRequest = false;
+        auto waitBeforeNextRequest = [&needGapBeforeNextRequest, itemInterval, st]() {
+          if (!needGapBeforeNextRequest || itemInterval <= std::chrono::milliseconds::zero()) {
+            return !st.stop_requested();
+          }
+          return sleepWithStop(st, itemInterval);
+        };
         while (!st.stop_requested()) {
           const auto &blocks = link->pointTable.Blocks();
           for (const auto &block : blocks) {
             if (st.stop_requested()) {
+              break;
+            }
+            if (!waitBeforeNextRequest()) {
               break;
             }
             std::vector<uint8_t> di = encodeDiBytes(block.diBytes, link->config);
@@ -1315,6 +1345,7 @@ void LinkManager::startPollingLocked(const std::string &connName, const std::sha
             std::string payloadBase64;
             int32_t status = 0;
             auto sendStatus = sendMonitorRequest(link.get(), frame, &payloadBase64, &status);
+            needGapBeforeNextRequest = true;
             if (!sendStatus.ok()) {
               LOG_WARNING("DLT645 数据块读请求失败: conn_name={}, block_di={}, 原因={}", connName, block.diText, sendStatus.error_message());
               continue;
@@ -1346,6 +1377,9 @@ void LinkManager::startPollingLocked(const std::string &connName, const std::sha
             if (blockTags.find(point.tag) != blockTags.end()) {
               continue;
             }
+            if (!waitBeforeNextRequest()) {
+              break;
+            }
             std::vector<uint8_t> di = encodeDi(point, link->config);
             std::vector<uint8_t> data = di;
             addOffset33(&data);
@@ -1355,6 +1389,7 @@ void LinkManager::startPollingLocked(const std::string &connName, const std::sha
             std::string payloadBase64;
             int32_t status = 0;
             auto sendStatus = sendMonitorRequest(link.get(), frame, &payloadBase64, &status);
+            needGapBeforeNextRequest = true;
             if (!sendStatus.ok()) {
               LOG_WARNING("DLT645 读请求失败: conn_name={}, tag={}, 原因={}", connName, point.tag, sendStatus.error_message());
               continue;
@@ -1373,7 +1408,10 @@ void LinkManager::startPollingLocked(const std::string &connName, const std::sha
           if (st.stop_requested()) {
             break;
           }
-          std::this_thread::sleep_for(interval);
+          if (!sleepWithStop(st, roundInterval)) {
+            break;
+          }
+          needGapBeforeNextRequest = false;
         }
       });
 }
