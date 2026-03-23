@@ -67,6 +67,7 @@ private:
     std::string lastError;
     PointTable pointTable;
     bool pointTableConfigured = false;
+    bool archiveRetrying = false;
 
     std::shared_ptr<grpc::ClientContext> mqttSubscribeContext;
     std::jthread mqttSubscribeThread;
@@ -75,6 +76,7 @@ private:
     std::jthread dcSubscribeThread;
 
     std::jthread pollThread;
+    std::jthread archiveRetryThread;
     std::mutex requestMutex;
     std::mutex pendingMutex;
     std::unordered_map<std::string, std::shared_ptr<PendingResponse>> pending;
@@ -97,6 +99,17 @@ private:
   bool isLinkAutoStartReadyLocked(const LinkRuntime &link, std::string *reason) const;
   grpc::Status maybeAutoStartLink(const std::string &connName, std::string_view trigger);
   void autoStartEligibleLinks(std::string_view trigger);
+  void launchArchiveRetryLocked(const std::string &connName,
+                                const std::shared_ptr<LinkRuntime> &link,
+                                const std::string &archiveKey);
+  void runArchiveRetryLoop(std::string connName,
+                           std::shared_ptr<LinkRuntime> link,
+                           std::string archiveKey,
+                           std::stop_token st);
+  void stopArchiveRetryLocked(LinkRuntime *link, std::jthread *outThread);
+  void releaseArchiveRefOnStartAbort(const std::string &connName,
+                                     const std::shared_ptr<LinkRuntime> &link,
+                                     const std::string &archiveKey);
 
   void startPollingLocked(const std::string &connName, const std::shared_ptr<LinkRuntime> &link);
   void stopPollingLocked(LinkRuntime *link);

@@ -31,7 +31,8 @@ public:
   ScopedTempDir() {
     auto base = std::filesystem::current_path();
     auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
+                  std::chrono::system_clock::now().time_since_epoch())
+                  .count();
     path_ = base / ("dlt645_link_manager_test_tmp_" + std::to_string(ts));
     std::filesystem::create_directories(path_);
   }
@@ -41,7 +42,9 @@ public:
     std::filesystem::remove_all(path_, ec);
   }
 
-  const std::filesystem::path &path() const { return path_; }
+  const std::filesystem::path &path() const {
+    return path_;
+  }
 
 private:
   std::filesystem::path path_;
@@ -54,7 +57,9 @@ public:
     std::filesystem::current_path(newCwd);
   }
 
-  ~ScopedCwd() { std::filesystem::current_path(old_); }
+  ~ScopedCwd() {
+    std::filesystem::current_path(old_);
+  }
 
   ScopedCwd(const ScopedCwd &) = delete;
   ScopedCwd &operator=(const ScopedCwd &) = delete;
@@ -87,7 +92,7 @@ std::string Base64Encode(const std::vector<uint8_t> &data) {
   return out;
 }
 
-}  // 命名空间结束
+}  // namespace
 
 namespace DLT645 {
 class DLT645LinkManagerTestPeer {
@@ -155,7 +160,7 @@ public:
     return mgr.sendMonitorRequest(it->second.get(), frame, outPayloadBase64, outStatus);
   }
 };
-}  // DLT645 命名空间结束
+}  // namespace DLT645
 namespace {
 
 using DLT645::DLT645LinkManagerTestPeer;
@@ -208,7 +213,29 @@ DLT645Proto::Point MakePointProto(const char *tag, const char *di, uint32_t data
   p.set_deadband(0.0);
   return p;
 }
-}  // 命名空间结束
+
+bool WaitForLinkState(LinkManager &mgr,
+                      const std::string &connName,
+                      DLT645Proto::LinkState expectedState,
+                      std::chrono::milliseconds timeout,
+                      DLT645Proto::LinkInfo *out) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  DLT645Proto::LinkInfo info;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (mgr.GetLink(connName, &info).ok() && info.state() == expectedState) {
+      if (out != nullptr) {
+        *out = info;
+      }
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  if (out != nullptr) {
+    (void)mgr.GetLink(connName, out);
+  }
+  return false;
+}
+}  // namespace
 
 // 验证：UpdateConfig 响应为空时返回参数错误。
 TEST(Dlt645LinkManagerTest, UpdateConfigRejectsNullResponse) {
@@ -1062,6 +1089,263 @@ TEST(Dlt645LinkManagerTest, StartStopLoraSameAddrSharesArchiveLifecycle) {
 
   ASSERT_TRUE(mgr.StopLink("conn-share-b").ok());
   EXPECT_EQ(delCount.load(), 1);
+}
+
+// 验证：自动启动阶段档案添加失败时，会把 LoRa status 转成中文原因写入 last_error。
+TEST(Dlt645LinkManagerTest, AutoStartStoresChineseArchiveFailureReasonInLastError) {
+  FakeDataCenterState state;
+  auto dcStub = MakeStub(&state);
+  auto mqttStub = std::make_shared<MQTTManagerProto::MockMQTTManagerServiceStub>();
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(dcStub);
+  mgr.setMqttStub(mqttStub);
+
+  ON_CALL(*mqttStub, RequestAndWait(_, _, _))
+      .WillByDefault(::testing::Invoke([](grpc::ClientContext *,
+                                          const MQTTManagerProto::RequestAndWaitRequest &req,
+                                          MQTTManagerProto::RequestAndWaitResponse *resp) {
+        if (resp == nullptr) {
+          return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
+        }
+        resp->set_ok(true);
+        resp->set_message("成功");
+        if (req.request_topic().find("addslaveNode") != std::string::npos) {
+          resp->set_payload("{\"status\":\"Buffull\"}");
+        } else if (req.request_topic().find("delslaveNode") != std::string::npos) {
+          resp->set_payload("{\"status\":0}");
+        } else {
+          resp->set_payload("{\"status\":0,\"data\":\"AQ==\"}");
+        }
+        return grpc::Status::OK;
+      }));
+
+  auto updateReq = MakeMqttUpdateRequest("127.0.0.1", 1883, "c-archive-reason");
+  DLT645Proto::UpdateConfigResponse updateResp;
+  ASSERT_TRUE(mgr.UpdateConfig(updateReq, &updateResp).ok());
+
+  DLT645Proto::UpsertLinkRequest linkReq;
+  *linkReq.mutable_config() = MakeValidLinkConfig("conn-archive-reason", DLT645Proto::COMM_MODE_LORA);
+  DLT645Proto::LinkInfo linkInfo;
+  ASSERT_TRUE(mgr.UpsertLink(linkReq, &linkInfo).ok());
+
+  DLT645Proto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-archive-reason");
+  *ptReq.add_points() = MakePointProto("P1", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  DLT645Proto::LinkInfo got;
+  ASSERT_TRUE(mgr.GetLink("conn-archive-reason", &got).ok());
+  EXPECT_EQ(got.state(), DLT645Proto::LINK_STATE_STOPPED);
+  EXPECT_EQ(got.last_error(), "档案添加失败: 缓冲区满");
+
+  ASSERT_TRUE(mgr.StopLink("conn-archive-reason").ok());
+}
+
+// 验证：自动启动阶段档案响应缺少 status 时，会直接按失败处理并记录中文原因。
+TEST(Dlt645LinkManagerTest, AutoStartRejectsArchiveResponseMissingStatus) {
+  FakeDataCenterState state;
+  auto dcStub = MakeStub(&state);
+  auto mqttStub = std::make_shared<MQTTManagerProto::MockMQTTManagerServiceStub>();
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(dcStub);
+  mgr.setMqttStub(mqttStub);
+
+  ON_CALL(*mqttStub, RequestAndWait(_, _, _))
+      .WillByDefault(::testing::Invoke([](grpc::ClientContext *,
+                                          const MQTTManagerProto::RequestAndWaitRequest &req,
+                                          MQTTManagerProto::RequestAndWaitResponse *resp) {
+        if (resp == nullptr) {
+          return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
+        }
+        resp->set_ok(true);
+        resp->set_message("成功");
+        if (req.request_topic().find("addslaveNode") != std::string::npos) {
+          resp->set_payload("{\"token\":\"x\"}");
+        } else if (req.request_topic().find("delslaveNode") != std::string::npos) {
+          resp->set_payload("{\"status\":0}");
+        } else {
+          resp->set_payload("{\"status\":0,\"data\":\"AQ==\"}");
+        }
+        return grpc::Status::OK;
+      }));
+
+  auto updateReq = MakeMqttUpdateRequest("127.0.0.1", 1883, "c-archive-missing");
+  DLT645Proto::UpdateConfigResponse updateResp;
+  ASSERT_TRUE(mgr.UpdateConfig(updateReq, &updateResp).ok());
+
+  DLT645Proto::UpsertLinkRequest linkReq;
+  *linkReq.mutable_config() = MakeValidLinkConfig("conn-archive-missing", DLT645Proto::COMM_MODE_LORA);
+  DLT645Proto::LinkInfo linkInfo;
+  ASSERT_TRUE(mgr.UpsertLink(linkReq, &linkInfo).ok());
+
+  DLT645Proto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-archive-missing");
+  *ptReq.add_points() = MakePointProto("P1", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  DLT645Proto::LinkInfo got;
+  ASSERT_TRUE(mgr.GetLink("conn-archive-missing", &got).ok());
+  EXPECT_EQ(got.state(), DLT645Proto::LINK_STATE_STOPPED);
+  EXPECT_EQ(got.last_error(), "档案添加响应缺少状态字段");
+
+  ASSERT_TRUE(mgr.StopLink("conn-archive-missing").ok());
+}
+
+// 验证：自动启动阶段首轮档案添加失败后，会在后台按 5 秒间隔继续重试直到成功。
+TEST(Dlt645LinkManagerTest, AutoStartRetriesArchiveAddUntilSuccess) {
+  FakeDataCenterState state;
+  auto dcStub = MakeStub(&state);
+  auto mqttStub = std::make_shared<MQTTManagerProto::MockMQTTManagerServiceStub>();
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(dcStub);
+  mgr.setMqttStub(mqttStub);
+
+  std::mutex addMu;
+  std::vector<std::chrono::steady_clock::time_point> addTimes;
+  std::atomic<int> addCount{0};
+  ON_CALL(*mqttStub, RequestAndWait(_, _, _))
+      .WillByDefault(::testing::Invoke([&addMu, &addTimes, &addCount](
+                                           grpc::ClientContext *,
+                                           const MQTTManagerProto::RequestAndWaitRequest &req,
+                                           MQTTManagerProto::RequestAndWaitResponse *resp) {
+        if (resp == nullptr) {
+          return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
+        }
+        resp->set_ok(true);
+        resp->set_message("成功");
+        if (req.request_topic().find("addslaveNode") != std::string::npos) {
+          {
+            std::lock_guard<std::mutex> lock(addMu);
+            addTimes.push_back(std::chrono::steady_clock::now());
+          }
+          const int current = addCount.fetch_add(1) + 1;
+          if (current == 1) {
+            resp->set_payload("{\"status\":\"Frametimeout\"}");
+          } else {
+            resp->set_payload("{\"status\":0}");
+          }
+        } else if (req.request_topic().find("delslaveNode") != std::string::npos) {
+          resp->set_payload("{\"status\":0}");
+        } else {
+          resp->set_payload("{\"status\":0,\"data\":\"AQ==\"}");
+        }
+        return grpc::Status::OK;
+      }));
+
+  auto updateReq = MakeMqttUpdateRequest("127.0.0.1", 1883, "c-archive-retry");
+  DLT645Proto::UpdateConfigResponse updateResp;
+  ASSERT_TRUE(mgr.UpdateConfig(updateReq, &updateResp).ok());
+
+  DLT645Proto::UpsertLinkRequest linkReq;
+  *linkReq.mutable_config() = MakeValidLinkConfig("conn-archive-retry", DLT645Proto::COMM_MODE_LORA);
+  DLT645Proto::LinkInfo linkInfo;
+  ASSERT_TRUE(mgr.UpsertLink(linkReq, &linkInfo).ok());
+
+  const auto firstAttemptBegin = std::chrono::steady_clock::now();
+  DLT645Proto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-archive-retry");
+  *ptReq.add_points() = MakePointProto("P1", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  DLT645Proto::LinkInfo got;
+  ASSERT_TRUE(mgr.GetLink("conn-archive-retry", &got).ok());
+  EXPECT_EQ(got.state(), DLT645Proto::LINK_STATE_STOPPED);
+  EXPECT_EQ(got.last_error(), "档案添加失败: 帧超时");
+
+  ASSERT_TRUE(WaitForLinkState(
+      mgr, "conn-archive-retry", DLT645Proto::LINK_STATE_RUNNING, std::chrono::seconds(8), &got));
+  EXPECT_TRUE(got.last_error().empty());
+  EXPECT_GE(addCount.load(), 2);
+
+  std::vector<std::chrono::steady_clock::time_point> capturedTimes;
+  {
+    std::lock_guard<std::mutex> lock(addMu);
+    capturedTimes = addTimes;
+  }
+  ASSERT_GE(capturedTimes.size(), 2u);
+  const auto retryGapMs =
+      std::chrono::duration_cast<std::chrono::milliseconds>(capturedTimes[1] - capturedTimes[0]).count();
+  EXPECT_GE(retryGapMs, 4500);
+  const auto totalCostMs =
+      std::chrono::duration_cast<std::chrono::milliseconds>(capturedTimes[1] - firstAttemptBegin).count();
+  EXPECT_GE(totalCostMs, 4500);
+
+  ASSERT_TRUE(mgr.StopLink("conn-archive-retry").ok());
+}
+
+// 验证：StopLink 会终止自动启动阶段的档案后台重试，不会在 5 秒后继续重发 addslaveNode。
+TEST(Dlt645LinkManagerTest, StopLinkCancelsArchiveRetry) {
+  FakeDataCenterState state;
+  auto dcStub = MakeStub(&state);
+  auto mqttStub = std::make_shared<MQTTManagerProto::MockMQTTManagerServiceStub>();
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(dcStub);
+  mgr.setMqttStub(mqttStub);
+
+  std::mutex addMu;
+  std::condition_variable addCv;
+  std::atomic<int> addCount{0};
+  ON_CALL(*mqttStub, RequestAndWait(_, _, _))
+      .WillByDefault(::testing::Invoke([&addMu, &addCv, &addCount](
+                                           grpc::ClientContext *,
+                                           const MQTTManagerProto::RequestAndWaitRequest &req,
+                                           MQTTManagerProto::RequestAndWaitResponse *resp) {
+        if (resp == nullptr) {
+          return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
+        }
+        resp->set_ok(true);
+        resp->set_message("成功");
+        if (req.request_topic().find("addslaveNode") != std::string::npos) {
+          addCount.fetch_add(1);
+          addCv.notify_all();
+          resp->set_payload("{\"status\":\"Frametimeout\"}");
+        } else if (req.request_topic().find("delslaveNode") != std::string::npos) {
+          resp->set_payload("{\"status\":0}");
+        } else {
+          resp->set_payload("{\"status\":0,\"data\":\"AQ==\"}");
+        }
+        return grpc::Status::OK;
+      }));
+
+  auto updateReq = MakeMqttUpdateRequest("127.0.0.1", 1883, "c-archive-stop");
+  DLT645Proto::UpdateConfigResponse updateResp;
+  ASSERT_TRUE(mgr.UpdateConfig(updateReq, &updateResp).ok());
+
+  DLT645Proto::UpsertLinkRequest linkReq;
+  *linkReq.mutable_config() = MakeValidLinkConfig("conn-archive-stop", DLT645Proto::COMM_MODE_LORA);
+  DLT645Proto::LinkInfo linkInfo;
+  ASSERT_TRUE(mgr.UpsertLink(linkReq, &linkInfo).ok());
+
+  DLT645Proto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-archive-stop");
+  *ptReq.add_points() = MakePointProto("P1", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  {
+    std::unique_lock<std::mutex> lock(addMu);
+    ASSERT_TRUE(addCv.wait_for(lock, std::chrono::seconds(2), [&addCount]() { return addCount.load() >= 1; }));
+  }
+
+  DLT645Proto::LinkInfo got;
+  ASSERT_TRUE(mgr.GetLink("conn-archive-stop", &got).ok());
+  EXPECT_EQ(got.state(), DLT645Proto::LINK_STATE_STOPPED);
+  EXPECT_EQ(got.last_error(), "档案添加失败: 帧超时");
+
+  ASSERT_TRUE(mgr.StopLink("conn-archive-stop").ok());
+
+  {
+    std::unique_lock<std::mutex> lock(addMu);
+    EXPECT_FALSE(addCv.wait_for(lock, std::chrono::seconds(6), [&addCount]() { return addCount.load() >= 2; }));
+  }
+  EXPECT_EQ(addCount.load(), 1);
 }
 
 // 验证：UpsertPointTable 在运行中/待删除时拒绝更新。

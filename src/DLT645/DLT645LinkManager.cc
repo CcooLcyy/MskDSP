@@ -243,6 +243,24 @@ int32_t parseStatusCode(const boost::json::value &value, bool *ok) {
   return 1;
 }
 
+std::string loraStatusToMessage(int32_t status) {
+  switch (status) {
+  case 0:
+    return "成功";
+  case 2:
+    return "帧超时";
+  case 3:
+    return "端口错误";
+  case 4:
+    return "缓冲区满";
+  case 5:
+    return "格式错误";
+  case 1:
+  default:
+    return "失败";
+  }
+}
+
 bool sleepWithStop(std::stop_token st, std::chrono::milliseconds total) {
   constexpr auto kSlice = std::chrono::milliseconds(100);
   auto left = total;
@@ -312,8 +330,7 @@ void LinkManager::LoadPersistedConfig() {
       LOG_ERROR("DLT645 MQTT 持久化配置加载失败: 原因={}", status.error_message());
     } else if (!mqttConfig.host().empty() && mqttConfig.port() != 0 && !mqttConfig.client_id().empty()) {
       mqttClient_.setConfig(mqttConfig);
-      LOG_INFO("DLT645 已加载 MQTT 持久化配置: host={}, port={}, client_id={}",
-               mqttConfig.host(), mqttConfig.port(), mqttConfig.client_id());
+      LOG_INFO("DLT645 已加载 MQTT 持久化配置: host={}, port={}, client_id={}", mqttConfig.host(), mqttConfig.port(), mqttConfig.client_id());
     } else {
       LOG_INFO("DLT645 未找到 MQTT 持久化配置");
     }
@@ -332,9 +349,7 @@ void LinkManager::LoadPersistedConfig() {
     LOG_ERROR("DLT645 点表持久化配置加载失败: 原因={}", pointTablesStatus.error_message());
     return;
   }
-  LOG_INFO("DLT645 持久化配置载入摘要: 链路记录数={}, 点表记录数={}",
-           linksConfig.links_size(),
-           pointTablesConfig.point_tables_size());
+  LOG_INFO("DLT645 持久化配置载入摘要: 链路记录数={}, 点表记录数={}", linksConfig.links_size(), pointTablesConfig.point_tables_size());
 
   std::unordered_map<std::string, DLT645Proto::PointTable> pointTablesByConn;
   pointTablesByConn.reserve(static_cast<size_t>(pointTablesConfig.point_tables_size()));
@@ -371,8 +386,7 @@ void LinkManager::LoadPersistedConfig() {
     DLT645Proto::LinkConfig normalized;
     auto status = normalizeLinkConfig(persistedLink.config(), &normalized);
     if (!status.ok()) {
-      LOG_ERROR("DLT645 链路持久化配置非法，已跳过: conn_name={}, 原因={}",
-                persistedLink.config().conn_name(), status.error_message());
+      LOG_ERROR("DLT645 链路持久化配置非法，已跳过: conn_name={}, 原因={}", persistedLink.config().conn_name(), status.error_message());
       needResaveLinks = true;
       if (!persistedLink.config().conn_name().empty() && pointTablesByConn.erase(persistedLink.config().conn_name()) > 0) {
         needResavePointTables = true;
@@ -387,12 +401,7 @@ void LinkManager::LoadPersistedConfig() {
       persistedPointCount = static_cast<size_t>(persistedTableIt->second.points_size());
       persistedBlockCount = static_cast<size_t>(persistedTableIt->second.blocks_size());
     }
-    LOG_INFO("DLT645 开始恢复链路持久化记录: conn_name={}, 持久化conn_id={}, 待删除={}, 持久化点数={}, 持久化数据块数={}",
-             normalized.conn_name(),
-             persistedLink.conn_id(),
-             persistedLink.pending_delete(),
-             persistedPointCount,
-             persistedBlockCount);
+    LOG_INFO("DLT645 开始恢复链路持久化记录: conn_name={}, 持久化conn_id={}, 待删除={}, 持久化点数={}, 持久化数据块数={}", normalized.conn_name(), persistedLink.conn_id(), persistedLink.pending_delete(), persistedPointCount, persistedBlockCount);
 
     DataCenterProto::ConnectionInfo connInfo;
     status = dataCenter_.GetOrCreateConnection(normalized.conn_name(), &connInfo);
@@ -400,11 +409,7 @@ void LinkManager::LoadPersistedConfig() {
       if (persistedPointCount > 0 || persistedBlockCount > 0) {
         pointTablesLeftByDataCenterFailure.emplace(normalized.conn_name());
       }
-      LOG_ERROR("DLT645 恢复链路时获取 DataCenter 连接失败: conn_name={}, 原因={}, 本地点表点数={}, 本地点表数据块数={}",
-                normalized.conn_name(),
-                status.error_message(),
-                persistedPointCount,
-                persistedBlockCount);
+      LOG_ERROR("DLT645 恢复链路时获取 DataCenter 连接失败: conn_name={}, 原因={}, 本地点表点数={}, 本地点表数据块数={}", normalized.conn_name(), status.error_message(), persistedPointCount, persistedBlockCount);
       continue;
     }
 
@@ -420,8 +425,7 @@ void LinkManager::LoadPersistedConfig() {
     if (tableIt != pointTablesByConn.end()) {
       status = restorePointTableFromProto(tableIt->second, &runtime->pointTable);
       if (!status.ok()) {
-        LOG_ERROR("DLT645 恢复点表失败，已跳过该点表: conn_name={}, 原因={}",
-                  normalized.conn_name(), status.error_message());
+        LOG_ERROR("DLT645 恢复点表失败，已跳过该点表: conn_name={}, 原因={}", normalized.conn_name(), status.error_message());
         needResavePointTables = true;
       } else {
         pointCount = static_cast<size_t>(tableIt->second.points_size());
@@ -438,34 +442,23 @@ void LinkManager::LoadPersistedConfig() {
 
     auto syncStatus = dataCenter_.UpsertConnTags(runtime->connId, runtime->pointTable.Tags(), true);
     if (!syncStatus.ok()) {
-      LOG_ERROR("DLT645 恢复链路时同步 DataCenter 连接标签注册表失败: conn_name={}, conn_id={}, 原因={}",
-                normalized.conn_name(), runtime->connId, syncStatus.error_message());
+      LOG_ERROR("DLT645 恢复链路时同步 DataCenter 连接标签注册表失败: conn_name={}, conn_id={}, 原因={}", normalized.conn_name(), runtime->connId, syncStatus.error_message());
     }
 
     if (persistedLink.conn_id() != 0 && persistedLink.conn_id() != runtime->connId) {
-      LOG_WARNING("DLT645 恢复链路时发现 conn_id 已变化: conn_name={}, 持久化conn_id={}, 当前conn_id={}",
-                  normalized.conn_name(), persistedLink.conn_id(), runtime->connId);
+      LOG_WARNING("DLT645 恢复链路时发现 conn_id 已变化: conn_name={}, 持久化conn_id={}, 当前conn_id={}", normalized.conn_name(), persistedLink.conn_id(), runtime->connId);
       needResaveLinks = true;
     }
 
     restoredLinks[normalized.conn_name()] = runtime;
-    LOG_INFO("DLT645 已恢复链路配置: conn_name={}, conn_id={}, 点数={}, 数据块数={}, 状态={}",
-             normalized.conn_name(),
-             runtime->connId,
-             pointCount,
-             blockCount,
-             persistedLink.pending_delete() ? "待删除" : "已停止");
+    LOG_INFO("DLT645 已恢复链路配置: conn_name={}, conn_id={}, 点数={}, 数据块数={}, 状态={}", normalized.conn_name(), runtime->connId, pointCount, blockCount, persistedLink.pending_delete() ? "待删除" : "已停止");
   }
 
   for (const auto &[connName, _] : pointTablesByConn) {
     auto tableIt = pointTablesByConn.find(connName);
     const size_t pointCount = tableIt == pointTablesByConn.end() ? 0u : static_cast<size_t>(tableIt->second.points_size());
     const size_t blockCount = tableIt == pointTablesByConn.end() ? 0u : static_cast<size_t>(tableIt->second.blocks_size());
-    LOG_WARNING("DLT645 点表持久化配置未进入本次恢复快照: conn_name={}, 点数={}, 数据块数={}, 原因={}",
-                connName,
-                pointCount,
-                blockCount,
-                pointTablesLeftByDataCenterFailure.contains(connName) ? "链路恢复阶段获取 DataCenter 连接失败" : "未找到对应链路");
+    LOG_WARNING("DLT645 点表持久化配置未进入本次恢复快照: conn_name={}, 点数={}, 数据块数={}, 原因={}", connName, pointCount, blockCount, pointTablesLeftByDataCenterFailure.contains(connName) ? "链路恢复阶段获取 DataCenter 连接失败" : "未找到对应链路");
     needResavePointTables = true;
   }
 
@@ -485,9 +478,7 @@ void LinkManager::LoadPersistedConfig() {
     }
   }
   if (needResavePointTables) {
-    LOG_WARNING("DLT645 本次恢复将回写点表持久化配置: 恢复后链路数={}, 回写点表记录数={}",
-                linksSnapshot.links_size(),
-                pointTablesSnapshot.point_tables_size());
+    LOG_WARNING("DLT645 本次恢复将回写点表持久化配置: 恢复后链路数={}, 回写点表记录数={}", linksSnapshot.links_size(), pointTablesSnapshot.point_tables_size());
     auto status = savePointTablesConfig(pointTablesSnapshot);
     if (!status.ok()) {
       LOG_ERROR("DLT645 清理点表持久化配置失败: 原因={}", status.error_message());
@@ -531,12 +522,10 @@ grpc::Status LinkManager::UpdateConfig(const DLT645Proto::UpdateConfigRequest &r
   if (!status.ok()) {
     response->set_ok(false);
     response->set_message("MQTT 配置落盘失败");
-    LOG_ERROR("DLT645 MQTT 配置落盘失败: host={}, port={}, client_id={}, 原因={}",
-              mqtt.host(), mqtt.port(), mqtt.client_id(), status.error_message());
+    LOG_ERROR("DLT645 MQTT 配置落盘失败: host={}, port={}, client_id={}, 原因={}", mqtt.host(), mqtt.port(), mqtt.client_id(), status.error_message());
     return status;
   }
-  LOG_INFO("DLT645 MQTT 配置已落盘: host={}, port={}, client_id={}",
-           mqtt.host(), mqtt.port(), mqtt.client_id());
+  LOG_INFO("DLT645 MQTT 配置已落盘: host={}, port={}, client_id={}", mqtt.host(), mqtt.port(), mqtt.client_id());
   response->set_ok(true);
   response->set_message("MQTT 配置更新成功");
   autoStartEligibleLinks("MQTT 配置更新后");
@@ -557,13 +546,13 @@ grpc::Status LinkManager::UpsertLink(const DLT645Proto::UpsertLinkRequest &reque
   }
 
   const auto connName = normalized.conn_name();
-  LOG_INFO("DLT645 开始创建或更新链路配置: conn_name={}, create_only={}",
-           connName, request.create_only());
+  LOG_INFO("DLT645 开始创建或更新链路配置: conn_name={}, create_only={}", connName, request.create_only());
 
   DLT645Proto::LinksConfig linksConfig;
   DLT645Proto::PointTablesConfig pointTablesConfig;
   DLT645Proto::LinkInfo info;
   bool created = false;
+  std::jthread archiveRetryThread;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = linksByName_.find(connName);
@@ -581,6 +570,8 @@ grpc::Status LinkManager::UpsertLink(const DLT645Proto::UpsertLinkRequest &reque
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "连接处于待删除状态");
       }
 
+      stopArchiveRetryLocked(it->second.get(), &archiveRetryThread);
+      stopMqttSubscribeLocked(it->second.get());
       it->second->config = normalized;
       it->second->lastError.clear();
       linksConfig = dumpLinksConfigLocked();
@@ -596,6 +587,9 @@ grpc::Status LinkManager::UpsertLink(const DLT645Proto::UpsertLinkRequest &reque
       }
       pendingCreateByName_.insert(connName);
     }
+  }
+  if (archiveRetryThread.joinable()) {
+    archiveRetryThread.join();
   }
 
   if (info.has_config()) {
@@ -674,6 +668,8 @@ grpc::Status LinkManager::UpsertLink(const DLT645Proto::UpsertLinkRequest &reque
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "连接处于待删除状态");
       }
 
+      stopArchiveRetryLocked(it->second.get(), &archiveRetryThread);
+      stopMqttSubscribeLocked(it->second.get());
       it->second->config = normalized;
       it->second->lastError.clear();
       linksConfig = dumpLinksConfigLocked();
@@ -695,6 +691,9 @@ grpc::Status LinkManager::UpsertLink(const DLT645Proto::UpsertLinkRequest &reque
         return status;
       }
     }
+  }
+  if (archiveRetryThread.joinable()) {
+    archiveRetryThread.join();
   }
 
   status = saveLinksConfig(linksConfig);
@@ -785,6 +784,10 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
       LOG_INFO("DLT645 启动连接功能跳过: conn_name={}, 原因=连接已在运行", connName);
       return grpc::Status::OK;
     }
+    if (link->archiveRetrying) {
+      LOG_INFO("DLT645 启动连接功能跳过: conn_name={}, 原因=正在后台重试档案添加", connName);
+      return grpc::Status::OK;
+    }
     std::string reason;
     if (!isLinkAutoStartReadyLocked(*link, &reason)) {
       link->lastError = reason;
@@ -801,58 +804,6 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
   const std::string archiveKey = useArchive ? makeArchiveKey(link->config) : std::string();
   bool holdArchiveRef = false;
   bool needAddArchive = false;
-  auto releaseArchiveRefOnStartFailure = [this, &connName, &link, &archiveKey]() {
-    bool needDeleteArchive = false;
-    {
-      std::unique_lock<std::mutex> lock(mu_);
-      while (true) {
-        archiveStateCv_.wait(lock, [this, &archiveKey]() {
-          return archiveAddInFlightByKey_.count(archiveKey) == 0 &&
-              archiveDelInFlightByKey_.count(archiveKey) == 0;
-        });
-        auto it = archiveRefCountByKey_.find(archiveKey);
-        if (it == archiveRefCountByKey_.end()) {
-          LOG_WARNING("DLT645 启动连接功能回滚未找到档案引用: conn_name={}, meter_addr={}", connName, link->config.meter_addr());
-          break;
-        }
-        if (it->second > 1) {
-          it->second -= 1;
-          LOG_INFO("DLT645 启动连接功能回滚已归还档案引用: conn_name={}, meter_addr={}, 剩余引用计数={}", connName, link->config.meter_addr(), it->second);
-          break;
-        }
-        archiveDelInFlightByKey_.insert(archiveKey);
-        needDeleteArchive = true;
-        LOG_INFO("DLT645 启动连接功能回滚进入档案删除阶段: conn_name={}, meter_addr={}", connName, link->config.meter_addr());
-        break;
-      }
-    }
-    if (!needDeleteArchive) {
-      return;
-    }
-
-    auto delStatus = sendDelSlaveNode(link.get());
-    {
-      std::lock_guard<std::mutex> lock(mu_);
-      archiveDelInFlightByKey_.erase(archiveKey);
-      auto it = archiveRefCountByKey_.find(archiveKey);
-      if (it != archiveRefCountByKey_.end()) {
-        if (it->second > 0) {
-          it->second -= 1;
-        }
-        const uint32_t leftRef = it->second;
-        if (leftRef == 0) {
-          archiveRefCountByKey_.erase(it);
-        }
-        LOG_INFO("DLT645 启动连接功能回滚更新档案引用状态: conn_name={}, meter_addr={}, 剩余引用计数={}", connName, link->config.meter_addr(), leftRef);
-      } else {
-        LOG_WARNING("DLT645 启动连接功能回滚未找到档案引用状态: conn_name={}, meter_addr={}", connName, link->config.meter_addr());
-      }
-    }
-    archiveStateCv_.notify_all();
-    if (!delStatus.ok()) {
-      LOG_WARNING("DLT645 启动连接功能回滚档案删除失败: conn_name={}, 原因={}", connName, delStatus.error_message());
-    }
-  };
 
   if (useArchive) {
     {
@@ -893,8 +844,12 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
       archiveStateCv_.notify_all();
       if (!status.ok()) {
         LOG_ERROR("DLT645 启动连接功能档案添加失败: conn_name={}, 原因={}", connName, status.error_message());
-        std::lock_guard<std::mutex> lock(mu_);
-        link->lastError = status.error_message();
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          link->lastError = status.error_message();
+          launchArchiveRetryLocked(connName, link, archiveKey);
+        }
+        LOG_WARNING("DLT645 启动连接功能将在后台持续重试档案添加: conn_name={}, 重试间隔=5000ms", connName);
         return status;
       }
       LOG_INFO("DLT645 启动连接功能档案添加成功: conn_name={}", connName);
@@ -921,7 +876,7 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
   }
   if (linkMissing) {
     if (useArchive && holdArchiveRef) {
-      releaseArchiveRefOnStartFailure();
+      releaseArchiveRefOnStartAbort(connName, link, archiveKey);
     }
     return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接不存在");
   }
@@ -936,6 +891,7 @@ grpc::Status LinkManager::StopLink(const std::string &connName) {
   }
   LOG_INFO("DLT645 开始停止连接功能: conn_name={}", connName);
   std::shared_ptr<LinkRuntime> link;
+  std::jthread archiveRetryThread;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = linksByName_.find(connName);
@@ -943,9 +899,13 @@ grpc::Status LinkManager::StopLink(const std::string &connName) {
       return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接不存在");
     }
     link = it->second;
+    stopArchiveRetryLocked(link.get(), &archiveRetryThread);
   }
   if (!link) {
     return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接不存在");
+  }
+  if (archiveRetryThread.joinable()) {
+    archiveRetryThread.join();
   }
 
   std::unique_lock<std::mutex> reqLock(link->requestMutex);
@@ -956,6 +916,7 @@ grpc::Status LinkManager::StopLink(const std::string &connName) {
       return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接不存在");
     }
     if (link->state == DLT645Proto::LINK_STATE_STOPPED) {
+      stopMqttSubscribeLocked(link.get());
       LOG_INFO("DLT645 停止连接功能跳过: conn_name={}, 原因=连接已停止", connName);
       return grpc::Status::OK;
     }
@@ -1111,6 +1072,7 @@ grpc::Status LinkManager::UpsertPointTable(const DLT645Proto::UpsertPointTableRe
 
   PointTable current;
   uint32_t connId = 0;
+  std::jthread archiveRetryThread;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = linksByName_.find(request.conn_name());
@@ -1123,8 +1085,13 @@ grpc::Status LinkManager::UpsertPointTable(const DLT645Proto::UpsertPointTableRe
     if (it->second->state == DLT645Proto::LINK_STATE_PENDING_DELETE) {
       return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "连接处于待删除状态");
     }
+    stopArchiveRetryLocked(it->second.get(), &archiveRetryThread);
+    stopMqttSubscribeLocked(it->second.get());
     connId = it->second->connId;
     current = it->second->pointTable;
+  }
+  if (archiveRetryThread.joinable()) {
+    archiveRetryThread.join();
   }
 
   PointTable next = current;
@@ -1323,8 +1290,7 @@ DLT645Proto::PointTablesConfig LinkManager::dumpPointTablesConfigLocked() const 
 grpc::Status LinkManager::saveLinksConfig(const DLT645Proto::LinksConfig &config) {
   auto status = linkStore_.Save(config);
   if (!status.ok()) {
-    LOG_ERROR("DLT645 链路配置落盘失败: 链路数={}, 原因={}",
-              config.links_size(), status.error_message());
+    LOG_ERROR("DLT645 链路配置落盘失败: 链路数={}, 原因={}", config.links_size(), status.error_message());
     return status;
   }
   LOG_INFO("DLT645 链路配置已落盘: 链路数={}", config.links_size());
@@ -1334,8 +1300,7 @@ grpc::Status LinkManager::saveLinksConfig(const DLT645Proto::LinksConfig &config
 grpc::Status LinkManager::savePointTablesConfig(const DLT645Proto::PointTablesConfig &config) {
   auto status = pointTableStore_.Save(config);
   if (!status.ok()) {
-    LOG_ERROR("DLT645 点表配置落盘失败: 链路数={}, 原因={}",
-              config.point_tables_size(), status.error_message());
+    LOG_ERROR("DLT645 点表配置落盘失败: 链路数={}, 原因={}", config.point_tables_size(), status.error_message());
     return status;
   }
   LOG_INFO("DLT645 点表配置已落盘: 链路数={}", config.point_tables_size());
@@ -1410,6 +1375,206 @@ void LinkManager::autoStartEligibleLinks(std::string_view trigger) {
 
 void LinkManager::TryAutoStartReadyLinks(std::string_view trigger) {
   autoStartEligibleLinks(trigger);
+}
+
+void LinkManager::stopArchiveRetryLocked(LinkRuntime *link, std::jthread *outThread) {
+  if (outThread != nullptr) {
+    *outThread = std::jthread();
+  }
+  if (link == nullptr) {
+    return;
+  }
+  if (link->archiveRetryThread.joinable()) {
+    link->archiveRetryThread.request_stop();
+    if (outThread != nullptr) {
+      *outThread = std::move(link->archiveRetryThread);
+    }
+  }
+  link->archiveRetrying = false;
+}
+
+void LinkManager::releaseArchiveRefOnStartAbort(const std::string &connName, const std::shared_ptr<LinkRuntime> &link, const std::string &archiveKey) {
+  if (!link || archiveKey.empty()) {
+    return;
+  }
+
+  bool needDeleteArchive = false;
+  {
+    std::unique_lock<std::mutex> lock(mu_);
+    while (true) {
+      archiveStateCv_.wait(lock, [this, &archiveKey]() {
+        return archiveAddInFlightByKey_.count(archiveKey) == 0 &&
+            archiveDelInFlightByKey_.count(archiveKey) == 0;
+      });
+      auto it = archiveRefCountByKey_.find(archiveKey);
+      if (it == archiveRefCountByKey_.end()) {
+        LOG_WARNING("DLT645 启动连接功能回滚未找到档案引用: conn_name={}, meter_addr={}", connName, link->config.meter_addr());
+        break;
+      }
+      if (it->second > 1) {
+        it->second -= 1;
+        LOG_INFO("DLT645 启动连接功能回滚已归还档案引用: conn_name={}, meter_addr={}, 剩余引用计数={}", connName, link->config.meter_addr(), it->second);
+        break;
+      }
+      archiveDelInFlightByKey_.insert(archiveKey);
+      needDeleteArchive = true;
+      LOG_INFO("DLT645 启动连接功能回滚进入档案删除阶段: conn_name={}, meter_addr={}", connName, link->config.meter_addr());
+      break;
+    }
+  }
+  if (!needDeleteArchive) {
+    return;
+  }
+
+  auto delStatus = sendDelSlaveNode(link.get());
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    archiveDelInFlightByKey_.erase(archiveKey);
+    auto it = archiveRefCountByKey_.find(archiveKey);
+    if (it != archiveRefCountByKey_.end()) {
+      if (it->second > 0) {
+        it->second -= 1;
+      }
+      const uint32_t leftRef = it->second;
+      if (leftRef == 0) {
+        archiveRefCountByKey_.erase(it);
+      }
+      LOG_INFO("DLT645 启动连接功能回滚更新档案引用状态: conn_name={}, meter_addr={}, 剩余引用计数={}", connName, link->config.meter_addr(), leftRef);
+    } else {
+      LOG_WARNING("DLT645 启动连接功能回滚未找到档案引用状态: conn_name={}, meter_addr={}", connName, link->config.meter_addr());
+    }
+  }
+  archiveStateCv_.notify_all();
+  if (!delStatus.ok()) {
+    LOG_WARNING("DLT645 启动连接功能回滚档案删除失败: conn_name={}, 原因={}", connName, delStatus.error_message());
+  }
+}
+
+void LinkManager::launchArchiveRetryLocked(const std::string &connName, const std::shared_ptr<LinkRuntime> &link, const std::string &archiveKey) {
+  if (!link) {
+    return;
+  }
+  if (link->archiveRetrying) {
+    LOG_INFO("DLT645 启动连接功能已在后台重试档案添加: conn_name={}", connName);
+    return;
+  }
+  link->archiveRetrying = true;
+  link->archiveRetryThread = ModuleManager::StartModuleThread(
+      moduleName_,
+      [this, connName, link, archiveKey](std::stop_token st) {
+        runArchiveRetryLoop(connName, link, archiveKey, st);
+      });
+  LOG_INFO("DLT645 启动连接功能已进入档案后台重试: conn_name={}, 重试间隔=5000ms", connName);
+}
+
+void LinkManager::runArchiveRetryLoop(std::string connName, std::shared_ptr<LinkRuntime> link, std::string archiveKey, std::stop_token st) {
+  constexpr auto kRetryInterval = std::chrono::seconds(5);
+  size_t retryCount = 0;
+  while (!st.stop_requested()) {
+    if (!sleepWithStop(st, kRetryInterval)) {
+      break;
+    }
+    ++retryCount;
+    LOG_INFO("DLT645 启动连接功能开始重试档案添加: conn_name={}, 第{}次重试", connName, retryCount);
+
+    bool holdArchiveRef = false;
+    bool needAddArchive = false;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = linksByName_.find(connName);
+      if (it == linksByName_.end() || it->second.get() != link.get()) {
+        break;
+      }
+      if (link->state == DLT645Proto::LINK_STATE_RUNNING) {
+        link->archiveRetrying = false;
+        LOG_INFO("DLT645 档案后台重试结束: conn_name={}, 原因=连接功能已在运行", connName);
+        return;
+      }
+      if (link->state == DLT645Proto::LINK_STATE_PENDING_DELETE) {
+        link->archiveRetrying = false;
+        LOG_INFO("DLT645 档案后台重试结束: conn_name={}, 原因=连接处于待删除状态", connName);
+        return;
+      }
+      auto refIt = archiveRefCountByKey_.find(archiveKey);
+      if (refIt != archiveRefCountByKey_.end() && refIt->second > 0) {
+        refIt->second += 1;
+        holdArchiveRef = true;
+        LOG_INFO("DLT645 启动连接功能后台重试复用档案引用: conn_name={}, meter_addr={}, 引用计数={}", connName, link->config.meter_addr(), refIt->second);
+      } else if (archiveAddInFlightByKey_.count(archiveKey) == 0 && archiveDelInFlightByKey_.count(archiveKey) == 0) {
+        archiveAddInFlightByKey_.insert(archiveKey);
+        needAddArchive = true;
+        LOG_INFO("DLT645 启动连接功能后台重试获取档案添加资格: conn_name={}, meter_addr={}", connName, link->config.meter_addr());
+      } else {
+        LOG_INFO("DLT645 启动连接功能后台重试暂不发起档案添加: conn_name={}, meter_addr={}, 原因=同地址档案操作进行中", connName, link->config.meter_addr());
+      }
+    }
+
+    if (st.stop_requested()) {
+      if (holdArchiveRef) {
+        releaseArchiveRefOnStartAbort(connName, link, archiveKey);
+      }
+      break;
+    }
+    if (!holdArchiveRef && !needAddArchive) {
+      continue;
+    }
+
+    grpc::Status status = grpc::Status::OK;
+    if (needAddArchive) {
+      status = sendAddSlaveNode(link.get());
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        archiveAddInFlightByKey_.erase(archiveKey);
+        if (status.ok()) {
+          archiveRefCountByKey_[archiveKey] = 1;
+          holdArchiveRef = true;
+          LOG_INFO("DLT645 启动连接功能后台重试建立档案引用成功: conn_name={}, meter_addr={}, 引用计数=1", connName, link->config.meter_addr());
+        } else {
+          archiveRefCountByKey_.erase(archiveKey);
+          link->lastError = status.error_message();
+        }
+      }
+      archiveStateCv_.notify_all();
+      if (!status.ok()) {
+        LOG_WARNING("DLT645 启动连接功能后台重试档案添加失败: conn_name={}, 第{}次重试, 原因={}, 5秒后继续重试", connName, retryCount, status.error_message());
+        continue;
+      }
+    }
+
+    bool started = false;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = linksByName_.find(connName);
+      if (!st.stop_requested() && it != linksByName_.end() && it->second.get() == link.get() &&
+          link->state != DLT645Proto::LINK_STATE_PENDING_DELETE) {
+        startPollingLocked(connName, link);
+        startDataCenterSubscribeLocked(connName, link);
+        link->state = DLT645Proto::LINK_STATE_RUNNING;
+        link->lastError.clear();
+        link->archiveRetrying = false;
+        started = true;
+      } else {
+        link->archiveRetrying = false;
+      }
+    }
+    if (started) {
+      LOG_INFO("DLT645 启动连接功能后台重试成功并已启动连接功能: conn_name={}, 第{}次重试", connName, retryCount);
+      return;
+    }
+    if (holdArchiveRef) {
+      releaseArchiveRefOnStartAbort(connName, link, archiveKey);
+    }
+    break;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = linksByName_.find(connName);
+    if (it != linksByName_.end() && it->second.get() == link.get()) {
+      it->second->archiveRetrying = false;
+    }
+  }
+  LOG_INFO("DLT645 档案后台重试结束: conn_name={}", connName);
 }
 
 void LinkManager::startPollingLocked(const std::string &connName, const std::shared_ptr<LinkRuntime> &link) {
@@ -1822,19 +1987,21 @@ grpc::Status LinkManager::sendAddSlaveNode(LinkRuntime *link) {
     return grpc::Status(grpc::StatusCode::INTERNAL, "档案添加响应解析失败");
   }
   const auto &respObj = parsed.as_object();
-  int32_t status = 0;
   auto statusIt = respObj.find("status");
-  if (statusIt != respObj.end()) {
-    bool parsedStatus = false;
-    status = parseStatusCode(statusIt->value(), &parsedStatus);
-    if (!parsedStatus) {
-      LOG_WARNING("DLT645 档案添加响应状态类型异常: conn_name={}, topic={}", link->config.conn_name(), respTopic);
-    }
-  } else {
-    LOG_WARNING("DLT645 档案添加响应缺少状态字段: conn_name={}, topic={}", link->config.conn_name(), respTopic);
+  if (statusIt == respObj.end()) {
+    LOG_ERROR("DLT645 档案添加响应缺少状态字段: conn_name={}, topic={}", link->config.conn_name(), respTopic);
+    return grpc::Status(grpc::StatusCode::INTERNAL, "档案添加响应缺少状态字段");
+  }
+  bool parsedStatus = false;
+  const int32_t status = parseStatusCode(statusIt->value(), &parsedStatus);
+  if (!parsedStatus) {
+    LOG_ERROR("DLT645 档案添加响应状态类型异常: conn_name={}, topic={}", link->config.conn_name(), respTopic);
+    return grpc::Status(grpc::StatusCode::INTERNAL, "档案添加响应状态类型异常");
   }
   if (status != 0) {
-    return grpc::Status(grpc::StatusCode::INTERNAL, "档案添加失败");
+    const auto reason = loraStatusToMessage(status);
+    LOG_ERROR("DLT645 档案添加响应失败: conn_name={}, topic={}, status={}, 描述={}", link->config.conn_name(), respTopic, status, reason);
+    return grpc::Status(grpc::StatusCode::INTERNAL, std::format("档案添加失败: {}", reason));
   }
   return grpc::Status::OK;
 }
@@ -1887,19 +2054,21 @@ grpc::Status LinkManager::sendDelSlaveNode(LinkRuntime *link) {
     return grpc::Status(grpc::StatusCode::INTERNAL, "档案删除响应解析失败");
   }
   const auto &respObj = parsed.as_object();
-  int32_t status = 0;
   auto statusIt = respObj.find("status");
-  if (statusIt != respObj.end()) {
-    bool parsedStatus = false;
-    status = parseStatusCode(statusIt->value(), &parsedStatus);
-    if (!parsedStatus) {
-      LOG_WARNING("DLT645 档案删除响应状态类型异常: conn_name={}, topic={}", link->config.conn_name(), respTopic);
-    }
-  } else {
-    LOG_WARNING("DLT645 档案删除响应缺少状态字段: conn_name={}, topic={}", link->config.conn_name(), respTopic);
+  if (statusIt == respObj.end()) {
+    LOG_ERROR("DLT645 档案删除响应缺少状态字段: conn_name={}, topic={}", link->config.conn_name(), respTopic);
+    return grpc::Status(grpc::StatusCode::INTERNAL, "档案删除响应缺少状态字段");
+  }
+  bool parsedStatus = false;
+  const int32_t status = parseStatusCode(statusIt->value(), &parsedStatus);
+  if (!parsedStatus) {
+    LOG_ERROR("DLT645 档案删除响应状态类型异常: conn_name={}, topic={}", link->config.conn_name(), respTopic);
+    return grpc::Status(grpc::StatusCode::INTERNAL, "档案删除响应状态类型异常");
   }
   if (status != 0) {
-    return grpc::Status(grpc::StatusCode::INTERNAL, "档案删除失败");
+    const auto reason = loraStatusToMessage(status);
+    LOG_ERROR("DLT645 档案删除响应失败: conn_name={}, topic={}, status={}, 描述={}", link->config.conn_name(), respTopic, status, reason);
+    return grpc::Status(grpc::StatusCode::INTERNAL, std::format("档案删除失败: {}", reason));
   }
   return grpc::Status::OK;
 }
