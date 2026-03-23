@@ -2,6 +2,30 @@ enable_testing()
 
 find_package(GTest CONFIG REQUIRED)
 
+set(MSKDSP_TEST_RUNNER "${CMAKE_CURRENT_SOURCE_DIR}/RunIsolatedTest.cmake")
+
+function(mskdsp_add_isolated_test test_name)
+  set(options)
+  set(oneValueArgs TARGET WORKING_DIRECTORY)
+  cmake_parse_arguments(MSKDSP_TEST "${options}" "${oneValueArgs}" "" ${ARGN})
+
+  if(NOT MSKDSP_TEST_TARGET)
+    set(MSKDSP_TEST_TARGET "${test_name}")
+  endif()
+
+  if(NOT MSKDSP_TEST_WORKING_DIRECTORY)
+    set(MSKDSP_TEST_WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/test_env/${test_name}")
+  endif()
+
+  add_test(NAME ${test_name}
+    COMMAND ${CMAKE_COMMAND}
+      "-DMSKDSP_TEST_NAME=${test_name}"
+      "-DMSKDSP_TEST_EXECUTABLE=$<TARGET_FILE:${MSKDSP_TEST_TARGET}>"
+      "-DMSKDSP_TEST_WORKDIR=${MSKDSP_TEST_WORKING_DIRECTORY}"
+      -P "${MSKDSP_TEST_RUNNER}"
+  )
+endfunction()
+
 set(MSKDSP_MODULE_MANAGER_TEST_ENV_DIR "${CMAKE_BINARY_DIR}/test_env/moduleManager")
 set(MSKDSP_MODULE_MANAGER_TEST_LIB_DIR "${MSKDSP_MODULE_MANAGER_TEST_ENV_DIR}/module")
 file(MAKE_DIRECTORY "${MSKDSP_MODULE_MANAGER_TEST_LIB_DIR}")
@@ -34,13 +58,11 @@ add_dependencies(moduleManager_test
   moduleManagerDummyModule
 )
 
-add_test(NAME moduleManager_test COMMAND moduleManager_test)
-set_tests_properties(moduleManager_test PROPERTIES
+mskdsp_add_isolated_test(moduleManager_test
   WORKING_DIRECTORY "${MSKDSP_MODULE_MANAGER_TEST_ENV_DIR}"
 )
 
 set(MSKDSP_MODULE_INTERFACE_TEST_ENV_DIR "${CMAKE_BINARY_DIR}/test_env/moduleInterface")
-file(MAKE_DIRECTORY "${MSKDSP_MODULE_INTERFACE_TEST_ENV_DIR}")
 
 add_executable(moduleInterface_test
   module_interface_test.cc
@@ -51,13 +73,11 @@ target_link_libraries(moduleInterface_test PRIVATE
   moduleManager
 )
 
-add_test(NAME moduleInterface_test COMMAND moduleInterface_test)
-set_tests_properties(moduleInterface_test PROPERTIES
+mskdsp_add_isolated_test(moduleInterface_test
   WORKING_DIRECTORY "${MSKDSP_MODULE_INTERFACE_TEST_ENV_DIR}"
 )
 
 set(MSKDSP_LOGGER_TEST_ENV_DIR "${CMAKE_BINARY_DIR}/test_env/logger")
-file(MAKE_DIRECTORY "${MSKDSP_LOGGER_TEST_ENV_DIR}")
 
 add_executable(logger_test
   logger_test.cc
@@ -68,8 +88,7 @@ target_link_libraries(logger_test PRIVATE
   moduleManager
 )
 
-add_test(NAME logger_test COMMAND logger_test)
-set_tests_properties(logger_test PROPERTIES
+mskdsp_add_isolated_test(logger_test
   WORKING_DIRECTORY "${MSKDSP_LOGGER_TEST_ENV_DIR}"
 )
 
@@ -89,7 +108,7 @@ target_link_libraries(mqtt_manager_test PRIVATE
   MQTTManager
 )
 
-add_test(NAME mqtt_manager_test COMMAND mqtt_manager_test)
+mskdsp_add_isolated_test(mqtt_manager_test)
 
 add_executable(dataCenterCore_test
   data_center_core_test.cc
@@ -109,7 +128,7 @@ target_link_libraries(dataCenterCore_test PRIVATE
   dspProto
 )
 
-add_test(NAME dataCenterCore_test COMMAND dataCenterCore_test)
+mskdsp_add_isolated_test(dataCenterCore_test)
 
 add_executable(dataCenterPointTableStore_test
   data_center_point_table_store_test.cc
@@ -127,7 +146,7 @@ target_link_libraries(dataCenterPointTableStore_test PRIVATE
   moduleManager
 )
 
-add_test(NAME dataCenterPointTableStore_test COMMAND dataCenterPointTableStore_test)
+mskdsp_add_isolated_test(dataCenterPointTableStore_test)
 
 add_executable(dataCenterRouteStore_test
   data_center_route_store_test.cc
@@ -143,7 +162,7 @@ target_link_libraries(dataCenterRouteStore_test PRIVATE
   dspProto
 )
 
-add_test(NAME dataCenterRouteStore_test COMMAND dataCenterRouteStore_test)
+mskdsp_add_isolated_test(dataCenterRouteStore_test)
 
 add_executable(dataCenterConnectionStore_test
   data_center_connection_store_test.cc
@@ -159,7 +178,7 @@ target_link_libraries(dataCenterConnectionStore_test PRIVATE
   dspProto
 )
 
-add_test(NAME dataCenterConnectionStore_test COMMAND dataCenterConnectionStore_test)
+mskdsp_add_isolated_test(dataCenterConnectionStore_test)
 
 add_executable(dataCenterGrpcService_test
   data_center_grpc_service_test.cc
@@ -185,7 +204,7 @@ target_link_libraries(dataCenterGrpcService_test PRIVATE
   moduleManager
 )
 
-add_test(NAME dataCenterGrpcService_test COMMAND dataCenterGrpcService_test)
+mskdsp_add_isolated_test(dataCenterGrpcService_test)
 
 add_executable(iec104PointTable_test
   iec104_point_table_test.cc
@@ -201,7 +220,7 @@ target_link_libraries(iec104PointTable_test PRIVATE
   dspProto
 )
 
-add_test(NAME iec104PointTable_test COMMAND iec104PointTable_test)
+mskdsp_add_isolated_test(iec104PointTable_test)
 
 add_executable(modbusRtuPointTable_test
   modbus_rtu_point_table_test.cc
@@ -219,7 +238,7 @@ target_link_libraries(modbusRtuPointTable_test PRIVATE
   moduleManager
 )
 
-add_test(NAME modbusRtuPointTable_test COMMAND modbusRtuPointTable_test)
+mskdsp_add_isolated_test(modbusRtuPointTable_test)
 
 add_executable(dlt645PointTable_test
   dlt645_point_table_test.cc
@@ -237,7 +256,7 @@ target_link_libraries(dlt645PointTable_test PRIVATE
   moduleManager
 )
 
-add_test(NAME dlt645PointTable_test COMMAND dlt645PointTable_test)
+mskdsp_add_isolated_test(dlt645PointTable_test)
 
 add_executable(dlt645LinkManager_test
   dlt645_link_manager_test.cc
@@ -263,7 +282,7 @@ target_link_libraries(dlt645LinkManager_test PRIVATE
   moduleManager
 )
 
-add_test(NAME dlt645LinkManager_test COMMAND dlt645LinkManager_test)
+mskdsp_add_isolated_test(dlt645LinkManager_test)
 
 add_executable(dlt645MqttClient_test
   dlt645_mqtt_client_test.cc
@@ -282,7 +301,7 @@ target_link_libraries(dlt645MqttClient_test PRIVATE
   moduleManager
 )
 
-add_test(NAME dlt645MqttClient_test COMMAND dlt645MqttClient_test)
+mskdsp_add_isolated_test(dlt645MqttClient_test)
 
 add_executable(dlt645DataCenterClient_test
   dlt645_data_center_client_test.cc
@@ -299,7 +318,7 @@ target_link_libraries(dlt645DataCenterClient_test PRIVATE
   dspProto
 )
 
-add_test(NAME dlt645DataCenterClient_test COMMAND dlt645DataCenterClient_test)
+mskdsp_add_isolated_test(dlt645DataCenterClient_test)
 
 add_executable(dlt645GrpcService_test
   dlt645_grpc_service_test.cc
@@ -316,7 +335,7 @@ target_link_libraries(dlt645GrpcService_test PRIVATE
   DLT645
 )
 
-add_test(NAME dlt645GrpcService_test COMMAND dlt645GrpcService_test)
+mskdsp_add_isolated_test(dlt645GrpcService_test)
 
 add_executable(iec104GrpcService_test
   iec104_grpc_service_test.cc
@@ -333,7 +352,7 @@ target_link_libraries(iec104GrpcService_test PRIVATE
   IEC104
 )
 
-add_test(NAME iec104GrpcService_test COMMAND iec104GrpcService_test)
+mskdsp_add_isolated_test(iec104GrpcService_test)
 
 add_executable(configPusherApplyConfig_test
   config_pusher_apply_config_test.cc
@@ -350,7 +369,7 @@ target_link_libraries(configPusherApplyConfig_test PRIVATE
   ConfigPusher
 )
 
-add_test(NAME configPusherApplyConfig_test COMMAND configPusherApplyConfig_test)
+mskdsp_add_isolated_test(configPusherApplyConfig_test)
 
 add_executable(configPusherApplyAgc_test
   config_pusher_apply_agc_test.cc
@@ -367,7 +386,7 @@ target_link_libraries(configPusherApplyAgc_test PRIVATE
   ConfigPusher
 )
 
-add_test(NAME configPusherApplyAgc_test COMMAND configPusherApplyAgc_test)
+mskdsp_add_isolated_test(configPusherApplyAgc_test)
 
 add_executable(configPusherApplyDlt645_test
   config_pusher_apply_dlt645_test.cc
@@ -384,7 +403,7 @@ target_link_libraries(configPusherApplyDlt645_test PRIVATE
   ConfigPusher
 )
 
-add_test(NAME configPusherApplyDlt645_test COMMAND configPusherApplyDlt645_test)
+mskdsp_add_isolated_test(configPusherApplyDlt645_test)
 
 add_executable(iec104LinkManager_test
   iec104_link_manager_test.cc
@@ -412,7 +431,7 @@ target_link_libraries(iec104LinkManager_test PRIVATE
   moduleManager
 )
 
-add_test(NAME iec104LinkManager_test COMMAND iec104LinkManager_test)
+mskdsp_add_isolated_test(iec104LinkManager_test)
 
 add_executable(iec104Persistence_test
   iec104_persistence_test.cc
@@ -439,7 +458,7 @@ target_link_libraries(iec104Persistence_test PRIVATE
   moduleManager
 )
 
-add_test(NAME iec104Persistence_test COMMAND iec104Persistence_test)
+mskdsp_add_isolated_test(iec104Persistence_test)
 
 add_executable(modbusRtuLinkManager_test
   modbus_rtu_data_center_client_test.cc
@@ -470,7 +489,7 @@ target_link_libraries(modbusRtuLinkManager_test PRIVATE
   moduleManager
 )
 
-add_test(NAME modbusRtuLinkManager_test COMMAND modbusRtuLinkManager_test)
+mskdsp_add_isolated_test(modbusRtuLinkManager_test)
 
 add_executable(configPusherApplyModbusRtu_test
   config_pusher_apply_modbus_rtu_test.cc
@@ -487,7 +506,7 @@ target_link_libraries(configPusherApplyModbusRtu_test PRIVATE
   ConfigPusher
 )
 
-add_test(NAME configPusherApplyModbusRtu_test COMMAND configPusherApplyModbusRtu_test)
+mskdsp_add_isolated_test(configPusherApplyModbusRtu_test)
 
 add_executable(iec104TcpSession_test
   iec104_tcp_session_test.cc
@@ -506,7 +525,7 @@ target_link_libraries(iec104TcpSession_test PRIVATE
   moduleManager
 )
 
-add_test(NAME iec104TcpSession_test COMMAND iec104TcpSession_test)
+mskdsp_add_isolated_test(iec104TcpSession_test)
 
 add_executable(agvcStrategy_test
   agvc_strategy_test.cc
@@ -517,7 +536,7 @@ target_link_libraries(agvcStrategy_test PRIVATE
   agvcCommon
 )
 
-add_test(NAME agvcStrategy_test COMMAND agvcStrategy_test)
+mskdsp_add_isolated_test(agvcStrategy_test)
 
 add_executable(agcGroupManager_test
   agc_group_manager_test.cc
@@ -540,7 +559,7 @@ target_link_libraries(agcGroupManager_test PRIVATE
   moduleManager
 )
 
-add_test(NAME agcGroupManager_test COMMAND agcGroupManager_test)
+mskdsp_add_isolated_test(agcGroupManager_test)
 
 add_executable(agcGroupStore_test
   agc_group_store_test.cc
@@ -557,7 +576,7 @@ target_link_libraries(agcGroupStore_test PRIVATE
   dspProto
 )
 
-add_test(NAME agcGroupStore_test COMMAND agcGroupStore_test)
+mskdsp_add_isolated_test(agcGroupStore_test)
 
 add_executable(agcControl_test
   agc_control_test.cc
@@ -573,7 +592,7 @@ target_link_libraries(agcControl_test PRIVATE
   agvcCommon
 )
 
-add_test(NAME agcControl_test COMMAND agcControl_test)
+mskdsp_add_isolated_test(agcControl_test)
 
 add_executable(configPusherDataCenter_test
   config_pusher_data_center_test.cc
@@ -591,7 +610,7 @@ target_link_libraries(configPusherDataCenter_test PRIVATE
   moduleManager
 )
 
-add_test(NAME configPusherDataCenter_test COMMAND configPusherDataCenter_test)
+mskdsp_add_isolated_test(configPusherDataCenter_test)
 
 add_executable(configPusherConfigLoader_test
   config_pusher_config_loader_test.cc
@@ -608,7 +627,7 @@ target_link_libraries(configPusherConfigLoader_test PRIVATE
   moduleManager
 )
 
-add_test(NAME configPusherConfigLoader_test COMMAND configPusherConfigLoader_test)
+mskdsp_add_isolated_test(configPusherConfigLoader_test)
 
 add_executable(configPusherModuleManager_test
   config_pusher_module_manager_test.cc
@@ -629,7 +648,7 @@ target_compile_definitions(configPusherModuleManager_test PRIVATE
   MSKDSP_TEST_DISABLE_PROTO_LOG=1
 )
 
-add_test(NAME configPusherModuleManager_test COMMAND configPusherModuleManager_test)
+mskdsp_add_isolated_test(configPusherModuleManager_test)
 
 set(MSKDSP_TEST_TARGETS
   moduleManager_test
