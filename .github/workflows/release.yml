@@ -1,0 +1,270 @@
+name: 正式发布
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  x64-verify:
+    name: x64 Debug 发布前校验
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 拉取主仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: 拉取远端 beta 分支引用
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin 'refs/heads/beta/*:refs/remotes/origin/beta/*'
+
+      - name: 校验正式版本来源于 beta 分支
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t MATCHED_BETA_BRANCHES < <(git for-each-ref --format='%(refname:short)' --contains HEAD 'refs/remotes/origin/beta/*')
+          if [ "${#MATCHED_BETA_BRANCHES[@]}" -eq 0 ]; then
+            echo "正式 tag 必须来自 beta 版本线，当前 tag 对应 commit 不在任何 origin/beta/* 上。"
+            exit 1
+          fi
+          printf '检测到正式 tag 来源 beta 分支:\n'
+          printf '%s\n' "${MATCHED_BETA_BRANCHES[@]}"
+
+      - name: 准备 protobuf 子模块访问
+        shell: bash
+        env:
+          MSKDSP_PROTO_SSH_KEY: ${{ secrets.MSKDSP_PROTO_SSH_KEY }}
+          MSKDSP_PROTO_TOKEN: ${{ secrets.MSKDSP_PROTO_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${MSKDSP_PROTO_SSH_KEY:-}" ]; then
+            install -m 700 -d "${HOME}/.ssh"
+            printf '%s\n' "${MSKDSP_PROTO_SSH_KEY}" > "${HOME}/.ssh/id_ed25519"
+            chmod 600 "${HOME}/.ssh/id_ed25519"
+            ssh-keyscan github.com >> "${HOME}/.ssh/known_hosts"
+            echo "已启用 SSH key 访问 protobuf 子模块"
+          elif [ -n "${MSKDSP_PROTO_TOKEN:-}" ]; then
+            git config --global url."https://${MSKDSP_PROTO_TOKEN}@github.com/".insteadOf "git@github.com:"
+            echo "已启用 Token 访问 protobuf 子模块"
+          else
+            git config --global url."https://github.com/".insteadOf "git@github.com:"
+            echo "未配置子模块凭据，已切换为 HTTPS 拉取 protobuf 子模块"
+          fi
+
+      - name: 拉取 protobuf 子模块
+        shell: bash
+        run: |
+          set -euo pipefail
+          git submodule sync --recursive
+          git submodule update --init --recursive
+
+      - name: 安装构建依赖
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            gcc-14 \
+            g++-14 \
+            gcovr
+
+      - name: 安装 vcpkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          VCPKG_ROOT="${RUNNER_TEMP}/vcpkg"
+          VCPKG_BASELINE="$(python3 - <<'PY'
+          import json
+          with open('vcpkg-configuration.json', 'r', encoding='utf-8') as fh:
+              print(json.load(fh)['default-registry']['baseline'])
+          PY
+          )"
+          git clone https://github.com/microsoft/vcpkg.git "${VCPKG_ROOT}"
+          git -C "${VCPKG_ROOT}" checkout "${VCPKG_BASELINE}"
+          "${VCPKG_ROOT}/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=${VCPKG_ROOT}" >> "${GITHUB_ENV}"
+
+      - name: 配置 x64 Debug
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=gcc-14 \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-linux-dynamic \
+            -DMSKDSP_BUILD_TESTS=ON \
+            -DMSKDSP_ENABLE_SANITIZERS=OFF \
+            -DMSKDSP_ENABLE_TSAN=OFF \
+            -DCMAKE_CXX_SCAN_FOR_MODULES=OFF \
+            -DGCOV_EXECUTABLE=/usr/bin/gcov-14
+
+      - name: 编译 x64 Debug
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build build --parallel
+
+      - name: 运行单元测试
+        shell: bash
+        run: |
+          set -euo pipefail
+          ctest --test-dir build --output-on-failure --parallel "$(nproc)"
+
+  arm64-release:
+    name: 构建 arm64 正式包并发布
+    runs-on: ubuntu-24.04
+    needs:
+      - x64-verify
+    steps:
+      - name: 拉取主仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: 生成发布元数据
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG_NAME="${GITHUB_REF_NAME}"
+          ARCHIVE_NAME="mskdsp-${TAG_NAME}-linux-arm64"
+          DEBUG_ARCHIVE_NAME="mskdsp-${TAG_NAME}-debugsymbols-linux-arm64"
+          echo "archive_name=${ARCHIVE_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "debug_archive_name=${DEBUG_ARCHIVE_NAME}" >> "${GITHUB_OUTPUT}"
+
+      - name: 准备 protobuf 子模块访问
+        shell: bash
+        env:
+          MSKDSP_PROTO_SSH_KEY: ${{ secrets.MSKDSP_PROTO_SSH_KEY }}
+          MSKDSP_PROTO_TOKEN: ${{ secrets.MSKDSP_PROTO_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${MSKDSP_PROTO_SSH_KEY:-}" ]; then
+            install -m 700 -d "${HOME}/.ssh"
+            printf '%s\n' "${MSKDSP_PROTO_SSH_KEY}" > "${HOME}/.ssh/id_ed25519"
+            chmod 600 "${HOME}/.ssh/id_ed25519"
+            ssh-keyscan github.com >> "${HOME}/.ssh/known_hosts"
+            echo "已启用 SSH key 访问 protobuf 子模块"
+          elif [ -n "${MSKDSP_PROTO_TOKEN:-}" ]; then
+            git config --global url."https://${MSKDSP_PROTO_TOKEN}@github.com/".insteadOf "git@github.com:"
+            echo "已启用 Token 访问 protobuf 子模块"
+          else
+            git config --global url."https://github.com/".insteadOf "git@github.com:"
+            echo "未配置子模块凭据，已切换为 HTTPS 拉取 protobuf 子模块"
+          fi
+
+      - name: 拉取 protobuf 子模块
+        shell: bash
+        run: |
+          set -euo pipefail
+          git submodule sync --recursive
+          git submodule update --init --recursive
+
+      - name: 安装构建依赖
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            gcc-14 \
+            g++-14 \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu
+
+      - name: 安装 vcpkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          VCPKG_ROOT="${RUNNER_TEMP}/vcpkg"
+          VCPKG_BASELINE="$(python3 - <<'PY'
+          import json
+          with open('vcpkg-configuration.json', 'r', encoding='utf-8') as fh:
+              print(json.load(fh)['default-registry']['baseline'])
+          PY
+          )"
+          git clone https://github.com/microsoft/vcpkg.git "${VCPKG_ROOT}"
+          git -C "${VCPKG_ROOT}" checkout "${VCPKG_BASELINE}"
+          "${VCPKG_ROOT}/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=${VCPKG_ROOT}" >> "${GITHUB_ENV}"
+
+      - name: 配置 arm64 RelWithDebInfo
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-arm64 -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+            -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
+            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+            -DCMAKE_CXX_SCAN_FOR_MODULES=OFF \
+            -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+            -DMSKDSP_BUILD_TESTS=OFF \
+            -DMSKDSP_STRIP_DEBUG=ON \
+            -DCMAKE_STRIP=/usr/bin/aarch64-linux-gnu-strip \
+            -DCMAKE_OBJDUMP=/usr/bin/aarch64-linux-gnu-objdump \
+            -DCMAKE_OBJCOPY=/usr/bin/aarch64-linux-gnu-objcopy \
+            -DVCPKG_HOST_TRIPLET=x64-linux-dynamic \
+            -DVCPKG_TARGET_TRIPLET=arm64-linux-dynamic \
+            -DProtobuf_PROTOC_EXECUTABLE="${GITHUB_WORKSPACE}/build-arm64/vcpkg_installed/x64-linux-dynamic/tools/protobuf/protoc" \
+            -DgRPC_CPP_PLUGIN_EXECUTABLE="${GITHUB_WORKSPACE}/build-arm64/vcpkg_installed/x64-linux-dynamic/tools/grpc/grpc_cpp_plugin"
+
+      - name: 编译 arm64 RelWithDebInfo
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build build-arm64 --parallel
+
+      - name: 安装运行产物到 package
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --install build-arm64
+
+      - name: 打包正式产物
+        shell: bash
+        run: |
+          set -euo pipefail
+          ASSETS=("${{ steps.meta.outputs.archive_name }}.tar.gz")
+          tar -C package -czf "${{ steps.meta.outputs.archive_name }}.tar.gz" MskDSP module lib conf
+          if [ -d package/debug ]; then
+            tar -C package -czf "${{ steps.meta.outputs.debug_archive_name }}.tar.gz" debug
+            ASSETS+=("${{ steps.meta.outputs.debug_archive_name }}.tar.gz")
+          fi
+          sha256sum "${ASSETS[@]}" > SHA256SUMS
+
+      - name: 创建或更新 GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ASSETS=("${{ steps.meta.outputs.archive_name }}.tar.gz")
+          if [ -f "${{ steps.meta.outputs.debug_archive_name }}.tar.gz" ]; then
+            ASSETS+=("${{ steps.meta.outputs.debug_archive_name }}.tar.gz")
+          fi
+          ASSETS+=(SHA256SUMS)
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "${ASSETS[@]}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" "${ASSETS[@]}" --verify-tag --generate-notes
+          fi

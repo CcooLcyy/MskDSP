@@ -1,0 +1,125 @@
+name: 持续集成
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+      - main
+      - beta/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  x64-debug-test:
+    name: x64 Debug 编译与单测
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 拉取主仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: 准备 protobuf 子模块访问
+        shell: bash
+        env:
+          MSKDSP_PROTO_SSH_KEY: ${{ secrets.MSKDSP_PROTO_SSH_KEY }}
+          MSKDSP_PROTO_TOKEN: ${{ secrets.MSKDSP_PROTO_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${MSKDSP_PROTO_SSH_KEY:-}" ]; then
+            install -m 700 -d "${HOME}/.ssh"
+            printf '%s\n' "${MSKDSP_PROTO_SSH_KEY}" > "${HOME}/.ssh/id_ed25519"
+            chmod 600 "${HOME}/.ssh/id_ed25519"
+            ssh-keyscan github.com >> "${HOME}/.ssh/known_hosts"
+            echo "已启用 SSH key 访问 protobuf 子模块"
+          elif [ -n "${MSKDSP_PROTO_TOKEN:-}" ]; then
+            git config --global url."https://${MSKDSP_PROTO_TOKEN}@github.com/".insteadOf "git@github.com:"
+            echo "已启用 Token 访问 protobuf 子模块"
+          else
+            git config --global url."https://github.com/".insteadOf "git@github.com:"
+            echo "未配置子模块凭据，已切换为 HTTPS 拉取 protobuf 子模块"
+          fi
+
+      - name: 拉取 protobuf 子模块
+        shell: bash
+        run: |
+          set -euo pipefail
+          git submodule sync --recursive
+          git submodule update --init --recursive
+
+      - name: 安装构建依赖
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            gcc-14 \
+            g++-14 \
+            gcovr
+
+      - name: 安装 vcpkg
+        id: vcpkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          VCPKG_ROOT="${RUNNER_TEMP}/vcpkg"
+          VCPKG_BASELINE="$(python3 - <<'PY'
+          import json
+          with open('vcpkg-configuration.json', 'r', encoding='utf-8') as fh:
+              print(json.load(fh)['default-registry']['baseline'])
+          PY
+          )"
+          git clone https://github.com/microsoft/vcpkg.git "${VCPKG_ROOT}"
+          git -C "${VCPKG_ROOT}" checkout "${VCPKG_BASELINE}"
+          "${VCPKG_ROOT}/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=${VCPKG_ROOT}" >> "${GITHUB_ENV}"
+          echo "vcpkg_root=${VCPKG_ROOT}" >> "${GITHUB_OUTPUT}"
+
+      - name: 配置 x64 Debug
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=gcc-14 \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-linux-dynamic \
+            -DMSKDSP_BUILD_TESTS=ON \
+            -DMSKDSP_ENABLE_SANITIZERS=OFF \
+            -DMSKDSP_ENABLE_TSAN=OFF \
+            -DCMAKE_CXX_SCAN_FOR_MODULES=OFF \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DGCOV_EXECUTABLE=/usr/bin/gcov-14
+
+      - name: 编译 x64 Debug
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build build --parallel
+
+      - name: 运行单元测试
+        shell: bash
+        run: |
+          set -euo pipefail
+          ctest --test-dir build --output-on-failure --parallel "$(nproc)"
+
+      - name: 上传失败现场
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-x64-debug-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: |
+            build/CMakeCache.txt
+            build/CMakeFiles/CMakeConfigureLog.yaml
+            build/Testing
