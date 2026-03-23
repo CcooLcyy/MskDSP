@@ -1,11 +1,11 @@
+#include <grpcpp/server_context.h>
 #include <gtest/gtest.h>
 
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <stop_token>
 #include <string>
-
-#include <grpcpp/server_context.h>
 
 #include "ModuleManager.h"
 #include "ModuleManagerGrpcService.h"
@@ -15,13 +15,25 @@ namespace fs = std::filesystem;
 
 constexpr const char *kDummyModuleName = "Dummy";
 
-fs::path LibDir() { return fs::path("module"); }
-fs::path ConfDir() { return fs::path("conf"); }
-fs::path SocketDir() { return fs::path("socket"); }
-fs::path LogDir() { return fs::path("log"); }
-fs::path AutoStartConfigPath() { return ConfDir() / "module_manager.jsonc"; }
+fs::path LibDir() {
+  return fs::path("module");
+}
+fs::path ConfDir() {
+  return fs::path("conf");
+}
+fs::path SocketDir() {
+  return fs::path("socket");
+}
+fs::path LogDir() {
+  return fs::path("log");
+}
+fs::path AutoStartConfigPath() {
+  return ConfDir() / "module_manager.jsonc";
+}
 
-std::string DummyLibPrefix() { return std::string("lib") + kDummyModuleName + ".so"; }
+std::string DummyLibPrefix() {
+  return std::string("lib") + kDummyModuleName + ".so";
+}
 
 std::string FindDummyLibFileName() {
   const auto prefix = DummyLibPrefix();
@@ -81,6 +93,60 @@ bool HasModuleInfoByName(const ModuleManagerProto::ModuleInfos &infos, const std
   return false;
 }
 
+bool HasUsableModuleInfo(const ModuleManagerProto::ModuleInfos &infos, const std::string &name) {
+  for (const auto &info : infos.module_info()) {
+    if (info.module_name() != name) {
+      continue;
+    }
+    if (!info.manifest_error().empty()) {
+      return false;
+    }
+    for (const auto &dependency : info.dependencies()) {
+      if (!HasModuleInfoByName(infos, dependency.module_name())) {
+        return false;
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
+struct TraceableModule {
+  std::string moduleName;
+  fs::path tracePath;
+};
+
+std::optional<TraceableModule> FindAvailableTraceableModule(const ModuleManagerProto::ModuleInfos &infos) {
+  const std::vector<TraceableModule> candidates = {
+      {"DataCenter", ConfDir() / "dataCenter" / "connections.pb"},
+      {"IEC104", ConfDir() / "IEC104" / "links.pb"},
+      {"ModbusRTU", ConfDir() / "ModbusRTU" / "links.pb"},
+      {"DLT645", ConfDir() / "DLT645" / "links.pb"},
+      {"AGC", ConfDir() / "AGC" / "groups.pb"}};
+  for (const auto &candidate : candidates) {
+    if (HasUsableModuleInfo(infos, candidate.moduleName)) {
+      return candidate;
+    }
+  }
+  return std::nullopt;
+}
+
+void TouchFile(const fs::path &path) {
+  fs::create_directories(path.parent_path());
+  std::ofstream ofs(path, std::ios::trunc);
+  ofs << "trace";
+}
+
+int CountRunningModuleByName(const ModuleManagerProto::ModuleRunningInfos &infos, const std::string &name) {
+  int count = 0;
+  for (const auto &info : infos.module_running_info()) {
+    if (info.module_name() == name) {
+      ++count;
+    }
+  }
+  return count;
+}
+
 class ModuleManagerTest : public ::testing::Test {
 protected:
   void SetUp() override {
@@ -92,13 +158,13 @@ protected:
         << "未在 `./module` 找到假模块共享库（期望前缀: " << DummyLibPrefix() << ")";
   }
 };
-}  // 命名空间结束
+}  // namespace
 
 // 验证：getModuleInfos 会扫描 ./module 中的模块，并读取 manifest 与 manifest_error。
 TEST_F(ModuleManagerTest, GetModuleInfosScansLibDirAndParsesVersion) {
   // 额外创建若干条目，覆盖扫描过滤与分支逻辑。
   std::ofstream(LibDir() / "libNoVersion.so").put('\n');
-  std::ofstream(LibDir() / "ab.so.0.0.1").put('\n');  // ".so" 出现过早，应被忽略。
+  std::ofstream(LibDir() / "ab.so.0.0.1").put('\n');   // ".so" 出现过早，应被忽略。
   fs::create_directory(LibDir() / "libDir.so.0.0.1");  // 不是普通文件，应被忽略。
 
   // 符号链接应被忽略。
@@ -188,6 +254,79 @@ TEST_F(ModuleManagerTest, AutoStartModulesFromJsonConfig) {
   const auto dummyInfo = FindModuleInfoByName(mgr.getModuleInfos(), kDummyModuleName);
   mgr.unloadModule(dummyInfo);
   EXPECT_EQ(mgr.getModuleRunningInfos().module_running_info_size(), 0);
+}
+
+// 验证：`UPPER` 模式下发现持久化配置文件痕迹时，会自动启动对应模块。
+TEST_F(ModuleManagerTest, UpperModeAutoStartsModuleFromPersistentTrace) {
+  ModuleManager::ModuleManager mgr;
+  const auto &infos = mgr.getModuleInfos();
+  const auto candidate = FindAvailableTraceableModule(infos);
+  if (!candidate.has_value()) {
+    GTEST_SKIP() << "当前测试环境未提供可验证持久化痕迹自动启动的真实模块";
+  }
+
+  TouchFile(candidate->tracePath);
+  WriteAutoStartConfig(R"jsonc(
+{
+  "boot_config_mode": "UPPER"
+}
+)jsonc");
+
+  std::stop_source stopSource;
+  stopSource.request_stop();
+  mgr.start(stopSource.get_token());
+
+  const auto running = mgr.getModuleRunningInfos();
+  EXPECT_EQ(CountRunningModuleByName(running, candidate->moduleName), 1);
+}
+
+// 验证：`auto_start_modules` 与持久化文件痕迹同时命中时，重复启动会被安全跳过。
+TEST_F(ModuleManagerTest, UpperModeTraceAutoStartCoexistsWithAutoStartModules) {
+  ModuleManager::ModuleManager mgr;
+  const auto &infos = mgr.getModuleInfos();
+  const auto candidate = FindAvailableTraceableModule(infos);
+  if (!candidate.has_value()) {
+    GTEST_SKIP() << "当前测试环境未提供可验证持久化痕迹自动启动的真实模块";
+  }
+
+  TouchFile(candidate->tracePath);
+  WriteAutoStartConfig(std::string(R"jsonc(
+{
+  "boot_config_mode": "UPPER",
+  "auto_start_modules": [")jsonc") +
+                       candidate->moduleName + R"jsonc("]
+}
+)jsonc");
+
+  std::stop_source stopSource;
+  stopSource.request_stop();
+  mgr.start(stopSource.get_token());
+
+  const auto running = mgr.getModuleRunningInfos();
+  EXPECT_EQ(CountRunningModuleByName(running, candidate->moduleName), 1);
+}
+
+// 验证：自动启动配置读取或解析失败时，会按安全模式回退为 `UPPER` 并继续按持久化文件痕迹自动启动模块。
+TEST_F(ModuleManagerTest, InvalidAutoStartConfigFallsBackToUpperTraceAutoStart) {
+  ModuleManager::ModuleManager mgr;
+  const auto &infos = mgr.getModuleInfos();
+  const auto candidate = FindAvailableTraceableModule(infos);
+  if (!candidate.has_value()) {
+    GTEST_SKIP() << "当前测试环境未提供可验证持久化痕迹自动启动的真实模块";
+  }
+
+  TouchFile(candidate->tracePath);
+  WriteAutoStartConfig(R"jsonc(
+{
+  "boot_config_mode":
+)jsonc");
+
+  std::stop_source stopSource;
+  stopSource.request_stop();
+  mgr.start(stopSource.get_token());
+
+  const auto running = mgr.getModuleRunningInfos();
+  EXPECT_EQ(CountRunningModuleByName(running, candidate->moduleName), 1);
 }
 
 // 验证：saveModuleStartConfig 会写入 ./conf/modConf.bin，且可反序列化回原数据。

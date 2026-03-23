@@ -42,18 +42,55 @@ extern "C" BOOST_SYMBOL_EXPORT bool GetModuleManifestPb(const uint8_t **data, si
 - 行为：
   - 管理器在进程启动时只读取一次 `boot_config_mode`，并固定为本次运行模式；运行中修改配置文件不会立即生效，需重启 `MskDSP`
   - `CONFIG_PUSHER`：允许 `ConfigPusher` 在启动后读取 JSONC 并下发配置
+  - 管理器启动后会先读取 `auto_start_modules` 并自动加载列表中的模块；已运行的模块会安全跳过
   - `UPPER`：即使 `auto_start_modules` 中包含 `ConfigPusher`，也会跳过其自动启动；若后续手动启动 `ConfigPusher`，模块仅启动服务，不会执行配置下发
-  - 管理器启动后读取 `auto_start_modules` 并自动加载列表中的其他模块；已运行的模块会跳过
-- 建议：使用 `CONFIG_PUSHER` 时，自启动列表仅填写 `ConfigPusher`；使用 `UPPER` 时，不要把 `ConfigPusher` 作为启动时配置入口。
+  - `UPPER`：在处理完 `auto_start_modules` 后，管理器还会继续检查各模块配置目录下是否存在持久化配置主文件或 `.bak` 备份文件；只要发现文件痕迹，就会自动启动对应模块
+  - `UPPER`：管理器只做“文件是否存在”的判断，不会预解析各模块的 pb 内容；pb 合法性、对象恢复以及模块内功能是否能自动进入运行态，统一由模块自身负责
+  - `UPPER`：`auto_start_modules` 与“文件痕迹自动启动”可以同时存在，重复启动会复用现有“已运行则跳过”逻辑，避免双重启动
+  - 若配置文件读取失败、JSONC 解析失败、根节点不是对象，或 `boot_config_mode` 填写非法，管理器会按安全模式回退为 `UPPER`；此时忽略无法解析的 `auto_start_modules`，但仍继续执行“文件痕迹自动启动”
+- 建议：使用 `CONFIG_PUSHER` 时，自启动列表仅填写 `ConfigPusher`；使用 `UPPER` 时，不要把 `ConfigPusher` 作为启动时配置入口，而应由模块根据持久化配置痕迹自行恢复与启动。
+
+### `UPPER` 模式文件痕迹清单
+- `DataCenter`
+  - `./conf/dataCenter/connections.pb`
+  - `./conf/dataCenter/connections.pb.bak`
+  - `./conf/dataCenter/conn_tags.pb`
+  - `./conf/dataCenter/conn_tags.pb.bak`
+  - `./conf/dataCenter/routes.pb`
+  - `./conf/dataCenter/routes.pb.bak`
+  - `./conf/dataCenter/point_tables.pb`
+  - `./conf/dataCenter/point_tables.pb.bak`
+    说明：这是 `conn_tags.pb` 的历史兼容文件名；若现场仍保留旧文件痕迹，`UPPER` 模式也会自动启动 `DataCenter`
+- `IEC104`
+  - `./conf/IEC104/links.pb`
+  - `./conf/IEC104/links.pb.bak`
+  - `./conf/IEC104/point_tables.pb`
+  - `./conf/IEC104/point_tables.pb.bak`
+- `ModbusRTU`
+  - `./conf/ModbusRTU/mqtt.pb`
+  - `./conf/ModbusRTU/mqtt.pb.bak`
+  - `./conf/ModbusRTU/links.pb`
+  - `./conf/ModbusRTU/links.pb.bak`
+  - `./conf/ModbusRTU/point_tables.pb`
+  - `./conf/ModbusRTU/point_tables.pb.bak`
+- `DLT645`
+  - `./conf/DLT645/mqtt.pb`
+  - `./conf/DLT645/mqtt.pb.bak`
+  - `./conf/DLT645/links.pb`
+  - `./conf/DLT645/links.pb.bak`
+  - `./conf/DLT645/point_tables.pb`
+  - `./conf/DLT645/point_tables.pb.bak`
+- `AGC`
+  - `./conf/AGC/groups.pb`
+  - `./conf/AGC/groups.pb.bak`
 
 示例：
 ```jsonc
 {
   // 启动配置模式：仅在进程启动时读取一次；修改后需重启 MskDSP 生效。
-  "boot_config_mode": "CONFIG_PUSHER",
-  // ModuleManager 启动时自动加载的模块列表（建议仅填写 ConfigPusher）。
-  // 其他模块建议通过 ConfigPusher 的配置进行按需启动。
-  "auto_start_modules": ["ConfigPusher"]
+  "boot_config_mode": "UPPER",
+  // 显式自动启动模块列表；与 UPPER 模式的“文件痕迹自动启动”可同时存在。
+  "auto_start_modules": ["DataCenter"]
 }
 ```
 

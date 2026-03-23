@@ -1,21 +1,21 @@
 #include "ModuleManager.h"
 
+#include <dlfcn.h>
 #include <google/protobuf/stubs/common.h>
 #include <grpcpp/completion_queue.h>
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/impl/service_type.h>
 #include <grpcpp/security/server_credentials.h>
 #include <grpcpp/server.h>
+#include <link.h>
 
 #include <algorithm>
+#include <atomic>
 #include <boost/dll/shared_library.hpp>
 #include <boost/json.hpp>
-#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
-#include <dlfcn.h>
-#include <link.h>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -29,6 +29,7 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "Logger.h"
@@ -43,6 +44,11 @@ constexpr const char *kBootConfigModeEnvName = "MSKDSP_BOOT_CONFIG_MODE";
 constexpr const char *kBootConfigModeConfigPusher = "CONFIG_PUSHER";
 constexpr const char *kBootConfigModeUpper = "UPPER";
 constexpr const char *kConfigPusherModuleName = "ConfigPusher";
+
+struct ModuleTraceAutoStartRule {
+  std::string_view moduleName;
+  std::vector<std::filesystem::path> tracePaths;
+};
 
 std::string stripJsonComments(std::string_view input) {
   std::string out;
@@ -167,10 +173,59 @@ std::string toHex(std::string_view text) {
   return oss.str();
 }
 
-void logJsonFieldDetails(std::string_view title,
-                         const boost::json::object &obj,
-                         std::string_view phase,
-                         std::string_view moduleName) {
+std::string joinPaths(const std::vector<std::filesystem::path> &paths, std::string_view sep) {
+  std::vector<std::string> texts;
+  texts.reserve(paths.size());
+  for (const auto &path : paths) {
+    texts.push_back(path.string());
+  }
+  return joinNames(texts, sep);
+}
+
+std::filesystem::path makeBackupPath(const std::filesystem::path &path) {
+  return std::filesystem::path(path.string() + ".bak");
+}
+
+std::vector<ModuleTraceAutoStartRule> buildUpperModeTraceAutoStartRules() {
+  return {
+      {"DataCenter",
+       {"./conf/dataCenter/connections.pb", "./conf/dataCenter/conn_tags.pb", "./conf/dataCenter/routes.pb", "./conf/dataCenter/point_tables.pb"}},
+      {"IEC104", {"./conf/IEC104/links.pb", "./conf/IEC104/point_tables.pb"}},
+      {"ModbusRTU", {"./conf/ModbusRTU/mqtt.pb", "./conf/ModbusRTU/links.pb", "./conf/ModbusRTU/point_tables.pb"}},
+      {"DLT645", {"./conf/DLT645/mqtt.pb", "./conf/DLT645/links.pb", "./conf/DLT645/point_tables.pb"}},
+      {"AGC", {"./conf/AGC/groups.pb"}}};
+}
+
+std::vector<std::filesystem::path> collectMatchedPersistentTracePaths(const std::vector<std::filesystem::path> &tracePaths) {
+  std::vector<std::filesystem::path> matched;
+  matched.reserve(tracePaths.size() * 2);
+  for (const auto &path : tracePaths) {
+    std::error_code ec;
+    if (std::filesystem::exists(path, ec)) {
+      matched.push_back(path);
+    }
+    const auto backupPath = makeBackupPath(path);
+    ec.clear();
+    if (std::filesystem::exists(backupPath, ec)) {
+      matched.push_back(backupPath);
+    }
+  }
+  return matched;
+}
+
+std::vector<std::pair<std::string, std::vector<std::filesystem::path>>> collectUpperModeAutoStartModulesByTrace() {
+  std::vector<std::pair<std::string, std::vector<std::filesystem::path>>> modules;
+  for (const auto &rule : buildUpperModeTraceAutoStartRules()) {
+    auto matched = collectMatchedPersistentTracePaths(rule.tracePaths);
+    if (matched.empty()) {
+      continue;
+    }
+    modules.emplace_back(std::string(rule.moduleName), std::move(matched));
+  }
+  return modules;
+}
+
+void logJsonFieldDetails(std::string_view title, const boost::json::object &obj, std::string_view phase, std::string_view moduleName) {
   LOG_INFO("{}字段数量={}，阶段: {}，模块: {}", title, obj.size(), phase, moduleName);
   if (obj.empty()) {
     return;
@@ -178,13 +233,7 @@ void logJsonFieldDetails(std::string_view title,
   for (const auto &entry : obj) {
     const auto &key = entry.key();
     std::string keyText(key.data(), key.size());
-    LOG_INFO("{}字段明细: 名称='{}'，字节数={}，十六进制={}，阶段: {}，模块: {}",
-             title,
-             keyText,
-             keyText.size(),
-             toHex(keyText),
-             phase,
-             moduleName);
+    LOG_INFO("{}字段明细: 名称='{}'，字节数={}，十六进制={}，阶段: {}，模块: {}", title, keyText, keyText.size(), toHex(keyText), phase, moduleName);
   }
 }
 
@@ -193,30 +242,24 @@ std::string sanitizeJsonSnippet(std::string_view text) {
   out.reserve(text.size());
   for (const char ch : text) {
     switch (ch) {
-      case '\n':
-        out.append("\\n");
-        break;
-      case '\r':
-        out.append("\\r");
-        break;
-      case '\t':
-        out.append("\\t");
-        break;
-      default:
-        out.push_back(ch);
-        break;
+    case '\n':
+      out.append("\\n");
+      break;
+    case '\r':
+      out.append("\\r");
+      break;
+    case '\t':
+      out.append("\\t");
+      break;
+    default:
+      out.push_back(ch);
+      break;
     }
   }
   return out;
 }
 
-void logJsonParseError(std::string_view title,
-                       std::string_view phase,
-                       std::string_view moduleName,
-                       std::string_view json,
-                       std::size_t offset,
-                       int errorValue,
-                       bool warnOnly) {
+void logJsonParseError(std::string_view title, std::string_view phase, std::string_view moduleName, std::string_view json, std::size_t offset, int errorValue, bool warnOnly) {
   const std::size_t safeOffset = std::min(offset, json.size());
   std::size_t line = 1;
   std::size_t column = 1;
@@ -240,34 +283,13 @@ void logJsonParseError(std::string_view title,
   const std::size_t snippetEnd = std::min(json.size(), safeOffset + kSnippetRadius);
   const auto snippet = sanitizeJsonSnippet(json.substr(snippetStart, snippetEnd - snippetStart));
   if (warnOnly) {
-    LOG_WARNING("{}解析失败: JSON 语法错误码={}，行={}，列={}，偏移={}，附近文本='{}'，阶段: {}，模块: {}",
-                title,
-                errorValue,
-                line,
-                column,
-                safeOffset,
-                snippet,
-                phase,
-                moduleName);
+    LOG_WARNING("{}解析失败: JSON 语法错误码={}，行={}，列={}，偏移={}，附近文本='{}'，阶段: {}，模块: {}", title, errorValue, line, column, safeOffset, snippet, phase, moduleName);
   } else {
-    LOG_ERROR("{}解析失败: JSON 语法错误码={}，行={}，列={}，偏移={}，附近文本='{}'，阶段: {}，模块: {}",
-              title,
-              errorValue,
-              line,
-              column,
-              safeOffset,
-              snippet,
-              phase,
-              moduleName);
+    LOG_ERROR("{}解析失败: JSON 语法错误码={}，行={}，列={}，偏移={}，附近文本='{}'，阶段: {}，模块: {}", title, errorValue, line, column, safeOffset, snippet, phase, moduleName);
   }
 }
 
-bool parseJsonValue(std::string_view json,
-                    boost::json::value *out,
-                    std::string_view title,
-                    std::string_view phase,
-                    std::string_view moduleName,
-                    bool warnOnly) {
+bool parseJsonValue(std::string_view json, boost::json::value *out, std::string_view title, std::string_view phase, std::string_view moduleName, bool warnOnly) {
   if (out == nullptr) {
     logJsonParseError(title, phase, moduleName, json, 0, -1, warnOnly);
     return false;
@@ -296,7 +318,8 @@ uint64_t hashBytes(const uint8_t *data, size_t size) {
 
 class ModuleInfosBuildGuard {
 public:
-  ModuleInfosBuildGuard(std::atomic_bool &flag, std::string_view reason) : flag_(flag) {
+  ModuleInfosBuildGuard(std::atomic_bool &flag, std::string_view reason) :
+    flag_(flag) {
     bool expected = false;
     acquired_ = flag_.compare_exchange_strong(expected, true);
     if (!acquired_) {
@@ -356,8 +379,7 @@ void logLoadedRuntimeLibs(std::string_view phase, std::string_view moduleName, b
   std::vector<std::string> current(data.paths.begin(), data.paths.end());
   std::sort(current.begin(), current.end());
   if (force) {
-    LOG_INFO("已加载运行库列表，阶段: {}，模块: {}，数量: {}，明细: {}", phase, moduleName, current.size(),
-             joinNames(current, ", "));
+    LOG_INFO("已加载运行库列表，阶段: {}，模块: {}，数量: {}，明细: {}", phase, moduleName, current.size(), joinNames(current, ", "));
     lastPaths = std::move(data.paths);
     return;
   }
@@ -553,10 +575,10 @@ bool parseVersionRange(const std::string &expr, std::vector<VersionConstraint> *
     if (token == "<" || token == "<=" || token == ">" || token == ">=" || token == "=") {
       op = token;
       if (!(iss >> version)) {
-      if (error != nullptr) {
-        *error = "操作符后缺少版本号";
-      }
-      return false;
+        if (error != nullptr) {
+          *error = "操作符后缺少版本号";
+        }
+        return false;
       }
     } else {
       if (token.rfind("==", 0) == 0) {
@@ -625,40 +647,37 @@ bool isVersionSatisfied(const std::vector<int> &version, const std::vector<Versi
   for (const auto &constraint : constraints) {
     const auto cmp = compareVersions(version, constraint.version);
     switch (constraint.op) {
-      case VersionConstraint::Op::kEq:
-        if (cmp != 0) {
-          return false;
-        }
-        break;
-      case VersionConstraint::Op::kLt:
-        if (cmp >= 0) {
-          return false;
-        }
-        break;
-      case VersionConstraint::Op::kLte:
-        if (cmp > 0) {
-          return false;
-        }
-        break;
-      case VersionConstraint::Op::kGt:
-        if (cmp <= 0) {
-          return false;
-        }
-        break;
-      case VersionConstraint::Op::kGte:
-        if (cmp < 0) {
-          return false;
-        }
-        break;
+    case VersionConstraint::Op::kEq:
+      if (cmp != 0) {
+        return false;
+      }
+      break;
+    case VersionConstraint::Op::kLt:
+      if (cmp >= 0) {
+        return false;
+      }
+      break;
+    case VersionConstraint::Op::kLte:
+      if (cmp > 0) {
+        return false;
+      }
+      break;
+    case VersionConstraint::Op::kGt:
+      if (cmp <= 0) {
+        return false;
+      }
+      break;
+    case VersionConstraint::Op::kGte:
+      if (cmp < 0) {
+        return false;
+      }
+      break;
     }
   }
   return true;
 }
 
-bool loadModuleManifest(const std::filesystem::path &libPath,
-                        ModuleManagerProto::ModuleManifest *manifest,
-                        std::string *error,
-                        std::unordered_map<std::string, boost::dll::shared_library> *libCache) {
+bool loadModuleManifest(const std::filesystem::path &libPath, ModuleManagerProto::ModuleManifest *manifest, std::string *error, std::unordered_map<std::string, boost::dll::shared_library> *libCache) {
   if (manifest == nullptr) {
     return false;
   }
@@ -729,17 +748,11 @@ bool loadModuleManifest(const std::filesystem::path &libPath,
     if (!againOk || dataAgain == nullptr || sizeAgain == 0) {
       LOG_WARNING("模块 {} manifest 二次获取失败，可能存在不稳定返回值", libPath.filename().string());
     } else if (dataAgain != data || sizeAgain != size) {
-      LOG_WARNING("模块 {} manifest 二次获取结果不一致: ptr {} -> {}, size {} -> {}",
-                  libPath.filename().string(),
-                  static_cast<const void *>(data),
-                  static_cast<const void *>(dataAgain),
-                  size,
-                  sizeAgain);
+      LOG_WARNING("模块 {} manifest 二次获取结果不一致: ptr {} -> {}, size {} -> {}", libPath.filename().string(), static_cast<const void *>(data), static_cast<const void *>(dataAgain), size, sizeAgain);
     } else {
       const uint64_t hashAgain = hashBytes(dataAgain, sizeAgain);
       if (hashAgain != hashOnce) {
-        LOG_WARNING("模块 {} manifest 内容在二次获取时发生变化，可能存在内存破坏或返回缓冲区复用",
-                    libPath.filename().string());
+        LOG_WARNING("模块 {} manifest 内容在二次获取时发生变化，可能存在内存破坏或返回缓冲区复用", libPath.filename().string());
       }
     }
     LOG_INFO("解析 manifest 数据: {} bytes ({})", size, libPath.filename().string());
@@ -832,9 +845,7 @@ void ModuleManager::start(std::stop_token stopToken) {
   auto selfCheckBegin = std::chrono::steady_clock::now();
   LOG_INFO("开始自动启动配置自检，阶段: 启动 gRPC 前");
   selfCheckAutoStartConfig("启动 gRPC 前", metaData_.name, true);
-  LOG_INFO("完成自动启动配置自检，阶段: 启动 gRPC 前，耗时: {} ms",
-           std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - selfCheckBegin)
-             .count());
+  LOG_INFO("完成自动启动配置自检，阶段: 启动 gRPC 前，耗时: {} ms", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - selfCheckBegin).count());
   logElapsed("启动 gRPC 前自检完成");
   LOG_INFO("已跳过 gRPC 客户端符号预加载");
   logElapsed("gRPC 客户端符号预加载阶段结束");
@@ -843,32 +854,24 @@ void ModuleManager::start(std::stop_token stopToken) {
   auto grpcBuildBegin = std::chrono::steady_clock::now();
   LOG_INFO("开始构建 gRPC 服务");
   grpcServerBuilder(moduleManagerService_);
-  LOG_INFO("完成构建 gRPC 服务，耗时: {} ms",
-           std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - grpcBuildBegin)
-             .count());
+  LOG_INFO("完成构建 gRPC 服务，耗时: {} ms", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - grpcBuildBegin).count());
   logElapsed("gRPC 服务构建完成");
   logLoadedRuntimeLibs("gRPC 服务启动后", metaData_.name, true);
   logElapsed("gRPC 服务启动后运行库记录完成");
   selfCheckBegin = std::chrono::steady_clock::now();
   LOG_INFO("开始自动启动配置自检，阶段: 启动 gRPC 后");
   selfCheckAutoStartConfig("启动 gRPC 后", metaData_.name, true);
-  LOG_INFO("完成自动启动配置自检，阶段: 启动 gRPC 后，耗时: {} ms",
-           std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - selfCheckBegin)
-             .count());
+  LOG_INFO("完成自动启动配置自检，阶段: 启动 gRPC 后，耗时: {} ms", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - selfCheckBegin).count());
   logElapsed("启动 gRPC 后自检完成");
   auto moduleInfosBegin = std::chrono::steady_clock::now();
   LOG_INFO("开始扫描模块清单");
   initModuleInfos();
-  LOG_INFO("完成扫描模块清单，耗时: {} ms",
-           std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - moduleInfosBegin)
-             .count());
+  LOG_INFO("完成扫描模块清单，耗时: {} ms", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - moduleInfosBegin).count());
   logElapsed("模块清单扫描完成");
   auto autoStartBegin = std::chrono::steady_clock::now();
   LOG_INFO("开始解析自动启动配置并启动模块");
   autoStartModulesFromConfig();
-  LOG_INFO("完成解析自动启动配置并启动模块，耗时: {} ms",
-           std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - autoStartBegin)
-             .count());
+  LOG_INFO("完成解析自动启动配置并启动模块，耗时: {} ms", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - autoStartBegin).count());
   logElapsed("自动启动流程完成");
   while (!stopToken.stop_requested()) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -913,88 +916,131 @@ void ModuleManager::autoStartModulesFromConfig() {
     LOG_INFO("自动启动配置文件大小: {} 字节", fileSize);
   }
 
+  std::vector<std::string> autoStartModules;
+  std::optional<boost::json::object> parsedConfigObject;
+
   std::string raw;
   if (!readFile(configPath, &raw)) {
-    setProcessBootConfigMode(kBootConfigModeUpper);
-    LOG_ERROR("读取自动启动配置失败: {}", configPath.string());
-    return;
-  }
-  LOG_INFO("自动启动配置读取完成，实际字节数: {}", raw.size());
-  LOG_INFO("自动启动配置原始文本包含 auto_start_modules: {}",
-           raw.find("auto_start_modules") != std::string::npos ? "是" : "否");
+    bootConfigMode = kBootConfigModeUpper;
+    setProcessBootConfigMode(bootConfigMode);
+    LOG_ERROR("读取自动启动配置失败: {}，将按安全模式继续执行持久化文件痕迹自动启动", configPath.string());
+  } else {
+    LOG_INFO("自动启动配置读取完成，实际字节数: {}", raw.size());
+    LOG_INFO("自动启动配置原始文本包含 auto_start_modules: {}", raw.find("auto_start_modules") != std::string::npos ? "是" : "否");
 
-  auto json = stripJsonComments(raw);
-  LOG_INFO("自动启动配置去注释后文本包含 auto_start_modules: {}",
-           json.find("auto_start_modules") != std::string::npos ? "是" : "否");
-  boost::json::value parsed;
-  if (!parseJsonValue(json, &parsed, "自动启动配置", "解析配置", metaData_.name, false)) {
-    setProcessBootConfigMode(kBootConfigModeUpper);
-    return;
-  }
-  if (!parsed.is_object()) {
-    setProcessBootConfigMode(kBootConfigModeUpper);
-    LOG_ERROR("自动启动配置必须为对象");
-    return;
-  }
-
-  const auto &obj = parsed.as_object();
-  bootConfigMode = parseBootConfigMode(obj);
-  setProcessBootConfigMode(bootConfigMode);
-  std::vector<std::string> fieldNames;
-  fieldNames.reserve(obj.size());
-  for (const auto &entry : obj) {
-    const auto &key = entry.key();
-    fieldNames.emplace_back(key.data(), key.size());
-  }
-  LOG_INFO("自动启动配置字段: {}", joinNames(fieldNames, ","));
-  auto fieldIt = obj.find("auto_start_modules");
-  if (fieldIt == obj.end()) {
-    LOG_INFO("自动启动配置未包含 auto_start_modules");
-    logJsonFieldDetails("自动启动配置", obj, "解析配置", metaData_.name);
-    if (obj.empty()) {
-      LOG_INFO("自动启动配置字段为空，无法解析任何字段");
+    auto json = stripJsonComments(raw);
+    LOG_INFO("自动启动配置去注释后文本包含 auto_start_modules: {}", json.find("auto_start_modules") != std::string::npos ? "是" : "否");
+    boost::json::value parsed;
+    if (!parseJsonValue(json, &parsed, "自动启动配置", "解析配置", metaData_.name, false)) {
+      bootConfigMode = kBootConfigModeUpper;
+      setProcessBootConfigMode(bootConfigMode);
+      LOG_WARNING("自动启动配置解析失败，将按安全模式继续执行持久化文件痕迹自动启动");
+    } else if (!parsed.is_object()) {
+      bootConfigMode = kBootConfigModeUpper;
+      setProcessBootConfigMode(bootConfigMode);
+      LOG_ERROR("自动启动配置必须为对象，将按安全模式继续执行持久化文件痕迹自动启动");
+    } else {
+      parsedConfigObject = parsed.as_object();
+      bootConfigMode = parseBootConfigMode(*parsedConfigObject);
+      setProcessBootConfigMode(bootConfigMode);
     }
-    return;
-  }
-  if (!fieldIt->value().is_array()) {
-    LOG_ERROR("自动启动配置的 auto_start_modules 必须为数组");
-    logJsonFieldDetails("自动启动配置", obj, "解析配置", metaData_.name);
-    return;
   }
 
-  const auto &list = fieldIt->value().as_array();
-  if (list.empty()) {
-    LOG_INFO("自动启动配置的 auto_start_modules 为空");
-    return;
+  if (!parsedConfigObject.has_value()) {
+    LOG_INFO("自动启动配置未形成可解析对象，本次仅保留 boot_config_mode={} 的安全回退语义", bootConfigMode);
   }
 
-  ensureModuleInfos();
+  if (parsedConfigObject.has_value()) {
+    const auto &obj = *parsedConfigObject;
+    std::vector<std::string> fieldNames;
+    fieldNames.reserve(obj.size());
+    for (const auto &entry : obj) {
+      const auto &key = entry.key();
+      fieldNames.emplace_back(key.data(), key.size());
+    }
+    LOG_INFO("自动启动配置字段: {}", joinNames(fieldNames, ","));
+    auto fieldIt = obj.find("auto_start_modules");
+    if (fieldIt == obj.end()) {
+      LOG_INFO("自动启动配置未包含 auto_start_modules");
+      logJsonFieldDetails("自动启动配置", obj, "解析配置", metaData_.name);
+      if (obj.empty()) {
+        LOG_INFO("自动启动配置字段为空，无法解析任何字段");
+      }
+    } else if (!fieldIt->value().is_array()) {
+      LOG_ERROR("自动启动配置的 auto_start_modules 必须为数组");
+      logJsonFieldDetails("自动启动配置", obj, "解析配置", metaData_.name);
+    } else {
+      const auto &list = fieldIt->value().as_array();
+      if (list.empty()) {
+        LOG_INFO("自动启动配置的 auto_start_modules 为空");
+      } else {
+        autoStartModules.reserve(list.size());
+        for (const auto &value : list) {
+          if (!value.is_string()) {
+            LOG_WARNING("自动启动模块条目不是字符串");
+            continue;
+          }
+          const auto &nameValue = value.as_string();
+          std::string moduleName(nameValue.c_str(), nameValue.size());
+          if (moduleName.empty()) {
+            LOG_WARNING("自动启动模块条目为空");
+            continue;
+          }
+          autoStartModules.push_back(std::move(moduleName));
+        }
+      }
+    }
+  }
+
+  if (!autoStartModules.empty() || bootConfigMode == kBootConfigModeUpper) {
+    ensureModuleInfos();
+  }
+
   int started = 0;
-  for (const auto &value : list) {
-    if (!value.is_string()) {
-      LOG_WARNING("自动启动模块条目不是字符串");
-      continue;
-    }
-    const auto &nameValue = value.as_string();
-    std::string moduleName(nameValue.c_str(), nameValue.size());
-    if (moduleName.empty()) {
-      LOG_WARNING("自动启动模块条目为空");
-      continue;
-    }
+  auto tryStartModule = [this, &bootConfigMode, &started](const std::string &moduleName, std::string_view reason, const std::vector<std::filesystem::path> *tracePaths) {
     if (bootConfigMode == kBootConfigModeUpper && moduleName == kConfigPusherModuleName) {
       LOG_INFO("当前 boot_config_mode={}，跳过自动启动模块: {}", bootConfigMode, moduleName);
-      continue;
+      return;
     }
-    LOG_INFO("自动启动模块: {}", moduleName);
+
+    const bool alreadyRunning = isModuleRunning(moduleName);
+    if (tracePaths != nullptr) {
+      LOG_INFO("当前 boot_config_mode={}，发现模块持久化配置文件痕迹: 模块={}, 文件={}", bootConfigMode, moduleName, joinPaths(*tracePaths, ", "));
+      LOG_INFO("当前 boot_config_mode={}，因{}自动启动模块: 模块={}, 文件={}", bootConfigMode, reason, moduleName, joinPaths(*tracePaths, ", "));
+    } else {
+      LOG_INFO("因{}自动启动模块: {}", reason, moduleName);
+    }
+
     auto result = startModuleByName(moduleName);
     if (!result.ok()) {
-      LOG_ERROR("自动启动模块 {} 失败: {}", moduleName, result.message);
-      continue;
+      if (tracePaths != nullptr) {
+        LOG_ERROR("按持久化配置文件痕迹自动启动模块失败: 模块={}, 文件={}, 原因={}", moduleName, joinPaths(*tracePaths, ", "), result.message);
+      } else {
+        LOG_ERROR("自动启动模块 {} 失败: {}", moduleName, result.message);
+      }
+      return;
     }
-    ++started;
+    if (!alreadyRunning) {
+      ++started;
+    }
+  };
+
+  for (const auto &moduleName : autoStartModules) {
+    tryStartModule(moduleName, "auto_start_modules 配置", nullptr);
   }
 
-  LOG_INFO("自动启动完成，已启动 {} 个模块", started);
+  if (bootConfigMode == kBootConfigModeUpper) {
+    LOG_INFO("当前 boot_config_mode={}，开始按持久化配置文件痕迹自动启动模块（仅检查文件存在性，不预解析 pb 内容）", bootConfigMode);
+    const auto modulesByTrace = collectUpperModeAutoStartModulesByTrace();
+    if (modulesByTrace.empty()) {
+      LOG_INFO("当前 boot_config_mode={}，未发现任何模块持久化配置文件痕迹", bootConfigMode);
+    }
+    for (const auto &[moduleName, tracePaths] : modulesByTrace) {
+      tryStartModule(moduleName, "持久化配置文件痕迹", &tracePaths);
+    }
+  }
+
+  LOG_INFO("自动启动完成，新增启动 {} 个模块", started);
 }
 ModuleOpResult ModuleManager::loadModule(ModuleManagerProto::ModuleInfo moduleInfo) {
   ensureModuleInfos();
