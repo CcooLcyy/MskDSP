@@ -68,8 +68,8 @@ TEST(ConfigPusherApplyModbusRtuTest, RejectsMqttLinkWithoutTopLevelMqtt) {
   EXPECT_FALSE(ConfigPusher::applyModbusRtuConfig(config, stub.get()));
 }
 
-// 验证：存在 MQTT UART 链路时，会先下发 UpdateConfig，再下发连接/点表/启动连接。
-TEST(ConfigPusherApplyModbusRtuTest, AppliesUpdateConfigBeforeLinkAndStart) {
+// 验证：存在 MQTT UART 链路时，会先下发 UpdateConfig，再下发连接/点表且不再额外调用 StartLink。
+TEST(ConfigPusherApplyModbusRtuTest, AppliesUpdateConfigBeforeLinkWithoutExplicitStart) {
   auto config = MakeMqttModbusConfig(true, true);
   auto stub = std::make_unique<ModbusRTUProto::MockModbusRTUServiceStub>();
 
@@ -100,13 +100,25 @@ TEST(ConfigPusherApplyModbusRtuTest, AppliesUpdateConfigBeforeLinkAndStart) {
         EXPECT_EQ(req.points_size(), 1);
         return grpc::Status::OK;
       }));
-  EXPECT_CALL(*stub, StartLink(_, _, _))
-      .WillOnce(Invoke([](grpc::ClientContext*,
-                          const ModbusRTUProto::StartLinkRequest& req,
-                          ModbusRTUProto::Empty*) {
-        EXPECT_EQ(req.conn_name(), "modbus-mqtt-1");
-        return grpc::Status::OK;
-      }));
+  EXPECT_CALL(*stub, StartLink(_, _, _)).Times(0);
 
   EXPECT_TRUE(ConfigPusher::applyModbusRtuConfig(config, stub.get()));
+}
+
+// 验证：MQTT 顶层配置下发失败且链路依赖 MQTT 时，会立即返回失败且不再继续下发连接。
+TEST(ConfigPusherApplyModbusRtuTest, UpdateConfigFailureStopsWhenMqttIsRequired) {
+  auto config = MakeMqttModbusConfig(false, true);
+  auto stub = std::make_unique<ModbusRTUProto::MockModbusRTUServiceStub>();
+
+  EXPECT_CALL(*stub, UpdateConfig(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext*,
+                          const ModbusRTUProto::UpdateConfigRequest& req,
+                          ModbusRTUProto::UpdateConfigResponse*) {
+        EXPECT_EQ(req.mqtt().client_id(), "dlt645");
+        return grpc::Status(grpc::StatusCode::INTERNAL, "MQTT 下发失败");
+      }));
+  EXPECT_CALL(*stub, UpsertLink(_, _, _)).Times(0);
+  EXPECT_CALL(*stub, StartLink(_, _, _)).Times(0);
+
+  EXPECT_FALSE(ConfigPusher::applyModbusRtuConfig(config, stub.get()));
 }

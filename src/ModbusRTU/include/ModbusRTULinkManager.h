@@ -6,6 +6,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -49,6 +50,7 @@ public:
   grpc::Status StartLink(const std::string& connName);
   grpc::Status StopLink(const std::string& connName);
   grpc::Status DeleteLink(const std::string& connName);
+  void TryAutoStartReadyLinks(std::string_view trigger);
 
   grpc::Status UpsertPointTable(const ModbusRTUProto::UpsertPointTableRequest& request);
   grpc::Status GetPointTable(const std::string& connName, ModbusRTUProto::PointTable* out) const;
@@ -117,6 +119,7 @@ private:
     ModbusRTUProto::LinkState state = ModbusRTUProto::LINK_STATE_STOPPED;
     std::string lastError;
     PointTable pointTable;
+    bool pointTableConfigured = false;
     std::shared_ptr<Bus> bus;
     std::jthread pollThread;
     std::shared_ptr<grpc::ClientContext> dcCommandContext;
@@ -129,10 +132,14 @@ private:
   static MqttKey makeMqttKey(const ModbusRTUProto::LinkConfig& config);
 
   grpc::Status fillLinkInfoLocked(const LinkRuntime& link, ModbusRTUProto::LinkInfo* out) const;
+  grpc::Status checkStartPreconditionsLocked(const LinkRuntime& link) const;
   ModbusRTUProto::LinksConfig dumpLinksConfigLocked() const;
   ModbusRTUProto::PointTablesConfig dumpPointTablesConfigLocked() const;
   grpc::Status saveLinksConfig(const ModbusRTUProto::LinksConfig& config);
   grpc::Status savePointTablesConfig(const ModbusRTUProto::PointTablesConfig& config);
+  bool isLinkAutoStartReadyLocked(const LinkRuntime& link, std::string* reason) const;
+  grpc::Status maybeAutoStartLink(const std::string& connName, std::string_view trigger);
+  void autoStartEligibleLinks(std::string_view trigger);
   grpc::Status ensureSerialCompatibleLocked(const SerialKey& key, const std::string& connName) const;
   grpc::Status ensureMqttCompatibleLocked(const MqttKey& key, const std::string& connName) const;
   std::shared_ptr<Bus> acquireSerialBusLocked(const SerialKey& key, const ModbusRTUProto::SerialConfig& serial);

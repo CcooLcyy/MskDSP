@@ -1,11 +1,16 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <cerrno>
 #include <chrono>
+#include <cstring>
 #include <cstdint>
 #include <filesystem>
+#include <fcntl.h>
+#include <stdlib.h>
 #include <string>
 #include <unordered_set>
+#include <unistd.h>
 
 #include "DataCenter_mock.grpc.pb.h"
 #include "ModbusRTULinkManager.h"
@@ -15,6 +20,7 @@ namespace {
 using ModbusRTU::LinkManager;
 
 using ::testing::_;
+using ::testing::HasSubstr;
 using ::testing::Return;
 
 ModbusRTUProto::UpsertLinkRequest MakeLinkReq(const char* connName, const char* device, uint32_t baud, uint32_t deviceId) {
@@ -79,6 +85,15 @@ ModbusRTUProto::Point MakeCoilPoint(const char* tag, uint32_t address) {
   return p;
 }
 
+ModbusRTUProto::Point MakeWriteSingleRegisterPoint(const char* tag, uint32_t address) {
+  ModbusRTUProto::Point p;
+  p.set_tag(tag);
+  p.set_function(ModbusRTUProto::FUNCTION_WRITE_SINGLE_REGISTER);
+  p.set_address(address);
+  p.set_type(ModbusRTUProto::DATA_TYPE_UINT16);
+  return p;
+}
+
 class ScopedTempDir {
 public:
   ScopedTempDir() {
@@ -100,6 +115,65 @@ public:
 private:
   inline static uint64_t counter_ = 0;
   std::filesystem::path path_;
+};
+
+class ScopedPseudoTty {
+public:
+  ScopedPseudoTty() {
+    masterFd_ = ::posix_openpt(O_RDWR | O_NOCTTY);
+    if (masterFd_ < 0) {
+      error_ = std::string("打开 PTY 主端失败: ") + std::strerror(errno);
+      return;
+    }
+    if (::grantpt(masterFd_) != 0) {
+      error_ = std::string("授权 PTY 从端失败: ") + std::strerror(errno);
+      closeAll();
+      return;
+    }
+    if (::unlockpt(masterFd_) != 0) {
+      error_ = std::string("解锁 PTY 从端失败: ") + std::strerror(errno);
+      closeAll();
+      return;
+    }
+
+    char slaveName[128] = {};
+    if (::ptsname_r(masterFd_, slaveName, sizeof(slaveName)) != 0) {
+      error_ = std::string("获取 PTY 从端路径失败: ") + std::strerror(errno);
+      closeAll();
+      return;
+    }
+    slavePath_ = slaveName;
+
+    slaveFd_ = ::open(slavePath_.c_str(), O_RDWR | O_NOCTTY);
+    if (slaveFd_ < 0) {
+      error_ = std::string("打开 PTY 从端失败: ") + std::strerror(errno);
+      closeAll();
+      return;
+    }
+  }
+
+  ~ScopedPseudoTty() { closeAll(); }
+
+  bool ok() const { return !slavePath_.empty(); }
+  const std::string& error() const { return error_; }
+  const std::string& slavePath() const { return slavePath_; }
+
+private:
+  void closeAll() {
+    if (slaveFd_ >= 0) {
+      ::close(slaveFd_);
+      slaveFd_ = -1;
+    }
+    if (masterFd_ >= 0) {
+      ::close(masterFd_);
+      masterFd_ = -1;
+    }
+  }
+
+  int masterFd_ = -1;
+  int slaveFd_ = -1;
+  std::string slavePath_;
+  std::string error_;
 };
 
 class LinkManagerTestEnv {
@@ -210,7 +284,7 @@ TEST(ModbusRtuLinkManagerTest, DeleteLinkFailureMarksPendingDeleteAndKeepsLocal)
   EXPECT_EQ(got.state(), ModbusRTUProto::LINK_STATE_PENDING_DELETE);
 }
 
-// 验证：address_base=ONE 且点表包含 address=0 时，StartLink 返回 INVALID_ARGUMENT。
+// 验证：address_base=ONE 且点表包含 address=0 时，StartLink 返回 FAILED_PRECONDITION。
 TEST(ModbusRtuLinkManagerTest, StartLinkRejectsZeroAddressWhenBaseOne) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
@@ -235,7 +309,7 @@ TEST(ModbusRtuLinkManagerTest, StartLinkRejectsZeroAddressWhenBaseOne) {
   ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
 
   auto st = mgr.StartLink("conn-addr");
-  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
 
   ModbusRTUProto::LinkInfo got;
   ASSERT_TRUE(mgr.GetLink("conn-addr", &got).ok());
@@ -480,12 +554,14 @@ TEST(ModbusRtuLinkManagerTest, UpdateConfigPersistsMqttConfigToFile) {
   EXPECT_TRUE(std::filesystem::exists(mqttPath));
 }
 
-// 验证：链路配置与点表在落盘后可被新 LinkManager 实例恢复，且恢复后保持 STOPPED。
+// 验证：链路配置与点表在落盘后可被新 LinkManager 实例恢复，且恢复后会自动启动模块内连接功能。
 TEST(ModbusRtuLinkManagerTest, LoadsPersistedLinkAndPointTableAfterRestart) {
   ScopedTempDir dir;
+  ScopedPseudoTty pty;
   const auto mqttPath = dir.path() / "mqtt.pb";
   const auto linksPath = dir.path() / "links.pb";
   const auto pointTablesPath = dir.path() / "point_tables.pb";
+  ASSERT_TRUE(pty.ok()) << pty.error();
 
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
@@ -496,14 +572,15 @@ TEST(ModbusRtuLinkManagerTest, LoadsPersistedLinkAndPointTableAfterRestart) {
     mgr.setDataCenterStub(stub);
 
     ModbusRTUProto::LinkInfo info;
-    ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("conn-persist", "/dev/ttyUSB0", 1), &info).ok());
+    ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("conn-persist", pty.slavePath().c_str(), 1), &info).ok());
     connId = info.conn_id();
 
     ModbusRTUProto::UpsertPointTableRequest ptReq;
     ptReq.set_conn_name("conn-persist");
     ptReq.set_replace(true);
-    *ptReq.add_points() = MakeCoilPoint("coil-a", 1);
+    *ptReq.add_points() = MakeWriteSingleRegisterPoint("reg-write-a", 1);
     ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+    ASSERT_TRUE(mgr.StopLink("conn-persist").ok());
   }
 
   {
@@ -514,18 +591,20 @@ TEST(ModbusRtuLinkManagerTest, LoadsPersistedLinkAndPointTableAfterRestart) {
     ModbusRTUProto::LinkInfo info;
     ASSERT_TRUE(mgr.GetLink("conn-persist", &info).ok());
     EXPECT_EQ(info.conn_id(), connId);
-    EXPECT_EQ(info.state(), ModbusRTUProto::LINK_STATE_STOPPED);
+    EXPECT_EQ(info.state(), ModbusRTUProto::LINK_STATE_RUNNING);
     EXPECT_TRUE(info.last_error().empty());
 
     ModbusRTUProto::PointTable pointTable;
     ASSERT_TRUE(mgr.GetPointTable("conn-persist", &pointTable).ok());
     ASSERT_EQ(pointTable.points_size(), 1);
-    EXPECT_EQ(pointTable.points(0).tag(), "coil-a");
+    EXPECT_EQ(pointTable.points(0).tag(), "reg-write-a");
     EXPECT_EQ(pointTable.points(0).address(), 1u);
+
+    ASSERT_TRUE(mgr.StopLink("conn-persist").ok());
   }
 }
 
-// 验证：DeleteLink 进入 PENDING_DELETE 后会落盘，重启后仍阻止启动链路功能。
+// 验证：DeleteLink 进入 PENDING_DELETE 后会落盘，重启后仍阻止启动链路功能，并在 last_error 中反映阻塞原因。
 TEST(ModbusRtuLinkManagerTest, LoadsPendingDeleteStateAfterRestart) {
   ScopedTempDir dir;
   const auto mqttPath = dir.path() / "mqtt.pb";
@@ -555,7 +634,7 @@ TEST(ModbusRtuLinkManagerTest, LoadsPendingDeleteStateAfterRestart) {
     ModbusRTUProto::LinkInfo info;
     ASSERT_TRUE(mgr.GetLink("conn-pending-persist", &info).ok());
     EXPECT_EQ(info.state(), ModbusRTUProto::LINK_STATE_PENDING_DELETE);
-    EXPECT_TRUE(info.last_error().empty());
+    EXPECT_THAT(info.last_error(), HasSubstr("待删除状态"));
 
     auto status = mgr.StartLink("conn-pending-persist");
     EXPECT_EQ(status.error_code(), grpc::StatusCode::FAILED_PRECONDITION);

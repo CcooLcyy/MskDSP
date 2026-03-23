@@ -107,23 +107,11 @@ bool applyModbusRtuConfig(const ConfigPusherProto::ModbusRtuConfig &config,
     }
 
     if (task.start()) {
-      ModbusRTUProto::StartLinkRequest startReq;
-      startReq.set_conn_name(linkConfig.conn_name());
-      LOG_INFO("发送 ModbusRTU 启动连接请求报文: {}", formatProtoForLog(startReq));
-      grpc::ClientContext startCtx;
-      ModbusRTUProto::Empty startResp;
-      status = stub->StartLink(&startCtx, startReq, &startResp);
-      if (!status.ok()) {
-        LOG_ERROR("ModbusRTU 启动连接失败: 连接名={}, 请求={}, 原因={}",
-                  linkConfig.conn_name(),
-                  formatProtoForLog(startReq),
-                  status.error_message());
-        ok = false;
-        continue;
-      }
-      LOG_INFO("收到 ModbusRTU 启动连接响应报文: {}", formatProtoForLog(startResp));
-      LOG_INFO("ModbusRTU 连接启动成功: 连接名={}", linkConfig.conn_name());
+      LOG_INFO("ModbusRTU 配置任务声明 start=true，当前版本仅保留兼容日志，不再额外调用 StartLink: 连接名={}",
+               linkConfig.conn_name());
     }
+    LOG_INFO("ModbusRTU 配置任务下发完成，后续是否启动连接功能将由模块依据当前配置自动判定: 连接名={}",
+             linkConfig.conn_name());
   }
 
   return ok;

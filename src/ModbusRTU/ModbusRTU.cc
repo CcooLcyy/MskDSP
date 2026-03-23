@@ -43,11 +43,11 @@ ModbusRTU::ModbusRTU() :
 ModbusRTU::~ModbusRTU() {}
 void ModbusRTU::start(std::stop_token stopToken) {
   LOG_INFO("ModbusRTU 模块启动");
-  linkManager_.LoadPersistedConfig();
   modbusRTUService_->setModbusRTU(this);
   LOG_INFO("ModbusRTU 服务实例绑定完成");
   grpcServerBuilder(modbusRTUService_);
   LOG_INFO("ModbusRTU gRPC 服务已启动");
+  linkManager_.LoadPersistedConfig();
 
   std::mutex mu;
   std::condition_variable_any cv;

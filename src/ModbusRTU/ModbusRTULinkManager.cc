@@ -378,8 +378,16 @@ void LinkManager::LoadPersistedConfig() {
       } else {
         runtime.pointTable = std::move(pointTable);
         pointCount = static_cast<size_t>(tableIt->second.points_size());
+        runtime.pointTableConfigured = pointCount > 0;
+        if (!runtime.pointTableConfigured) {
+          LOG_WARNING("ModbusRTU 恢复到空点表，链路将保持已停止等待后续补全: conn_name={}",
+                      normalized.conn_name());
+        }
       }
       pointTablesByConn.erase(tableIt);
+    } else {
+      LOG_WARNING("ModbusRTU 恢复链路时未找到对应点表，链路将保持已停止等待后续补全: conn_name={}",
+                  normalized.conn_name());
     }
 
     auto syncStatus = dataCenter_.UpsertConnTags(runtime.connId, runtime.pointTable.Tags(), true);
@@ -445,6 +453,7 @@ void LinkManager::LoadPersistedConfig() {
   }
 
   LOG_INFO("ModbusRTU 本地持久化配置加载完成: 链路数={}", linksSnapshot.links_size());
+  TryAutoStartReadyLinks("持久化恢复完成后");
 }
 
 void LinkManager::setDataCenterServerAddress(std::string address) {
@@ -494,6 +503,7 @@ grpc::Status LinkManager::UpdateConfig(const ModbusRTUProto::UpdateConfigRequest
            mqtt.client_id());
   response->set_ok(true);
   response->set_message("MQTT 配置更新成功");
+  autoStartEligibleLinks("MQTT 配置更新后");
   return grpc::Status::OK;
 }
 
@@ -770,6 +780,88 @@ grpc::Status LinkManager::savePointTablesConfig(const ModbusRTUProto::PointTable
   }
   LOG_INFO("ModbusRTU 点表配置已落盘: 链路数={}", config.point_tables_size());
   return grpc::Status::OK;
+}
+
+bool LinkManager::isLinkAutoStartReadyLocked(const LinkRuntime& link, std::string* reason) const {
+  auto setReason = [reason](std::string text) {
+    if (reason != nullptr) {
+      *reason = std::move(text);
+    }
+    return false;
+  };
+
+  if (link.state == ModbusRTUProto::LINK_STATE_RUNNING) {
+    return setReason("链路已在运行");
+  }
+  if (link.state == ModbusRTUProto::LINK_STATE_PENDING_DELETE) {
+    return setReason("链路处于待删除状态");
+  }
+  if (link.connId == 0) {
+    return setReason("conn_id 无效");
+  }
+  if (!link.pointTableConfigured) {
+    return setReason("链路点表未就绪，当前规则要求链路配置和点表都成功恢复或下发后才启动连接功能");
+  }
+  if (link.config.transport_type() == ModbusRTUProto::TRANSPORT_MQTT_UART && !mqttClient_.hasConfig()) {
+    return setReason("MQTT 全局配置未就绪，当前规则要求 MQTT 配置成功恢复或下发后才启动连接功能");
+  }
+  if (link.config.address_base() == ModbusRTUProto::ADDRESS_BASE_ONE) {
+    for (const auto& point : link.pointTable.Points()) {
+      if (point.address == 0) {
+        return setReason("address_base=ONE 但点表存在 address=0，当前规则不允许启动连接功能");
+      }
+    }
+  }
+  return true;
+}
+
+grpc::Status LinkManager::maybeAutoStartLink(const std::string& connName, std::string_view trigger) {
+  std::string reason;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = linksByName_.find(connName);
+    if (it == linksByName_.end()) {
+      return makeNotFound(connName);
+    }
+    if (!isLinkAutoStartReadyLocked(it->second, &reason)) {
+      it->second.lastError = reason;
+      LOG_INFO("ModbusRTU 暂不自动启动链路: conn_name={}, 触发来源={}, 原因={}", connName, trigger, reason);
+      return grpc::Status::OK;
+    }
+  }
+
+  LOG_INFO("ModbusRTU 检测到链路已满足最小可运行条件，准备自动启动: conn_name={}, 触发来源={}",
+           connName,
+           trigger);
+  auto status = StartLink(connName);
+  if (!status.ok()) {
+    LOG_WARNING("ModbusRTU 自动启动链路失败: conn_name={}, 触发来源={}, 原因={}",
+                connName,
+                trigger,
+                status.error_message());
+    return status;
+  }
+  LOG_INFO("ModbusRTU 自动启动链路完成: conn_name={}, 触发来源={}", connName, trigger);
+  return grpc::Status::OK;
+}
+
+void LinkManager::autoStartEligibleLinks(std::string_view trigger) {
+  std::vector<std::string> connNames;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    connNames.reserve(linksByName_.size());
+    for (const auto& [connName, _] : linksByName_) {
+      connNames.emplace_back(connName);
+    }
+  }
+  std::sort(connNames.begin(), connNames.end());
+  for (const auto& connName : connNames) {
+    (void)maybeAutoStartLink(connName, trigger);
+  }
+}
+
+void LinkManager::TryAutoStartReadyLinks(std::string_view trigger) {
+  autoStartEligibleLinks(trigger);
 }
 
 grpc::Status LinkManager::ensureSerialCompatibleLocked(const SerialKey& key, const std::string& connName) const {
@@ -1126,7 +1218,18 @@ grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& re
     if (!status.ok()) {
       return status;
     }
-    *out = std::move(info);
+    (void)maybeAutoStartLink(connName, "链路配置更新后");
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = linksByName_.find(connName);
+      if (it == linksByName_.end()) {
+        return makeNotFound(connName);
+      }
+      status = fillLinkInfoLocked(it->second, out);
+      if (!status.ok()) {
+        return status;
+      }
+    }
     return grpc::Status::OK;
   }
 
@@ -1193,6 +1296,18 @@ grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& re
   if (!status.ok()) {
     return status;
   }
+  (void)maybeAutoStartLink(connName, "链路配置创建后");
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = linksByName_.find(connName);
+    if (it == linksByName_.end()) {
+      return makeNotFound(connName);
+    }
+    status = fillLinkInfoLocked(it->second, out);
+    if (!status.ok()) {
+      return status;
+    }
+  }
   return grpc::Status::OK;
 }
 
@@ -1231,6 +1346,7 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
   if (!status.ok()) {
     return status;
   }
+  LOG_INFO("ModbusRTU 开始启动链路功能: conn_name={}", connName);
 
   ModbusRTUProto::LinkConfig config;
   PointTable pointTable;
@@ -1250,7 +1366,13 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
       return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路处于待删除状态");
     }
     if (link.state == ModbusRTUProto::LINK_STATE_RUNNING) {
-      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路已在运行");
+      LOG_INFO("ModbusRTU 启动链路功能跳过: conn_name={}, 原因=链路已在运行", connName);
+      return grpc::Status::OK;
+    }
+    std::string reason;
+    if (!isLinkAutoStartReadyLocked(link, &reason)) {
+      link.lastError = reason;
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, reason);
     }
     config = link.config;
     pointTable = link.pointTable;
@@ -1315,6 +1437,14 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
         released->Close();
       }
       return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路处于待删除状态");
+    }
+    if (link.state == ModbusRTUProto::LINK_STATE_RUNNING) {
+      auto released = isSerial ? releaseSerialBusLocked(serialKey) : releaseMqttBusLocked(mqttKey);
+      if (released) {
+        released->Close();
+      }
+      LOG_INFO("ModbusRTU 启动链路功能跳过: conn_name={}, 原因=链路已在运行", connName);
+      return grpc::Status::OK;
     }
     link.bus = bus;
     link.state = ModbusRTUProto::LINK_STATE_RUNNING;
@@ -1506,12 +1636,14 @@ grpc::Status LinkManager::UpsertPointTable(const ModbusRTUProto::UpsertPointTabl
       return makeNotFound(request.conn_name());
     }
     it->second.pointTable = std::move(next);
+    it->second.pointTableConfigured = !it->second.pointTable.Points().empty();
     pointTablesConfig = dumpPointTablesConfigLocked();
   }
   status = savePointTablesConfig(pointTablesConfig);
   if (!status.ok()) {
     return status;
   }
+  (void)maybeAutoStartLink(request.conn_name(), "点表配置更新后");
   return grpc::Status::OK;
 }
 
