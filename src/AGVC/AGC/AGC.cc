@@ -59,6 +59,8 @@ void AGC::start(std::stop_token stopToken) {
   if (!restoreStatus.ok()) {
     LOG_ERROR("AGC 恢复本地控制组配置存在错误: {}", restoreStatus.error_message());
   }
+  LOG_INFO("AGC 开始在模块启动阶段检查已恢复控制组是否满足自动启动条件");
+  groupManager_.TryAutoStartReadyGroups("模块启动后恢复检查");
   while (!stopToken.stop_requested()) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }

@@ -38,6 +38,7 @@ public:
   grpc::Status StartGroup(const std::string& groupName);
   grpc::Status StopGroup(const std::string& groupName);
   grpc::Status DeleteGroup(const std::string& groupName);
+  void TryAutoStartReadyGroups(std::string_view trigger);
 
 private:
   struct ControlTrigger {
@@ -81,6 +82,8 @@ private:
   grpc::Status validateGroupName(const std::string& groupName) const;
   grpc::Status validateGroupConfig(const AGCProto::GroupConfig& config) const;
   grpc::Status fillGroupInfoLocked(const GroupRuntime& g, AGCProto::GroupInfo* out) const;
+  grpc::Status checkStartPreconditionsLocked(const GroupRuntime& g) const;
+  grpc::Status tryAutoStartGroup(const std::string& groupName, std::string_view trigger);
   AGCProto::GroupsConfig dumpGroupsConfigLocked() const;
   grpc::Status saveGroupsLocked();
   grpc::Status restoreGroupFromConfig(const AGCProto::GroupConfig& config, AGCProto::GroupState restoredState);

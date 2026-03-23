@@ -41,8 +41,8 @@ TEST(ConfigPusherApplyAgcTest, NullStubReturnsFalse) {
   EXPECT_FALSE(ConfigPusher::applyAgcConfig(config, nullptr));
 }
 
-// 验证：AGC 配置任务会调用 UpsertGroup，并在 start=true 时调用 StartGroup。
-TEST(ConfigPusherApplyAgcTest, UpsertAndStartGroupSuccess) {
+// 验证：AGC 配置任务在 start=true 时只调用 UpsertGroup，不再额外调用 StartGroup。
+TEST(ConfigPusherApplyAgcTest, UpsertGroupSuccessWhenStartFlagIsTrue) {
   auto config = MakeAgcConfig(true);
   auto stub = std::make_unique<AGCProto::MockAGCServiceStub>();
 
@@ -58,13 +58,7 @@ TEST(ConfigPusherApplyAgcTest, UpsertAndStartGroupSuccess) {
         resp->set_conn_id(100);
         return grpc::Status::OK;
       }));
-  EXPECT_CALL(*stub, StartGroup(_, _, _))
-      .WillOnce(Invoke([](grpc::ClientContext*,
-                          const AGCProto::StartGroupRequest& req,
-                          AGCProto::Empty*) {
-        EXPECT_EQ(req.group_name(), "g-1");
-        return grpc::Status::OK;
-      }));
+  EXPECT_CALL(*stub, StartGroup(_, _, _)).Times(0);
 
   EXPECT_TRUE(ConfigPusher::applyAgcConfig(config, stub.get()));
 }
@@ -98,4 +92,16 @@ TEST(ConfigPusherApplyAgcTest, UpsertWithoutStartGroup) {
   EXPECT_CALL(*stub, StartGroup(_, _, _)).Times(0);
 
   EXPECT_TRUE(ConfigPusher::applyAgcConfig(config, stub.get()));
+}
+
+// 验证：缺少 config.group_name 时不会继续调用 UpsertGroup，并返回失败。
+TEST(ConfigPusherApplyAgcTest, MissingGroupNameSkipsRpc) {
+  auto config = MakeAgcConfig(false);
+  config.mutable_groups(0)->mutable_upsert()->mutable_config()->set_group_name("");
+  auto stub = std::make_unique<AGCProto::MockAGCServiceStub>();
+
+  EXPECT_CALL(*stub, UpsertGroup(_, _, _)).Times(0);
+  EXPECT_CALL(*stub, StartGroup(_, _, _)).Times(0);
+
+  EXPECT_FALSE(ConfigPusher::applyAgcConfig(config, stub.get()));
 }

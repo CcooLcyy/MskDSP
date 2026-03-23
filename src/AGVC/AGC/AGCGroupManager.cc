@@ -82,6 +82,89 @@ grpc::Status GroupManager::fillGroupInfoLocked(const GroupRuntime &g, AGCProto::
   return grpc::Status::OK;
 }
 
+grpc::Status GroupManager::checkStartPreconditionsLocked(const GroupRuntime &g) const {
+  if (g.state == AGCProto::GROUP_STATE_PENDING_DELETE) {
+    return makePreconditionFailed("控制组处于待删除状态");
+  }
+  auto status = validateGroupConfig(g.config);
+  if (!status.ok()) {
+    return makePreconditionFailed(std::format("控制组配置未通过当前校验: {}", status.error_message()));
+  }
+  if (g.connId == 0) {
+    return makePreconditionFailed("控制组 conn_id 无效");
+  }
+  const auto tags = collectAllTags(g.config);
+  if (tags.empty()) {
+    return makePreconditionFailed("控制组订阅标签为空，当前规则要求控制组配置完整后才启动控制组功能");
+  }
+  return grpc::Status::OK;
+}
+
+grpc::Status GroupManager::tryAutoStartGroup(const std::string &groupName, std::string_view trigger) {
+  size_t memberCount = 0;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end()) {
+      return makeNotFound(groupName);
+    }
+    memberCount = static_cast<size_t>(it->second.config.members_size());
+    if (it->second.state == AGCProto::GROUP_STATE_RUNNING) {
+      LOG_INFO("AGC 自动启动控制组跳过: group_name={}, 触发来源={}, 原因=控制组已在运行",
+               groupName,
+               trigger);
+      return grpc::Status::OK;
+    }
+    auto status = checkStartPreconditionsLocked(it->second);
+    if (!status.ok()) {
+      it->second.lastError = status.error_message();
+      LOG_INFO("AGC 自动启动控制组跳过: group_name={}, 触发来源={}, 成员数={}, 原因={}",
+               groupName,
+               trigger,
+               memberCount,
+               status.error_message());
+      return status;
+    }
+  }
+
+  LOG_INFO("AGC 自动启动控制组: group_name={}, 触发来源={}, 规则=控制组配置通过当前校验且非待删除, 成员数={}",
+           groupName,
+           trigger,
+           memberCount);
+  auto status = StartGroup(groupName);
+  if (!status.ok()) {
+    LOG_WARNING("AGC 自动启动控制组失败: group_name={}, 触发来源={}, 原因={}",
+                groupName,
+                trigger,
+                status.error_message());
+  } else {
+    LOG_INFO("AGC 自动启动控制组成功: group_name={}, 触发来源={}", groupName, trigger);
+  }
+  return status;
+}
+
+void GroupManager::TryAutoStartReadyGroups(std::string_view trigger) {
+  std::vector<std::string> groupNames;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    groupNames.reserve(groupsByName_.size());
+    for (const auto &[groupName, group] : groupsByName_) {
+      if (group.state == AGCProto::GROUP_STATE_STOPPED) {
+        groupNames.push_back(groupName);
+      }
+    }
+  }
+
+  if (groupNames.empty()) {
+    LOG_INFO("AGC 自动启动检查完成: 触发来源={}, 当前无可评估控制组", trigger);
+    return;
+  }
+
+  for (const auto &groupName : groupNames) {
+    (void)tryAutoStartGroup(groupName, trigger);
+  }
+}
+
 AGCProto::GroupsConfig GroupManager::dumpGroupsConfigLocked() const {
   AGCProto::GroupsConfig config;
   for (const auto &[_, group] : groupsByName_) {
@@ -214,6 +297,7 @@ grpc::Status GroupManager::RestorePersistedGroups() {
   }
 
   LOG_INFO("AGC 控制组配置恢复完成: 成功={}, 失败={}", restored, failed);
+  TryAutoStartReadyGroups("持久化恢复完成后");
   if (failed > 0) {
     return grpc::Status(grpc::StatusCode::INTERNAL, "部分控制组恢复失败");
   }
@@ -318,7 +402,18 @@ grpc::Status GroupManager::UpsertGroup(const AGCProto::UpsertGroupRequest &reque
       }
     }
   }
-
+  (void)tryAutoStartGroup(groupName, "控制组配置更新成功");
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end()) {
+      return makeNotFound(groupName);
+    }
+    status = fillGroupInfoLocked(it->second, out);
+    if (!status.ok()) {
+      return status;
+    }
+  }
   return grpc::Status::OK;
 }
 
@@ -440,11 +535,14 @@ grpc::Status GroupManager::StartGroup(const std::string &groupName) {
     if (it == groupsByName_.end()) {
       return makeNotFound(groupName);
     }
-    if (it->second.state == AGCProto::GROUP_STATE_PENDING_DELETE) {
-      return makePreconditionFailed("控制组处于待删除状态");
-    }
     if (it->second.state == AGCProto::GROUP_STATE_RUNNING) {
-      return makePreconditionFailed("控制组已在运行");
+      LOG_INFO("AGC 启动控制组请求幂等成功: group_name={}, 原因=控制组已在运行", groupName);
+      return grpc::Status::OK;
+    }
+    status = checkStartPreconditionsLocked(it->second);
+    if (!status.ok()) {
+      it->second.lastError = status.error_message();
+      return status;
     }
     startThreadsLocked(groupName, &it->second);
     it->second.state = AGCProto::GROUP_STATE_RUNNING;

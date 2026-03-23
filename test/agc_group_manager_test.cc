@@ -127,8 +127,8 @@ bool WaitForSubscriptionCount(const FakeDataCenterState& state, uint32_t connId,
 }
 }  // 命名空间结束
 
-// 验证：create_only UpsertGroup 会向 DataCenter 取/建 conn_id，并回填到 GroupInfo。
-TEST(AgcGroupManagerTest, UpsertGroupCreateOnlyReturnsConnId) {
+// 验证：create_only UpsertGroup 会向 DataCenter 取/建 conn_id，并在配置合法时自动启动控制组内功能。
+TEST(AgcGroupManagerTest, UpsertGroupCreateOnlyReturnsConnIdAndAutoStartsReadyGroup) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
@@ -139,9 +139,10 @@ TEST(AgcGroupManagerTest, UpsertGroupCreateOnlyReturnsConnId) {
   AGCProto::GroupInfo info;
   ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
   EXPECT_NE(info.conn_id(), 0u);
-  EXPECT_EQ(info.state(), AGCProto::GROUP_STATE_STOPPED);
+  EXPECT_EQ(info.state(), AGCProto::GROUP_STATE_RUNNING);
   EXPECT_EQ(info.config().group_name(), "g-1");
   EXPECT_TRUE(state.HasConnection("AGC", "g-1"));
+  ASSERT_TRUE(mgr.StopGroup("g-1").ok());
 }
 
 // 验证：当 DataCenter 已存在相同 (module_name, conn_name) 时，create_only UpsertGroup 返回 ALREADY_EXISTS。
@@ -379,8 +380,8 @@ TEST(AgcGroupManagerTest, StartGroupRejectsWhenPendingDelete) {
   EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
 }
 
-// 验证：StartGroup 会读取初始输入快照触发一次控制，并且不会按固定周期重复下发。
-TEST(AgcGroupManagerTest, StartGroupUsesInitialSnapshotWithoutPeriodicRepublish) {
+// 验证：显式 StartGroup 在预置初始输入快照后会触发一次控制，并且不会按固定周期重复下发。
+TEST(AgcGroupManagerTest, ExplicitStartUsesInitialSnapshotWithoutPeriodicRepublish) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
@@ -390,6 +391,7 @@ TEST(AgcGroupManagerTest, StartGroupUsesInitialSnapshotWithoutPeriodicRepublish)
 
   AGCProto::GroupInfo info;
   ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+  ASSERT_TRUE(mgr.StopGroup("g-initial-snapshot").ok());
   PublishDoublePoint(&state, info.conn_id(), "P_CMD", 60.0);
   PublishDoublePoint(&state, info.conn_id(), "INV1_P_MEAS", 10.0);
   PublishDoublePoint(&state, info.conn_id(), "INV2_P_MEAS", 20.0);
@@ -487,7 +489,7 @@ TEST(AgcGroupManagerTest, RuntimeMeasurementUpdateTriggersRecalculation) {
   ASSERT_TRUE(mgr.StopGroup("g-runtime-meas").ok());
 }
 
-// 验证：控制组运行中收到重复的同值输入时，不会重复触发控制发布。
+// 验证：控制组显式启动并完成首轮发布后，运行中收到重复的同值输入时，不会重复触发控制发布。
 TEST(AgcGroupManagerTest, DuplicateRuntimeCommandDoesNotRepublish) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
@@ -498,6 +500,7 @@ TEST(AgcGroupManagerTest, DuplicateRuntimeCommandDoesNotRepublish) {
 
   AGCProto::GroupInfo info;
   ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+  ASSERT_TRUE(mgr.StopGroup("g-duplicate-cmd").ok());
   PublishDoublePoint(&state, info.conn_id(), "P_CMD", 60.0);
   PublishDoublePoint(&state, info.conn_id(), "INV1_P_MEAS", 10.0);
   PublishDoublePoint(&state, info.conn_id(), "INV2_P_MEAS", 20.0);
@@ -516,8 +519,8 @@ TEST(AgcGroupManagerTest, DuplicateRuntimeCommandDoesNotRepublish) {
   ASSERT_TRUE(mgr.StopGroup("g-duplicate-cmd").ok());
 }
 
-// 验证：UpsertGroup 会把控制组配置落盘，随后可由新的 GroupManager 恢复为 STOPPED 状态。
-TEST(AgcGroupManagerTest, RestorePersistedGroupsLoadsStoppedGroupsFromLocalStore) {
+// 验证：UpsertGroup 会把控制组配置落盘，随后新的 GroupManager 恢复后会自动启动可运行控制组。
+TEST(AgcGroupManagerTest, RestorePersistedGroupsLoadsGroupConfigFromLocalStore) {
   ScopedTempDir dir;
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
@@ -540,9 +543,43 @@ TEST(AgcGroupManagerTest, RestorePersistedGroupsLoadsStoppedGroupsFromLocalStore
   AGCProto::GroupInfo got;
   ASSERT_TRUE(reader.GetGroup("g-persist", &got).ok());
   EXPECT_EQ(got.config().group_name(), "g-persist");
-  EXPECT_EQ(got.state(), AGCProto::GROUP_STATE_STOPPED);
+  EXPECT_EQ(got.state(), AGCProto::GROUP_STATE_RUNNING);
   EXPECT_TRUE(got.last_error().empty());
   EXPECT_NE(got.conn_id(), 0u);
+  ASSERT_TRUE(reader.StopGroup("g-persist").ok());
+}
+
+// 验证：RestorePersistedGroups 恢复出可运行控制组后，会自动启动控制组内功能。
+TEST(AgcGroupManagerTest, RestorePersistedGroupsAutoStartsReadyGroup) {
+  ScopedTempDir dir;
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  const auto groupsPath = dir.path() / "groups.pb";
+  uint32_t restoredConnId = 0;
+
+  {
+    GroupManager writer("AGC", groupsPath);
+    writer.setDataCenterStub(stub);
+
+    auto req = MakeGroupReq("g-auto-restore");
+    AGCProto::GroupInfo info;
+    ASSERT_TRUE(writer.UpsertGroup(req, &info).ok());
+    restoredConnId = info.conn_id();
+    ASSERT_NE(restoredConnId, 0u);
+  }
+
+  GroupManager reader("AGC", groupsPath);
+  reader.setDataCenterStub(stub);
+  ASSERT_TRUE(reader.RestorePersistedGroups().ok());
+
+  AGCProto::GroupInfo got;
+  ASSERT_TRUE(reader.GetGroup("g-auto-restore", &got).ok());
+  EXPECT_EQ(got.state(), AGCProto::GROUP_STATE_RUNNING);
+  EXPECT_TRUE(got.last_error().empty());
+  EXPECT_EQ(got.conn_id(), restoredConnId);
+  EXPECT_TRUE(WaitForSubscriptionCount(state, restoredConnId, 1u));
+
+  ASSERT_TRUE(reader.StopGroup("g-auto-restore").ok());
 }
 
 // 验证：DeleteGroup 进入 PENDING_DELETE 后会落盘，重启后仍阻止启动控制组。
