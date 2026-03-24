@@ -108,7 +108,7 @@ ModbusRTU 模块负责管理 ModbusRTU 链路与点表，当前同时支持两�
 
 ## 主站写寄存器闭环
 - 触发方式：上位机或其他模块先把命令写入 DataCenter 源端点，再通过 `Route` 路由到 ModbusRTU 的 `conn_id + tag`。
-- ModbusRTU 主站启动连接功能后，会订阅本连接内所有写点 `tag`；收到更新后自动编码并发送 `0x06/0x10` RTU 报文。
+- ModbusRTU 主站链路进入运行态后，会订阅本连接内所有写点 `tag`；收到更新后自动编码并发送 `0x06/0x10` RTU 报文。
 - `FUNCTION_WRITE_SINGLE_REGISTER` 适合单个 16 位设定值。
 - `FUNCTION_WRITE_MULTIPLE_REGISTERS` 适合 32 位设定值，或明确要求用 `0x10` 下发的 16 位设定值。
 - 命令值支持 DataCenter `double/int/bool`；`bool` 会按 `0/1` 处理。

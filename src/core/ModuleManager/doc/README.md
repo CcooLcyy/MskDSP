@@ -115,6 +115,7 @@ extern "C" BOOST_SYMBOL_EXPORT bool GetModuleManifestPb(const uint8_t **data, si
 ### 稳定性与容错
 - 模块重启/Stop 后其 `outer_grpc_server` 可能变化，上位机应在连接失败时重新调用 `GetRunningModuleInfo` 刷新地址并重连。
 - `StartModule` 返回后模块线程已启动，但服务就绪可能存在短暂延迟；建议上位机对目标模块做一次健康探测/重试连接后再进入配置流程。
+- 若启用了 `./conf/module_manager.jsonc` 的自启动列表，或在 `UPPER` 模式下命中了持久化配置文件痕迹自动启动，可跳过 `StartModule`，直接通过 `GetRunningModuleInfo` 获取已启动模块信息。
 
 ## 端口策略
 - 模块管理器对外 gRPC：固定监听 `0.0.0.0:7000`。
