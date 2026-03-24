@@ -256,6 +256,36 @@ TEST_F(ModuleManagerTest, AutoStartModulesFromJsonConfig) {
   EXPECT_EQ(mgr.getModuleRunningInfos().module_running_info_size(), 0);
 }
 
+// 验证：`CONFIG_PUSHER` 模式下即使存在持久化配置文件痕迹，也只按 jsonc 中的 auto_start_modules 启动模块。
+TEST_F(ModuleManagerTest, ConfigPusherModeIgnoresPersistentTraceAutoStart) {
+  ModuleManager::ModuleManager mgr;
+  const auto &infos = mgr.getModuleInfos();
+  const auto candidate = FindAvailableTraceableModule(infos);
+  if (!candidate.has_value()) {
+    GTEST_SKIP() << "当前测试环境未提供可验证持久化痕迹自动启动的真实模块";
+  }
+
+  TouchFile(candidate->tracePath);
+  WriteAutoStartConfig(R"jsonc(
+{
+  "boot_config_mode": "CONFIG_PUSHER",
+  "auto_start_modules": ["Dummy"]
+}
+)jsonc");
+
+  std::stop_source stopSource;
+  stopSource.request_stop();
+  mgr.start(stopSource.get_token());
+
+  const auto running = mgr.getModuleRunningInfos();
+  EXPECT_EQ(CountRunningModuleByName(running, kDummyModuleName), 1);
+  EXPECT_EQ(CountRunningModuleByName(running, candidate->moduleName), 0);
+
+  const auto dummyInfo = FindModuleInfoByName(mgr.getModuleInfos(), kDummyModuleName);
+  mgr.unloadModule(dummyInfo);
+  EXPECT_EQ(mgr.getModuleRunningInfos().module_running_info_size(), 0);
+}
+
 // 验证：`UPPER` 模式下发现持久化配置文件痕迹时，会自动启动对应模块。
 TEST_F(ModuleManagerTest, UpperModeAutoStartsModuleFromPersistentTrace) {
   ModuleManager::ModuleManager mgr;
