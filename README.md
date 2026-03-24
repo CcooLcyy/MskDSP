@@ -89,10 +89,17 @@ docker build --platform=linux/arm64 -t mskdsp:arm64 .
 ```
 3) 运行（使用 host 网络，不需要端口映射）：
 ```bash
-docker run --network host --rm mskdsp:arm64
+mkdir -p ./log
+docker run --network host --rm --log-driver none \
+  -v "$(pwd)/log:/opt/mskdsp/log" \
+  mskdsp:arm64
 ```
 
 注意：`Dockerfile` 基于 `localhost/arm64v8/ubuntu`，确保该基础镜像已存在或按需调整镜像名。
+
+说明：
+- 建议 Docker 场景使用 `--log-driver none`，直接关闭 Docker 对容器标准输出/标准错误的日志收集，避免生成 `/var/lib/docker/containers/<id>/<id>-json.log`。
+- 使用该参数后，`docker logs` 不再提供输出；请先将宿主机当前目录的 `./log` 挂载到容器内 `/opt/mskdsp/log`，正式运行日志可直接查看宿主机 `./log` 目录。
 
 ### 启动自加载配置
 可选配置文件：`./conf/module_manager.jsonc`（JSONC，支持注释），用于控制 ModuleManager 启动时自动加载的模块列表。

@@ -330,11 +330,12 @@ start_container() {
   if [[ "${1:-}" == "--" ]]; then
     shift
   fi
-  echo "运行容器仅映射 conf/module/log 目录"
+  echo "运行容器仅映射 conf/module/log 目录，并关闭 Docker 日志收集"
   docker run -d \
     --name "${CONTAINER_NAME}" \
     --privileged \
     --restart unless-stopped \
+    --log-driver none \
     --network host \
     -v "${HOST_DIR}/conf:${CONTAINER_DIR}/conf" \
     -v "${HOST_DIR}/module:${CONTAINER_DIR}/module" \
