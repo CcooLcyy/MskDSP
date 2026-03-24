@@ -5,7 +5,7 @@ MQTTManager 提供通用 MQTT 连接与请求-响应能力，业务模块通过 
 
 ## 能力清单
 - 单实例多连接（每个连接一个线程）
-- 业务模块通过 gRPC 直接提供 broker 连接参数（host/port）
+- 业务模块通过 gRPC 直接提供 broker 连接参数（host/port/client_id 等）
 - 请求-响应：payload 原样透传，按 JSON 字段匹配响应
 - 普通发布与订阅：payload 原样透传
 
@@ -19,12 +19,13 @@ MQTTManager 提供通用 MQTT 连接与请求-响应能力，业务模块通过 
 - 运行时可通过管理器 `GetRunningModuleInfo` 查询实际地址
 
 ## 连接与隔离规则
-- 连接唯一标识：`host:port`
-- 若同一 `host:port` 连接参数不一致，将返回错误（避免连接冲突）
+- 连接唯一标识：`host:port + client_id`
+- 若同一 `host:port` 但 `client_id` 不同，将建立独立连接，便于多个模块同时接入同一 broker
+- 若同一 `host:port + client_id` 下其余连接参数（`username/password/keepalive_sec/clean_session/connect_timeout_ms`）不一致，将返回错误（避免同名客户端配置冲突）
 - 请求-响应通过 `match_field` 指定的 JSON 字段值做关联；同一 `response_topic + match_field + match_value` 只允许一个请求在途
 
 ## 连接复用与并发行为
-- 同一 `host:port` 连接在模块内复用；并发请求触发重复创建时会复用已有连接（日志会提示“连接已存在，丢弃重复创建”）。
+- 同一 `host:port + client_id` 连接在模块内复用；并发请求触发重复创建时会复用已有连接（日志会提示“连接已存在，丢弃重复创建”）。
 - 发布/订阅/重订阅在单连接内做串行化，避免并发操作导致 MQTT 客户端阻塞或超时。
 - 连接断开时可能出现短暂不可用；建议业务侧使用 QoS 1 并配合持久会话（`clean_session=false`）降低丢消息概率。
 

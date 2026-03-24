@@ -9,6 +9,43 @@
 #include "MQTTManager.pb.h"
 #include "MQTTTopicMatcher.hpp"
 
+namespace MQTTManager {
+class MQTTManagerTestPeer {
+public:
+  static std::string MakeConnectionKey(MQTTManager &mgr, const MQTTManagerProto::ConnectionInfo &info) {
+    return mgr.makeConnectionKey(info);
+  }
+
+  static bool PrepareConnection(MQTTManager &mgr, const MQTTManagerProto::ConnectionInfo &info, std::string *error) {
+    return static_cast<bool>(mgr.getOrCreateConnection(info, error));
+  }
+
+  static size_t ConnectionCount(MQTTManager &mgr) { return mgr.connections_.size(); }
+};
+}  // namespace MQTTManager
+
+namespace {
+using MQTTManager::MQTTManagerTestPeer;
+
+MQTTManagerProto::ConnectionInfo MakeConnectionInfo(const std::string &clientId,
+                                                    uint32_t keepaliveSec = 30,
+                                                    bool cleanSession = true,
+                                                    uint32_t connectTimeoutMs = 3000,
+                                                    const std::string &username = "",
+                                                    const std::string &password = "") {
+  MQTTManagerProto::ConnectionInfo info;
+  info.set_host("127.0.0.1");
+  info.set_port(1883);
+  info.set_client_id(clientId);
+  info.set_username(username);
+  info.set_password(password);
+  info.set_keepalive_sec(keepaliveSec);
+  info.set_clean_session(cleanSession);
+  info.set_connect_timeout_ms(connectTimeoutMs);
+  return info;
+}
+}  // namespace
+
 // 验证主题过滤匹配支持 + 与 # 通配符。
 TEST(MqttTopicMatcherTest, MatchTopicFilterSupportsWildcards) {
   EXPECT_TRUE(MQTTManager::MatchTopicFilter("#", "a/b/c"));
@@ -75,6 +112,42 @@ TEST(MqttJsonPathTest, MissingFieldReturnsFalse) {
 
   const boost::json::value* value = nullptr;
   EXPECT_FALSE(MQTTManager::JsonPath::extractValue(json, segments, &value, &error));
+}
+
+// 验证连接键包含 client_id，避免同一 broker 下不同客户端相互冲突。
+TEST(MqttManagerConnectionReuseTest, ConnectionKeyIncludesClientId) {
+  MQTTManager::MQTTManager mgr;
+  const auto connA = MakeConnectionInfo("client-a");
+  const auto connB = MakeConnectionInfo("client-b");
+
+  EXPECT_NE(MQTTManagerTestPeer::MakeConnectionKey(mgr, connA),
+            MQTTManagerTestPeer::MakeConnectionKey(mgr, connB));
+}
+
+// 验证同一 broker 下不同 client_id 可建立独立连接并并存。
+TEST(MqttManagerConnectionReuseTest, AllowsSameBrokerWithDifferentClientId) {
+  MQTTManager::MQTTManager mgr;
+  std::string error;
+
+  EXPECT_TRUE(MQTTManagerTestPeer::PrepareConnection(mgr, MakeConnectionInfo("client-a"), &error));
+  EXPECT_TRUE(error.empty());
+  EXPECT_TRUE(MQTTManagerTestPeer::PrepareConnection(mgr, MakeConnectionInfo("client-b"), &error));
+  EXPECT_TRUE(error.empty());
+  EXPECT_EQ(MQTTManagerTestPeer::ConnectionCount(mgr), 2u);
+}
+
+// 验证同一 broker 与同一 client_id 下其余连接参数不一致时仍拒绝复用。
+TEST(MqttManagerConnectionReuseTest, RejectsSameBrokerSameClientIdWithDifferentOptions) {
+  MQTTManager::MQTTManager mgr;
+  std::string error;
+
+  EXPECT_TRUE(MQTTManagerTestPeer::PrepareConnection(mgr, MakeConnectionInfo("client-a", 30, true, 3000), &error));
+  EXPECT_TRUE(error.empty());
+
+  error.clear();
+  EXPECT_FALSE(MQTTManagerTestPeer::PrepareConnection(mgr, MakeConnectionInfo("client-a", 60, true, 3000), &error));
+  EXPECT_EQ(error, "连接参数冲突，请使用同一连接参数");
+  EXPECT_EQ(MQTTManagerTestPeer::ConnectionCount(mgr), 1u);
 }
 
 // 验证：Publish 参数校验分支。

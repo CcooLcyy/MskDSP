@@ -83,6 +83,28 @@ std::string formatBrokerUri(const MQTTManagerProto::ConnectionInfo& info) {
   return oss.str();
 }
 
+std::string formatConnectionParamSummary(const MQTTManagerProto::ConnectionInfo& info) {
+  std::ostringstream oss;
+  oss << "client_id=" << (info.client_id().empty() ? "<空>" : info.client_id())
+      << ", username=" << (info.username().empty() ? "<空>" : "<已设置>")
+      << ", password=" << (info.password().empty() ? "<空>" : "<已设置>")
+      << ", keepalive_sec=" << info.keepalive_sec()
+      << ", clean_session=" << (info.clean_session() ? "true" : "false")
+      << ", connect_timeout_ms=" << info.connect_timeout_ms();
+  return oss.str();
+}
+
+std::string joinFieldsForLog(const std::vector<std::string>& fields) {
+  std::ostringstream oss;
+  for (size_t i = 0; i < fields.size(); ++i) {
+    if (i != 0) {
+      oss << ",";
+    }
+    oss << fields[i];
+  }
+  return oss.str();
+}
+
 bool parseJsonPayload(const std::string& payload, boost::json::value* out, std::string_view title, bool warnOnly) {
   if (out == nullptr) {
     return false;
@@ -707,9 +729,38 @@ std::shared_ptr<MQTTManager::ConnectionContext> MQTTManager::getOrCreateConnecti
     auto it = connections_.find(key);
     if (it != connections_.end()) {
       const auto& ctx = it->second;
-      if (ctx->clientId != info.client_id() || ctx->username != info.username() || ctx->password != info.password() ||
-          ctx->keepaliveSec != info.keepalive_sec() || ctx->cleanSession != info.clean_session() ||
-          ctx->connectTimeoutMs != info.connect_timeout_ms()) {
+      std::vector<std::string> conflictFields;
+      if (ctx->clientId != info.client_id()) {
+        conflictFields.emplace_back("client_id");
+      }
+      if (ctx->username != info.username()) {
+        conflictFields.emplace_back("username");
+      }
+      if (ctx->password != info.password()) {
+        conflictFields.emplace_back("password");
+      }
+      if (ctx->keepaliveSec != info.keepalive_sec()) {
+        conflictFields.emplace_back("keepalive_sec");
+      }
+      if (ctx->cleanSession != info.clean_session()) {
+        conflictFields.emplace_back("clean_session");
+      }
+      if (ctx->connectTimeoutMs != info.connect_timeout_ms()) {
+        conflictFields.emplace_back("connect_timeout_ms");
+      }
+      if (!conflictFields.empty()) {
+        MQTTManagerProto::ConnectionInfo existingInfo;
+        existingInfo.set_host(info.host());
+        existingInfo.set_port(info.port());
+        existingInfo.set_client_id(ctx->clientId);
+        existingInfo.set_username(ctx->username);
+        existingInfo.set_password(ctx->password);
+        existingInfo.set_keepalive_sec(ctx->keepaliveSec);
+        existingInfo.set_clean_session(ctx->cleanSession);
+        existingInfo.set_connect_timeout_ms(ctx->connectTimeoutMs);
+        LOG_ERROR("MQTTManager 连接参数冲突: 连接键={}, 冲突字段={}, 已存在参数={}, 新请求参数={}", key,
+                  joinFieldsForLog(conflictFields), formatConnectionParamSummary(existingInfo),
+                  formatConnectionParamSummary(info));
         if (error != nullptr) {
           *error = "连接参数冲突，请使用同一连接参数";
         }
@@ -745,7 +796,7 @@ std::shared_ptr<MQTTManager::ConnectionContext> MQTTManager::getOrCreateConnecti
 
 std::string MQTTManager::makeConnectionKey(const MQTTManagerProto::ConnectionInfo& info) const {
   std::ostringstream oss;
-  oss << info.host() << ":" << info.port();
+  oss << info.host() << ":" << info.port() << "|client_id=" << info.client_id();
   return oss.str();
 }
 
