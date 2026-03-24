@@ -118,7 +118,8 @@ private:
   void startDataCenterSubscribeLocked(const std::string &connName, const std::shared_ptr<LinkRuntime> &link);
   void stopDataCenterSubscribeLocked(LinkRuntime *link);
 
-  grpc::Status sendAddSlaveNode(LinkRuntime *link);
+  grpc::Status sendAddSlaveNode(LinkRuntime *link, bool *outArchiveExists);
+  grpc::Status sendAddSlaveNodes(const std::vector<LinkRuntime *> &links, bool *outArchiveExists);
   grpc::Status sendDelSlaveNode(LinkRuntime *link);
   grpc::Status sendMonitorRequest(LinkRuntime *link, const std::vector<uint8_t> &frame, std::string *outPayloadBase64, int32_t *outStatus);
   grpc::Status sendWriteRequest(LinkRuntime *link, const std::vector<uint8_t> &frame);

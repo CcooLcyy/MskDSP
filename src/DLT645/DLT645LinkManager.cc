@@ -243,6 +243,47 @@ int32_t parseStatusCode(const boost::json::value &value, bool *ok) {
   return 1;
 }
 
+struct ArchiveAddStatusResult {
+  bool ok = false;
+  int32_t status = 0;
+  bool archiveExists = false;
+};
+
+ArchiveAddStatusResult parseArchiveAddStatus(const boost::json::value &value) {
+  ArchiveAddStatusResult result;
+  if (value.is_int64()) {
+    result.ok = true;
+    result.status = static_cast<int32_t>(value.as_int64());
+    result.archiveExists = result.status == 2;
+    return result;
+  }
+  if (value.is_uint64()) {
+    result.ok = true;
+    result.status = static_cast<int32_t>(value.as_uint64());
+    result.archiveExists = result.status == 2;
+    return result;
+  }
+  if (!value.is_string()) {
+    return result;
+  }
+
+  std::string text = trimAscii(value.as_string().c_str());
+  if (text.empty()) {
+    return result;
+  }
+
+  int32_t parsed = 0;
+  if (parseInt32Text(text, &parsed)) {
+    result.ok = true;
+    result.status = parsed;
+    result.archiveExists = parsed == 2;
+    return result;
+  }
+
+  result.status = parseStatusCode(value, &result.ok);
+  return result;
+}
+
 std::string loraStatusToMessage(int32_t status) {
   switch (status) {
   case 0:
@@ -828,8 +869,9 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
     }
 
     if (needAddArchive) {
+      bool archiveAlreadyExists = false;
       LOG_INFO("DLT645 启动连接功能进入档案添加阶段: conn_name={}, comm_mode={}", connName, DLT645Proto::CommMode_Name(link->config.comm_mode()));
-      status = sendAddSlaveNode(link.get());
+      status = sendAddSlaveNode(link.get(), &archiveAlreadyExists);
       {
         std::lock_guard<std::mutex> lock(mu_);
         archiveAddInFlightByKey_.erase(archiveKey);
@@ -852,7 +894,12 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
         LOG_WARNING("DLT645 启动连接功能将在后台持续重试档案添加: conn_name={}, 重试间隔=5000ms", connName);
         return status;
       }
-      LOG_INFO("DLT645 启动连接功能档案添加成功: conn_name={}", connName);
+      if (archiveAlreadyExists) {
+        LOG_INFO("DLT645 启动连接功能识别到档案已存在: conn_name={}, 后续不再重复下发档案，继续启动连接功能",
+                 connName);
+      } else {
+        LOG_INFO("DLT645 启动连接功能档案添加成功: conn_name={}", connName);
+      }
     } else {
       LOG_INFO("DLT645 启动连接功能跳过档案添加: conn_name={}, meter_addr={}, 原因=同地址档案已存在", connName, link->config.meter_addr());
     }
@@ -1368,7 +1415,175 @@ void LinkManager::autoStartEligibleLinks(std::string_view trigger) {
     }
   }
   std::sort(connNames.begin(), connNames.end());
+
+  struct BatchGroup {
+    std::string archiveKey;
+    std::vector<std::string> connNames;
+    std::vector<std::shared_ptr<LinkRuntime>> links;
+  };
+
+  std::unordered_map<std::string, BatchGroup> batchGroupsByKey;
+  std::vector<std::string> batchGroupOrder;
+  std::unordered_set<std::string> handledConnNames;
+
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    for (const auto &connName : connNames) {
+      auto it = linksByName_.find(connName);
+      if (it == linksByName_.end() || !it->second) {
+        continue;
+      }
+      auto link = it->second;
+      if (link->config.comm_mode() != DLT645Proto::COMM_MODE_LORA) {
+        continue;
+      }
+      if (link->archiveRetrying) {
+        continue;
+      }
+      std::string reason;
+      if (!isLinkAutoStartReadyLocked(*link, &reason)) {
+        continue;
+      }
+      const auto archiveKey = makeArchiveKey(link->config);
+      auto refIt = archiveRefCountByKey_.find(archiveKey);
+      if (refIt != archiveRefCountByKey_.end() && refIt->second > 0) {
+        continue;
+      }
+      if (archiveAddInFlightByKey_.contains(archiveKey) || archiveDelInFlightByKey_.contains(archiveKey)) {
+        continue;
+      }
+
+      auto [groupIt, inserted] = batchGroupsByKey.try_emplace(archiveKey);
+      if (inserted) {
+        groupIt->second.archiveKey = archiveKey;
+        batchGroupOrder.push_back(archiveKey);
+      }
+      groupIt->second.connNames.push_back(connName);
+      groupIt->second.links.push_back(std::move(link));
+    }
+
+    if (batchGroupOrder.size() > 1) {
+      for (const auto &archiveKey : batchGroupOrder) {
+        archiveAddInFlightByKey_.insert(archiveKey);
+      }
+    } else {
+      batchGroupsByKey.clear();
+      batchGroupOrder.clear();
+    }
+  }
+
+  if (!batchGroupOrder.empty()) {
+    std::vector<LinkRuntime *> requestLinks;
+    requestLinks.reserve(batchGroupOrder.size());
+    for (const auto &archiveKey : batchGroupOrder) {
+      requestLinks.push_back(batchGroupsByKey.at(archiveKey).links.front().get());
+    }
+
+    bool archiveAlreadyExists = false;
+    auto batchStatus = sendAddSlaveNodes(requestLinks, &archiveAlreadyExists);
+
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      for (const auto &archiveKey : batchGroupOrder) {
+        archiveAddInFlightByKey_.erase(archiveKey);
+      }
+
+      if (batchStatus.ok()) {
+        for (const auto &archiveKey : batchGroupOrder) {
+          auto groupIt = batchGroupsByKey.find(archiveKey);
+          if (groupIt == batchGroupsByKey.end()) {
+            continue;
+          }
+
+          const auto &group = groupIt->second;
+          uint32_t startedCount = 0;
+          for (size_t i = 0; i < group.connNames.size(); ++i) {
+            const auto &connName = group.connNames[i];
+            const auto &link = group.links[i];
+            auto liveIt = linksByName_.find(connName);
+            if (liveIt == linksByName_.end() || liveIt->second != link) {
+              LOG_WARNING("DLT645 批量自动启动跳过失效链路: conn_name={}", connName);
+              continue;
+            }
+            if (link->state == DLT645Proto::LINK_STATE_PENDING_DELETE) {
+              LOG_WARNING("DLT645 批量自动启动跳过待删除链路: conn_name={}", connName);
+              continue;
+            }
+
+            startMqttSubscribeLocked(connName, link);
+            startPollingLocked(connName, link);
+            startDataCenterSubscribeLocked(connName, link);
+            link->state = DLT645Proto::LINK_STATE_RUNNING;
+            link->lastError.clear();
+            handledConnNames.insert(connName);
+            ++startedCount;
+            LOG_INFO("DLT645 批量自动启动连接成功: conn_name={}, meter_addr={}", connName, link->config.meter_addr());
+          }
+
+          if (startedCount > 0) {
+            archiveRefCountByKey_[archiveKey] = startedCount;
+            LOG_INFO("DLT645 批量档案引用建立成功: meter_addr={}, 引用计数={}, 档案已存在={}",
+                     group.links.front()->config.meter_addr(),
+                     startedCount,
+                     archiveAlreadyExists ? "是" : "否");
+          } else {
+            archiveRefCountByKey_.erase(archiveKey);
+            LOG_WARNING("DLT645 批量档案下发后未能启动任何链路，已回滚本地引用计数: meter_addr={}",
+                        group.links.front()->config.meter_addr());
+          }
+        }
+      } else {
+        for (const auto &archiveKey : batchGroupOrder) {
+          auto groupIt = batchGroupsByKey.find(archiveKey);
+          if (groupIt == batchGroupsByKey.end()) {
+            continue;
+          }
+
+          const auto &group = groupIt->second;
+          archiveRefCountByKey_.erase(archiveKey);
+          for (size_t i = 0; i < group.connNames.size(); ++i) {
+            const auto &connName = group.connNames[i];
+            const auto &link = group.links[i];
+            auto liveIt = linksByName_.find(connName);
+            if (liveIt == linksByName_.end() || liveIt->second != link) {
+              continue;
+            }
+            link->lastError = batchStatus.error_message();
+            handledConnNames.insert(connName);
+          }
+
+          const auto &repConnName = group.connNames.front();
+          const auto &repLink = group.links.front();
+          auto repIt = linksByName_.find(repConnName);
+          if (repIt != linksByName_.end() && repIt->second == repLink) {
+            launchArchiveRetryLocked(repConnName, repLink, archiveKey);
+            LOG_WARNING("DLT645 批量档案下发失败，已切换到后台重试: conn_name={}, meter_addr={}, 原因={}",
+                        repConnName,
+                        repLink->config.meter_addr(),
+                        batchStatus.error_message());
+          }
+        }
+      }
+    }
+
+    archiveStateCv_.notify_all();
+    if (batchStatus.ok()) {
+      LOG_INFO("DLT645 批量档案下发完成: 触发来源={}, 档案数={}, 档案已存在={}",
+               trigger,
+               requestLinks.size(),
+               archiveAlreadyExists ? "是" : "否");
+    } else {
+      LOG_WARNING("DLT645 批量档案下发失败: 触发来源={}, 档案数={}, 原因={}",
+                  trigger,
+                  requestLinks.size(),
+                  batchStatus.error_message());
+    }
+  }
+
   for (const auto &connName : connNames) {
+    if (handledConnNames.contains(connName)) {
+      continue;
+    }
     (void)maybeAutoStartLink(connName, trigger);
   }
 }
@@ -1521,7 +1736,8 @@ void LinkManager::runArchiveRetryLoop(std::string connName, std::shared_ptr<Link
 
     grpc::Status status = grpc::Status::OK;
     if (needAddArchive) {
-      status = sendAddSlaveNode(link.get());
+      bool archiveAlreadyExists = false;
+      status = sendAddSlaveNode(link.get(), &archiveAlreadyExists);
       {
         std::lock_guard<std::mutex> lock(mu_);
         archiveAddInFlightByKey_.erase(archiveKey);
@@ -1538,6 +1754,9 @@ void LinkManager::runArchiveRetryLoop(std::string connName, std::shared_ptr<Link
       if (!status.ok()) {
         LOG_WARNING("DLT645 启动连接功能后台重试档案添加失败: conn_name={}, 第{}次重试, 原因={}, 5秒后继续重试", connName, retryCount, status.error_message());
         continue;
+      }
+      if (archiveAlreadyExists) {
+        LOG_INFO("DLT645 启动连接功能后台重试识别到档案已存在: conn_name={}, 停止继续重试并恢复连接功能", connName);
       }
     }
 
@@ -1937,12 +2156,27 @@ grpc::Status LinkManager::runLoraSerialized(LinkRuntime *link, const char *opera
   return status;
 }
 
-grpc::Status LinkManager::sendAddSlaveNode(LinkRuntime *link) {
+grpc::Status LinkManager::sendAddSlaveNode(LinkRuntime *link, bool *outArchiveExists) {
   if (link == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "链路为空");
   }
-  const auto topic = makeAddSlaveRequestTopic(link->config.comm_mode());
-  const auto respTopic = makeAddSlaveResponseTopic(link->config.comm_mode());
+  return sendAddSlaveNodes({link}, outArchiveExists);
+}
+
+grpc::Status LinkManager::sendAddSlaveNodes(const std::vector<LinkRuntime *> &links, bool *outArchiveExists) {
+  if (links.empty()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "链路列表为空");
+  }
+  if (outArchiveExists != nullptr) {
+    *outArchiveExists = false;
+  }
+  auto *firstLink = links.front();
+  if (firstLink == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "链路为空");
+  }
+
+  const auto topic = makeAddSlaveRequestTopic(firstLink->config.comm_mode());
+  const auto respTopic = makeAddSlaveResponseTopic(firstLink->config.comm_mode());
   if (topic.empty() || respTopic.empty()) {
     return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "当前通信方式不支持档案管理");
   }
@@ -1952,55 +2186,88 @@ grpc::Status LinkManager::sendAddSlaveNode(LinkRuntime *link) {
   obj["timestamp"] = formatTimestamp();
   obj["prio"] = 1;
   boost::json::array body;
-  boost::json::object item;
-  item["addr"] = link->config.meter_addr();
-  item["proType"] = 2;
-  body.push_back(item);
+  std::unordered_set<std::string> seenAddrs;
+  uint32_t timeoutMs = 0;
+  for (auto *link : links) {
+    if (link == nullptr) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "链路为空");
+    }
+    if (link->config.comm_mode() != firstLink->config.comm_mode()) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "批量档案下发要求通信方式一致");
+    }
+    timeoutMs = std::max(timeoutMs, link->config.request_timeout_ms());
+    if (!seenAddrs.insert(link->config.meter_addr()).second) {
+      continue;
+    }
+
+    boost::json::object item;
+    item["addr"] = link->config.meter_addr();
+    item["proType"] = 2;
+    body.push_back(std::move(item));
+  }
+  if (body.empty()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "档案列表为空");
+  }
   obj["body"] = std::move(body);
 
   const auto json = boost::json::serialize(obj);
-  LOG_INFO("DLT645 发送档案添加请求: conn_name={}, topic={}, response_topic={}, payload={}", link->config.conn_name(), topic, respTopic, json);
+  LOG_INFO("DLT645 发送档案添加请求: conn_name={}, topic={}, response_topic={}, 档案数={}, payload={}",
+           firstLink->config.conn_name(),
+           topic,
+           respTopic,
+           seenAddrs.size(),
+           json);
 
   std::string responsePayload;
   std::string error;
   auto statusRet = runLoraSerialized(
-      link,
+      firstLink,
       "档案添加请求",
       topic,
-      [this, &topic, &respTopic, &json, &link, &responsePayload, &error]() {
-        return mqttClient_.RequestAndWait(topic, respTopic, json, link->config.request_timeout_ms(), 0, 0, "token", &responsePayload, &error);
+      [this, &topic, &respTopic, &json, timeoutMs, &responsePayload, &error]() {
+        return mqttClient_.RequestAndWait(topic, respTopic, json, timeoutMs, 0, 0, "token", &responsePayload, &error);
       });
   if (!statusRet.ok()) {
-    LOG_ERROR("DLT645 档案添加请求失败: conn_name={}, 原因={}", link->config.conn_name(), error);
+    LOG_ERROR("DLT645 档案添加请求失败: conn_name={}, 原因={}", firstLink->config.conn_name(), error);
     return statusRet;
   }
   if (responsePayload.empty()) {
-    LOG_ERROR("DLT645 档案添加响应为空: conn_name={}, topic={}", link->config.conn_name(), respTopic);
+    LOG_ERROR("DLT645 档案添加响应为空: conn_name={}, topic={}", firstLink->config.conn_name(), respTopic);
     return grpc::Status(grpc::StatusCode::INTERNAL, "档案添加响应为空");
   }
-  LOG_INFO("DLT645 收到档案添加响应: conn_name={}, topic={}, payload={}", link->config.conn_name(), respTopic, responsePayload);
+  LOG_INFO("DLT645 收到档案添加响应: conn_name={}, topic={}, payload={}", firstLink->config.conn_name(), respTopic, responsePayload);
 
   boost::system::error_code ec;
   auto parsed = boost::json::parse(responsePayload, ec);
   if (ec || !parsed.is_object()) {
-    LOG_ERROR("DLT645 档案添加响应解析失败: conn_name={}, 原因={}", link->config.conn_name(), ec.message());
+    LOG_ERROR("DLT645 档案添加响应解析失败: conn_name={}, 原因={}", firstLink->config.conn_name(), ec.message());
     return grpc::Status(grpc::StatusCode::INTERNAL, "档案添加响应解析失败");
   }
   const auto &respObj = parsed.as_object();
   auto statusIt = respObj.find("status");
   if (statusIt == respObj.end()) {
-    LOG_ERROR("DLT645 档案添加响应缺少状态字段: conn_name={}, topic={}", link->config.conn_name(), respTopic);
+    LOG_ERROR("DLT645 档案添加响应缺少状态字段: conn_name={}, topic={}", firstLink->config.conn_name(), respTopic);
     return grpc::Status(grpc::StatusCode::INTERNAL, "档案添加响应缺少状态字段");
   }
-  bool parsedStatus = false;
-  const int32_t status = parseStatusCode(statusIt->value(), &parsedStatus);
-  if (!parsedStatus) {
-    LOG_ERROR("DLT645 档案添加响应状态类型异常: conn_name={}, topic={}", link->config.conn_name(), respTopic);
+  const auto statusResult = parseArchiveAddStatus(statusIt->value());
+  if (!statusResult.ok) {
+    LOG_ERROR("DLT645 档案添加响应状态类型异常: conn_name={}, topic={}", firstLink->config.conn_name(), respTopic);
     return grpc::Status(grpc::StatusCode::INTERNAL, "档案添加响应状态类型异常");
   }
+  if (statusResult.archiveExists) {
+    if (outArchiveExists != nullptr) {
+      *outArchiveExists = true;
+    }
+    LOG_INFO(
+        "DLT645 档案添加响应表明档案已存在: conn_name={}, topic={}, status=2, 跳过后续档案重试并继续后续抄表流程",
+        firstLink->config.conn_name(),
+        respTopic);
+    return grpc::Status::OK;
+  }
+  const int32_t status = statusResult.status;
   if (status != 0) {
     const auto reason = loraStatusToMessage(status);
-    LOG_ERROR("DLT645 档案添加响应失败: conn_name={}, topic={}, status={}, 描述={}", link->config.conn_name(), respTopic, status, reason);
+    LOG_ERROR("DLT645 档案添加响应失败: conn_name={}, topic={}, status={}, 描述={}", firstLink->config.conn_name(), respTopic, status, reason);
     return grpc::Status(grpc::StatusCode::INTERNAL, std::format("档案添加失败: {}", reason));
   }
   return grpc::Status::OK;

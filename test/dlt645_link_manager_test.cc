@@ -1,6 +1,8 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <boost/json.hpp>
+
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -10,6 +12,7 @@
 #include <filesystem>
 #include <future>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -1089,6 +1092,188 @@ TEST(Dlt645LinkManagerTest, StartStopLoraSameAddrSharesArchiveLifecycle) {
 
   ASSERT_TRUE(mgr.StopLink("conn-share-b").ok());
   EXPECT_EQ(delCount.load(), 1);
+}
+
+// 验证：同一批次多个 LoRa 档案添加会合并为单条 addslaveNode MQTT 消息，body 数组包含全部档案项。
+TEST(Dlt645LinkManagerTest, TryAutoStartReadyLinksBatchesLoraArchivesIntoSingleMqttMessage) {
+  FakeDataCenterState state;
+  auto dcStub = MakeStub(&state);
+  auto mqttStub = std::make_shared<MQTTManagerProto::MockMQTTManagerServiceStub>();
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(dcStub);
+  mgr.setMqttStub(mqttStub);
+
+  DLT645Proto::UpsertLinkRequest reqA;
+  *reqA.mutable_config() = MakeValidLinkConfig("conn-batch-a", DLT645Proto::COMM_MODE_LORA);
+  reqA.mutable_config()->set_meter_addr("123456789012");
+  DLT645Proto::LinkInfo infoA;
+  ASSERT_TRUE(mgr.UpsertLink(reqA, &infoA).ok());
+
+  DLT645Proto::UpsertLinkRequest reqB;
+  *reqB.mutable_config() = MakeValidLinkConfig("conn-batch-b", DLT645Proto::COMM_MODE_LORA);
+  reqB.mutable_config()->set_meter_addr("123456789013");
+  DLT645Proto::LinkInfo infoB;
+  ASSERT_TRUE(mgr.UpsertLink(reqB, &infoB).ok());
+
+  auto updateReq = MakeMqttUpdateRequest("127.0.0.1", 1883, "c-batch-add");
+  DLT645Proto::UpdateConfigResponse updateResp;
+  ASSERT_TRUE(mgr.UpdateConfig(updateReq, &updateResp).ok());
+
+  DLT645LinkManagerTestPeer::SetPointTableConfigured(mgr, "conn-batch-a", true);
+  DLT645LinkManagerTestPeer::SetPointTableConfigured(mgr, "conn-batch-b", true);
+
+  std::mutex addMu;
+  std::vector<std::string> addPayloads;
+  ON_CALL(*mqttStub, RequestAndWait(_, _, _))
+      .WillByDefault(::testing::Invoke([&addMu, &addPayloads](
+                                           grpc::ClientContext *,
+                                           const MQTTManagerProto::RequestAndWaitRequest &req,
+                                           MQTTManagerProto::RequestAndWaitResponse *resp) {
+        if (resp == nullptr) {
+          return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
+        }
+        resp->set_ok(true);
+        resp->set_message("成功");
+        if (req.request_topic().find("addslaveNode") != std::string::npos) {
+          std::lock_guard<std::mutex> lock(addMu);
+          addPayloads.push_back(req.payload());
+        }
+        resp->set_payload("{\"status\":0}");
+        return grpc::Status::OK;
+      }));
+
+  mgr.TryAutoStartReadyLinks("批量档案下发测试");
+
+  EXPECT_TRUE(mgr.StopLink("conn-batch-a").ok());
+  EXPECT_TRUE(mgr.StopLink("conn-batch-b").ok());
+
+  EXPECT_EQ(addPayloads.size(), 1u);
+  if (addPayloads.size() != 1u) {
+    return;
+  }
+
+  boost::system::error_code ec;
+  auto parsed = boost::json::parse(addPayloads.front(), ec);
+  ASSERT_FALSE(ec);
+  ASSERT_TRUE(parsed.is_object());
+
+  const auto &obj = parsed.as_object();
+  auto bodyIt = obj.find("body");
+  ASSERT_NE(bodyIt, obj.end());
+  ASSERT_TRUE(bodyIt->value().is_array());
+
+  const auto &body = bodyIt->value().as_array();
+  EXPECT_EQ(body.size(), 2u);
+
+  std::set<std::string> addrs;
+  for (const auto &item : body) {
+    ASSERT_TRUE(item.is_object());
+    const auto &itemObj = item.as_object();
+
+    auto addrIt = itemObj.find("addr");
+    ASSERT_NE(addrIt, itemObj.end());
+    ASSERT_TRUE(addrIt->value().is_string());
+    addrs.insert(std::string(addrIt->value().as_string().c_str()));
+
+    auto proTypeIt = itemObj.find("proType");
+    ASSERT_NE(proTypeIt, itemObj.end());
+    ASSERT_TRUE(proTypeIt->value().is_int64() || proTypeIt->value().is_uint64());
+    const int64_t proType = proTypeIt->value().is_int64()
+        ? proTypeIt->value().as_int64()
+        : static_cast<int64_t>(proTypeIt->value().as_uint64());
+    EXPECT_EQ(proType, 2);
+  }
+
+  EXPECT_EQ(addrs, (std::set<std::string>{"123456789012", "123456789013"}));
+}
+
+// 验证：自动启动阶段 addslaveNode 返回数值状态 2 时，视为档案已存在并继续抄表，且 StopLink 仍会删除档案。
+TEST(Dlt645LinkManagerTest, AutoStartTreatsNumericArchiveStatus2AsExistingAndDeletesOnStop) {
+  FakeDataCenterState state;
+  auto dcStub = MakeStub(&state);
+  auto mqttStub = std::make_shared<MQTTManagerProto::MockMQTTManagerServiceStub>();
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(dcStub);
+  mgr.setMqttStub(mqttStub);
+
+  std::mutex requestMu;
+  std::condition_variable requestCv;
+  int addCount = 0;
+  int delCount = 0;
+  int monitorCount = 0;
+  ON_CALL(*mqttStub, RequestAndWait(_, _, _))
+      .WillByDefault(::testing::Invoke([&requestMu, &requestCv, &addCount, &delCount, &monitorCount](
+                                           grpc::ClientContext *,
+                                           const MQTTManagerProto::RequestAndWaitRequest &req,
+                                           MQTTManagerProto::RequestAndWaitResponse *resp) {
+        if (resp == nullptr) {
+          return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
+        }
+        resp->set_ok(true);
+        resp->set_message("成功");
+        {
+          std::lock_guard<std::mutex> lock(requestMu);
+          if (req.request_topic().find("addslaveNode") != std::string::npos) {
+            ++addCount;
+            resp->set_payload("{\"status\":2}");
+          } else if (req.request_topic().find("delslaveNode") != std::string::npos) {
+            ++delCount;
+            resp->set_payload("{\"status\":0}");
+          } else if (req.request_topic().find("loraManager") != std::string::npos &&
+                     req.request_topic().find("monitorNode") != std::string::npos) {
+            ++monitorCount;
+            resp->set_payload("{\"status\":0,\"data\":\"AQ==\"}");
+          } else {
+            resp->set_payload("{\"status\":0}");
+          }
+        }
+        requestCv.notify_all();
+        return grpc::Status::OK;
+      }));
+
+  auto updateReq = MakeMqttUpdateRequest("127.0.0.1", 1883, "c-archive-exists");
+  DLT645Proto::UpdateConfigResponse updateResp;
+  ASSERT_TRUE(mgr.UpdateConfig(updateReq, &updateResp).ok());
+
+  DLT645Proto::UpsertLinkRequest linkReq;
+  *linkReq.mutable_config() = MakeValidLinkConfig("conn-archive-exists", DLT645Proto::COMM_MODE_LORA);
+  linkReq.mutable_config()->set_poll_interval_ms(200);
+  DLT645Proto::LinkInfo linkInfo;
+  ASSERT_TRUE(mgr.UpsertLink(linkReq, &linkInfo).ok());
+
+  DLT645Proto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-archive-exists");
+  *ptReq.add_points() = MakePointProto("P1", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  {
+    std::unique_lock<std::mutex> lock(requestMu);
+    ASSERT_TRUE(requestCv.wait_for(lock, std::chrono::seconds(2), [&addCount]() { return addCount >= 1; }));
+  }
+
+  DLT645Proto::LinkInfo got;
+  ASSERT_TRUE(WaitForLinkState(
+      mgr, "conn-archive-exists", DLT645Proto::LINK_STATE_RUNNING, std::chrono::seconds(2), &got));
+  EXPECT_TRUE(got.last_error().empty());
+
+  {
+    std::unique_lock<std::mutex> lock(requestMu);
+    ASSERT_TRUE(requestCv.wait_for(lock, std::chrono::seconds(3), [&monitorCount]() { return monitorCount >= 1; }));
+    EXPECT_FALSE(requestCv.wait_for(lock, std::chrono::seconds(6), [&addCount]() { return addCount >= 2; }));
+    EXPECT_EQ(addCount, 1);
+  }
+
+  ASSERT_TRUE(mgr.StopLink("conn-archive-exists").ok());
+  {
+    std::lock_guard<std::mutex> lock(requestMu);
+    EXPECT_EQ(delCount, 1);
+  }
+
+  ASSERT_TRUE(mgr.GetLink("conn-archive-exists", &got).ok());
+  EXPECT_EQ(got.state(), DLT645Proto::LINK_STATE_STOPPED);
 }
 
 // 验证：自动启动阶段档案添加失败时，会把 LoRa status 转成中文原因写入 last_error。
