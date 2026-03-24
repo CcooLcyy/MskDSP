@@ -18,6 +18,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       VCPKG_BINARY_CACHE_DIR: ${{ github.workspace }}/.cache/vcpkg/arm64-linux-dynamic
+      CCACHE_DIR: ${{ github.workspace }}/.cache/ccache/arm64-linux-dynamic
     steps:
       - name: 拉取主仓库
         uses: actions/checkout@v4
@@ -34,13 +35,26 @@ jobs:
           restore-keys: |
             vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-
 
+      - name: 恢复 ccache 编译缓存
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ runner.os }}-gcc14-arm64-linux-dynamic-v1-${{ hashFiles('CMakeLists.txt', 'protobuf/CMakeLists.txt', 'CMakePresets.json') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-gcc14-arm64-linux-dynamic-v1-
+
       - name: 准备 vcpkg 二进制缓存环境
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "${VCPKG_BINARY_CACHE_DIR}"
+          mkdir -p "${CCACHE_DIR}"
           echo "VCPKG_DEFAULT_BINARY_CACHE=${VCPKG_BINARY_CACHE_DIR}" >> "${GITHUB_ENV}"
           echo "VCPKG_BINARY_SOURCES=clear;files,${VCPKG_BINARY_CACHE_DIR},readwrite" >> "${GITHUB_ENV}"
+          echo "CCACHE_DIR=${CCACHE_DIR}" >> "${GITHUB_ENV}"
+          echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}" >> "${GITHUB_ENV}"
+          echo "CCACHE_COMPILERCHECK=content" >> "${GITHUB_ENV}"
+          echo "CCACHE_MAXSIZE=1G" >> "${GITHUB_ENV}"
 
       - name: 生成构建元数据
         id: meta
@@ -94,6 +108,7 @@ jobs:
           sudo apt-get install -y \
             cmake \
             ninja-build \
+            ccache \
             gcc-14 \
             g++-14 \
             gcc-aarch64-linux-gnu \
@@ -124,6 +139,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_SYSTEM_NAME=Linux \
             -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
             -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
             -DCMAKE_CXX_SCAN_FOR_MODULES=OFF \
@@ -138,11 +155,24 @@ jobs:
             -DProtobuf_PROTOC_EXECUTABLE="${GITHUB_WORKSPACE}/build-arm64/vcpkg_installed/x64-linux-dynamic/tools/protobuf/protoc" \
             -DgRPC_CPP_PLUGIN_EXECUTABLE="${GITHUB_WORKSPACE}/build-arm64/vcpkg_installed/x64-linux-dynamic/tools/grpc/grpc_cpp_plugin"
 
+      - name: 清零 ccache 统计
+        shell: bash
+        run: |
+          set -euo pipefail
+          ccache --zero-stats
+
       - name: 编译 arm64 RelWithDebInfo
         shell: bash
         run: |
           set -euo pipefail
           cmake --build build-arm64 --parallel
+
+      - name: 输出 ccache 统计
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          ccache --show-stats
 
       - name: 安装运行产物到 package
         shell: bash
