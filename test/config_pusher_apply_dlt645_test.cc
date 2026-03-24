@@ -37,7 +37,7 @@ ConfigPusherProto::Dlt645Config MakeDlt645Config(bool start) {
   task->set_start(start);
   return config;
 }
-}  // 命名空间结束
+}  // namespace
 
 // 验证：DLT645 gRPC stub 为空时下发失败。
 TEST(ConfigPusherApplyDlt645Test, NullStubReturnsFalse) {

@@ -132,7 +132,6 @@ private:
   static MqttKey makeMqttKey(const ModbusRTUProto::LinkConfig& config);
 
   grpc::Status fillLinkInfoLocked(const LinkRuntime& link, ModbusRTUProto::LinkInfo* out) const;
-  grpc::Status checkStartPreconditionsLocked(const LinkRuntime& link) const;
   ModbusRTUProto::LinksConfig dumpLinksConfigLocked() const;
   ModbusRTUProto::PointTablesConfig dumpPointTablesConfigLocked() const;
   grpc::Status saveLinksConfig(const ModbusRTUProto::LinksConfig& config);
