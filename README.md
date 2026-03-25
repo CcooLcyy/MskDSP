@@ -20,6 +20,8 @@ MskDSP 是一个基于 C++23 的模块化系统：核心由 `ModuleManager` 管�
 - [src/ModbusRTU/](./src/ModbusRTU/)：ModbusRTU 协议相关能力（示例模块，[文档](./src/ModbusRTU/doc/README.md)）
 - [src/AGVC/AGC/](./src/AGVC/AGC/)：AGC 自动功率控制（总设定拆分/派生点计算，通过 DataCenter 路由与上下游联动，[文档](./src/AGVC/AGC/doc/README.md)）
 - [src/AGVC/AVC/](./src/AGVC/AVC/)：AVC 自动电压控制（骨架/预留模块）
+- [src/ConfigPusher/](./src/ConfigPusher/)：配置编排与初始化下发能力（[文档](./src/ConfigPusher/doc/README.md)）
+- [src/MQTTManager/](./src/MQTTManager/)：MQTT 通道管理与协议适配能力
 
 ### 新增模块
 新增模块可以参考现有示例 `src/DataCenter/`、`src/IEC104/`、`src/DLT645/` 与 `src/ModbusRTU/`，核心步骤如下：
@@ -35,7 +37,7 @@ bash script/new_module.sh <NewModule>
    - 在构造函数中调用 `initLibInfo(<LibInfo变量>)` 初始化模块元信息（库名/版本/端口等）。
    - 在 `start()` 中创建并注册 gRPC Service，然后调用 `grpcServerBuilder(service)` 启动服务。
 3. 导出工厂函数：提供 `extern "C" BOOST_SYMBOL_EXPORT ModuleInterface::ModuleInterface* create()` 供管理器动态加载。
-4. 导出 manifest：提供 `extern "C" BOOST_SYMBOL_EXPORT bool GetModuleManifestPb(const uint8_t **data, size_t *size)`，填充模块名/版本/依赖与版本约束（示例见 `src/Modbus/Modbus.cc`）。
+4. 导出 manifest：提供 `extern "C" BOOST_SYMBOL_EXPORT bool GetModuleManifestPb(const uint8_t **data, size_t *size)`，填充模块名/版本/依赖与版本约束（示例见 `src/ModbusRTU/ModbusRTU.cc`）。
 5. 配置 CMake（参考 `src/DataCenter/CMakeLists.txt`）：
    - 在 `src/<NewModule>/cmake/LibInfo.cmake` 中设置 `LIB_NAME` 与版本号。
    - `configure_file(${CMAKE_SOURCE_DIR}/cmake/LibInfo.h.in ...)` 生成 `<LIB_NAME>LibInfo.h` 供 `initLibInfo()` 使用。
@@ -95,7 +97,7 @@ docker run --network host --rm --log-driver none \
   mskdsp:arm64
 ```
 
-注意：`Dockerfile` 基于 `localhost/arm64v8/ubuntu`，确保该基础镜像已存在或按需调整镜像名。
+注意：`Dockerfile` 基于 `localhost/arm64v8/ubuntu:noble`，确保该基础镜像已存在或按需调整镜像名。
 
 说明：
 - 建议 Docker 场景使用 `--log-driver none`，直接关闭 Docker 对容器标准输出/标准错误的日志收集，避免生成 `/var/lib/docker/containers/<id>/<id>-json.log`。
@@ -130,18 +132,19 @@ ctest --test-dir build --output-on-failure
 如未开启测试构建（`MSKDSP_BUILD_TESTS=OFF`），则不会生成/执行任何测试用例。
 
 ### 测试覆盖率
-开启 `MSKDSP_BUILD_TESTS` 后会在构建时自动运行测试并生成覆盖率报告（要求使用 GCC/Clang 编译，并安装 `gcovr`）。默认值：`Debug=ON`，其他构建类型为 `OFF`。报告默认仅统计本项目 `src/` 下的实现文件与模板实现（`.cc/.cpp/.c/.hpp`），不包含纯声明头文件（`.h`）。
+开启 `MSKDSP_BUILD_TESTS` 后会构建测试并启用覆盖率编译选项（要求使用 GCC/Clang 编译，并安装 `gcovr`）。默认值：`Debug=ON`，其他构建类型为 `OFF`。覆盖率报告需要显式构建 `coverage` 目标生成；普通 `cmake --build ...` 不会自动生成覆盖率报告。报告默认仅统计本项目 `src/` 下的实现文件与模板实现（`.cc/.cpp/.c/.hpp`），不包含纯声明头文件（`.h`）。
 ```bash
 cmake -S . -B build-cov -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake \
   -DMSKDSP_BUILD_TESTS=ON
 cmake --build build-cov --parallel
+cmake --build build-cov --target coverage
 ```
 报告输出：`build-cov/coverage/index.html`
 如本机存在多个 GCC 版本，可通过 `-DGCOV_EXECUTABLE=/usr/bin/gcov-<版本>` 指定与编译器匹配的 `gcov`；`gcovr` 路径可用 `-DGCOVR_EXECUTABLE=/path/to/gcovr` 指定。
 
 #### 常见问题
-- 开启 `MSKDSP_BUILD_TESTS` 后 `cmake --build ...` 会自动执行 `ctest` 并刷新覆盖率报告；如只想编译不跑测试/覆盖率，请用 `-DMSKDSP_BUILD_TESTS=OFF`，或仅构建指定目标（例如 `cmake --build build --target MskDSP`）。
+- `MSKDSP_BUILD_TESTS=ON` 只会构建测试并启用覆盖率编译选项；如需生成覆盖率报告，请显式执行 `cmake --build <build-dir> --target coverage`。
 - 若遇到 `GCOV returncode was 3`，通常是 `gcov` 版本与编译器不匹配；用 `-DGCOV_EXECUTABLE=/usr/bin/gcov-<gcc主版本>` 指定即可。
 - 若遇到 `AssertionError: Got function ... on multiple lines`，通常是同一源文件被多个 target 编译（例如库 + 测试）；需要在 gcovr 使用函数合并策略（当前工程已在 coverage 目标中内置）。
 - 若遇到 `Cannot open source file ...` 且路径指向已不存在的源码（例如模块目录改名后），说明 build 目录残留旧对象文件；建议清理 build 目录后重新配置/编译。
