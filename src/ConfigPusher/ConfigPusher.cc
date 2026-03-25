@@ -183,12 +183,12 @@ void ConfigPusher::applyConfig() {
   auto dataCenterConfig = LoadDataCenterConfigFile(ResolveConfigPath(configDir, kDataCenterConfigPath));
   auto agcConfig = LoadConfigFile(ResolveConfigPath(configDir, kAgcConfigPath));
 
-  const bool hasIec104 = iec104Config && iec104Config->has_iec104() && !iec104Config->iec104().links().empty();
-  const bool hasModbus = modbusConfig && modbusConfig->has_modbus_rtu() && !modbusConfig->modbus_rtu().links().empty();
+  const bool hasIec104 = iec104Config && iec104Config->has_iec104();
+  const bool hasModbus = modbusConfig && modbusConfig->has_modbus_rtu();
   const bool hasModbusMqtt = modbusConfig && modbusNeedsMqtt(*modbusConfig);
-  const bool hasDlt645 = dlt645Config && dlt645Config->has_dlt645() && !dlt645Config->dlt645().links().empty();
-  const bool hasAgc = agcConfig && agcConfig->has_agc() && agcConfig->agc().groups_size() > 0;
-  const bool hasDataCenter = dataCenterConfig && (!dataCenterConfig->point_tables().empty() || (dataCenterConfig->has_routes() && dataCenterConfig->routes().routes_size() > 0));
+  const bool hasDlt645 = dlt645Config && dlt645Config->has_dlt645();
+  const bool hasAgc = agcConfig && agcConfig->has_agc();
+  const bool hasDataCenter = dataCenterConfig.has_value();
   const bool needsDataCenter = hasIec104 || hasModbus || hasDlt645 || hasAgc || hasDataCenter;
   if (!hasIec104 && !hasModbus && !hasDlt645 && !hasAgc && !hasDataCenter) {
     LOG_INFO("配置中未包含 IEC104/ModbusRTU/DLT645/AGC/DataCenter 配置");

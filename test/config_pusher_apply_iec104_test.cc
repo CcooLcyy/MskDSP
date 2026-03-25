@@ -11,6 +11,13 @@ using ::testing::_;
 using ::testing::InSequence;
 using ::testing::Invoke;
 
+IEC104Proto::LinkInfo MakeLinkInfo(const char *connName, IEC104Proto::LinkState state) {
+  IEC104Proto::LinkInfo info;
+  info.mutable_config()->set_conn_name(connName);
+  info.set_state(state);
+  return info;
+}
+
 ConfigPusherProto::Iec104Config MakeIec104Config(bool start) {
   ConfigPusherProto::Iec104Config config;
 
@@ -45,6 +52,13 @@ TEST(ConfigPusherApplyIec104Test, ApplyLinkAndPointTableWithoutExplicitStart) {
   auto stub = std::make_unique<IEC104Proto::MockIEC104ServiceStub>();
 
   InSequence seq;
+  EXPECT_CALL(*stub, ListLinks(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext *,
+                          const IEC104Proto::Empty &,
+                          IEC104Proto::ListLinksResponse *resp) {
+        resp->Clear();
+        return grpc::Status::OK;
+      }));
   EXPECT_CALL(*stub, UpsertLink(_, _, _))
       .WillOnce(Invoke([](grpc::ClientContext *,
                           const IEC104Proto::UpsertLinkRequest &req,
@@ -79,4 +93,59 @@ TEST(ConfigPusherApplyIec104Test, MissingConnNameSkipsRpc) {
   EXPECT_CALL(*stub, StartLink(_, _, _)).Times(0);
 
   EXPECT_FALSE(ConfigPusher::applyIec104Config(config, stub.get()));
+}
+
+// 验证：CONFIG_PUSHER 编排会删除 jsonc 未声明的旧链路、先停止仍在运行的目标链路，再按全量点表覆盖到 jsonc 目标态。
+TEST(ConfigPusherApplyIec104Test, ReconcilesStaleAndRunningLinksToJsoncTargetState) {
+  auto config = MakeIec104Config(true);
+  config.mutable_links(0)->mutable_point_table()->set_replace(false);
+  auto stub = std::make_unique<IEC104Proto::MockIEC104ServiceStub>();
+
+  InSequence seq;
+  EXPECT_CALL(*stub, ListLinks(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext *,
+                          const IEC104Proto::Empty &,
+                          IEC104Proto::ListLinksResponse *resp) {
+        resp->Clear();
+        *resp->add_links() = MakeLinkInfo("iec104-legacy", IEC104Proto::LINK_STATE_STOPPED);
+        *resp->add_links() = MakeLinkInfo("iec104-main", IEC104Proto::LINK_STATE_RUNNING);
+        return grpc::Status::OK;
+      }));
+  EXPECT_CALL(*stub, DeleteLink(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext *,
+                          const IEC104Proto::DeleteLinkRequest &req,
+                          IEC104Proto::Empty *) {
+        EXPECT_EQ(req.conn_name(), "iec104-legacy");
+        return grpc::Status::OK;
+      }));
+  EXPECT_CALL(*stub, StopLink(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext *,
+                          const IEC104Proto::StopLinkRequest &req,
+                          IEC104Proto::Empty *) {
+        EXPECT_EQ(req.conn_name(), "iec104-main");
+        return grpc::Status::OK;
+      }));
+  EXPECT_CALL(*stub, UpsertLink(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext *,
+                          const IEC104Proto::UpsertLinkRequest &req,
+                          IEC104Proto::LinkInfo *resp) {
+        EXPECT_EQ(req.config().conn_name(), "iec104-main");
+        resp->set_conn_id(302);
+        return grpc::Status::OK;
+      }));
+  EXPECT_CALL(*stub, UpsertPointTable(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext *,
+                          const IEC104Proto::UpsertPointTableRequest &req,
+                          IEC104Proto::Empty *) {
+        EXPECT_EQ(req.conn_name(), "iec104-main");
+        EXPECT_TRUE(req.replace());
+        EXPECT_EQ(req.points_size(), 1);
+        if (req.points_size() == 1) {
+          EXPECT_EQ(req.points(0).tag(), "P_TOTAL");
+        }
+        return grpc::Status::OK;
+      }));
+  EXPECT_CALL(*stub, StartLink(_, _, _)).Times(0);
+
+  EXPECT_TRUE(ConfigPusher::applyIec104Config(config, stub.get()));
 }

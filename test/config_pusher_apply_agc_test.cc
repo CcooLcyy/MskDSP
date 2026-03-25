@@ -6,8 +6,16 @@
 
 namespace {
 using ::testing::_;
+using ::testing::InSequence;
 using ::testing::Invoke;
 using ::testing::Return;
+
+AGCProto::GroupInfo MakeGroupInfo(const char *groupName, AGCProto::GroupState state) {
+  AGCProto::GroupInfo info;
+  info.mutable_config()->set_group_name(groupName);
+  info.set_state(state);
+  return info;
+}
 
 ConfigPusherProto::AgcConfig MakeAgcConfig(bool start) {
   ConfigPusherProto::AgcConfig config;
@@ -46,6 +54,14 @@ TEST(ConfigPusherApplyAgcTest, UpsertGroupSuccessWhenStartFlagIsTrue) {
   auto config = MakeAgcConfig(true);
   auto stub = std::make_unique<AGCProto::MockAGCServiceStub>();
 
+  InSequence seq;
+  EXPECT_CALL(*stub, ListGroups(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext *,
+                          const AGCProto::Empty &,
+                          AGCProto::ListGroupsResponse *resp) {
+        resp->Clear();
+        return grpc::Status::OK;
+      }));
   EXPECT_CALL(*stub, UpsertGroup(_, _, _))
       .WillOnce(Invoke([](grpc::ClientContext*,
                           const AGCProto::UpsertGroupRequest& req,
@@ -104,4 +120,48 @@ TEST(ConfigPusherApplyAgcTest, MissingGroupNameSkipsRpc) {
   EXPECT_CALL(*stub, StartGroup(_, _, _)).Times(0);
 
   EXPECT_FALSE(ConfigPusher::applyAgcConfig(config, stub.get()));
+}
+
+// 验证：CONFIG_PUSHER 编排会删除 jsonc 未声明的旧控制组，并先停止仍在运行的目标控制组再按 jsonc 覆盖配置。
+TEST(ConfigPusherApplyAgcTest, ReconcilesStaleAndRunningGroupsToJsoncTargetState) {
+  auto config = MakeAgcConfig(true);
+  auto stub = std::make_unique<AGCProto::MockAGCServiceStub>();
+
+  InSequence seq;
+  EXPECT_CALL(*stub, ListGroups(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext *,
+                          const AGCProto::Empty &,
+                          AGCProto::ListGroupsResponse *resp) {
+        resp->Clear();
+        *resp->add_groups() = MakeGroupInfo("g-legacy", AGCProto::GROUP_STATE_STOPPED);
+        *resp->add_groups() = MakeGroupInfo("g-1", AGCProto::GROUP_STATE_RUNNING);
+        return grpc::Status::OK;
+      }));
+  EXPECT_CALL(*stub, DeleteGroup(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext *,
+                          const AGCProto::DeleteGroupRequest &req,
+                          AGCProto::Empty *) {
+        EXPECT_EQ(req.group_name(), "g-legacy");
+        return grpc::Status::OK;
+      }));
+  EXPECT_CALL(*stub, StopGroup(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext *,
+                          const AGCProto::StopGroupRequest &req,
+                          AGCProto::Empty *) {
+        EXPECT_EQ(req.group_name(), "g-1");
+        return grpc::Status::OK;
+      }));
+  EXPECT_CALL(*stub, UpsertGroup(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext*,
+                          const AGCProto::UpsertGroupRequest& req,
+                          AGCProto::GroupInfo* resp) {
+        EXPECT_EQ(req.config().group_name(), "g-1");
+        EXPECT_EQ(req.config().members_size(), 1);
+        resp->mutable_config()->set_group_name(req.config().group_name());
+        resp->set_conn_id(102);
+        return grpc::Status::OK;
+      }));
+  EXPECT_CALL(*stub, StartGroup(_, _, _)).Times(0);
+
+  EXPECT_TRUE(ConfigPusher::applyAgcConfig(config, stub.get()));
 }

@@ -4,6 +4,7 @@
 #include <google/protobuf/message.h>
 
 #include <string>
+#include <unordered_set>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -28,13 +29,6 @@ struct ConnKeyHash {
     return h(k.module) ^ (h(k.conn) << 1);
   }
 };
-
-bool HasDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config) {
-  if (!config.point_tables().empty()) {
-    return true;
-  }
-  return config.has_routes() && config.routes().routes_size() > 0;
-}
 
 bool ValidateConnKey(const std::string &moduleName, const std::string &connName) {
   return !moduleName.empty() && !connName.empty();
@@ -63,10 +57,9 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
     LOG_ERROR("DataCenter gRPC stub 为空");
     return false;
   }
-  if (!HasDataCenterConfig(config)) {
-    LOG_INFO("DataCenter 配置为空，跳过下发");
-    return true;
-  }
+  LOG_INFO("DataCenter 配置将按 jsonc 目标态收敛: 连接标签注册表条目数={}, 路由数={}",
+           config.point_tables_size(),
+           config.has_routes() ? config.routes().routes_size() : 0);
 
   DataCenterProto::ListConnectionsResponse connections;
   grpc::ClientContext listCtx;
@@ -89,9 +82,12 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
   }
 
   bool ok = true;
+  std::unordered_set<uint32_t> desiredConnIds;
+  desiredConnIds.reserve(static_cast<size_t>(config.point_tables_size()));
+  std::unordered_set<ConnKey, ConnKeyHash> desiredConnKeys;
+  desiredConnKeys.reserve(static_cast<size_t>(config.point_tables_size()));
   struct ResolvedConnTags {
     uint32_t connId;
-    bool replace;
     std::vector<std::string> tags;
     std::string moduleName;
     std::string connName;
@@ -105,8 +101,11 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
       ok = false;
       continue;
     }
-    if (table.tags().empty()) {
-      LOG_ERROR("DataCenter 连接标签注册表配置缺少标签: 模块名={}, 连接名={}", table.module_name(), table.conn_name());
+    ConnKey key{table.module_name(), table.conn_name()};
+    if (!desiredConnKeys.insert(key).second) {
+      LOG_ERROR("DataCenter 连接标签注册表配置存在重复连接: 模块名={}, 连接名={}",
+                table.module_name(),
+                table.conn_name());
       ok = false;
       continue;
     }
@@ -134,9 +133,9 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
       continue;
     }
 
+    desiredConnIds.emplace(connId);
     connTagsList.push_back(ResolvedConnTags{
         .connId = connId,
-        .replace = table.replace(),
         .tags = std::move(tags),
         .moduleName = table.module_name(),
         .connName = table.conn_name()});
@@ -185,6 +184,20 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
         ok = false;
         continue;
       }
+      if (!desiredConnIds.contains(srcConnId)) {
+        LOG_ERROR("DataCenter 路由源连接未在 point_tables 中声明目标标签集合: 模块名={}, 连接名={}",
+                  src.module_name(),
+                  src.conn_name());
+        ok = false;
+        continue;
+      }
+      if (!desiredConnIds.contains(dstConnId)) {
+        LOG_ERROR("DataCenter 路由目的连接未在 point_tables 中声明目标标签集合: 模块名={}, 连接名={}",
+                  dst.module_name(),
+                  dst.conn_name());
+        ok = false;
+        continue;
+      }
 
       DataCenterProto::Route resolved;
       resolved.mutable_src()->set_conn_id(srcConnId);
@@ -200,15 +213,29 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
     return false;
   }
 
+  for (const auto &conn : connections.conns()) {
+    if (conn.conn_id() == 0 || conn.module_name().empty() || conn.conn_name().empty()) {
+      continue;
+    }
+    if (desiredConnIds.contains(conn.conn_id())) {
+      continue;
+    }
+    connTagsList.push_back(ResolvedConnTags{
+        .connId = conn.conn_id(),
+        .tags = {},
+        .moduleName = conn.module_name(),
+        .connName = conn.conn_name()});
+  }
+
   for (const auto &table : connTagsList) {
     DataCenterProto::UpsertConnTagsRequest req;
     req.set_conn_id(table.connId);
-    req.set_replace(table.replace);
+    req.set_replace(true);
     for (const auto &tag : table.tags) {
       req.add_tags(tag);
     }
 
-    LOG_INFO("开始下发 DataCenter 连接标签注册表: 模块名={}, 连接名={}, 标签数={}, 是否替换={}",
+    LOG_INFO("开始按目标态覆盖 DataCenter 连接标签注册表: 模块名={}, 连接名={}, 标签数={}, 是否替换={}",
              table.moduleName,
              table.connName,
              req.tags_size(),
@@ -232,14 +259,14 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
              req.tags_size());
   }
 
-  if (hasRoutes && !routes.empty()) {
+  {
     DataCenterProto::UpsertRoutesRequest req;
-    req.set_replace(config.routes().replace());
+    req.set_replace(true);
     for (const auto &route : routes) {
       *req.add_routes() = route;
     }
 
-    LOG_INFO("开始下发 DataCenter 路由: 路由数={}, 是否替换={}", req.routes_size(), req.replace());
+    LOG_INFO("开始按目标态覆盖 DataCenter 路由: 路由数={}, 是否替换={}", req.routes_size(), req.replace());
     LOG_INFO("发送 DataCenter 路由请求报文: {}", formatProtoForLog(req));
     grpc::ClientContext ctx;
     DataCenterProto::Empty resp;

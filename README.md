@@ -102,15 +102,22 @@ docker run --network host --rm --log-driver none \
 - 使用该参数后，`docker logs` 不再提供输出；请先将宿主机当前目录的 `./log` 挂载到容器内 `/opt/mskdsp/log`，正式运行日志可直接查看宿主机 `./log` 目录。
 
 ### 启动自加载配置
-可选配置文件：`./conf/module_manager.jsonc`（JSONC，支持注释），用于控制 ModuleManager 启动时自动加载的模块列表。
-- 字段：`auto_start_modules`（字符串数组，模块名应与 `lib<模块名>.so.<version>` 匹配）
-- 缺失或为空：跳过自加载
-- 模板：`package/conf/module_manager.jsonc`（可直接修改并随包部署）
-- 建议：自启动列表仅填写 `ConfigPusher`，其余模块由 ConfigPusher 按配置按需启动
+可选配置文件：`./conf/module_manager.jsonc`（JSONC，支持注释），用于控制 ModuleManager 启动时的模块自加载行为。
+
+- 关键字段：
+  - `boot_config_mode`
+    - `CONFIG_PUSHER`：允许 `ConfigPusher` 在启动后读取 JSONC 并执行配置下发
+    - `UPPER`：`ModuleManager` 会按持久化配置文件痕迹自动启动对应模块，`ConfigPusher` 若被手动启动则仅提供服务、不执行配置下发
+  - `auto_start_modules`：显式自动加载模块列表
+- 模板：`package/conf/module_manager.jsonc`
+- 建议：使用 `CONFIG_PUSHER` 时，自启动列表仅填写 `ConfigPusher`
+- 更完整的模式说明、回退语义与 `UPPER` 文件痕迹清单，见 `src/core/ModuleManager/doc/README.md`
 
 示例：
 ```jsonc
 {
+  // 启动配置模式：允许 ConfigPusher 在启动后执行配置下发。
+  "boot_config_mode": "CONFIG_PUSHER",
   // ModuleManager 启动时自动加载的模块列表。
   "auto_start_modules": ["ConfigPusher"]
 }

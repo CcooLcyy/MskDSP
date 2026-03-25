@@ -294,6 +294,12 @@ TEST(ConfigPusherApplyConfigTest, AppliesJsoncConfigAndStartsModuleEvenWhenPersi
       "conn_name": "line-1",
       "tags": ["P_CMD_SRC"],
       "replace": true
+    },
+    {
+      "module_name": "AGC",
+      "conn_name": "g-1",
+      "tags": ["P_CMD"],
+      "replace": true
     }
   ],
   "routes": {
@@ -359,11 +365,23 @@ TEST(ConfigPusherApplyConfigTest, AppliesJsoncConfigAndStartsModuleEvenWhenPersi
   ConfigPusherTestPeer::ApplyConfig(pusher);
 
   const auto connTagsRequests = dataCenterService.connTagsRequests();
-  ASSERT_EQ(connTagsRequests.size(), 1u);
-  EXPECT_EQ(connTagsRequests[0].conn_id(), 10u);
-  EXPECT_TRUE(connTagsRequests[0].replace());
-  ASSERT_EQ(connTagsRequests[0].tags_size(), 1);
-  EXPECT_EQ(connTagsRequests[0].tags(0), "P_CMD_SRC");
+  ASSERT_EQ(connTagsRequests.size(), 2u);
+  bool sawSrcConnTags = false;
+  bool sawDstConnTags = false;
+  for (const auto& req : connTagsRequests) {
+    EXPECT_TRUE(req.replace());
+    if (req.conn_id() == 10u) {
+      ASSERT_EQ(req.tags_size(), 1);
+      EXPECT_EQ(req.tags(0), "P_CMD_SRC");
+      sawSrcConnTags = true;
+    } else if (req.conn_id() == 20u) {
+      ASSERT_EQ(req.tags_size(), 1);
+      EXPECT_EQ(req.tags(0), "P_CMD");
+      sawDstConnTags = true;
+    }
+  }
+  EXPECT_TRUE(sawSrcConnTags);
+  EXPECT_TRUE(sawDstConnTags);
 
   const auto routeRequests = dataCenterService.routeRequests();
   ASSERT_EQ(routeRequests.size(), 1u);
@@ -373,6 +391,84 @@ TEST(ConfigPusherApplyConfigTest, AppliesJsoncConfigAndStartsModuleEvenWhenPersi
   EXPECT_EQ(routeRequests[0].routes(0).src().tag(), "P_CMD_SRC");
   EXPECT_EQ(routeRequests[0].routes(0).dst().conn_id(), 20u);
   EXPECT_EQ(routeRequests[0].routes(0).dst().tag(), "P_CMD");
+
+  server->Shutdown();
+}
+
+// 验证：即使 DataCenter.jsonc 目标态为空，ConfigPusher 仍会启动 DataCenter 并按空目标态清空旧标签/旧路由。
+TEST(ConfigPusherApplyConfigTest, EmptyDataCenterJsonStillAppliesAsTargetState) {
+  ScopedTempDir workDir;
+  ScopedCwd cwd(workDir.path());
+
+  const auto configDir = workDir.path() / "configPusher";
+  WriteFile(configDir / "DataCenter.jsonc", R"json(
+{
+  "point_tables": [],
+  "routes": {
+    "routes": []
+  }
+}
+)json");
+
+  WriteFile(workDir.path() / "conf" / "dataCenter" / "connections.pb", "trace");
+
+  FakeDataCenterService dataCenterService;
+  grpc::ServerBuilder builder;
+  int port = 0;
+  builder.RegisterService(&dataCenterService);
+  builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+  auto server = builder.BuildAndStart();
+  ASSERT_NE(server, nullptr);
+  ASSERT_GT(port, 0);
+  const auto dataCenterAddr = std::string("127.0.0.1:") + std::to_string(port);
+
+  auto stub = std::make_shared<ModuleManagerProto::MockModuleManageStub>();
+  EXPECT_CALL(*stub, GetModuleInfo(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext *, const ModuleManagerProto::Empty &, ModuleManagerProto::ModuleInfos *resp) {
+        resp->Clear();
+        *resp->add_module_info() = MakeModuleInfo("DataCenter");
+        return grpc::Status::OK;
+      }));
+
+  size_t runningInfoCalls = 0;
+  EXPECT_CALL(*stub, GetRunningModuleInfo(_, _, _))
+      .Times(AtLeast(2))
+      .WillRepeatedly(Invoke([&](grpc::ClientContext *, const ModuleManagerProto::Empty &, ModuleManagerProto::ModuleRunningInfos *resp) {
+        resp->Clear();
+        if (runningInfoCalls++ >= 1) {
+          auto *running = resp->add_module_running_info();
+          running->set_module_name("DataCenter");
+          running->set_inner_grpc_server(dataCenterAddr);
+        }
+        return grpc::Status::OK;
+      }));
+
+  EXPECT_CALL(*stub, StartModule(_, _, _))
+      .Times(1)
+      .WillOnce(Invoke([](grpc::ClientContext *,
+                          const ModuleManagerProto::ModuleInfo &info,
+                          ModuleManagerProto::Empty *) {
+        EXPECT_EQ(info.module_name(), "DataCenter");
+        return grpc::Status::OK;
+      }));
+
+  ConfigPusherClass pusher;
+  pusher.setModuleManagerStub(stub);
+  pusher.setConfigDirForTest(configDir);
+
+  ConfigPusherTestPeer::ApplyConfig(pusher);
+
+  const auto connTagsRequests = dataCenterService.connTagsRequests();
+  ASSERT_EQ(connTagsRequests.size(), 2u);
+  for (const auto& req : connTagsRequests) {
+    EXPECT_TRUE(req.replace());
+    EXPECT_EQ(req.tags_size(), 0);
+  }
+
+  const auto routeRequests = dataCenterService.routeRequests();
+  ASSERT_EQ(routeRequests.size(), 1u);
+  EXPECT_TRUE(routeRequests[0].replace());
+  EXPECT_EQ(routeRequests[0].routes_size(), 0);
 
   server->Shutdown();
 }

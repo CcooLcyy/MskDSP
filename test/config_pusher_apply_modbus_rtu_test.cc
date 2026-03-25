@@ -2,12 +2,14 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <string>
 
 #include "ConfigPusherApplyModbusRtu.h"
 #include "ModbusRTU_mock.grpc.pb.h"
 
 namespace {
 using ::testing::_;
+using ::testing::AtLeast;
 using ::testing::InSequence;
 using ::testing::Invoke;
 
@@ -62,6 +64,7 @@ TEST(ConfigPusherApplyModbusRtuTest, RejectsMqttLinkWithoutTopLevelMqtt) {
   auto config = MakeMqttModbusConfig(false, false);
   auto stub = std::make_unique<ModbusRTUProto::MockModbusRTUServiceStub>();
 
+  EXPECT_CALL(*stub, ListLinks(_, _, _)).Times(0);
   EXPECT_CALL(*stub, UpdateConfig(_, _, _)).Times(0);
   EXPECT_CALL(*stub, UpsertLink(_, _, _)).Times(0);
 
@@ -74,6 +77,13 @@ TEST(ConfigPusherApplyModbusRtuTest, AppliesUpdateConfigBeforeLinkWithoutExplici
   auto stub = std::make_unique<ModbusRTUProto::MockModbusRTUServiceStub>();
 
   InSequence seq;
+  EXPECT_CALL(*stub, ListLinks(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext*,
+                          const ModbusRTUProto::Empty&,
+                          ModbusRTUProto::ListLinksResponse* resp) {
+        resp->Clear();
+        return grpc::Status::OK;
+      }));
   EXPECT_CALL(*stub, UpdateConfig(_, _, _))
       .WillOnce(Invoke([](grpc::ClientContext*,
                           const ModbusRTUProto::UpdateConfigRequest& req,
@@ -110,6 +120,13 @@ TEST(ConfigPusherApplyModbusRtuTest, UpdateConfigFailureStopsWhenMqttIsRequired)
   auto config = MakeMqttModbusConfig(false, true);
   auto stub = std::make_unique<ModbusRTUProto::MockModbusRTUServiceStub>();
 
+  EXPECT_CALL(*stub, ListLinks(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext*,
+                          const ModbusRTUProto::Empty&,
+                          ModbusRTUProto::ListLinksResponse* resp) {
+        resp->Clear();
+        return grpc::Status::OK;
+      }));
   EXPECT_CALL(*stub, UpdateConfig(_, _, _))
       .WillOnce(Invoke([](grpc::ClientContext*,
                           const ModbusRTUProto::UpdateConfigRequest& req,
@@ -121,4 +138,100 @@ TEST(ConfigPusherApplyModbusRtuTest, UpdateConfigFailureStopsWhenMqttIsRequired)
   EXPECT_CALL(*stub, StartLink(_, _, _)).Times(0);
 
   EXPECT_FALSE(ConfigPusher::applyModbusRtuConfig(config, stub.get()));
+}
+
+// 验证：CONFIG_PUSHER 会删除 jsonc 未声明的旧链路，并对仍保留且运行中的链路先 Stop 再 Upsert，点表按 replace=true 全量覆盖。
+TEST(ConfigPusherApplyModbusRtuTest, ConvergesToJsoncTargetByDeletingStaleLinkAndReplacingPointTable) {
+  auto config = MakeMqttModbusConfig(false, true);
+  auto stub = std::make_unique<ModbusRTUProto::MockModbusRTUServiceStub>();
+
+  bool listedLinks = false;
+  bool deletedLegacyLink = false;
+  bool stoppedDesiredLink = false;
+  bool upsertedDesiredLink = false;
+
+  InSequence seq;
+  EXPECT_CALL(*stub, ListLinks(_, _, _))
+      .Times(1)
+      .WillOnce(Invoke([&](grpc::ClientContext*,
+                           const ModbusRTUProto::Empty&,
+                           ModbusRTUProto::ListLinksResponse* resp) {
+        listedLinks = true;
+        auto* legacy = resp->add_links();
+        legacy->mutable_config()->set_conn_name("legacy-link");
+        legacy->set_state(ModbusRTUProto::LINK_STATE_STOPPED);
+
+        auto* desired = resp->add_links();
+        desired->mutable_config()->set_conn_name("modbus-mqtt-1");
+        desired->set_state(ModbusRTUProto::LINK_STATE_RUNNING);
+        return grpc::Status::OK;
+      }));
+
+  EXPECT_CALL(*stub, DeleteLink(_, _, _))
+      .Times(AtLeast(1))
+      .WillRepeatedly(Invoke([&](grpc::ClientContext*,
+                                 const ModbusRTUProto::DeleteLinkRequest& req,
+                                 ModbusRTUProto::Empty*) {
+        EXPECT_TRUE(listedLinks);
+        if (req.conn_name() == "legacy-link") {
+          deletedLegacyLink = true;
+        } else {
+          ADD_FAILURE() << "DeleteLink 不应删除 jsonc 目标链路: " << req.conn_name();
+        }
+        return grpc::Status::OK;
+      }));
+
+  EXPECT_CALL(*stub, StopLink(_, _, _))
+      .Times(AtLeast(1))
+      .WillRepeatedly(Invoke([&](grpc::ClientContext*,
+                                 const ModbusRTUProto::StopLinkRequest& req,
+                                 ModbusRTUProto::Empty*) {
+        EXPECT_TRUE(listedLinks);
+        if (req.conn_name() == "modbus-mqtt-1") {
+          stoppedDesiredLink = true;
+        } else if (req.conn_name() != "legacy-link") {
+          ADD_FAILURE() << "StopLink 命中了未知链路: " << req.conn_name();
+        }
+        return grpc::Status::OK;
+      }));
+
+  EXPECT_CALL(*stub, UpdateConfig(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext*,
+                          const ModbusRTUProto::UpdateConfigRequest& req,
+                          ModbusRTUProto::UpdateConfigResponse* resp) {
+        EXPECT_EQ(req.mqtt().client_id(), "dlt645");
+        resp->set_ok(true);
+        resp->set_message("成功");
+        return grpc::Status::OK;
+      }));
+
+  EXPECT_CALL(*stub, UpsertLink(_, _, _))
+      .WillOnce(Invoke([&](grpc::ClientContext*,
+                          const ModbusRTUProto::UpsertLinkRequest& req,
+                          ModbusRTUProto::LinkInfo* resp) {
+        EXPECT_TRUE(stoppedDesiredLink);
+        EXPECT_EQ(req.config().conn_name(), "modbus-mqtt-1");
+        EXPECT_EQ(req.config().transport_type(), ModbusRTUProto::TRANSPORT_MQTT_UART);
+        upsertedDesiredLink = true;
+        resp->set_conn_id(1001);
+        return grpc::Status::OK;
+      }));
+
+  EXPECT_CALL(*stub, UpsertPointTable(_, _, _))
+      .WillOnce(Invoke([&](grpc::ClientContext*,
+                          const ModbusRTUProto::UpsertPointTableRequest& req,
+                          ModbusRTUProto::Empty*) {
+        EXPECT_TRUE(upsertedDesiredLink);
+        EXPECT_EQ(req.conn_name(), "modbus-mqtt-1");
+        EXPECT_EQ(req.points_size(), 1);
+        EXPECT_TRUE(req.replace());
+        EXPECT_EQ(req.points(0).tag(), "Ua");
+        return grpc::Status::OK;
+      }));
+
+  EXPECT_CALL(*stub, StartLink(_, _, _)).Times(0);
+
+  EXPECT_TRUE(ConfigPusher::applyModbusRtuConfig(config, stub.get()));
+  EXPECT_TRUE(deletedLegacyLink);
+  EXPECT_TRUE(stoppedDesiredLink);
 }
