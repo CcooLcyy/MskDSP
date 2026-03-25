@@ -47,7 +47,7 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
   - `comm_mode`：通信方式：`COMM_MODE_LORA`/`COMM_MODE_CARRIER`/`COMM_MODE_SERIAL`。
   - `poll_interval_ms`：整轮扫描完成后的等待间隔（毫秒，0 使用默认值）。
   - `poll_item_interval_ms`：单次点抄收发完成后，到下一次点抄收发开始前的等待间隔（毫秒，0 表示无额外等待）。
-  - `request_timeout_ms`：请求超时（毫秒，0 使用默认值）。
+  - `request_timeout_ms`：请求超时（毫秒，0 使用默认值）；对于 `COMM_MODE_LORA` 的正式轮询点抄，若收到响应但 `status!=0`，下一次点抄前的退避等待也复用该值。
   - `serial_port`：串口标识（`COMM_MODE_SERIAL` 必填，例如 `RS485-1`）。
   - `serial_baud_rate`：串口波特率（`COMM_MODE_SERIAL`，0 使用默认值 `9600`）。
   - `serial_data_bits`：串口数据位（`COMM_MODE_SERIAL`，0 使用默认值 `8`，仅支持 `5..8`）。
@@ -207,7 +207,8 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
   - `5/Formaterror`：格式错误。
   - 其他未识别值：统一按失败处理。
 - 对 `addslaveNode/delslaveNode` 而言，`status` 缺失、空值或类型异常会直接按失败处理，不再默认视为成功。
-- 对普通抄表/写入请求，`status=2` 仍按“帧超时”处理；但对 Lora/载波 `addslaveNode` 响应，数值型 `status=2`（含字符串 `"2"`）表示“档案已存在”，模块会按档案添加成功处理，不再进入后台重试，并直接继续后续抄表流程；字符串 `Frametimeout` 仍按“帧超时”失败处理。
+- 对普通抄表/写入请求，`status=2` 仍按“帧超时”处理；其中 `COMM_MODE_LORA` 的正式轮询点抄若收到任意 `status!=0`，模块会在继续下一次点抄前按 `request_timeout_ms` 退避等待，而不是固定等待 5 秒。
+- 对 Lora/载波 `addslaveNode` 响应，数值型 `status=2`（含字符串 `"2"`）表示“档案已存在”，模块会按档案添加成功处理，不再进入后台重试，并直接继续后续抄表流程；字符串 `Frametimeout` 仍按“帧超时”失败处理。
 - 档案管理（仅 Lora/载波）：按 `(comm_mode, meter_addr)` 做地址级引用计数；首个连接进入运行态时发送 `addslaveNode`，最后一个连接退出运行态时发送 `delslaveNode`。
 - 若首轮 `addslaveNode` 失败（不含数值型 `status=2`/字符串 `"2"` 的“档案已存在”），链路会保持 `STOPPED`，模块后台每 5 秒重试一次档案添加；重试成功后会自动继续启动连接功能。`StopLink`、`UpsertLink`、`UpsertPointTable` 会终止该后台重试，并以最新配置重新判定后续行为。
 
@@ -242,6 +243,7 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
 - `addslaveNode` 在同地址首个连接进入运行态时触发发送（按地址生命周期一次）；消息默认不保留（retain=false）。
 - 若首轮 `addslaveNode` 返回数值型 `status=2`（含字符串 `"2"`），表示档案已存在；模块不会继续重发 `addslaveNode`，而是直接继续后续抄表流程。
 - 若首轮 `addslaveNode` 返回失败（不含数值型 `status=2`/字符串 `"2"` 的“档案已存在”），模块会在后台每 5 秒继续重发，直到成功、连接功能被停止，或链路配置/点表被再次更新。
+- `COMM_MODE_LORA` 的正式轮询点抄若收到非零 `status`，模块不会进入档案后台重试逻辑；仅在当前轮询线程内按 `request_timeout_ms` 等待后继续抄下一个点或数据块。
 - `StartLink` 首次调用可能直接返回失败，但后台仍会继续重试档案添加；`UpsertLink/UpsertPointTable` 返回成功也只代表配置已生效，不代表连接功能已经进入 `RUNNING`。集成侧应通过 `GetLink/ListLinks` 的 `state` 与 `last_error` 判断最终状态。
 - 如订阅端在发送之后才订阅，可能错过该消息；建议订阅端使用 QoS 1 + 持久会话（`clean_session=false`）。
 - 即使首轮 `addslaveNode` 返回数值型 `status=2`（含字符串 `"2"`）而未重试，后续当该地址生命周期结束时（例如上位机调用 `StopLink` 停止连接功能，且该地址已无其他运行连接），模块仍会按生命周期发送 `delslaveNode` 删除档案。
@@ -281,6 +283,7 @@ DLT645 会将模块内已生效的配置落盘到工作目录下的 `./conf/DLT6
 - 订阅端偶尔收不到：请确认订阅时机、broker 地址是否一致，并建议使用 QoS 1 + 持久会话。
 
 ### 变更记录
+- 2026-03-25：LoRa 正式轮询点抄收到非零 `status` 时，下一次点抄前的等待由固定 5 秒改为复用 `request_timeout_ms`；档案后台重试仍保持每 5 秒。
 - 2026-03-23：档案添加/删除响应 `status` 改为输出中文失败原因；首轮 `addslaveNode` 失败后转为后台每 5 秒无限重试，并补充上位机状态展示指导文档。
 - 2026-02-03：新增数据块配置（blocks/items/trim_right_space）及读块写点规则说明。
 - 2026-03-04：新增 `COMM_MODE_SERIAL` 串口通道实现，支持 uartManager 主题与串口参数下发。

@@ -31,7 +31,6 @@ constexpr uint8_t kDefaultQos = 1;
 constexpr uint32_t kDefaultPollIntervalMs = 1000;
 constexpr uint32_t kDefaultPollItemIntervalMs = 0;
 constexpr uint32_t kDefaultRequestTimeoutMs = 3000;
-constexpr auto kLoraNextReadDelayOnStatusError = std::chrono::seconds(5);
 constexpr const char *kAppName = "AGVC";
 constexpr const char *kAppTypeLora = "loraManager";
 constexpr const char *kAppTypeCarrier = "ccoRouter";
@@ -1805,10 +1804,12 @@ void LinkManager::startPollingLocked(const std::string &connName, const std::sha
 
   const auto roundInterval = std::chrono::milliseconds(link->config.poll_interval_ms());
   const auto itemInterval = std::chrono::milliseconds(link->config.poll_item_interval_ms());
+  const auto statusErrorInterval = std::chrono::milliseconds(
+      link->config.request_timeout_ms() > 0 ? link->config.request_timeout_ms() : kDefaultRequestTimeoutMs);
   LOG_INFO("DLT645 启动轮询线程: conn_name={}, 整轮间隔={}ms, 单次收发间隔={}ms", connName, link->config.poll_interval_ms(), link->config.poll_item_interval_ms());
   link->pollThread = ModuleManager::StartModuleThread(
       moduleName_,
-      [this, connName, link, roundInterval, itemInterval](std::stop_token st) {
+      [this, connName, link, roundInterval, itemInterval, statusErrorInterval](std::stop_token st) {
         auto nextRequestGap = std::chrono::milliseconds::zero();
         auto waitBeforeNextRequest = [&nextRequestGap, st]() {
           if (nextRequestGap <= std::chrono::milliseconds::zero()) {
@@ -1849,8 +1850,9 @@ void LinkManager::startPollingLocked(const std::string &connName, const std::sha
             if (status != 0) {
               LOG_WARNING("DLT645 数据块读请求返回失败: conn_name={}, block_di={}, 状态码={}", connName, block.diText, status);
               if (link->config.comm_mode() == DLT645Proto::COMM_MODE_LORA) {
-                scheduleNextRequestGap(std::chrono::duration_cast<std::chrono::milliseconds>(kLoraNextReadDelayOnStatusError));
-                LOG_WARNING("DLT645 LoRa 数据块读请求返回异常状态，5秒后再抄下一个数据块: conn_name={}, block_di={}, 状态码={}",
+                scheduleNextRequestGap(statusErrorInterval);
+                LOG_WARNING("DLT645 LoRa 数据块读请求返回异常状态，{}ms后再抄下一个数据块: conn_name={}, block_di={}, 状态码={}",
+                            statusErrorInterval.count(),
                             connName,
                             block.diText,
                             status);
@@ -1900,8 +1902,9 @@ void LinkManager::startPollingLocked(const std::string &connName, const std::sha
             if (status != 0) {
               LOG_WARNING("DLT645 读请求返回失败: conn_name={}, tag={}, 状态码={}", connName, point.tag, status);
               if (link->config.comm_mode() == DLT645Proto::COMM_MODE_LORA) {
-                scheduleNextRequestGap(std::chrono::duration_cast<std::chrono::milliseconds>(kLoraNextReadDelayOnStatusError));
-                LOG_WARNING("DLT645 LoRa 读请求返回异常状态，5秒后再抄下一个点: conn_name={}, tag={}, 状态码={}",
+                scheduleNextRequestGap(statusErrorInterval);
+                LOG_WARNING("DLT645 LoRa 读请求返回异常状态，{}ms后再抄下一个点: conn_name={}, tag={}, 状态码={}",
+                            statusErrorInterval.count(),
                             connName,
                             point.tag,
                             status);
