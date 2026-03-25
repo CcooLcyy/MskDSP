@@ -14,7 +14,7 @@ on:
         default: ''
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: beta-${{ github.workflow }}-${{ github.ref }}
@@ -261,12 +261,27 @@ jobs:
         run: |
           set -euo pipefail
           BASE_VERSION="$(tr -d '\n' < VERSION)"
-          BUILD_DATE="$(TZ=Asia/Shanghai date +%Y%m%d)"
+          BUILD_STAMP="$(TZ=Asia/Shanghai date +%Y%m%d-%H%M%S)"
           SHORT_SHA="$(git rev-parse --short=7 HEAD)"
-          BRANCH_SUFFIX="$(echo "${{ steps.ref.outputs.target_ref }}" | tr '/' '-')"
-          IMAGE_VERSION="${BASE_VERSION}-${BRANCH_SUFFIX}-${BUILD_DATE}-${SHORT_SHA}-linux-arm64"
+          TARGET_REF="${{ steps.ref.outputs.target_ref }}"
+          BETA_LINE="${TARGET_REF#beta/}"
+          BRANCH_SUFFIX="$(echo "${TARGET_REF}" | tr '/' '-')"
+          BETA_TAG_PREFIX="beta-${BETA_LINE}-"
+          BETA_TAG="${BETA_TAG_PREFIX}${BUILD_STAMP}-${SHORT_SHA}"
+          RELEASE_TITLE="Beta ${BETA_LINE} ${BUILD_STAMP}-${SHORT_SHA}"
+          NOTES_START_TAG="$(git describe --tags --match 'v*' --abbrev=0 2>/dev/null || true)"
+          if [ -z "${NOTES_START_TAG}" ]; then
+            echo "未找到可作为 Beta 发布说明基线的正式 tag（匹配 v*）" >&2
+            exit 1
+          fi
+          IMAGE_VERSION="${BASE_VERSION}-${BRANCH_SUFFIX}-${BUILD_STAMP}-${SHORT_SHA}-linux-arm64"
           ARCHIVE_NAME="mskdsp-${IMAGE_VERSION}"
-          DEBUG_ARCHIVE_NAME="mskdsp-${BASE_VERSION}-${BRANCH_SUFFIX}-${BUILD_DATE}-${SHORT_SHA}-debugsymbols-linux-arm64"
+          DEBUG_ARCHIVE_NAME="mskdsp-${BASE_VERSION}-${BRANCH_SUFFIX}-${BUILD_STAMP}-${SHORT_SHA}-debugsymbols-linux-arm64"
+          echo "beta_line=${BETA_LINE}" >> "${GITHUB_OUTPUT}"
+          echo "beta_tag_prefix=${BETA_TAG_PREFIX}" >> "${GITHUB_OUTPUT}"
+          echo "beta_tag=${BETA_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "release_title=${RELEASE_TITLE}" >> "${GITHUB_OUTPUT}"
+          echo "notes_start_tag=${NOTES_START_TAG}" >> "${GITHUB_OUTPUT}"
           echo "image_version=${IMAGE_VERSION}" >> "${GITHUB_OUTPUT}"
           echo "archive_name=${ARCHIVE_NAME}" >> "${GITHUB_OUTPUT}"
           echo "debug_archive_name=${DEBUG_ARCHIVE_NAME}" >> "${GITHUB_OUTPUT}"
@@ -432,3 +447,46 @@ jobs:
             ${{ steps.meta.outputs.debug_archive_name }}.tar.gz
             SHA256SUMS
           if-no-files-found: ignore
+
+      - name: 清理当前 Beta 线旧预发布
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          BETA_TAG_PREFIX="${{ steps.meta.outputs.beta_tag_prefix }}"
+          mapfile -t OLD_RELEASE_TAGS < <(gh release list --limit 100 --json tagName,isPrerelease --jq ".[] | select(.isPrerelease == true and (.tagName | startswith(\"${BETA_TAG_PREFIX}\"))) | .tagName")
+          if [ "${#OLD_RELEASE_TAGS[@]}" -eq 0 ]; then
+            echo "当前 Beta 线无旧预发布需要清理"
+            exit 0
+          fi
+          printf '清理当前 Beta 线旧预发布:\n'
+          printf '%s\n' "${OLD_RELEASE_TAGS[@]}"
+          for tag in "${OLD_RELEASE_TAGS[@]}"; do
+            gh release delete "${tag}" --cleanup-tag --yes
+          done
+
+      - name: 创建 Beta 预发布页面
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ASSETS=("images/${{ steps.meta.outputs.archive_name }}")
+          if [ -f "${{ steps.meta.outputs.debug_archive_name }}.tar.gz" ]; then
+            ASSETS+=("${{ steps.meta.outputs.debug_archive_name }}.tar.gz")
+          fi
+          ASSETS+=(SHA256SUMS)
+          EXTRA_NOTES="$(cat <<EOF
+          基线正式版本：${{ steps.meta.outputs.notes_start_tag }}
+          目标 Beta 分支：${{ steps.ref.outputs.target_ref }}
+          说明范围：以下自动生成内容表示自上述正式版本以来的累计变更。
+          EOF
+          )"
+          gh release create "${{ steps.meta.outputs.beta_tag }}" "${ASSETS[@]}" \
+            --target "${{ steps.ref.outputs.target_ref }}" \
+            --title "${{ steps.meta.outputs.release_title }}" \
+            --prerelease \
+            --generate-notes \
+            --notes-start-tag "${{ steps.meta.outputs.notes_start_tag }}" \
+            --notes "${EXTRA_NOTES}"
