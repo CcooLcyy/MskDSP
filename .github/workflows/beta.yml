@@ -279,9 +279,10 @@ jobs:
           BETA_TAG="${BETA_TAG_PREFIX}${BUILD_STAMP}-${SHORT_SHA}"
           RELEASE_TITLE="Beta ${BETA_LINE} ${BUILD_STAMP}-${SHORT_SHA}"
           NOTES_START_TAG="$(git describe --tags --match 'v*' --abbrev=0 2>/dev/null || true)"
-          if [ -z "${NOTES_START_TAG}" ]; then
-            echo "未找到可作为 Beta 发布说明基线的正式 tag（匹配 v*）" >&2
-            exit 1
+          if [ -n "${NOTES_START_TAG}" ]; then
+            echo "已找到 Beta 发布说明基线正式 tag: ${NOTES_START_TAG}"
+          else
+            echo "未找到可作为 Beta 发布说明基线的正式 tag（匹配 v*），将按首个 Beta 预发布处理"
           fi
           IMAGE_VERSION="${BASE_VERSION}-${BRANCH_SUFFIX}-${BUILD_STAMP}-${SHORT_SHA}-linux-arm64"
           ARCHIVE_NAME="mskdsp-${IMAGE_VERSION}"
@@ -495,16 +496,30 @@ jobs:
             ASSETS+=("${{ steps.meta.outputs.debug_archive_name }}.tar.gz")
           fi
           ASSETS+=(SHA256SUMS)
-          EXTRA_NOTES="$(cat <<EOF
-          基线正式版本：${{ steps.meta.outputs.notes_start_tag }}
+          NOTES_START_TAG_OUTPUT="${{ steps.meta.outputs.notes_start_tag }}"
+          RELEASE_ARGS=(
+            "${{ steps.meta.outputs.beta_tag }}"
+            "${ASSETS[@]}"
+            --target "${{ steps.ref.outputs.target_ref }}"
+            --title "${{ steps.meta.outputs.release_title }}"
+            --prerelease
+            --generate-notes
+          )
+          if [ -n "${NOTES_START_TAG_OUTPUT}" ]; then
+            EXTRA_NOTES="$(cat <<EOF
+          基线正式版本：${NOTES_START_TAG_OUTPUT}
           目标 Beta 分支：${{ steps.ref.outputs.target_ref }}
           说明范围：以下自动生成内容表示自上述正式版本以来的累计变更。
           EOF
-          )"
-          gh release create "${{ steps.meta.outputs.beta_tag }}" "${ASSETS[@]}" \
-            --target "${{ steps.ref.outputs.target_ref }}" \
-            --title "${{ steps.meta.outputs.release_title }}" \
-            --prerelease \
-            --generate-notes \
-            --notes-start-tag "${{ steps.meta.outputs.notes_start_tag }}" \
-            --notes "${EXTRA_NOTES}"
+            )"
+            RELEASE_ARGS+=(--notes-start-tag "${NOTES_START_TAG_OUTPUT}")
+          else
+            EXTRA_NOTES="$(cat <<EOF
+          基线正式版本：当前仓库暂无正式版本 tag（匹配 v*）
+          目标 Beta 分支：${{ steps.ref.outputs.target_ref }}
+          说明范围：当前为首个 Beta 预发布，以下自动生成内容由 GitHub 按默认规则生成。
+          EOF
+            )"
+          fi
+          RELEASE_ARGS+=(--notes "${EXTRA_NOTES}")
+          gh release create "${RELEASE_ARGS[@]}"
