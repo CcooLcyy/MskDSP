@@ -171,3 +171,226 @@ jobs:
             build/CMakeCache.txt
             build/CMakeFiles/CMakeConfigureLog.yaml
             build/Testing
+
+  arm64-master-package:
+    name: master/main 产出 arm64 测试安装包
+    runs-on: ubuntu-24.04
+    needs:
+      - x64-debug-test
+    if: ${{ github.event_name == 'push' && (github.ref_name == 'master' || github.ref_name == 'main') }}
+    env:
+      VCPKG_BINARY_CACHE_DIR: ${{ github.workspace }}/.cache/vcpkg/arm64-linux-dynamic
+      CCACHE_DIR: ${{ github.workspace }}/.cache/ccache/arm64-linux-dynamic
+    steps:
+      - name: 拉取主仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: 恢复 vcpkg 二进制缓存
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_BINARY_CACHE_DIR }}
+          key: vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          restore-keys: |
+            vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-
+
+      - name: 恢复 ccache 编译缓存
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ runner.os }}-gcc14-arm64-linux-dynamic-v1-${{ hashFiles('CMakeLists.txt', 'protobuf/CMakeLists.txt', 'CMakePresets.json') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-gcc14-arm64-linux-dynamic-v1-
+
+      - name: 准备 vcpkg 二进制缓存环境
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${VCPKG_BINARY_CACHE_DIR}"
+          mkdir -p "${CCACHE_DIR}"
+          echo "VCPKG_DEFAULT_BINARY_CACHE=${VCPKG_BINARY_CACHE_DIR}" >> "${GITHUB_ENV}"
+          echo "VCPKG_BINARY_SOURCES=clear;files,${VCPKG_BINARY_CACHE_DIR},readwrite" >> "${GITHUB_ENV}"
+          echo "CCACHE_DIR=${CCACHE_DIR}" >> "${GITHUB_ENV}"
+          echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}" >> "${GITHUB_ENV}"
+          echo "CCACHE_COMPILERCHECK=content" >> "${GITHUB_ENV}"
+          echo "CCACHE_MAXSIZE=1G" >> "${GITHUB_ENV}"
+
+      - name: 生成构建元数据
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_VERSION="$(tr -d '\n' < VERSION)"
+          BUILD_DATE="$(TZ=Asia/Shanghai date +%Y%m%d)"
+          SHORT_SHA="$(git rev-parse --short=7 HEAD)"
+          BRANCH_SUFFIX="$(echo "${GITHUB_REF_NAME}" | tr '/' '-')"
+          IMAGE_VERSION="${BASE_VERSION}-${BRANCH_SUFFIX}-ci-${BUILD_DATE}-${SHORT_SHA}-linux-arm64"
+          ARCHIVE_NAME="mskdsp-${IMAGE_VERSION}"
+          DEBUG_ARCHIVE_NAME="mskdsp-${BASE_VERSION}-${BRANCH_SUFFIX}-ci-${BUILD_DATE}-${SHORT_SHA}-debugsymbols-linux-arm64"
+          echo "image_version=${IMAGE_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "archive_name=${ARCHIVE_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "debug_archive_name=${DEBUG_ARCHIVE_NAME}" >> "${GITHUB_OUTPUT}"
+
+      - name: 准备 protobuf 子模块访问
+        shell: bash
+        env:
+          MSKDSP_PROTO_SSH_KEY: ${{ secrets.MSKDSP_PROTO_SSH_KEY }}
+          MSKDSP_PROTO_TOKEN: ${{ secrets.MSKDSP_PROTO_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${MSKDSP_PROTO_SSH_KEY:-}" ]; then
+            install -m 700 -d "${HOME}/.ssh"
+            printf '%s\n' "${MSKDSP_PROTO_SSH_KEY}" > "${HOME}/.ssh/id_ed25519"
+            chmod 600 "${HOME}/.ssh/id_ed25519"
+            ssh-keyscan github.com >> "${HOME}/.ssh/known_hosts"
+            echo "已启用 SSH key 访问 protobuf 子模块"
+          elif [ -n "${MSKDSP_PROTO_TOKEN:-}" ]; then
+            git config --global url."https://${MSKDSP_PROTO_TOKEN}@github.com/".insteadOf "git@github.com:"
+            echo "已启用 Token 访问 protobuf 子模块"
+          else
+            git config --global url."https://github.com/".insteadOf "git@github.com:"
+            echo "未配置子模块凭据，已切换为 HTTPS 拉取 protobuf 子模块"
+          fi
+
+      - name: 拉取 protobuf 子模块
+        shell: bash
+        run: |
+          set -euo pipefail
+          git submodule sync --recursive
+          git submodule update --init --recursive
+
+      - name: 安装构建依赖
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            ccache \
+            gcc-14 \
+            g++-14 \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu
+
+      - name: 安装 vcpkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          VCPKG_ROOT="${RUNNER_TEMP}/vcpkg"
+          VCPKG_BASELINE="$(python3 - <<'PY'
+          import json
+          with open('vcpkg-configuration.json', 'r', encoding='utf-8') as fh:
+              print(json.load(fh)['default-registry']['baseline'])
+          PY
+          )"
+          git clone https://github.com/microsoft/vcpkg.git "${VCPKG_ROOT}"
+          git -C "${VCPKG_ROOT}" checkout "${VCPKG_BASELINE}"
+          "${VCPKG_ROOT}/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=${VCPKG_ROOT}" >> "${GITHUB_ENV}"
+
+      - name: 配置 arm64 RelWithDebInfo
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-arm64 -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+            -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
+            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_SCAN_FOR_MODULES=OFF \
+            -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+            -DMSKDSP_BUILD_TESTS=OFF \
+            -DMSKDSP_STRIP_DEBUG=ON \
+            -DCMAKE_STRIP=/usr/bin/aarch64-linux-gnu-strip \
+            -DCMAKE_OBJDUMP=/usr/bin/aarch64-linux-gnu-objdump \
+            -DCMAKE_OBJCOPY=/usr/bin/aarch64-linux-gnu-objcopy \
+            -DVCPKG_HOST_TRIPLET=x64-linux-dynamic \
+            -DVCPKG_TARGET_TRIPLET=arm64-linux-dynamic \
+            -DProtobuf_PROTOC_EXECUTABLE="${GITHUB_WORKSPACE}/build-arm64/vcpkg_installed/x64-linux-dynamic/tools/protobuf/protoc" \
+            -DgRPC_CPP_PLUGIN_EXECUTABLE="${GITHUB_WORKSPACE}/build-arm64/vcpkg_installed/x64-linux-dynamic/tools/grpc/grpc_cpp_plugin"
+
+      - name: 清零 ccache 统计
+        shell: bash
+        run: |
+          set -euo pipefail
+          ccache --zero-stats
+
+      - name: 编译 arm64 RelWithDebInfo
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build build-arm64 --parallel
+
+      - name: 输出 ccache 统计
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          ccache --show-stats
+
+      - name: 安装运行产物到 package
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --install build-arm64
+
+      - name: 打包调试符号
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d package/debug ]; then
+            tar -C package -czf "${{ steps.meta.outputs.debug_archive_name }}.tar.gz" debug
+          fi
+
+      - name: 准备 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 生成自解压测试包
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p images
+          CI_DOCKERFILE="${RUNNER_TEMP}/Dockerfile.ci"
+          sed 's#localhost/arm64v8/ubuntu:noble#arm64v8/ubuntu:noble#' Dockerfile > "${CI_DOCKERFILE}"
+          IMAGE_REF="mskdsp:${{ steps.meta.outputs.image_version }}"
+          IMAGE_TAR="images/${{ steps.meta.outputs.archive_name }}.tar"
+          docker buildx build \
+            --platform linux/arm64 \
+            --load \
+            -t "${IMAGE_REF}" \
+            -f "${CI_DOCKERFILE}" \
+            .
+          rm -f "${IMAGE_TAR}"
+          docker save -o "${IMAGE_TAR}" "${IMAGE_REF}"
+          (
+            cd script
+            bash ./make_exe.sh "../${IMAGE_TAR}"
+          )
+          rm -f "${IMAGE_TAR}"
+
+      - name: 生成校验文件
+        shell: bash
+        run: |
+          set -euo pipefail
+          ASSETS=("images/${{ steps.meta.outputs.archive_name }}")
+          if [ -f "${{ steps.meta.outputs.debug_archive_name }}.tar.gz" ]; then
+            ASSETS+=("${{ steps.meta.outputs.debug_archive_name }}.tar.gz")
+          fi
+          sha256sum "${ASSETS[@]}" > SHA256SUMS
+
+      - name: 上传 arm64 测试安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.archive_name }}
+          path: |
+            images/${{ steps.meta.outputs.archive_name }}
+            ${{ steps.meta.outputs.debug_archive_name }}.tar.gz
+            SHA256SUMS
+          if-no-files-found: ignore
