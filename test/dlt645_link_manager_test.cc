@@ -748,6 +748,103 @@ TEST(Dlt645LinkManagerTest, PollingHonorsPollItemIntervalBetweenRequests) {
   EXPECT_GE(intervalMs, 150);
 }
 
+// 验证：LoRa 轮询抄读时，成功响应后不会额外等待 5 秒，而异常 status 后会等待约 5 秒再抄下一个点。
+TEST(Dlt645LinkManagerTest, LoraPollingWaitsFiveSecondsOnlyAfterNonZeroStatus) {
+  FakeDataCenterState state;
+  auto dcStub = MakeStub(&state);
+  auto mqttStub = std::make_shared<MQTTManagerProto::MockMQTTManagerServiceStub>();
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(dcStub);
+  mgr.setMqttStub(mqttStub);
+
+  DLT645Proto::UpsertLinkRequest linkReq;
+  *linkReq.mutable_config() = MakeValidLinkConfig("conn-lora-gap", DLT645Proto::COMM_MODE_LORA);
+  linkReq.mutable_config()->set_poll_interval_ms(60000);
+  linkReq.mutable_config()->set_poll_item_interval_ms(0);
+  DLT645Proto::LinkInfo linkInfo;
+  ASSERT_TRUE(mgr.UpsertLink(linkReq, &linkInfo).ok());
+
+  DLT645Proto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-lora-gap");
+  *ptReq.add_points() = MakePointProto("P1", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16);
+  *ptReq.add_points() = MakePointProto("P2", "02010200", 2, DLT645Proto::DATA_TYPE_UINT16);
+  *ptReq.add_points() = MakePointProto("P3", "02010300", 2, DLT645Proto::DATA_TYPE_UINT16);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  std::mutex recordMu;
+  std::condition_variable recordCv;
+  std::vector<std::chrono::steady_clock::time_point> monitorTimes;
+  ON_CALL(*mqttStub, RequestAndWait(_, _, _))
+      .WillByDefault(::testing::Invoke([&recordMu, &recordCv, &monitorTimes](
+                                           grpc::ClientContext *,
+                                           const MQTTManagerProto::RequestAndWaitRequest &req,
+                                           MQTTManagerProto::RequestAndWaitResponse *resp) {
+        if (resp == nullptr) {
+          return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
+        }
+        resp->set_ok(true);
+        resp->set_message("成功");
+        if (req.request_topic().find("addslaveNode") != std::string::npos) {
+          resp->set_payload("{\"status\":2}");
+          return grpc::Status::OK;
+        }
+        if (req.request_topic().find("delslaveNode") != std::string::npos) {
+          resp->set_payload("{\"status\":0}");
+          return grpc::Status::OK;
+        }
+        if (req.request_topic().find("loraManager") != std::string::npos &&
+            req.request_topic().find("monitorNode") != std::string::npos) {
+          size_t currentCount = 0;
+          {
+            std::lock_guard<std::mutex> lock(recordMu);
+            monitorTimes.push_back(std::chrono::steady_clock::now());
+            currentCount = monitorTimes.size();
+          }
+          recordCv.notify_all();
+          if (currentCount == 1 || currentCount == 3) {
+            resp->set_payload("{\"status\":0,\"data\":\"AQ==\"}");
+          } else if (currentCount == 2) {
+            resp->set_payload("{\"status\":9}");
+          } else {
+            resp->set_payload("{\"status\":0,\"data\":\"AQ==\"}");
+          }
+          return grpc::Status::OK;
+        }
+        resp->set_payload("{\"status\":0}");
+        return grpc::Status::OK;
+      }));
+
+  auto updateReq = MakeMqttUpdateRequest("127.0.0.1", 1883, "c-lora-gap");
+  DLT645Proto::UpdateConfigResponse updateResp;
+  ASSERT_TRUE(mgr.UpdateConfig(updateReq, &updateResp).ok());
+
+  DLT645Proto::LinkInfo got;
+  ASSERT_TRUE(WaitForLinkState(
+      mgr, "conn-lora-gap", DLT645Proto::LINK_STATE_RUNNING, std::chrono::seconds(3), &got));
+
+  {
+    std::unique_lock<std::mutex> lock(recordMu);
+    ASSERT_TRUE(recordCv.wait_for(lock, std::chrono::seconds(8), [&monitorTimes]() { return monitorTimes.size() >= 3; }));
+  }
+
+  ASSERT_TRUE(mgr.StopLink("conn-lora-gap").ok());
+
+  std::vector<std::chrono::steady_clock::time_point> capturedTimes;
+  {
+    std::lock_guard<std::mutex> lock(recordMu);
+    capturedTimes = monitorTimes;
+  }
+  ASSERT_GE(capturedTimes.size(), 3u);
+  const auto firstGapMs =
+      std::chrono::duration_cast<std::chrono::milliseconds>(capturedTimes[1] - capturedTimes[0]).count();
+  const auto secondGapMs =
+      std::chrono::duration_cast<std::chrono::milliseconds>(capturedTimes[2] - capturedTimes[1]).count();
+  EXPECT_LT(firstGapMs, 1000);
+  EXPECT_GE(secondGapMs, 4500);
+}
+
 // 验证：Lora 链路启动连接功能阻塞时，不会阻塞 UART 链路启动连接功能。
 TEST(Dlt645LinkManagerTest, StartLinkLoraBlockedDoesNotBlockUart) {
   FakeDataCenterState state;

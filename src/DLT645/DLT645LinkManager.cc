@@ -31,6 +31,7 @@ constexpr uint8_t kDefaultQos = 1;
 constexpr uint32_t kDefaultPollIntervalMs = 1000;
 constexpr uint32_t kDefaultPollItemIntervalMs = 0;
 constexpr uint32_t kDefaultRequestTimeoutMs = 3000;
+constexpr auto kLoraNextReadDelayOnStatusError = std::chrono::seconds(5);
 constexpr const char *kAppName = "AGVC";
 constexpr const char *kAppTypeLora = "loraManager";
 constexpr const char *kAppTypeCarrier = "ccoRouter";
@@ -1808,12 +1809,19 @@ void LinkManager::startPollingLocked(const std::string &connName, const std::sha
   link->pollThread = ModuleManager::StartModuleThread(
       moduleName_,
       [this, connName, link, roundInterval, itemInterval](std::stop_token st) {
-        bool needGapBeforeNextRequest = false;
-        auto waitBeforeNextRequest = [&needGapBeforeNextRequest, itemInterval, st]() {
-          if (!needGapBeforeNextRequest || itemInterval <= std::chrono::milliseconds::zero()) {
+        auto nextRequestGap = std::chrono::milliseconds::zero();
+        auto waitBeforeNextRequest = [&nextRequestGap, st]() {
+          if (nextRequestGap <= std::chrono::milliseconds::zero()) {
             return !st.stop_requested();
           }
-          return sleepWithStop(st, itemInterval);
+          const auto gap = nextRequestGap;
+          nextRequestGap = std::chrono::milliseconds::zero();
+          return sleepWithStop(st, gap);
+        };
+        auto scheduleNextRequestGap = [&nextRequestGap](std::chrono::milliseconds gap) {
+          if (gap > nextRequestGap) {
+            nextRequestGap = gap;
+          }
         };
         while (!st.stop_requested()) {
           const auto &blocks = link->pointTable.Blocks();
@@ -1833,13 +1841,20 @@ void LinkManager::startPollingLocked(const std::string &connName, const std::sha
             std::string payloadBase64;
             int32_t status = 0;
             auto sendStatus = sendMonitorRequest(link.get(), frame, &payloadBase64, &status);
-            needGapBeforeNextRequest = true;
+            scheduleNextRequestGap(itemInterval);
             if (!sendStatus.ok()) {
               LOG_WARNING("DLT645 数据块读请求失败: conn_name={}, block_di={}, 原因={}", connName, block.diText, sendStatus.error_message());
               continue;
             }
             if (status != 0) {
               LOG_WARNING("DLT645 数据块读请求返回失败: conn_name={}, block_di={}, 状态码={}", connName, block.diText, status);
+              if (link->config.comm_mode() == DLT645Proto::COMM_MODE_LORA) {
+                scheduleNextRequestGap(std::chrono::duration_cast<std::chrono::milliseconds>(kLoraNextReadDelayOnStatusError));
+                LOG_WARNING("DLT645 LoRa 数据块读请求返回异常状态，5秒后再抄下一个数据块: conn_name={}, block_di={}, 状态码={}",
+                            connName,
+                            block.diText,
+                            status);
+              }
               continue;
             }
             std::string error;
@@ -1877,13 +1892,20 @@ void LinkManager::startPollingLocked(const std::string &connName, const std::sha
             std::string payloadBase64;
             int32_t status = 0;
             auto sendStatus = sendMonitorRequest(link.get(), frame, &payloadBase64, &status);
-            needGapBeforeNextRequest = true;
+            scheduleNextRequestGap(itemInterval);
             if (!sendStatus.ok()) {
               LOG_WARNING("DLT645 读请求失败: conn_name={}, tag={}, 原因={}", connName, point.tag, sendStatus.error_message());
               continue;
             }
             if (status != 0) {
               LOG_WARNING("DLT645 读请求返回失败: conn_name={}, tag={}, 状态码={}", connName, point.tag, status);
+              if (link->config.comm_mode() == DLT645Proto::COMM_MODE_LORA) {
+                scheduleNextRequestGap(std::chrono::duration_cast<std::chrono::milliseconds>(kLoraNextReadDelayOnStatusError));
+                LOG_WARNING("DLT645 LoRa 读请求返回异常状态，5秒后再抄下一个点: conn_name={}, tag={}, 状态码={}",
+                            connName,
+                            point.tag,
+                            status);
+              }
               continue;
             }
             std::string error;
@@ -1899,7 +1921,7 @@ void LinkManager::startPollingLocked(const std::string &connName, const std::sha
           if (!sleepWithStop(st, roundInterval)) {
             break;
           }
-          needGapBeforeNextRequest = false;
+          nextRequestGap = std::chrono::milliseconds::zero();
         }
       });
 }
