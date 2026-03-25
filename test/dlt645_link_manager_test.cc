@@ -1681,6 +1681,94 @@ TEST(Dlt645LinkManagerTest, AutoStartRetriesArchiveAddUntilSuccess) {
   ASSERT_TRUE(mgr.StopLink("conn-archive-retry").ok());
 }
 
+// 验证：自动启动阶段档案添加首次等待 MQTT 响应超时后，会在后台按 5 秒间隔重新发送 addslaveNode 直到成功。
+TEST(Dlt645LinkManagerTest, AutoStartRetriesArchiveAddAfterMqttTimeout) {
+  FakeDataCenterState state;
+  auto dcStub = MakeStub(&state);
+  auto mqttStub = std::make_shared<MQTTManagerProto::MockMQTTManagerServiceStub>();
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(dcStub);
+  mgr.setMqttStub(mqttStub);
+
+  std::mutex addMu;
+  std::vector<std::chrono::steady_clock::time_point> addTimes;
+  std::atomic<int> addCount{0};
+  ON_CALL(*mqttStub, RequestAndWait(_, _, _))
+      .WillByDefault(::testing::Invoke([&addMu, &addTimes, &addCount](
+                                           grpc::ClientContext *,
+                                           const MQTTManagerProto::RequestAndWaitRequest &req,
+                                           MQTTManagerProto::RequestAndWaitResponse *resp) {
+        if (resp == nullptr) {
+          return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
+        }
+        if (req.request_topic().find("addslaveNode") != std::string::npos) {
+          {
+            std::lock_guard<std::mutex> lock(addMu);
+            addTimes.push_back(std::chrono::steady_clock::now());
+          }
+          const int current = addCount.fetch_add(1) + 1;
+          if (current == 1) {
+            return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "等待响应超时");
+          }
+          resp->set_ok(true);
+          resp->set_message("成功");
+          resp->set_payload("{\"status\":0}");
+          return grpc::Status::OK;
+        }
+
+        resp->set_ok(true);
+        resp->set_message("成功");
+        if (req.request_topic().find("delslaveNode") != std::string::npos) {
+          resp->set_payload("{\"status\":0}");
+        } else {
+          resp->set_payload("{\"status\":0,\"data\":\"AQ==\"}");
+        }
+        return grpc::Status::OK;
+      }));
+
+  auto updateReq = MakeMqttUpdateRequest("127.0.0.1", 1883, "c-archive-timeout");
+  DLT645Proto::UpdateConfigResponse updateResp;
+  ASSERT_TRUE(mgr.UpdateConfig(updateReq, &updateResp).ok());
+
+  DLT645Proto::UpsertLinkRequest linkReq;
+  *linkReq.mutable_config() = MakeValidLinkConfig("conn-archive-timeout", DLT645Proto::COMM_MODE_LORA);
+  DLT645Proto::LinkInfo linkInfo;
+  ASSERT_TRUE(mgr.UpsertLink(linkReq, &linkInfo).ok());
+
+  const auto firstAttemptBegin = std::chrono::steady_clock::now();
+  DLT645Proto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-archive-timeout");
+  *ptReq.add_points() = MakePointProto("P1", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  DLT645Proto::LinkInfo got;
+  ASSERT_TRUE(mgr.GetLink("conn-archive-timeout", &got).ok());
+  EXPECT_EQ(got.state(), DLT645Proto::LINK_STATE_STOPPED);
+  EXPECT_EQ(got.last_error(), "等待响应超时");
+
+  ASSERT_TRUE(WaitForLinkState(
+      mgr, "conn-archive-timeout", DLT645Proto::LINK_STATE_RUNNING, std::chrono::seconds(8), &got));
+  EXPECT_TRUE(got.last_error().empty());
+  EXPECT_GE(addCount.load(), 2);
+
+  std::vector<std::chrono::steady_clock::time_point> capturedTimes;
+  {
+    std::lock_guard<std::mutex> lock(addMu);
+    capturedTimes = addTimes;
+  }
+  ASSERT_GE(capturedTimes.size(), 2u);
+  const auto retryGapMs =
+      std::chrono::duration_cast<std::chrono::milliseconds>(capturedTimes[1] - capturedTimes[0]).count();
+  EXPECT_GE(retryGapMs, 4500);
+  const auto totalCostMs =
+      std::chrono::duration_cast<std::chrono::milliseconds>(capturedTimes[1] - firstAttemptBegin).count();
+  EXPECT_GE(totalCostMs, 4500);
+
+  ASSERT_TRUE(mgr.StopLink("conn-archive-timeout").ok());
+}
+
 // 验证：StopLink 会终止自动启动阶段的档案后台重试，不会在 5 秒后继续重发 addslaveNode。
 TEST(Dlt645LinkManagerTest, StopLinkCancelsArchiveRetry) {
   FakeDataCenterState state;
