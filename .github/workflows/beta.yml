@@ -127,6 +127,11 @@ jobs:
             g++-14 \
             ccache \
             gcovr
+          if ! command -v ccache >/dev/null 2>&1; then
+            echo "未找到 ccache，可执行文件缺失" >&2
+            exit 1
+          fi
+          ccache --version
 
       - name: 安装 vcpkg
         shell: bash
@@ -179,7 +184,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ccache --show-stats
+          if command -v ccache >/dev/null 2>&1; then
+            ccache --show-stats || echo "ccache 统计输出失败，跳过收尾统计"
+          else
+            echo "ccache 不可用，跳过统计输出"
+          fi
 
       - name: 运行单元测试
         shell: bash
@@ -328,6 +337,11 @@ jobs:
             gcc-aarch64-linux-gnu \
             g++-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu
+          if ! command -v ccache >/dev/null 2>&1; then
+            echo "未找到 ccache，可执行文件缺失" >&2
+            exit 1
+          fi
+          ccache --version
 
       - name: 安装 vcpkg
         shell: bash
@@ -386,7 +400,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ccache --show-stats
+          if command -v ccache >/dev/null 2>&1; then
+            ccache --show-stats || echo "ccache 统计输出失败，跳过收尾统计"
+          else
+            echo "ccache 不可用，跳过统计输出"
+          fi
 
       - name: 安装运行产物到 package
         shell: bash
