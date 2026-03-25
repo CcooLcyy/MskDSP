@@ -31,13 +31,13 @@ public:
   void setDataCenterServerAddress(std::string address);
   void setDataCenterStub(std::shared_ptr<DataCenterProto::DataCenterService::StubInterface> stub);
 
-  grpc::Status RestorePersistedGroups();
-  grpc::Status UpsertGroup(const AGCProto::UpsertGroupRequest& request, AGCProto::GroupInfo* out);
-  grpc::Status GetGroup(const std::string& groupName, AGCProto::GroupInfo* out) const;
-  grpc::Status ListGroups(AGCProto::ListGroupsResponse* out) const;
-  grpc::Status StartGroup(const std::string& groupName);
-  grpc::Status StopGroup(const std::string& groupName);
-  grpc::Status DeleteGroup(const std::string& groupName);
+  grpc::Status LoadPersistedConfig();
+  grpc::Status UpsertGroup(const AGCProto::UpsertGroupRequest &request, AGCProto::GroupInfo *out);
+  grpc::Status GetGroup(const std::string &groupName, AGCProto::GroupInfo *out) const;
+  grpc::Status ListGroups(AGCProto::ListGroupsResponse *out) const;
+  grpc::Status StartGroup(const std::string &groupName);
+  grpc::Status StopGroup(const std::string &groupName);
+  grpc::Status DeleteGroup(const std::string &groupName);
   void TryAutoStartReadyGroups(std::string_view trigger);
 
 private:
@@ -79,26 +79,26 @@ private:
     double lastUnallocatedKw{0.0};
   };
 
-  grpc::Status validateGroupName(const std::string& groupName) const;
-  grpc::Status validateGroupConfig(const AGCProto::GroupConfig& config) const;
-  grpc::Status fillGroupInfoLocked(const GroupRuntime& g, AGCProto::GroupInfo* out) const;
-  grpc::Status checkStartPreconditionsLocked(const GroupRuntime& g) const;
-  grpc::Status tryAutoStartGroup(const std::string& groupName, std::string_view trigger);
+  grpc::Status validateGroupName(const std::string &groupName) const;
+  grpc::Status validateGroupConfig(const AGCProto::GroupConfig &config) const;
+  grpc::Status fillGroupInfoLocked(const GroupRuntime &g, AGCProto::GroupInfo *out) const;
+  grpc::Status checkStartPreconditionsLocked(const GroupRuntime &g) const;
+  grpc::Status tryAutoStartGroup(const std::string &groupName, std::string_view trigger);
   AGCProto::GroupsConfig dumpGroupsConfigLocked() const;
   grpc::Status saveGroupsLocked();
-  grpc::Status restoreGroupFromConfig(const AGCProto::GroupConfig& config, AGCProto::GroupState restoredState);
+  grpc::Status restoreGroupFromConfig(const AGCProto::GroupConfig &config, AGCProto::GroupState restoredState);
 
-  void startThreadsLocked(const std::string& groupName, GroupRuntime* g);
-  void primeControlInputs(const std::string& groupName);
-  void requestControlLocked(const std::string& groupName, GroupRuntime* g, std::string_view reason, std::string_view tag);
+  void startThreadsLocked(const std::string &groupName, GroupRuntime *g);
+  void primeControlInputs(const std::string &groupName);
+  void requestControlLocked(const std::string &groupName, GroupRuntime *g, std::string_view reason, std::string_view tag);
 
-  bool handleUpdateLocked(GroupRuntime* g, const DataCenterProto::PointUpdate& update);
-  void controlTick(const std::string& groupName);
+  bool handleUpdateLocked(GroupRuntime *g, const DataCenterProto::PointUpdate &update);
+  void controlTick(const std::string &groupName);
 
-  static bool pointValueToDouble(const DataCenterProto::PointValue& v, double* out);
+  static bool pointValueToDouble(const DataCenterProto::PointValue &v, double *out);
 
-  static std::unordered_set<std::string> collectAllTags(const AGCProto::GroupConfig& config);
-  static void rebuildTagCache(GroupRuntime* g);
+  static std::unordered_set<std::string> collectAllTags(const AGCProto::GroupConfig &config);
+  static void rebuildTagCache(GroupRuntime *g);
 
   mutable std::mutex mu_;
   std::unordered_map<std::string, GroupRuntime> groupsByName_;

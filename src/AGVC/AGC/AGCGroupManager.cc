@@ -28,15 +28,15 @@ grpc::Status makePreconditionFailed(std::string message) {
 
 const char *groupStateToString(AGCProto::GroupState state) {
   switch (state) {
-    case AGCProto::GROUP_STATE_RUNNING:
-      return "运行中";
-    case AGCProto::GROUP_STATE_PENDING_DELETE:
-      return "待删除";
-    case AGCProto::GROUP_STATE_STOPPED:
-      return "已停止";
-    case AGCProto::GROUP_STATE_UNSPECIFIED:
-    default:
-      return "未指定";
+  case AGCProto::GROUP_STATE_RUNNING:
+    return "运行中";
+  case AGCProto::GROUP_STATE_PENDING_DELETE:
+    return "待删除";
+  case AGCProto::GROUP_STATE_STOPPED:
+    return "已停止";
+  case AGCProto::GROUP_STATE_UNSPECIFIED:
+  default:
+    return "未指定";
   }
 }
 
@@ -110,33 +110,21 @@ grpc::Status GroupManager::tryAutoStartGroup(const std::string &groupName, std::
     }
     memberCount = static_cast<size_t>(it->second.config.members_size());
     if (it->second.state == AGCProto::GROUP_STATE_RUNNING) {
-      LOG_INFO("AGC 自动启动控制组跳过: group_name={}, 触发来源={}, 原因=控制组已在运行",
-               groupName,
-               trigger);
+      LOG_INFO("AGC 自动启动控制组跳过: group_name={}, 触发来源={}, 原因=控制组已在运行", groupName, trigger);
       return grpc::Status::OK;
     }
     auto status = checkStartPreconditionsLocked(it->second);
     if (!status.ok()) {
       it->second.lastError = status.error_message();
-      LOG_INFO("AGC 自动启动控制组跳过: group_name={}, 触发来源={}, 成员数={}, 原因={}",
-               groupName,
-               trigger,
-               memberCount,
-               status.error_message());
+      LOG_INFO("AGC 自动启动控制组跳过: group_name={}, 触发来源={}, 成员数={}, 原因={}", groupName, trigger, memberCount, status.error_message());
       return status;
     }
   }
 
-  LOG_INFO("AGC 自动启动控制组: group_name={}, 触发来源={}, 规则=控制组配置通过当前校验且非待删除, 成员数={}",
-           groupName,
-           trigger,
-           memberCount);
+  LOG_INFO("AGC 自动启动控制组: group_name={}, 触发来源={}, 规则=控制组配置通过当前校验且非待删除, 成员数={}", groupName, trigger, memberCount);
   auto status = StartGroup(groupName);
   if (!status.ok()) {
-    LOG_WARNING("AGC 自动启动控制组失败: group_name={}, 触发来源={}, 原因={}",
-                groupName,
-                trigger,
-                status.error_message());
+    LOG_WARNING("AGC 自动启动控制组失败: group_name={}, 触发来源={}, 原因={}", groupName, trigger, status.error_message());
   } else {
     LOG_INFO("AGC 自动启动控制组成功: group_name={}, 触发来源={}", groupName, trigger);
   }
@@ -168,7 +156,7 @@ void GroupManager::TryAutoStartReadyGroups(std::string_view trigger) {
 AGCProto::GroupsConfig GroupManager::dumpGroupsConfigLocked() const {
   AGCProto::GroupsConfig config;
   for (const auto &[_, group] : groupsByName_) {
-    auto* persisted = config.add_persisted_groups();
+    auto *persisted = config.add_persisted_groups();
     *persisted->mutable_config() = group.config;
     persisted->set_pending_delete(group.state == AGCProto::GROUP_STATE_PENDING_DELETE);
   }
@@ -189,18 +177,12 @@ grpc::Status GroupManager::restoreGroupFromConfig(const AGCProto::GroupConfig &c
   if (!status.ok()) {
     return status;
   }
-  LOG_INFO("AGC 开始恢复控制组持久化记录: group_name={}, 状态={}, 成员数={}",
-           config.group_name(),
-           groupStateToString(restoredState),
-           config.members_size());
+  LOG_INFO("AGC 开始恢复控制组持久化记录: group_name={}, 状态={}, 成员数={}", config.group_name(), groupStateToString(restoredState), config.members_size());
 
   DataCenterProto::ConnectionInfo connInfo;
   status = dataCenter_.GetOrCreateConnection(config.group_name(), &connInfo);
   if (!status.ok()) {
-    LOG_ERROR("AGC 恢复控制组时获取 DataCenter 连接失败: group_name={}, 成员数={}, 原因={}",
-              config.group_name(),
-              config.members_size(),
-              status.error_message());
+    LOG_ERROR("AGC 恢复控制组时获取 DataCenter 连接失败: group_name={}, 成员数={}, 原因={}", config.group_name(), config.members_size(), status.error_message());
     return status;
   }
   if (connInfo.conn_id() == 0) {
@@ -225,16 +207,9 @@ grpc::Status GroupManager::restoreGroupFromConfig(const AGCProto::GroupConfig &c
     auto connTagsStatus = dataCenter_.UpsertConnTags(runtime.connId, tagList, true);
     if (!connTagsStatus.ok()) {
       runtime.lastError = connTagsStatus.error_message();
-      LOG_ERROR("AGC 恢复控制组时同步 DataCenter 连接标签注册表失败: group_name={}, conn_id={}, 标签数={}, 原因={}",
-                config.group_name(),
-                runtime.connId,
-                tagList.size(),
-                connTagsStatus.error_message());
+      LOG_ERROR("AGC 恢复控制组时同步 DataCenter 连接标签注册表失败: group_name={}, conn_id={}, 标签数={}, 原因={}", config.group_name(), runtime.connId, tagList.size(), connTagsStatus.error_message());
     } else {
-      LOG_INFO("AGC 恢复控制组时已同步 DataCenter 连接标签注册表: group_name={}, conn_id={}, 标签数={}",
-               config.group_name(),
-               runtime.connId,
-               tagList.size());
+      LOG_INFO("AGC 恢复控制组时已同步 DataCenter 连接标签注册表: group_name={}, conn_id={}, 标签数={}", config.group_name(), runtime.connId, tagList.size());
     }
     std::lock_guard<std::mutex> lock(mu_);
     groupsByName_[config.group_name()] = std::move(runtime);
@@ -246,16 +221,14 @@ grpc::Status GroupManager::restoreGroupFromConfig(const AGCProto::GroupConfig &c
   return grpc::Status::OK;
 }
 
-grpc::Status GroupManager::RestorePersistedGroups() {
+grpc::Status GroupManager::LoadPersistedConfig() {
   AGCProto::GroupsConfig config;
   auto status = groupStore_.Load(&config);
   if (!status.ok()) {
     LOG_ERROR("AGC 控制组配置加载失败: 原因={}", status.error_message());
     return status;
   }
-  LOG_INFO("AGC 控制组持久化配置载入摘要: persisted_groups={}, legacy_groups={}",
-           config.persisted_groups_size(),
-           config.groups_size());
+  LOG_INFO("AGC 控制组持久化配置载入摘要: persisted_groups={}, legacy_groups={}", config.persisted_groups_size(), config.groups_size());
   if (config.groups_size() == 0 && config.persisted_groups_size() == 0) {
     LOG_INFO("AGC 未发现本地控制组配置");
     return grpc::Status::OK;
@@ -264,7 +237,7 @@ grpc::Status GroupManager::RestorePersistedGroups() {
   size_t restored = 0;
   size_t failed = 0;
   if (config.persisted_groups_size() > 0) {
-    for (const auto& persisted : config.persisted_groups()) {
+    for (const auto &persisted : config.persisted_groups()) {
       if (!persisted.has_config()) {
         ++failed;
         LOG_ERROR("AGC 恢复控制组失败: group_name=<空>, 原因=持久化记录缺少 config");
@@ -279,12 +252,10 @@ grpc::Status GroupManager::RestorePersistedGroups() {
         continue;
       }
       ++restored;
-      LOG_INFO("AGC 已恢复控制组配置: group_name={}, 状态={}",
-               persisted.config().group_name(),
-               groupStateToString(restoredState));
+      LOG_INFO("AGC 已恢复控制组配置: group_name={}, 状态={}", persisted.config().group_name(), groupStateToString(restoredState));
     }
   } else {
-    for (const auto& group : config.groups()) {
+    for (const auto &group : config.groups()) {
       status = restoreGroupFromConfig(group, AGCProto::GROUP_STATE_STOPPED);
       if (!status.ok()) {
         ++failed;
@@ -456,9 +427,7 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
   const auto connId = g->connId;
   auto tags = g->subscribeTags;
   if (connId == 0 || tags.empty()) {
-    LOG_WARNING("AGC 控制组启动事件触发控制功能失败: group_name={}, conn_id={}, 原因=订阅标签为空或连接无效",
-                groupName,
-                connId);
+    LOG_WARNING("AGC 控制组启动事件触发控制功能失败: group_name={}, conn_id={}, 原因=订阅标签为空或连接无效", groupName, connId);
     return;
   }
 
@@ -488,39 +457,36 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
   g->dcSubscribeThread = ModuleManager::StartModuleThread(
       AGCLibInfo.LIB_NAME,
       [this, groupName, ctx, connId, tags](std::stop_token st) {
-    std::stop_callback cb(st, [&ctx]() { ctx->TryCancel(); });
+        std::stop_callback cb(st, [&ctx]() { ctx->TryCancel(); });
 
-    auto reader = dataCenter_.Subscribe(ctx.get(), connId, tags, false);
-    if (!reader) {
-      LOG_ERROR("AGC 建立 DataCenter 订阅失败: group_name={}, conn_id={}, 标签数={}", groupName, connId, tags.size());
-      return;
-    }
+        auto reader = dataCenter_.Subscribe(ctx.get(), connId, tags, false);
+        if (!reader) {
+          LOG_ERROR("AGC 建立 DataCenter 订阅失败: group_name={}, conn_id={}, 标签数={}", groupName, connId, tags.size());
+          return;
+        }
 
-    DataCenterProto::PointUpdate update;
-    while (reader->Read(&update)) {
-      std::lock_guard<std::mutex> lock(mu_);
-      auto it = groupsByName_.find(groupName);
-      if (it == groupsByName_.end()) {
-        break;
-      }
-      if (handleUpdateLocked(&it->second, update)) {
-        requestControlLocked(groupName, &it->second, "订阅输入点更新", update.dst_tag());
-      }
-    }
+        DataCenterProto::PointUpdate update;
+        while (reader->Read(&update)) {
+          std::lock_guard<std::mutex> lock(mu_);
+          auto it = groupsByName_.find(groupName);
+          if (it == groupsByName_.end()) {
+            break;
+          }
+          if (handleUpdateLocked(&it->second, update)) {
+            requestControlLocked(groupName, &it->second, "订阅输入点更新", update.dst_tag());
+          }
+        }
 
-    auto finishStatus = reader->Finish();
-    if (!finishStatus.ok() && !st.stop_requested()) {
-      std::lock_guard<std::mutex> lock(mu_);
-      auto it = groupsByName_.find(groupName);
-      if (it != groupsByName_.end()) {
-        it->second.lastError = finishStatus.error_message();
-      }
-    }
-  });
-  LOG_INFO("AGC 控制组已启用事件触发控制功能: group_name={}, conn_id={}, 订阅标签数={}",
-           groupName,
-           connId,
-           tags.size());
+        auto finishStatus = reader->Finish();
+        if (!finishStatus.ok() && !st.stop_requested()) {
+          std::lock_guard<std::mutex> lock(mu_);
+          auto it = groupsByName_.find(groupName);
+          if (it != groupsByName_.end()) {
+            it->second.lastError = finishStatus.error_message();
+          }
+        }
+      });
+  LOG_INFO("AGC 控制组已启用事件触发控制功能: group_name={}, conn_id={}, 订阅标签数={}", groupName, connId, tags.size());
 }
 
 grpc::Status GroupManager::StartGroup(const std::string &groupName) {
@@ -756,10 +722,7 @@ void GroupManager::primeControlInputs(const std::string &groupName) {
   }
 
   if (connId == 0 || tags.empty()) {
-    LOG_DEBUG("AGC 启动控制组时跳过初始输入快照加载: group_name={}, conn_id={}, 标签数={}",
-              groupName,
-              connId,
-              tags.size());
+    LOG_DEBUG("AGC 启动控制组时跳过初始输入快照加载: group_name={}, conn_id={}, 标签数={}", groupName, connId, tags.size());
     return;
   }
 
@@ -773,11 +736,7 @@ void GroupManager::primeControlInputs(const std::string &groupName) {
         it->second.lastError = status.error_message();
       }
     }
-    LOG_WARNING("AGC 启动控制组时读取初始输入快照失败: group_name={}, conn_id={}, 标签数={}, 原因={}",
-                groupName,
-                connId,
-                tags.size(),
-                status.error_message());
+    LOG_WARNING("AGC 启动控制组时读取初始输入快照失败: group_name={}, conn_id={}, 标签数={}, 原因={}", groupName, connId, tags.size(), status.error_message());
     return;
   }
 
@@ -798,11 +757,7 @@ void GroupManager::primeControlInputs(const std::string &groupName) {
     }
   }
 
-  LOG_INFO("AGC 启动控制组时已加载初始输入快照: group_name={}, conn_id={}, updates={}, changed={}",
-           groupName,
-           connId,
-           resp.updates_size(),
-           changed);
+  LOG_INFO("AGC 启动控制组时已加载初始输入快照: group_name={}, conn_id={}, updates={}, changed={}", groupName, connId, resp.updates_size(), changed);
 }
 
 void GroupManager::requestControlLocked(

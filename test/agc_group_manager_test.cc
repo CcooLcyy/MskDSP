@@ -26,7 +26,8 @@ public:
   ScopedTempDir() {
     auto base = std::filesystem::current_path();
     auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
+                  std::chrono::system_clock::now().time_since_epoch())
+                  .count();
     path_ = base / ("agc_group_manager_test_tmp_" + std::to_string(ts));
     std::filesystem::create_directories(path_);
   }
@@ -36,16 +37,18 @@ public:
     std::filesystem::remove_all(path_, ec);
   }
 
-  const std::filesystem::path& path() const { return path_; }
+  const std::filesystem::path &path() const {
+    return path_;
+  }
 
 private:
   std::filesystem::path path_;
 };
 
-AGCProto::UpsertGroupRequest MakeGroupReq(const char* groupName) {
+AGCProto::UpsertGroupRequest MakeGroupReq(const char *groupName) {
   AGCProto::UpsertGroupRequest req;
   req.set_create_only(true);
-  auto* cfg = req.mutable_config();
+  auto *cfg = req.mutable_config();
   cfg->set_group_name(groupName);
   cfg->mutable_p_cmd()->mutable_signal()->set_tag("P_CMD");
   cfg->mutable_p_cmd()->mutable_signal()->set_unit("kW");
@@ -54,7 +57,7 @@ AGCProto::UpsertGroupRequest MakeGroupReq(const char* groupName) {
   cfg->mutable_outputs()->mutable_p_total_meas()->set_tag("P_TOTAL");
   cfg->mutable_outputs()->mutable_p_total_meas()->set_unit("kW");
 
-  auto* inv1 = cfg->add_members();
+  auto *inv1 = cfg->add_members();
   inv1->set_member_name("inv-1");
   inv1->set_controllable(true);
   inv1->set_capacity_kw(50);
@@ -65,7 +68,7 @@ AGCProto::UpsertGroupRequest MakeGroupReq(const char* groupName) {
   inv1->mutable_p_set()->mutable_signal()->set_unit("kW");
   inv1->mutable_p_set()->set_mode(AGCProto::VALUE_MODE_ABSOLUTE);
 
-  auto* inv2 = cfg->add_members();
+  auto *inv2 = cfg->add_members();
   inv2->set_member_name("inv-2");
   inv2->set_controllable(true);
   inv2->set_capacity_kw(100);
@@ -79,7 +82,7 @@ AGCProto::UpsertGroupRequest MakeGroupReq(const char* groupName) {
   return req;
 }
 
-void PublishDoublePoint(FakeDataCenterState* state, uint32_t connId, const char* tag, double value) {
+void PublishDoublePoint(FakeDataCenterState *state, uint32_t connId, const char *tag, double value) {
   ASSERT_NE(state, nullptr);
   DataCenterProto::PublishRequest req;
   req.set_conn_id(connId);
@@ -89,7 +92,7 @@ void PublishDoublePoint(FakeDataCenterState* state, uint32_t connId, const char*
   ASSERT_TRUE(state->Publish(req).ok());
 }
 
-bool WaitForLatestDouble(const FakeDataCenterState& state, uint32_t connId, const char* tag, double expected) {
+bool WaitForLatestDouble(const FakeDataCenterState &state, uint32_t connId, const char *tag, double expected) {
   for (int i = 0; i < 50; ++i) {
     DataCenterProto::GetLatestRequest req;
     req.set_conn_id(connId);
@@ -106,7 +109,7 @@ bool WaitForLatestDouble(const FakeDataCenterState& state, uint32_t connId, cons
   return false;
 }
 
-bool WaitForPublishCount(const FakeDataCenterState& state, uint32_t connId, const char* tag, size_t expected) {
+bool WaitForPublishCount(const FakeDataCenterState &state, uint32_t connId, const char *tag, size_t expected) {
   for (int i = 0; i < 50; ++i) {
     if (state.GetPublishCount(connId, tag) >= expected) {
       return true;
@@ -116,7 +119,7 @@ bool WaitForPublishCount(const FakeDataCenterState& state, uint32_t connId, cons
   return false;
 }
 
-bool WaitForSubscriptionCount(const FakeDataCenterState& state, uint32_t connId, size_t expected) {
+bool WaitForSubscriptionCount(const FakeDataCenterState &state, uint32_t connId, size_t expected) {
   for (int i = 0; i < 50; ++i) {
     if (state.GetSubscriptionCount(connId) >= expected) {
       return true;
@@ -125,7 +128,7 @@ bool WaitForSubscriptionCount(const FakeDataCenterState& state, uint32_t connId,
   }
   return false;
 }
-}  // 命名空间结束
+}  // namespace
 
 // 验证：create_only UpsertGroup 会向 DataCenter 取/建 conn_id，并在配置合法时自动启动控制组内功能。
 TEST(AgcGroupManagerTest, UpsertGroupCreateOnlyReturnsConnIdAndAutoStartsReadyGroup) {
@@ -229,12 +232,12 @@ TEST(AgcGroupManagerTest, UpsertGroupRegistersBaseTagToDataCenterConnTags) {
   auto stub = MakeStub(&state);
 
   EXPECT_CALL(*stub, UpsertConnTags(_, _, _))
-      .WillOnce(Invoke([](grpc::ClientContext*, const DataCenterProto::UpsertConnTagsRequest& req, DataCenterProto::Empty*) {
+      .WillOnce(Invoke([](grpc::ClientContext *, const DataCenterProto::UpsertConnTagsRequest &req, DataCenterProto::Empty *) {
         EXPECT_NE(req.conn_id(), 0u);
         EXPECT_TRUE(req.replace());
 
         std::unordered_set<std::string> tags;
-        for (const auto& t : req.tags()) {
+        for (const auto &t : req.tags()) {
           tags.emplace(t);
         }
         EXPECT_TRUE(tags.contains("P_CMD"));
@@ -538,7 +541,7 @@ TEST(AgcGroupManagerTest, RestorePersistedGroupsLoadsGroupConfigFromLocalStore) 
 
   GroupManager reader("AGC", groupsPath);
   reader.setDataCenterStub(stub);
-  ASSERT_TRUE(reader.RestorePersistedGroups().ok());
+  ASSERT_TRUE(reader.LoadPersistedConfig().ok());
 
   AGCProto::GroupInfo got;
   ASSERT_TRUE(reader.GetGroup("g-persist", &got).ok());
@@ -570,7 +573,7 @@ TEST(AgcGroupManagerTest, RestorePersistedGroupsAutoStartsReadyGroup) {
 
   GroupManager reader("AGC", groupsPath);
   reader.setDataCenterStub(stub);
-  ASSERT_TRUE(reader.RestorePersistedGroups().ok());
+  ASSERT_TRUE(reader.LoadPersistedConfig().ok());
 
   AGCProto::GroupInfo got;
   ASSERT_TRUE(reader.GetGroup("g-auto-restore", &got).ok());
@@ -604,7 +607,7 @@ TEST(AgcGroupManagerTest, RestorePersistedGroupsLoadsPendingDeleteStateAfterRest
 
   GroupManager reader("AGC", groupsPath);
   reader.setDataCenterStub(stub);
-  ASSERT_TRUE(reader.RestorePersistedGroups().ok());
+  ASSERT_TRUE(reader.LoadPersistedConfig().ok());
 
   AGCProto::GroupInfo got;
   ASSERT_TRUE(reader.GetGroup("g-pending-persist", &got).ok());
@@ -635,7 +638,7 @@ TEST(AgcGroupManagerTest, DeleteGroupRemovesPersistedConfig) {
 
   GroupManager reader("AGC", groupsPath);
   reader.setDataCenterStub(stub);
-  ASSERT_TRUE(reader.RestorePersistedGroups().ok());
+  ASSERT_TRUE(reader.LoadPersistedConfig().ok());
 
   AGCProto::GroupInfo got;
   auto status = reader.GetGroup("g-removed", &got);

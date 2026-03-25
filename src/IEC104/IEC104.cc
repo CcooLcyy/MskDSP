@@ -43,7 +43,7 @@ void IEC104::start(std::stop_token stopToken) {
   LOG_INFO("IEC104 模块启动");
   iec104Service_->getIEC104(this);
   grpcServerBuilder(iec104Service_);
-  linkManager_.RecoverPersistedConfigOnModuleStart();
+  linkManager_.LoadPersistedConfig();
 
   std::mutex mu;
   std::condition_variable_any cv;

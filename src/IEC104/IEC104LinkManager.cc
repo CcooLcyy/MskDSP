@@ -39,9 +39,7 @@ std::vector<std::string> buildDataCenterTags(const IEC104::PointTable &pointTabl
 LinkManager::LinkManager(std::string moduleName, std::filesystem::path linksPath, std::filesystem::path pointTablesPath) :
   dataCenter_(std::move(moduleName)) {
   if (linksPath.empty() != pointTablesPath.empty()) {
-    LOG_WARNING("IEC104 持久化路径配置不完整，已禁用本地配置落盘: links_path={}, point_tables_path={}",
-                linksPath.string(),
-                pointTablesPath.string());
+    LOG_WARNING("IEC104 持久化路径配置不完整，已禁用本地配置落盘: links_path={}, point_tables_path={}", linksPath.string(), pointTablesPath.string());
     return;
   }
   if (linksPath.empty()) {
@@ -79,7 +77,7 @@ void LinkManager::setDataCenterStub(std::shared_ptr<DataCenterProto::DataCenterS
   }
 }
 
-void LinkManager::RecoverPersistedConfigOnModuleStart() {
+void LinkManager::LoadPersistedConfig() {
   bool canReload = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -164,12 +162,12 @@ bool LinkManager::isSlaveStation(const IEC104Proto::LinkConfig &config) {
 
 const char *LinkManager::stationRoleToString(IEC104Proto::StationRole role) {
   switch (role) {
-    case IEC104Proto::STATION_ROLE_MASTER:
-      return "主站";
-    case IEC104Proto::STATION_ROLE_SLAVE:
-      return "从站";
-    default:
-      return "未指定";
+  case IEC104Proto::STATION_ROLE_MASTER:
+    return "主站";
+  case IEC104Proto::STATION_ROLE_SLAVE:
+    return "从站";
+  default:
+    return "未指定";
   }
 }
 
@@ -279,8 +277,7 @@ grpc::Status LinkManager::checkStartPreconditionsLocked(const LinkRuntime &link)
   }
   const auto pointCount = link.pointTable.Tags().size();
   if (!link.pointTableConfigured || pointCount == 0) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
-                        "链路点表未就绪，当前规则要求链路非待删除且至少存在 1 条通过校验的点表记录后才启动连接功能");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路点表未就绪，当前规则要求链路非待删除且至少存在 1 条通过校验的点表记录后才启动连接功能");
   }
   return grpc::Status::OK;
 }
@@ -295,33 +292,21 @@ grpc::Status LinkManager::tryAutoStartLink(const std::string &connName, std::str
     }
     pointCount = it->second.pointTable.Tags().size();
     if (it->second.state == IEC104Proto::LINK_STATE_RUNNING) {
-      LOG_INFO("IEC104 自动启动链路跳过: conn_name={}, 触发来源={}, 原因=链路已在运行",
-               connName,
-               trigger);
+      LOG_INFO("IEC104 自动启动链路跳过: conn_name={}, 触发来源={}, 原因=链路已在运行", connName, trigger);
       return grpc::Status::OK;
     }
     auto status = checkStartPreconditionsLocked(it->second);
     if (!status.ok()) {
       it->second.lastError = status.error_message();
-      LOG_INFO("IEC104 自动启动链路跳过: conn_name={}, 触发来源={}, 点数={}, 原因={}",
-               connName,
-               trigger,
-               pointCount,
-               status.error_message());
+      LOG_INFO("IEC104 自动启动链路跳过: conn_name={}, 触发来源={}, 点数={}, 原因={}", connName, trigger, pointCount, status.error_message());
       return status;
     }
   }
 
-  LOG_INFO("IEC104 自动启动链路: conn_name={}, 触发来源={}, 规则=链路非待删除且至少存在 1 条有效点表记录, 点数={}",
-           connName,
-           trigger,
-           pointCount);
+  LOG_INFO("IEC104 自动启动链路: conn_name={}, 触发来源={}, 规则=链路非待删除且至少存在 1 条有效点表记录, 点数={}", connName, trigger, pointCount);
   auto status = StartLink(connName);
   if (!status.ok()) {
-    LOG_WARNING("IEC104 自动启动链路失败: conn_name={}, 触发来源={}, 原因={}",
-                connName,
-                trigger,
-                status.error_message());
+    LOG_WARNING("IEC104 自动启动链路失败: conn_name={}, 触发来源={}, 原因={}", connName, trigger, status.error_message());
   } else {
     LOG_INFO("IEC104 自动启动链路成功: conn_name={}, 触发来源={}", connName, trigger);
   }
@@ -370,10 +355,7 @@ void LinkManager::loadPersistedConfig(std::string_view trigger) {
     LOG_ERROR("IEC104 加载本地点表配置失败: {}", status.error_message());
     return;
   }
-  LOG_INFO("IEC104 持久化配置载入摘要: 触发来源={}, 链路记录数={}, 点表记录数={}",
-           trigger,
-           linksConfig.links_size(),
-           pointTablesConfig.point_tables_size());
+  LOG_INFO("IEC104 持久化配置载入摘要: 触发来源={}, 链路记录数={}, 点表记录数={}", trigger, linksConfig.links_size(), pointTablesConfig.point_tables_size());
 
   std::unordered_map<std::string, IEC104Proto::PointTable> pointTablesByConn;
   std::unordered_map<std::string, int> pointTableIndexByConn;
@@ -456,12 +438,7 @@ void LinkManager::loadPersistedConfig(std::string_view trigger) {
     if (auto persistedTableIt = pointTablesByConn.find(connName); persistedTableIt != pointTablesByConn.end()) {
       persistedPointCount = static_cast<size_t>(persistedTableIt->second.points_size());
     }
-    LOG_INFO("IEC104 开始恢复链路持久化记录: 触发来源={}, conn_name={}, 持久化conn_id={}, 待删除={}, 持久化点数={}",
-             trigger,
-             connName,
-             persisted.conn_id(),
-             persisted.pending_delete(),
-             persistedPointCount);
+    LOG_INFO("IEC104 开始恢复链路持久化记录: 触发来源={}, conn_name={}, 持久化conn_id={}, 待删除={}, 持久化点数={}", trigger, connName, persisted.conn_id(), persisted.pending_delete(), persistedPointCount);
 
     status = validateLinkConfig(normalized);
     if (!status.ok()) {
@@ -494,11 +471,7 @@ void LinkManager::loadPersistedConfig(std::string_view trigger) {
       }
       if (conflicted) {
         ++failedCount;
-        LOG_ERROR("IEC104 恢复链路时监听端点冲突，已跳过: conn_name={}, 对端链路={}, 当前监听={}, 对端监听={}",
-                  connName,
-                  conflictName,
-                  listenEndpointToString(listen),
-                  listenEndpointToString(conflictListen));
+        LOG_ERROR("IEC104 恢复链路时监听端点冲突，已跳过: conn_name={}, 对端链路={}, 当前监听={}, 对端监听={}", connName, conflictName, listenEndpointToString(listen), listenEndpointToString(conflictListen));
         removeLinkRecord(static_cast<size_t>(i), connName);
         continue;
       }
@@ -509,28 +482,18 @@ void LinkManager::loadPersistedConfig(std::string_view trigger) {
     if (!status.ok()) {
       ++failedCount;
       ++dataCenterFailureCount;
-      LOG_ERROR("IEC104 恢复链路时获取 DataCenter 连接失败: 触发来源={}, conn_name={}, 原因={}, 本地点表点数={}",
-                trigger,
-                connName,
-                status.error_message(),
-                persistedPointCount);
+      LOG_ERROR("IEC104 恢复链路时获取 DataCenter 连接失败: 触发来源={}, conn_name={}, 原因={}, 本地点表点数={}", trigger, connName, status.error_message(), persistedPointCount);
       pointTablesByConn.erase(connName);
       continue;
     }
     if (connInfo.conn_id() == 0) {
       ++failedCount;
-      LOG_ERROR("IEC104 恢复链路时 DataCenter 返回无效 conn_id，已跳过: 触发来源={}, conn_name={}, 本地点表点数={}",
-                trigger,
-                connName,
-                persistedPointCount);
+      LOG_ERROR("IEC104 恢复链路时 DataCenter 返回无效 conn_id，已跳过: 触发来源={}, conn_name={}, 本地点表点数={}", trigger, connName, persistedPointCount);
       pointTablesByConn.erase(connName);
       continue;
     }
     if (persisted.conn_id() != connInfo.conn_id()) {
-      LOG_WARNING("IEC104 恢复链路时发现 conn_id 已变化: conn_name={}, 持久化conn_id={}, 当前conn_id={}",
-                  connName,
-                  persisted.conn_id(),
-                  connInfo.conn_id());
+      LOG_WARNING("IEC104 恢复链路时发现 conn_id 已变化: conn_name={}, 持久化conn_id={}, 当前conn_id={}", connName, persisted.conn_id(), connInfo.conn_id());
       updatedConnIds[connName] = connInfo.conn_id();
       needResaveLinks = true;
     }
@@ -563,31 +526,21 @@ void LinkManager::loadPersistedConfig(std::string_view trigger) {
     auto tags = buildDataCenterTags(runtime.pointTable, runtime.config);
     auto syncStatus = dataCenter_.UpsertConnTags(runtime.connId, tags, true);
     if (!syncStatus.ok()) {
-      LOG_ERROR("IEC104 恢复链路时同步 DataCenter 连接标签注册表失败: conn_name={}, conn_id={}, 原因={}",
-                connName,
-                runtime.connId,
-                syncStatus.error_message());
+      LOG_ERROR("IEC104 恢复链路时同步 DataCenter 连接标签注册表失败: conn_name={}, conn_id={}, 原因={}", connName, runtime.connId, syncStatus.error_message());
     }
 
     if (normalized.role() == IEC104Proto::ROLE_SERVER) {
       restoredServerListenByName[connName] = listen;
     }
     restoredLinks[connName] = std::move(runtime);
-    LOG_INFO("IEC104 已恢复链路配置: conn_name={}, conn_id={}, 点数={}, 状态={}",
-             connName,
-             connInfo.conn_id(),
-             pointCount,
-             persisted.pending_delete() ? "待删除" : "已停止");
+    LOG_INFO("IEC104 已恢复链路配置: conn_name={}, conn_id={}, 点数={}, 状态={}", connName, connInfo.conn_id(), pointCount, persisted.pending_delete() ? "待删除" : "已停止");
   }
 
   for (const auto &[connName, _] : pointTablesByConn) {
     auto tableIt = pointTablesByConn.find(connName);
     const size_t pointCount = tableIt == pointTablesByConn.end() ? 0u : static_cast<size_t>(tableIt->second.points_size());
     LOG_WARNING("IEC104 点表持久化配置未找到对应链路，已忽略: conn_name={}", connName);
-    LOG_WARNING("IEC104 点表持久化配置未进入本次恢复快照: 触发来源={}, conn_name={}, 点数={}",
-                trigger,
-                connName,
-                pointCount);
+    LOG_WARNING("IEC104 点表持久化配置未进入本次恢复快照: 触发来源={}, conn_name={}, 点数={}", trigger, connName, pointCount);
     auto indexIt = pointTableIndexByConn.find(connName);
     if (indexIt != pointTableIndexByConn.end()) {
       const auto keepIndex = static_cast<size_t>(indexIt->second);
@@ -622,9 +575,7 @@ void LinkManager::loadPersistedConfig(std::string_view trigger) {
         }
       }
     }
-    LOG_WARNING("IEC104 本次恢复将回写链路持久化配置: 触发来源={}, 回写链路记录数={}",
-                trigger,
-                linksToPersist.links_size());
+    LOG_WARNING("IEC104 本次恢复将回写链路持久化配置: 触发来源={}, 回写链路记录数={}", trigger, linksToPersist.links_size());
     auto saveStatus = linkStore_->Save(linksToPersist);
     if (!saveStatus.ok()) {
       LOG_ERROR("IEC104 回写链路持久化配置失败: {}", saveStatus.error_message());
@@ -639,21 +590,14 @@ void LinkManager::loadPersistedConfig(std::string_view trigger) {
       }
       *pointTablesToPersist.add_point_tables() = pointTablesConfig.point_tables(i);
     }
-    LOG_WARNING("IEC104 本次恢复将回写点表持久化配置: 触发来源={}, 回写点表记录数={}",
-                trigger,
-                pointTablesToPersist.point_tables_size());
+    LOG_WARNING("IEC104 本次恢复将回写点表持久化配置: 触发来源={}, 回写点表记录数={}", trigger, pointTablesToPersist.point_tables_size());
     auto saveStatus = pointTableStore_->Save(pointTablesToPersist);
     if (!saveStatus.ok()) {
       LOG_ERROR("IEC104 回写点表持久化配置失败: {}", saveStatus.error_message());
     }
   }
 
-  LOG_INFO("IEC104 本地持久化配置加载完成: 触发来源={}, 恢复成功={}, 恢复失败={}, DataCenter失败={}, 当前内存链路数={}",
-           trigger,
-           restoredCount,
-           failedCount,
-           dataCenterFailureCount,
-           restoredCount);
+  LOG_INFO("IEC104 本地持久化配置加载完成: 触发来源={}, 恢复成功={}, 恢复失败={}, DataCenter失败={}, 当前内存链路数={}", trigger, restoredCount, failedCount, dataCenterFailureCount, restoredCount);
   TryAutoStartReadyLinks(trigger);
 }
 
@@ -724,9 +668,7 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
     const auto stationRole = normalizeStationRole(config);
     if (stationRole != IEC104Proto::STATION_ROLE_UNSPECIFIED) {
       config.set_station_role(stationRole);
-      LOG_INFO("IEC104 未指定站点角色，已按传输角色默认: conn_name={}, station_role={}",
-               config.conn_name(),
-               stationRoleToString(stationRole));
+      LOG_INFO("IEC104 未指定站点角色，已按传输角色默认: conn_name={}, station_role={}", config.conn_name(), stationRoleToString(stationRole));
     }
   }
   const auto connName = config.conn_name();

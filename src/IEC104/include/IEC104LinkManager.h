@@ -1,10 +1,10 @@
 #pragma once
 
-#include <filesystem>
 #include <grpcpp/client_context.h>
 #include <grpcpp/support/status.h>
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -26,15 +26,13 @@ class IEC104PointTableStore;
 
 class LinkManager {
 public:
-  explicit LinkManager(std::string moduleName,
-                       std::filesystem::path linksPath = {},
-                       std::filesystem::path pointTablesPath = {});
+  explicit LinkManager(std::string moduleName, std::filesystem::path linksPath = {}, std::filesystem::path pointTablesPath = {});
   ~LinkManager();
 
   void setDataCenterServerAddress(std::string address);
   void setDataCenterStub(std::shared_ptr<DataCenterProto::DataCenterService::StubInterface> stub);
 
-  void RecoverPersistedConfigOnModuleStart();
+  void LoadPersistedConfig();
   grpc::Status UpsertLink(const IEC104Proto::UpsertLinkRequest &request, IEC104Proto::LinkInfo *out);
   grpc::Status GetLink(const std::string &connName, IEC104Proto::LinkInfo *out) const;
   grpc::Status ListLinks(IEC104Proto::ListLinksResponse *out) const;

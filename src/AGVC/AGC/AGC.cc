@@ -55,7 +55,7 @@ void AGC::start(std::stop_token stopToken) {
   agcService_->getAGC(this);
   grpcServerBuilder(agcService_);
   LOG_INFO("AGC 开始在模块启动阶段恢复本地控制组配置");
-  auto restoreStatus = groupManager_.RestorePersistedGroups();
+  auto restoreStatus = groupManager_.LoadPersistedConfig();
   if (!restoreStatus.ok()) {
     LOG_ERROR("AGC 恢复本地控制组配置存在错误: {}", restoreStatus.error_message());
   }
@@ -67,16 +67,16 @@ void AGC::start(std::stop_token stopToken) {
   LOG_INFO("AGC 模块停止");
 }
 
-GroupManager& AGC::groupManager() {
+GroupManager &AGC::groupManager() {
   return groupManager_;
 }
 
-const GroupManager& AGC::groupManager() const {
+const GroupManager &AGC::groupManager() const {
   return groupManager_;
 }
 }  // namespace AGC
 
-extern "C" BOOST_SYMBOL_EXPORT ModuleInterface::ModuleInterface* create() {
+extern "C" BOOST_SYMBOL_EXPORT ModuleInterface::ModuleInterface *create() {
   return new AGC::AGC();
 }
 
