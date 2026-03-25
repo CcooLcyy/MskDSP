@@ -137,6 +137,14 @@ void TouchFile(const fs::path &path) {
   ofs << "trace";
 }
 
+fs::path BackupPath(const fs::path &path) {
+  return fs::path(path.string() + ".bak");
+}
+
+fs::path TmpPath(const fs::path &path) {
+  return fs::path(path.string() + ".tmp");
+}
+
 int CountRunningModuleByName(const ModuleManagerProto::ModuleRunningInfos &infos, const std::string &name) {
   int count = 0;
   for (const auto &info : infos.module_running_info()) {
@@ -284,6 +292,66 @@ TEST_F(ModuleManagerTest, ConfigPusherModeIgnoresPersistentTraceAutoStart) {
   const auto dummyInfo = FindModuleInfoByName(mgr.getModuleInfos(), kDummyModuleName);
   mgr.unloadModule(dummyInfo);
   EXPECT_EQ(mgr.getModuleRunningInfos().module_running_info_size(), 0);
+}
+
+// 验证：`CONFIG_PUSHER` 模式会在启动任何模块前删除受管 `.pb/.bak/.tmp` 持久化文件，但不会误删无关文件。
+TEST_F(ModuleManagerTest, ConfigPusherModeCleansManagedPersistentFilesBeforeModuleStart) {
+  const auto managed = ConfDir() / "DLT645" / "links.pb";
+  const auto managedBak = BackupPath(managed);
+  const auto managedTmp = TmpPath(managed);
+  const auto unrelated = ConfDir() / "custom" / "keep.pb";
+  TouchFile(managed);
+  TouchFile(managedBak);
+  TouchFile(managedTmp);
+  TouchFile(unrelated);
+
+  WriteAutoStartConfig(R"jsonc(
+{
+  "boot_config_mode": "CONFIG_PUSHER",
+  "auto_start_modules": ["Dummy"]
+}
+)jsonc");
+
+  ModuleManager::ModuleManager mgr;
+  std::stop_source stopSource;
+  stopSource.request_stop();
+  mgr.start(stopSource.get_token());
+
+  EXPECT_FALSE(fs::exists(managed));
+  EXPECT_FALSE(fs::exists(managedBak));
+  EXPECT_FALSE(fs::exists(managedTmp));
+  EXPECT_TRUE(fs::exists(unrelated));
+
+  const auto running = mgr.getModuleRunningInfos();
+  EXPECT_EQ(CountRunningModuleByName(running, kDummyModuleName), 1);
+
+  const auto dummyInfo = FindModuleInfoByName(mgr.getModuleInfos(), kDummyModuleName);
+  mgr.unloadModule(dummyInfo);
+}
+
+// 验证：`UPPER` 模式不会执行启动前中央清场，受管 `.tmp` 痕迹文件会被保留。
+TEST_F(ModuleManagerTest, UpperModeDoesNotCleanManagedTmpTraceFiles) {
+  const auto managedTmp = TmpPath(ConfDir() / "DLT645" / "links.pb");
+  TouchFile(managedTmp);
+
+  WriteAutoStartConfig(R"jsonc(
+{
+  "boot_config_mode": "UPPER",
+  "auto_start_modules": ["Dummy"]
+}
+)jsonc");
+
+  ModuleManager::ModuleManager mgr;
+  std::stop_source stopSource;
+  stopSource.request_stop();
+  mgr.start(stopSource.get_token());
+
+  EXPECT_TRUE(fs::exists(managedTmp));
+  const auto running = mgr.getModuleRunningInfos();
+  EXPECT_EQ(CountRunningModuleByName(running, kDummyModuleName), 1);
+
+  const auto dummyInfo = FindModuleInfoByName(mgr.getModuleInfos(), kDummyModuleName);
+  mgr.unloadModule(dummyInfo);
 }
 
 // 验证：`UPPER` 模式下发现持久化配置文件痕迹时，会自动启动对应模块。

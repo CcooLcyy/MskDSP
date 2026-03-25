@@ -10,6 +10,7 @@
 #include <link.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <boost/dll/shared_library.hpp>
 #include <boost/json.hpp>
@@ -186,6 +187,10 @@ std::filesystem::path makeBackupPath(const std::filesystem::path &path) {
   return std::filesystem::path(path.string() + ".bak");
 }
 
+std::filesystem::path makeTmpPath(const std::filesystem::path &path) {
+  return std::filesystem::path(path.string() + ".tmp");
+}
+
 std::vector<ModuleTraceAutoStartRule> buildUpperModeTraceAutoStartRules() {
   return {
       {"DataCenter",
@@ -223,6 +228,58 @@ std::vector<std::pair<std::string, std::vector<std::filesystem::path>>> collectU
     modules.emplace_back(std::string(rule.moduleName), std::move(matched));
   }
   return modules;
+}
+
+void clearManagedPersistentTraceFilesForConfigPusher() {
+  LOG_INFO("当前 boot_config_mode={}，开始在模块启动前清理受管持久化文件", kBootConfigModeConfigPusher);
+  size_t removed = 0;
+  size_t missing = 0;
+  size_t failed = 0;
+
+  for (const auto &rule : buildUpperModeTraceAutoStartRules()) {
+    for (const auto &path : rule.tracePaths) {
+      const std::array<std::filesystem::path, 3> cleanupTargets = {
+          path,
+          makeBackupPath(path),
+          makeTmpPath(path),
+      };
+      for (const auto &target : cleanupTargets) {
+        std::error_code ec;
+        const bool exists = std::filesystem::exists(target, ec);
+        if (ec) {
+          ++failed;
+          LOG_ERROR("CONFIG_PUSHER 启动前检查持久化文件失败: 模块={}, 文件={}, 原因={}",
+                    rule.moduleName,
+                    target.string(),
+                    ec.message());
+          continue;
+        }
+        if (!exists) {
+          ++missing;
+          continue;
+        }
+        const bool deleted = std::filesystem::remove(target, ec);
+        if (ec || !deleted) {
+          ++failed;
+          LOG_ERROR("CONFIG_PUSHER 启动前删除持久化文件失败: 模块={}, 文件={}, 原因={}",
+                    rule.moduleName,
+                    target.string(),
+                    ec ? ec.message() : "删除结果为 false");
+          continue;
+        }
+        ++removed;
+        LOG_WARNING("CONFIG_PUSHER 启动前已删除受管持久化文件: 模块={}, 文件={}",
+                    rule.moduleName,
+                    target.string());
+      }
+    }
+  }
+
+  LOG_INFO("当前 boot_config_mode={}，模块启动前受管持久化文件清理完成: 删除={}, 缺失={}, 失败={}",
+           kBootConfigModeConfigPusher,
+           removed,
+           missing,
+           failed);
 }
 
 void logJsonFieldDetails(std::string_view title, const boost::json::object &obj, std::string_view phase, std::string_view moduleName) {
@@ -990,6 +1047,10 @@ void ModuleManager::autoStartModulesFromConfig() {
         }
       }
     }
+  }
+
+  if (bootConfigMode == kBootConfigModeConfigPusher) {
+    clearManagedPersistentTraceFilesForConfigPusher();
   }
 
   if (!autoStartModules.empty() || bootConfigMode == kBootConfigModeUpper) {
