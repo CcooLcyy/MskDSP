@@ -32,8 +32,11 @@ images/*
 # PDF 文档
 *.pdf
 
-# 协议原始表格
-doc
+# 文档目录默认忽略，仅放开 Markdown
+doc/**
+!doc/
+!doc/**/
+!doc/**/*.md
 doc/锦浪逆变器协议/RS485_MODBUS锦浪光伏并网逆变器通信协议.xlsx
 
 # 测试配置

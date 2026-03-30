@@ -20,6 +20,14 @@ ConfigPusher 更适合作为初始化配置导入与批量编排执行器，不�
 - 在 `CONFIG_PUSHER` 模式下按 `jsonc` 目标态收敛：删除 `jsonc` 未声明的旧链路/控制组，并覆盖点表/连接标签注册表/路由
 - 对 `start` 字段仅保留兼容日志，不再额外调用 `StartLink/StartGroup`
 
+## 对接文档
+
+`ConfigPusher` 的能力矩阵、模块 RPC 映射、导入执行语义与上位机同步边界，已收束到独立文档：
+
+- [`doc/ConfigPusher能力矩阵.md`](../../../doc/ConfigPusher能力矩阵.md)
+
+README 这里只保留模块说明、启动方式、配置入口与基础语义；若涉及上位机模板建模、导入预检、结果展示与模块间编排语义，请优先参考上述矩阵文档。
+
 ## 接口与协议
 - Protobuf：`protobuf/ConfigPusher.proto`
 - gRPC Service：`ConfigPusherProto::ConfigPusherService`
