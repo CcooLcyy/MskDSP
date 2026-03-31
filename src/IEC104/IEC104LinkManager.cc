@@ -767,13 +767,8 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
   }
 
   if (updated) {
-    (void)tryAutoStartLink(connName, "链路配置更新成功");
-    std::lock_guard<std::mutex> lock(mu_);
-    auto it = linksByName_.find(connName);
-    if (it == linksByName_.end()) {
-      return makeNotFound(connName);
-    }
-    return fillLinkInfoLocked(it->second, out);
+    LOG_INFO("IEC104 链路配置更新成功，当前不会自动启动链路连接功能，等待显式调用 StartLink: conn_name={}", connName);
+    return grpc::Status::OK;
   }
 
   auto rollbackPendingCreate = [this, &connName, isServer]() {
@@ -808,11 +803,12 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
     return grpc::Status(grpc::StatusCode::INTERNAL, "DataCenter 返回 conn_id=0");
   }
 
-  std::string autoStartTrigger;
+  bool createdNow = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
     pendingCreateByName_.erase(connName);
     auto [it, inserted] = linksByName_.try_emplace(connName);
+    createdNow = inserted;
     if (!inserted) {
       // 另一个 UpsertLink 与此请求并发并已创建链路。
       if (request.create_only()) {
@@ -850,7 +846,6 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
       if (!status.ok()) {
         return status;
       }
-      autoStartTrigger = "链路配置更新成功";
     } else {
       it->second.config = config;
       it->second.connId = connInfo.conn_id();
@@ -865,12 +860,11 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
       if (!status.ok()) {
         return status;
       }
-      autoStartTrigger = "链路配置创建成功";
     }
   }
-  if (!autoStartTrigger.empty()) {
-    (void)tryAutoStartLink(connName, autoStartTrigger);
-  }
+  LOG_INFO("IEC104 链路配置{}成功，当前不会自动启动链路连接功能，等待显式调用 StartLink: conn_name={}",
+           createdNow ? "创建" : "更新",
+           connName);
   return grpc::Status::OK;
 }
 
@@ -1092,7 +1086,7 @@ grpc::Status LinkManager::UpsertPointTable(const IEC104Proto::UpsertPointTableRe
       return status;
     }
   }
-  (void)tryAutoStartLink(request.conn_name(), "点表更新成功");
+  LOG_INFO("IEC104 点表配置更新成功，当前不会自动启动链路连接功能，等待显式调用 StartLink: conn_name={}", request.conn_name());
   return grpc::Status::OK;
 }
 

@@ -600,6 +600,58 @@ TEST(Dlt645LinkManagerTest, LoadPersistedConfigRestoresPendingDeleteAfterRestart
   }
 }
 
+// 验证：链路配置、点表与 MQTT 配置落盘后，新实例恢复时仍会自动恢复链路连接功能。
+TEST(Dlt645LinkManagerTest, LoadPersistedConfigAutoStartsRestoredReadyLink) {
+  ScopedTempDir dir;
+  ScopedCwd cwd(dir.path());
+  std::filesystem::create_directories("conf/DLT645");
+
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  uint32_t connId = 0;
+  {
+    LinkManager mgr("DLT645");
+    mgr.setDataCenterStub(stub);
+
+    auto updateReq = MakeMqttUpdateRequest("127.0.0.1", 1883, "persist-client");
+    DLT645Proto::UpdateConfigResponse updateResp;
+    ASSERT_TRUE(mgr.UpdateConfig(updateReq, &updateResp).ok());
+
+    DLT645Proto::UpsertLinkRequest req;
+    *req.mutable_config() = MakeValidLinkConfig("conn-persist", DLT645Proto::COMM_MODE_SERIAL);
+    DLT645Proto::LinkInfo info;
+    ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+    connId = info.conn_id();
+
+    DLT645Proto::UpsertPointTableRequest ptReq;
+    ptReq.set_conn_name("conn-persist");
+    *ptReq.add_points() = MakePointProto("P1", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16);
+    ptReq.set_replace(true);
+    ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+    ASSERT_TRUE(mgr.StopLink("conn-persist").ok());
+  }
+
+  {
+    LinkManager mgr("DLT645");
+    mgr.setDataCenterStub(stub);
+    mgr.LoadPersistedConfig();
+
+    DLT645Proto::LinkInfo info;
+    ASSERT_TRUE(mgr.GetLink("conn-persist", &info).ok());
+    EXPECT_EQ(info.conn_id(), connId);
+    EXPECT_EQ(info.state(), DLT645Proto::LINK_STATE_RUNNING);
+    EXPECT_TRUE(info.last_error().empty());
+
+    DLT645Proto::PointTable pointTable;
+    ASSERT_TRUE(mgr.GetPointTable("conn-persist", &pointTable).ok());
+    ASSERT_EQ(pointTable.points_size(), 1);
+    EXPECT_EQ(pointTable.points(0).tag(), "P1");
+
+    ASSERT_TRUE(mgr.StopLink("conn-persist").ok());
+  }
+}
+
 // 验证：StopLink 不会把 PENDING_DELETE 状态清回 STOPPED。
 TEST(Dlt645LinkManagerTest, StopLinkKeepsPendingDeleteState) {
   FakeDataCenterState state;
@@ -661,6 +713,106 @@ TEST(Dlt645LinkManagerTest, StartLinkRejectsWhenRunningOrPendingDelete) {
   DLT645LinkManagerTestPeer::SetLinkState(mgr, "conn-running", DLT645Proto::LINK_STATE_PENDING_DELETE);
   st = mgr.StartLink("conn-running");
   EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+}
+
+// 验证：UpdateConfig 成功后不会自动启动已具备运行条件的停止态链路。
+TEST(Dlt645LinkManagerTest, UpdateConfigKeepsStoppedWhenReadyLinkExists) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(stub);
+
+  DLT645Proto::UpsertLinkRequest linkReq;
+  *linkReq.mutable_config() = MakeValidLinkConfig("conn-update-config", DLT645Proto::COMM_MODE_SERIAL);
+  DLT645Proto::LinkInfo linkInfo;
+  ASSERT_TRUE(mgr.UpsertLink(linkReq, &linkInfo).ok());
+
+  DLT645Proto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-update-config");
+  *ptReq.add_points() = MakePointProto("P1", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  auto updateReq = MakeMqttUpdateRequest("127.0.0.1", 1883, "cfg-update");
+  DLT645Proto::UpdateConfigResponse updateResp;
+  ASSERT_TRUE(mgr.UpdateConfig(updateReq, &updateResp).ok());
+
+  DLT645Proto::LinkInfo got;
+  ASSERT_TRUE(mgr.GetLink("conn-update-config", &got).ok());
+  EXPECT_EQ(got.state(), DLT645Proto::LINK_STATE_STOPPED);
+  EXPECT_TRUE(got.last_error().empty());
+}
+
+// 验证：UpsertPointTable 成功后链路保持 STOPPED，需显式调用 StartLink 才启动链路功能。
+TEST(Dlt645LinkManagerTest, UpsertPointTableKeepsStoppedUntilExplicitStart) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(stub);
+
+  auto updateReq = MakeMqttUpdateRequest("127.0.0.1", 1883, "cfg-point");
+  DLT645Proto::UpdateConfigResponse updateResp;
+  ASSERT_TRUE(mgr.UpdateConfig(updateReq, &updateResp).ok());
+
+  DLT645Proto::UpsertLinkRequest linkReq;
+  *linkReq.mutable_config() = MakeValidLinkConfig("conn-explicit", DLT645Proto::COMM_MODE_SERIAL);
+  DLT645Proto::LinkInfo linkInfo;
+  ASSERT_TRUE(mgr.UpsertLink(linkReq, &linkInfo).ok());
+
+  DLT645Proto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-explicit");
+  *ptReq.add_points() = MakePointProto("P1", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  DLT645Proto::LinkInfo got;
+  ASSERT_TRUE(mgr.GetLink("conn-explicit", &got).ok());
+  EXPECT_EQ(got.state(), DLT645Proto::LINK_STATE_STOPPED);
+  EXPECT_TRUE(got.last_error().empty());
+
+  ASSERT_TRUE(mgr.StartLink("conn-explicit").ok());
+  ASSERT_TRUE(mgr.GetLink("conn-explicit", &got).ok());
+  EXPECT_EQ(got.state(), DLT645Proto::LINK_STATE_RUNNING);
+  EXPECT_TRUE(got.last_error().empty());
+}
+
+// 验证：停止态且点表已就绪的链路执行 UpsertLink 更新后，仍保持 STOPPED。
+TEST(Dlt645LinkManagerTest, UpsertLinkUpdateKeepsStoppedWhenPointTableReady) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(stub);
+
+  auto updateReq = MakeMqttUpdateRequest("127.0.0.1", 1883, "cfg-link");
+  DLT645Proto::UpdateConfigResponse updateResp;
+  ASSERT_TRUE(mgr.UpdateConfig(updateReq, &updateResp).ok());
+
+  DLT645Proto::UpsertLinkRequest createReq;
+  *createReq.mutable_config() = MakeValidLinkConfig("conn-update-ready", DLT645Proto::COMM_MODE_SERIAL);
+  DLT645Proto::LinkInfo created;
+  ASSERT_TRUE(mgr.UpsertLink(createReq, &created).ok());
+
+  DLT645Proto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-update-ready");
+  *ptReq.add_points() = MakePointProto("P1", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+  ASSERT_TRUE(mgr.StopLink("conn-update-ready").ok());
+
+  DLT645Proto::UpsertLinkRequest updateLinkReq;
+  *updateLinkReq.mutable_config() = MakeValidLinkConfig("conn-update-ready", DLT645Proto::COMM_MODE_SERIAL);
+  updateLinkReq.mutable_config()->set_poll_interval_ms(2000);
+  DLT645Proto::LinkInfo updated;
+  ASSERT_TRUE(mgr.UpsertLink(updateLinkReq, &updated).ok());
+  EXPECT_EQ(updated.config().poll_interval_ms(), 2000u);
+
+  DLT645Proto::LinkInfo got;
+  ASSERT_TRUE(mgr.GetLink("conn-update-ready", &got).ok());
+  EXPECT_EQ(got.state(), DLT645Proto::LINK_STATE_STOPPED);
+  EXPECT_TRUE(got.last_error().empty());
 }
 
 // 验证：StartLink 串口模式可启动通信任务。
@@ -741,6 +893,11 @@ TEST(Dlt645LinkManagerTest, PollingHonorsPollItemIntervalBetweenRequests) {
   auto updateReq = MakeMqttUpdateRequest("127.0.0.1", 1883, "c-gap");
   DLT645Proto::UpdateConfigResponse updateResp;
   ASSERT_TRUE(mgr.UpdateConfig(updateReq, &updateResp).ok());
+
+  DLT645Proto::LinkInfo got;
+  ASSERT_TRUE(mgr.GetLink("conn-gap", &got).ok());
+  EXPECT_EQ(got.state(), DLT645Proto::LINK_STATE_STOPPED);
+  ASSERT_TRUE(mgr.StartLink("conn-gap").ok());
 
   {
     std::unique_lock<std::mutex> lock(recordMu);
@@ -834,6 +991,9 @@ TEST(Dlt645LinkManagerTest, LoraPollingWaitsRequestTimeoutAfterNonZeroStatus) {
   ASSERT_TRUE(mgr.UpdateConfig(updateReq, &updateResp).ok());
 
   DLT645Proto::LinkInfo got;
+  ASSERT_TRUE(mgr.GetLink("conn-lora-gap", &got).ok());
+  EXPECT_EQ(got.state(), DLT645Proto::LINK_STATE_STOPPED);
+  ASSERT_TRUE(mgr.StartLink("conn-lora-gap").ok());
   ASSERT_TRUE(WaitForLinkState(
       mgr, "conn-lora-gap", DLT645Proto::LINK_STATE_RUNNING, std::chrono::seconds(3), &got));
 
@@ -940,6 +1100,9 @@ TEST(Dlt645LinkManagerTest, LoraBlockPollingWaitsRequestTimeoutAfterNonZeroStatu
   ASSERT_TRUE(mgr.UpdateConfig(updateReq, &updateResp).ok());
 
   DLT645Proto::LinkInfo got;
+  ASSERT_TRUE(mgr.GetLink("conn-lora-block-gap", &got).ok());
+  EXPECT_EQ(got.state(), DLT645Proto::LINK_STATE_STOPPED);
+  ASSERT_TRUE(mgr.StartLink("conn-lora-block-gap").ok());
   ASSERT_TRUE(WaitForLinkState(
       mgr, "conn-lora-block-gap", DLT645Proto::LINK_STATE_RUNNING, std::chrono::seconds(3), &got));
 
@@ -1405,8 +1568,8 @@ TEST(Dlt645LinkManagerTest, TryAutoStartReadyLinksBatchesLoraArchivesIntoSingleM
   EXPECT_EQ(addrs, (std::set<std::string>{"123456789012", "123456789013"}));
 }
 
-// 验证：自动启动阶段 addslaveNode 返回数值状态 2 时，视为档案已存在并继续抄表，且 StopLink 仍会删除档案。
-TEST(Dlt645LinkManagerTest, AutoStartTreatsNumericArchiveStatus2AsExistingAndDeletesOnStop) {
+// 验证：显式 StartLink 时 addslaveNode 返回数值状态 2，会视为档案已存在并继续抄表，且 StopLink 仍会删除档案。
+TEST(Dlt645LinkManagerTest, StartLinkTreatsNumericArchiveStatus2AsExistingAndDeletesOnStop) {
   FakeDataCenterState state;
   auto dcStub = MakeStub(&state);
   auto mqttStub = std::make_shared<MQTTManagerProto::MockMQTTManagerServiceStub>();
@@ -1465,6 +1628,7 @@ TEST(Dlt645LinkManagerTest, AutoStartTreatsNumericArchiveStatus2AsExistingAndDel
   *ptReq.add_points() = MakePointProto("P1", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16);
   ptReq.set_replace(true);
   ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+  ASSERT_TRUE(mgr.StartLink("conn-archive-exists").ok());
 
   {
     std::unique_lock<std::mutex> lock(requestMu);
@@ -1493,8 +1657,8 @@ TEST(Dlt645LinkManagerTest, AutoStartTreatsNumericArchiveStatus2AsExistingAndDel
   EXPECT_EQ(got.state(), DLT645Proto::LINK_STATE_STOPPED);
 }
 
-// 验证：自动启动阶段档案添加失败时，会把 LoRa status 转成中文原因写入 last_error。
-TEST(Dlt645LinkManagerTest, AutoStartStoresChineseArchiveFailureReasonInLastError) {
+// 验证：显式 StartLink 失败时，会把 LoRa status 转成中文原因写入 last_error。
+TEST(Dlt645LinkManagerTest, StartLinkStoresChineseArchiveFailureReasonInLastError) {
   FakeDataCenterState state;
   auto dcStub = MakeStub(&state);
   auto mqttStub = std::make_shared<MQTTManagerProto::MockMQTTManagerServiceStub>();
@@ -1536,6 +1700,8 @@ TEST(Dlt645LinkManagerTest, AutoStartStoresChineseArchiveFailureReasonInLastErro
   *ptReq.add_points() = MakePointProto("P1", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16);
   ptReq.set_replace(true);
   ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+  auto st = mgr.StartLink("conn-archive-reason");
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INTERNAL);
 
   DLT645Proto::LinkInfo got;
   ASSERT_TRUE(mgr.GetLink("conn-archive-reason", &got).ok());
@@ -1545,8 +1711,8 @@ TEST(Dlt645LinkManagerTest, AutoStartStoresChineseArchiveFailureReasonInLastErro
   ASSERT_TRUE(mgr.StopLink("conn-archive-reason").ok());
 }
 
-// 验证：自动启动阶段档案响应缺少 status 时，会直接按失败处理并记录中文原因。
-TEST(Dlt645LinkManagerTest, AutoStartRejectsArchiveResponseMissingStatus) {
+// 验证：显式 StartLink 遇到档案响应缺少 status 时，会直接按失败处理并记录中文原因。
+TEST(Dlt645LinkManagerTest, StartLinkRejectsArchiveResponseMissingStatus) {
   FakeDataCenterState state;
   auto dcStub = MakeStub(&state);
   auto mqttStub = std::make_shared<MQTTManagerProto::MockMQTTManagerServiceStub>();
@@ -1588,6 +1754,8 @@ TEST(Dlt645LinkManagerTest, AutoStartRejectsArchiveResponseMissingStatus) {
   *ptReq.add_points() = MakePointProto("P1", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16);
   ptReq.set_replace(true);
   ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+  auto st = mgr.StartLink("conn-archive-missing");
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INTERNAL);
 
   DLT645Proto::LinkInfo got;
   ASSERT_TRUE(mgr.GetLink("conn-archive-missing", &got).ok());
@@ -1597,8 +1765,8 @@ TEST(Dlt645LinkManagerTest, AutoStartRejectsArchiveResponseMissingStatus) {
   ASSERT_TRUE(mgr.StopLink("conn-archive-missing").ok());
 }
 
-// 验证：自动启动阶段首轮档案添加失败后，会在后台按 5 秒间隔继续重试直到成功。
-TEST(Dlt645LinkManagerTest, AutoStartRetriesArchiveAddUntilSuccess) {
+// 验证：显式 StartLink 首轮档案添加失败后，会在后台按 5 秒间隔继续重试直到成功。
+TEST(Dlt645LinkManagerTest, StartLinkRetriesArchiveAddUntilSuccess) {
   FakeDataCenterState state;
   auto dcStub = MakeStub(&state);
   auto mqttStub = std::make_shared<MQTTManagerProto::MockMQTTManagerServiceStub>();
@@ -1654,6 +1822,8 @@ TEST(Dlt645LinkManagerTest, AutoStartRetriesArchiveAddUntilSuccess) {
   *ptReq.add_points() = MakePointProto("P1", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16);
   ptReq.set_replace(true);
   ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+  auto st = mgr.StartLink("conn-archive-retry");
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INTERNAL);
 
   DLT645Proto::LinkInfo got;
   ASSERT_TRUE(mgr.GetLink("conn-archive-retry", &got).ok());
@@ -1681,8 +1851,8 @@ TEST(Dlt645LinkManagerTest, AutoStartRetriesArchiveAddUntilSuccess) {
   ASSERT_TRUE(mgr.StopLink("conn-archive-retry").ok());
 }
 
-// 验证：自动启动阶段档案添加首次等待 MQTT 响应超时后，会在后台按 5 秒间隔重新发送 addslaveNode 直到成功。
-TEST(Dlt645LinkManagerTest, AutoStartRetriesArchiveAddAfterMqttTimeout) {
+// 验证：显式 StartLink 首次等待 MQTT 响应超时后，会在后台按 5 秒间隔重新发送 addslaveNode 直到成功。
+TEST(Dlt645LinkManagerTest, StartLinkRetriesArchiveAddAfterMqttTimeout) {
   FakeDataCenterState state;
   auto dcStub = MakeStub(&state);
   auto mqttStub = std::make_shared<MQTTManagerProto::MockMQTTManagerServiceStub>();
@@ -1742,6 +1912,8 @@ TEST(Dlt645LinkManagerTest, AutoStartRetriesArchiveAddAfterMqttTimeout) {
   *ptReq.add_points() = MakePointProto("P1", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16);
   ptReq.set_replace(true);
   ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+  auto st = mgr.StartLink("conn-archive-timeout");
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
 
   DLT645Proto::LinkInfo got;
   ASSERT_TRUE(mgr.GetLink("conn-archive-timeout", &got).ok());
@@ -1769,7 +1941,7 @@ TEST(Dlt645LinkManagerTest, AutoStartRetriesArchiveAddAfterMqttTimeout) {
   ASSERT_TRUE(mgr.StopLink("conn-archive-timeout").ok());
 }
 
-// 验证：StopLink 会终止自动启动阶段的档案后台重试，不会在 5 秒后继续重发 addslaveNode。
+// 验证：StopLink 会终止显式 StartLink 失败后触发的档案后台重试，不会在 5 秒后继续重发 addslaveNode。
 TEST(Dlt645LinkManagerTest, StopLinkCancelsArchiveRetry) {
   FakeDataCenterState state;
   auto dcStub = MakeStub(&state);
@@ -1818,6 +1990,8 @@ TEST(Dlt645LinkManagerTest, StopLinkCancelsArchiveRetry) {
   *ptReq.add_points() = MakePointProto("P1", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16);
   ptReq.set_replace(true);
   ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+  auto st = mgr.StartLink("conn-archive-stop");
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INTERNAL);
 
   {
     std::unique_lock<std::mutex> lock(addMu);

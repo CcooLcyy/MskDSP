@@ -6,6 +6,7 @@
 #include <boost/asio/ip/tcp.hpp>
 
 #include <cstdint>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -78,6 +79,26 @@ IEC104Proto::Point MakeBoolPoint(const char* tag, uint32_t ioa) {
   p.set_type(IEC104Proto::POINT_TYPE_SINGLE);
   return p;
 }
+
+class ScopedTempDir {
+public:
+  ScopedTempDir() {
+    auto base = std::filesystem::current_path();
+    path_ = base / ("iec104_link_manager_test_tmp_" + std::to_string(counter_++));
+    std::filesystem::create_directories(path_);
+  }
+
+  ~ScopedTempDir() {
+    std::error_code ec;
+    std::filesystem::remove_all(path_, ec);
+  }
+
+  const std::filesystem::path& path() const { return path_; }
+
+private:
+  inline static uint64_t counter_ = 0;
+  std::filesystem::path path_;
+};
 }  // 命名空间结束
 
 namespace IEC104 {
@@ -274,8 +295,8 @@ TEST(IEC104LinkManagerTest, DeleteLinkReleasesReservedServerPort) {
   ASSERT_TRUE(mgr.UpsertLink(req2, &info2).ok());
 }
 
-// 验证：链路配置与点表达到最小可运行条件后，模块会自动启动链路功能。
-TEST(IEC104LinkManagerTest, UpsertPointTableAutoStartsWhenLinkReady) {
+// 验证：UpsertPointTable 成功后链路保持 STOPPED，需显式调用 StartLink 才启动链路功能。
+TEST(IEC104LinkManagerTest, UpsertPointTableKeepsStoppedUntilExplicitStart) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
@@ -293,6 +314,11 @@ TEST(IEC104LinkManagerTest, UpsertPointTableAutoStartsWhenLinkReady) {
   ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
 
   IEC104Proto::LinkInfo got;
+  ASSERT_TRUE(mgr.GetLink("conn-auto", &got).ok());
+  EXPECT_EQ(got.state(), IEC104Proto::LINK_STATE_STOPPED);
+  EXPECT_TRUE(got.last_error().empty());
+
+  ASSERT_TRUE(mgr.StartLink("conn-auto").ok());
   ASSERT_TRUE(mgr.GetLink("conn-auto", &got).ok());
   EXPECT_EQ(got.state(), IEC104Proto::LINK_STATE_RUNNING);
   EXPECT_TRUE(got.last_error().empty());
@@ -317,6 +343,7 @@ TEST(IEC104LinkManagerTest, UpsertPointTableRejectsWhenLinkRunning) {
   *pt1.add_points() = MakePoint("A", 100);
   pt1.set_replace(true);
   ASSERT_TRUE(mgr.UpsertPointTable(pt1).ok());
+  ASSERT_TRUE(mgr.StartLink("conn-running").ok());
 
   EXPECT_CALL(*stub, UpsertConnTags(_, _, _)).Times(0);
 
@@ -335,6 +362,88 @@ TEST(IEC104LinkManagerTest, UpsertPointTableRejectsWhenLinkRunning) {
   EXPECT_EQ(out.points(0).tag(), "A");
 
   ASSERT_TRUE(mgr.StopLink("conn-running").ok());
+}
+
+// 验证：已具备点表的停止态链路执行 UpsertLink 更新后，仍保持 STOPPED。
+TEST(IEC104LinkManagerTest, UpsertLinkUpdateKeepsStoppedWhenPointTableReady) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+
+  const auto port = AllocateFreeTcpPort();
+  auto createReq = MakeServerLinkReq("conn-update", "0.0.0.0", port);
+  IEC104Proto::LinkInfo created;
+  ASSERT_TRUE(mgr.UpsertLink(createReq, &created).ok());
+
+  IEC104Proto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-update");
+  *ptReq.add_points() = MakePoint("A", 100);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+  ASSERT_TRUE(mgr.StopLink("conn-update").ok());
+
+  auto updateReq = MakeServerLinkReq("conn-update", "0.0.0.0", port);
+  updateReq.set_create_only(false);
+  updateReq.mutable_config()->set_ca(2);
+
+  IEC104Proto::LinkInfo updated;
+  ASSERT_TRUE(mgr.UpsertLink(updateReq, &updated).ok());
+  EXPECT_EQ(updated.config().ca(), 2);
+
+  IEC104Proto::LinkInfo got;
+  ASSERT_TRUE(mgr.GetLink("conn-update", &got).ok());
+  EXPECT_EQ(got.state(), IEC104Proto::LINK_STATE_STOPPED);
+  EXPECT_TRUE(got.last_error().empty());
+}
+
+// 验证：链路配置与点表落盘后，新实例恢复时仍会自动恢复链路连接功能。
+TEST(IEC104LinkManagerTest, LoadPersistedConfigAutoStartsRestoredReadyLink) {
+  ScopedTempDir dir;
+  const auto linksPath = dir.path() / "links.pb";
+  const auto pointTablesPath = dir.path() / "point_tables.pb";
+
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  const auto port = AllocateFreeTcpPort();
+  uint32_t connId = 0;
+  {
+    LinkManager mgr("IEC104", linksPath, pointTablesPath);
+    mgr.setDataCenterStub(stub);
+
+    auto req = MakeServerLinkReq("conn-persist", "0.0.0.0", port);
+    IEC104Proto::LinkInfo info;
+    ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+    connId = info.conn_id();
+
+    IEC104Proto::UpsertPointTableRequest ptReq;
+    ptReq.set_conn_name("conn-persist");
+    *ptReq.add_points() = MakePoint("A", 100);
+    ptReq.set_replace(true);
+    ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+    ASSERT_TRUE(mgr.StopLink("conn-persist").ok());
+  }
+
+  {
+    LinkManager mgr("IEC104", linksPath, pointTablesPath);
+    mgr.setDataCenterStub(stub);
+    mgr.LoadPersistedConfig();
+
+    IEC104Proto::LinkInfo info;
+    ASSERT_TRUE(mgr.GetLink("conn-persist", &info).ok());
+    EXPECT_EQ(info.conn_id(), connId);
+    EXPECT_EQ(info.state(), IEC104Proto::LINK_STATE_RUNNING);
+    EXPECT_TRUE(info.last_error().empty());
+
+    IEC104Proto::PointTable pointTable;
+    ASSERT_TRUE(mgr.GetPointTable("conn-persist", &pointTable).ok());
+    ASSERT_EQ(pointTable.points_size(), 1);
+    EXPECT_EQ(pointTable.points(0).tag(), "A");
+
+    ASSERT_TRUE(mgr.StopLink("conn-persist").ok());
+  }
 }
 
 // 验证：停止态链路的点表增量更新会合并并同步完整 tags 到 DataCenter。

@@ -46,7 +46,7 @@ TEST(ConfigPusherApplyIec104Test, NullStubReturnsFalse) {
   EXPECT_FALSE(ConfigPusher::applyIec104Config(config, nullptr));
 }
 
-// 验证：IEC104 配置任务在 start=true 时只下发连接和点表，不再额外调用 StartLink。
+// 验证：IEC104 配置任务在 start=true 时只下发连接和点表，配置完成后保持 STOPPED，且不额外调用 StartLink。
 TEST(ConfigPusherApplyIec104Test, ApplyLinkAndPointTableWithoutExplicitStart) {
   auto config = MakeIec104Config(true);
   auto stub = std::make_unique<IEC104Proto::MockIEC104ServiceStub>();

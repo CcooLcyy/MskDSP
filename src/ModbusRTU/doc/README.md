@@ -26,7 +26,7 @@ ModbusRTU 模块负责管理 ModbusRTU 链路与点表，当前同时支持两�
 ## 配置来源
 - 运行时配置既可由上位机直连下发，也可由 ConfigPusher 批量下发；后者更适合作为初始化导入方式。
 - 示例文件：`package/conf/configPusher/modbus_rtu.jsonc`
-- 当存在 `TRANSPORT_MQTT_UART` 链路时，ConfigPusher 会先调用 `UpdateConfig` 下发顶层 `modbus_rtu.mqtt`，再继续下发链路/点表；若对象达到当前最小可运行条件，模块会自动让链路进入运行态，`StartLink` 仅作为兼容性幂等入口保留。
+- 当存在 `TRANSPORT_MQTT_UART` 链路时，ConfigPusher 会先调用 `UpdateConfig` 下发顶层 `modbus_rtu.mqtt`，再继续下发链路/点表；配置类 RPC 成功后链路仍保持 `STOPPED`，需由上位机显式调用 `StartLink` 启动模块内的链路连接功能。
 
 ## 配置持久化（当前实现）
 - 当前实现会将已下发的 MQTT/链路/点表配置本地持久化到 `./conf/ModbusRTU/`，用于模块重启后的自动恢复。
@@ -36,9 +36,10 @@ ModbusRTU 模块负责管理 ModbusRTU 链路与点表，当前同时支持两�
   - `./conf/ModbusRTU/point_tables.pb`
 - 恢复时会重新向 DataCenter 获取/确认 `conn_id`，并同步该链路的 tags 到 DataCenter 连接标签注册表。
 - ModbusRTU 当前采用的“可运行最小条件”为：链路对象状态不是 `PENDING_DELETE`、已经恢复出有效 `conn_id`、点表已成功恢复或下发，且 `TRANSPORT_MQTT_UART` 链路的 MQTT 全局配置也已经恢复或下发成功；若 `address_base=ONE`，点表中还不能存在 `address=0` 的记录。
-- 模块启动后，恢复出的链路若满足上述最小条件，会自动进入运行态；模块已经启动后，若上位机补齐点表或 MQTT 配置并达到上述条件，也会自动再次尝试让链路进入运行态。
+- 配置类 RPC 成功后，仅表示配置已更新到内存并完成必要落盘或 tags 同步，不会自动启动模块内的链路连接功能；链路会保持 `STOPPED`，等待上位机显式调用 `StartLink`。
+- 模块启动后，恢复出的链路若满足上述最小条件，仍会自动进入运行态。
 - 若 `links.pb` / `point_tables.pb` / `mqtt.pb` 解析失败、点表非法、链路与点表不匹配、MQTT 配置不完整或自动启动失败，ModbusRTU 仅记录中文日志并保持模块服务在线，等待上位机后续修正配置。
-- `StartLink` RPC 仍保留用于兼容，但已改为幂等语义：链路已在运行时直接返回成功，正常主流程不再依赖额外单独调用。
+- `StartLink` RPC 是显式启动模块内链路连接功能的唯一入口，并保持幂等语义：链路已在运行时直接返回成功。
 - `last_error`、总线实例、轮询线程、订阅线程与运行中的收发状态不落盘。
 
 ## 传输模式

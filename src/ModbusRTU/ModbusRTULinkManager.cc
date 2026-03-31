@@ -503,7 +503,7 @@ grpc::Status LinkManager::UpdateConfig(const ModbusRTUProto::UpdateConfigRequest
            mqtt.client_id());
   response->set_ok(true);
   response->set_message("MQTT 配置更新成功");
-  autoStartEligibleLinks("MQTT 配置更新后");
+  LOG_INFO("ModbusRTU MQTT 配置更新成功，当前不会自动启动链路连接功能，等待显式调用 StartLink");
   return grpc::Status::OK;
 }
 
@@ -1218,7 +1218,7 @@ grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& re
     if (!status.ok()) {
       return status;
     }
-    (void)maybeAutoStartLink(connName, "链路配置更新后");
+    LOG_INFO("ModbusRTU 链路配置更新成功，当前不会自动启动链路连接功能，等待显式调用 StartLink: conn_name={}", connName);
     {
       std::lock_guard<std::mutex> lock(mu_);
       auto it = linksByName_.find(connName);
@@ -1296,7 +1296,7 @@ grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& re
   if (!status.ok()) {
     return status;
   }
-  (void)maybeAutoStartLink(connName, "链路配置创建后");
+  LOG_INFO("ModbusRTU 链路配置创建成功，当前不会自动启动链路连接功能，等待显式调用 StartLink: conn_name={}", connName);
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = linksByName_.find(connName);
@@ -1643,7 +1643,7 @@ grpc::Status LinkManager::UpsertPointTable(const ModbusRTUProto::UpsertPointTabl
   if (!status.ok()) {
     return status;
   }
-  (void)maybeAutoStartLink(request.conn_name(), "点表配置更新后");
+  LOG_INFO("ModbusRTU 点表配置更新成功，当前不会自动启动链路连接功能，等待显式调用 StartLink: conn_name={}", request.conn_name());
   return grpc::Status::OK;
 }
 

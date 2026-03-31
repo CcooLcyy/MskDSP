@@ -71,7 +71,7 @@ TEST(ConfigPusherApplyModbusRtuTest, RejectsMqttLinkWithoutTopLevelMqtt) {
   EXPECT_FALSE(ConfigPusher::applyModbusRtuConfig(config, stub.get()));
 }
 
-// 验证：存在 MQTT UART 链路时，会先下发 UpdateConfig，再下发连接/点表且不再额外调用 StartLink。
+// 验证：存在 MQTT UART 链路时，会先下发 UpdateConfig，再下发连接/点表；配置完成后保持 STOPPED，且不再额外调用 StartLink。
 TEST(ConfigPusherApplyModbusRtuTest, AppliesUpdateConfigBeforeLinkWithoutExplicitStart) {
   auto config = MakeMqttModbusConfig(true, true);
   auto stub = std::make_unique<ModbusRTUProto::MockModbusRTUServiceStub>();

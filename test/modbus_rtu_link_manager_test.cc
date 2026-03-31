@@ -403,6 +403,107 @@ TEST(ModbusRtuLinkManagerTest, StartLinkRejectsMqttWithoutUpdateConfig) {
   EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
 }
 
+// 验证：UpsertPointTable 成功后链路保持 STOPPED，需显式调用 StartLink 才启动链路功能。
+TEST(ModbusRtuLinkManagerTest, UpsertPointTableKeepsStoppedUntilExplicitStart) {
+  ScopedPseudoTty pty;
+  ASSERT_TRUE(pty.ok()) << pty.error();
+
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManagerTestEnv env;
+  auto& mgr = env.mgr;
+  mgr.setDataCenterStub(stub);
+
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("conn-start-explicit", pty.slavePath().c_str(), 1), &info).ok());
+
+  ModbusRTUProto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-start-explicit");
+  *ptReq.add_points() = MakeWriteSingleRegisterPoint("reg-a", 1);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  ModbusRTUProto::LinkInfo got;
+  ASSERT_TRUE(mgr.GetLink("conn-start-explicit", &got).ok());
+  EXPECT_EQ(got.state(), ModbusRTUProto::LINK_STATE_STOPPED);
+  EXPECT_TRUE(got.last_error().empty());
+
+  ASSERT_TRUE(mgr.StartLink("conn-start-explicit").ok());
+  ASSERT_TRUE(mgr.GetLink("conn-start-explicit", &got).ok());
+  EXPECT_EQ(got.state(), ModbusRTUProto::LINK_STATE_RUNNING);
+  EXPECT_TRUE(got.last_error().empty());
+
+  ASSERT_TRUE(mgr.StopLink("conn-start-explicit").ok());
+}
+
+// 验证：停止态且点表已就绪的链路执行 UpsertLink 更新后，仍保持 STOPPED。
+TEST(ModbusRtuLinkManagerTest, UpsertLinkUpdateKeepsStoppedWhenPointTableReady) {
+  ScopedPseudoTty pty;
+  ASSERT_TRUE(pty.ok()) << pty.error();
+
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManagerTestEnv env;
+  auto& mgr = env.mgr;
+  mgr.setDataCenterStub(stub);
+
+  ModbusRTUProto::LinkInfo created;
+  ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("conn-update-ready", pty.slavePath().c_str(), 1), &created).ok());
+
+  ModbusRTUProto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-update-ready");
+  *ptReq.add_points() = MakeWriteSingleRegisterPoint("reg-a", 1);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+  ASSERT_TRUE(mgr.StopLink("conn-update-ready").ok());
+
+  auto updateReq = MakeMinimalLinkReq("conn-update-ready", pty.slavePath().c_str(), 1);
+  updateReq.mutable_config()->set_poll_interval_ms(2000);
+  ModbusRTUProto::LinkInfo updated;
+  ASSERT_TRUE(mgr.UpsertLink(updateReq, &updated).ok());
+  EXPECT_EQ(updated.config().poll_interval_ms(), 2000u);
+
+  ModbusRTUProto::LinkInfo got;
+  ASSERT_TRUE(mgr.GetLink("conn-update-ready", &got).ok());
+  EXPECT_EQ(got.state(), ModbusRTUProto::LINK_STATE_STOPPED);
+  EXPECT_TRUE(got.last_error().empty());
+}
+
+// 验证：UpdateConfig 成功后不会自动启动已具备运行条件的停止态链路。
+TEST(ModbusRtuLinkManagerTest, UpdateConfigKeepsStoppedWhenReadyLinkExists) {
+  ScopedPseudoTty pty;
+  ASSERT_TRUE(pty.ok()) << pty.error();
+
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManagerTestEnv env;
+  auto& mgr = env.mgr;
+  mgr.setDataCenterStub(stub);
+
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("conn-update-config", pty.slavePath().c_str(), 1), &info).ok());
+
+  ModbusRTUProto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-update-config");
+  *ptReq.add_points() = MakeWriteSingleRegisterPoint("reg-a", 1);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+  ASSERT_TRUE(mgr.StopLink("conn-update-config").ok());
+
+  auto req = MakeMqttUpdateRequest("127.0.0.1", 1883, "modbus-rtu-test");
+  ModbusRTUProto::UpdateConfigResponse resp;
+  ASSERT_TRUE(mgr.UpdateConfig(req, &resp).ok());
+  EXPECT_TRUE(resp.ok());
+
+  ModbusRTUProto::LinkInfo got;
+  ASSERT_TRUE(mgr.GetLink("conn-update-config", &got).ok());
+  EXPECT_EQ(got.state(), ModbusRTUProto::LINK_STATE_STOPPED);
+  EXPECT_TRUE(got.last_error().empty());
+}
+
 // 验证：串口 data_bits 越界时 UpsertLink 拒绝。
 TEST(ModbusRtuLinkManagerTest, UpsertLinkRejectsInvalidDataBits) {
   FakeDataCenterState state;
