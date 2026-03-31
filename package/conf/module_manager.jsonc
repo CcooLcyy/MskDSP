@@ -3,7 +3,7 @@
   // - CONFIG_PUSHER：启动时允许 ConfigPusher 读取 JSONC 并下发配置。
   // - UPPER：启动时不允许 ConfigPusher 自动下发配置；由上位机负责下发。
   // 该字段仅在 MskDSP 进程启动时读取一次；运行中修改不会立即生效，需重启后生效。
-  "boot_config_mode": "CONFIG_PUSHER",
+  "boot_config_mode": "UPPER",
   // ModuleManager 启动时自动加载的模块列表（建议仅填写 ConfigPusher）。
   // 其他模块建议通过 ConfigPusher 的配置进行按需启动。
   // 日志策略为内置配置（如需调整请修改 src/core/ModuleManager/Logger.cc）：
