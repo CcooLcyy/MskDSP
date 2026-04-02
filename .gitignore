@@ -14,6 +14,9 @@ package/test*
 package/log
 package/debug
 
+package/conf/**/*.pb
+package/conf/**/*.pb.bak
+
 # 屏蔽所有版本文件
 **/*LibInfo.h
 package/conf/modConf.bin
