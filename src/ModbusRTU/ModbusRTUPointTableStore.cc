@@ -4,7 +4,7 @@
 #include <utility>
 
 #include "ModbusRTUPointTable.h"
-#include "detail/ProtoFileStore.hpp"
+#include "mskdsp/detail/ProtoFileStore.hpp"
 
 namespace ModbusRTU {
 namespace {
@@ -32,12 +32,12 @@ ModbusRTUPointTableStore::ModbusRTUPointTableStore(std::filesystem::path pointTa
   pointTablesPath_(std::move(pointTablesPath)) {}
 
 grpc::Status ModbusRTUPointTableStore::Save(const ModbusRTUProto::PointTablesConfig& config) {
-  detail::ProtoFileStore<ModbusRTUProto::PointTablesConfig> store(pointTablesPath_, validatePointTablesConfig);
+  mskdsp::detail::ProtoFileStore<ModbusRTUProto::PointTablesConfig> store(pointTablesPath_, validatePointTablesConfig);
   return store.Save(config);
 }
 
 grpc::Status ModbusRTUPointTableStore::Load(ModbusRTUProto::PointTablesConfig* out) {
-  detail::ProtoFileStore<ModbusRTUProto::PointTablesConfig> store(pointTablesPath_, validatePointTablesConfig);
+  mskdsp::detail::ProtoFileStore<ModbusRTUProto::PointTablesConfig> store(pointTablesPath_, validatePointTablesConfig);
   return store.Load(out);
 }
 
@@ -46,12 +46,12 @@ std::filesystem::path ModbusRTUPointTableStore::pointTablesPath() const {
 }
 
 std::filesystem::path ModbusRTUPointTableStore::backupPath() const {
-  detail::ProtoFileStore<ModbusRTUProto::PointTablesConfig> store(pointTablesPath_, validatePointTablesConfig);
+  mskdsp::detail::ProtoFileStore<ModbusRTUProto::PointTablesConfig> store(pointTablesPath_, validatePointTablesConfig);
   return store.backupPath();
 }
 
 std::filesystem::path ModbusRTUPointTableStore::tmpPath() const {
-  detail::ProtoFileStore<ModbusRTUProto::PointTablesConfig> store(pointTablesPath_, validatePointTablesConfig);
+  mskdsp::detail::ProtoFileStore<ModbusRTUProto::PointTablesConfig> store(pointTablesPath_, validatePointTablesConfig);
   return store.tmpPath();
 }
 }  // namespace ModbusRTU

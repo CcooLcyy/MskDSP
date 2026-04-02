@@ -3,7 +3,7 @@
 #include <unordered_set>
 #include <utility>
 
-#include "detail/ProtoFileStore.hpp"
+#include "mskdsp/detail/ProtoFileStore.hpp"
 
 namespace DLT645 {
 namespace {
@@ -35,12 +35,12 @@ DLT645LinkStore::DLT645LinkStore(std::filesystem::path linksPath) :
   linksPath_(std::move(linksPath)) {}
 
 grpc::Status DLT645LinkStore::Save(const DLT645Proto::LinksConfig &config) {
-  detail::ProtoFileStore<DLT645Proto::LinksConfig> store(linksPath_, validateLinksConfig);
+  mskdsp::detail::ProtoFileStore<DLT645Proto::LinksConfig> store(linksPath_, validateLinksConfig);
   return store.Save(config);
 }
 
 grpc::Status DLT645LinkStore::Load(DLT645Proto::LinksConfig *out) {
-  detail::ProtoFileStore<DLT645Proto::LinksConfig> store(linksPath_, validateLinksConfig);
+  mskdsp::detail::ProtoFileStore<DLT645Proto::LinksConfig> store(linksPath_, validateLinksConfig);
   return store.Load(out);
 }
 
@@ -49,12 +49,12 @@ std::filesystem::path DLT645LinkStore::linksPath() const {
 }
 
 std::filesystem::path DLT645LinkStore::backupPath() const {
-  detail::ProtoFileStore<DLT645Proto::LinksConfig> store(linksPath_, validateLinksConfig);
+  mskdsp::detail::ProtoFileStore<DLT645Proto::LinksConfig> store(linksPath_, validateLinksConfig);
   return store.backupPath();
 }
 
 std::filesystem::path DLT645LinkStore::tmpPath() const {
-  detail::ProtoFileStore<DLT645Proto::LinksConfig> store(linksPath_, validateLinksConfig);
+  mskdsp::detail::ProtoFileStore<DLT645Proto::LinksConfig> store(linksPath_, validateLinksConfig);
   return store.tmpPath();
 }
 }  // namespace DLT645

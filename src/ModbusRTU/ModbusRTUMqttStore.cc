@@ -2,7 +2,7 @@
 
 #include <utility>
 
-#include "detail/ProtoFileStore.hpp"
+#include "mskdsp/detail/ProtoFileStore.hpp"
 
 namespace ModbusRTU {
 namespace {
@@ -24,12 +24,12 @@ ModbusRTUMqttStore::ModbusRTUMqttStore(std::filesystem::path mqttPath) :
   mqttPath_(std::move(mqttPath)) {}
 
 grpc::Status ModbusRTUMqttStore::Save(const ModbusRTUProto::MqttConfig& config) {
-  detail::ProtoFileStore<ModbusRTUProto::MqttConfig> store(mqttPath_, validateMqttConfig);
+  mskdsp::detail::ProtoFileStore<ModbusRTUProto::MqttConfig> store(mqttPath_, validateMqttConfig);
   return store.Save(config);
 }
 
 grpc::Status ModbusRTUMqttStore::Load(ModbusRTUProto::MqttConfig* out) {
-  detail::ProtoFileStore<ModbusRTUProto::MqttConfig> store(mqttPath_, validateMqttConfig);
+  mskdsp::detail::ProtoFileStore<ModbusRTUProto::MqttConfig> store(mqttPath_, validateMqttConfig);
   return store.Load(out);
 }
 
@@ -38,12 +38,12 @@ std::filesystem::path ModbusRTUMqttStore::mqttPath() const {
 }
 
 std::filesystem::path ModbusRTUMqttStore::backupPath() const {
-  detail::ProtoFileStore<ModbusRTUProto::MqttConfig> store(mqttPath_, validateMqttConfig);
+  mskdsp::detail::ProtoFileStore<ModbusRTUProto::MqttConfig> store(mqttPath_, validateMqttConfig);
   return store.backupPath();
 }
 
 std::filesystem::path ModbusRTUMqttStore::tmpPath() const {
-  detail::ProtoFileStore<ModbusRTUProto::MqttConfig> store(mqttPath_, validateMqttConfig);
+  mskdsp::detail::ProtoFileStore<ModbusRTUProto::MqttConfig> store(mqttPath_, validateMqttConfig);
   return store.tmpPath();
 }
 }  // namespace ModbusRTU

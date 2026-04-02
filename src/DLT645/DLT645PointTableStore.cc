@@ -4,7 +4,7 @@
 #include <utility>
 
 #include "DLT645PointTable.h"
-#include "detail/ProtoFileStore.hpp"
+#include "mskdsp/detail/ProtoFileStore.hpp"
 
 namespace DLT645 {
 namespace {
@@ -32,12 +32,12 @@ DLT645PointTableStore::DLT645PointTableStore(std::filesystem::path pointTablesPa
   pointTablesPath_(std::move(pointTablesPath)) {}
 
 grpc::Status DLT645PointTableStore::Save(const DLT645Proto::PointTablesConfig &config) {
-  detail::ProtoFileStore<DLT645Proto::PointTablesConfig> store(pointTablesPath_, validatePointTablesConfig);
+  mskdsp::detail::ProtoFileStore<DLT645Proto::PointTablesConfig> store(pointTablesPath_, validatePointTablesConfig);
   return store.Save(config);
 }
 
 grpc::Status DLT645PointTableStore::Load(DLT645Proto::PointTablesConfig *out) {
-  detail::ProtoFileStore<DLT645Proto::PointTablesConfig> store(pointTablesPath_, validatePointTablesConfig);
+  mskdsp::detail::ProtoFileStore<DLT645Proto::PointTablesConfig> store(pointTablesPath_, validatePointTablesConfig);
   return store.Load(out);
 }
 
@@ -46,12 +46,12 @@ std::filesystem::path DLT645PointTableStore::pointTablesPath() const {
 }
 
 std::filesystem::path DLT645PointTableStore::backupPath() const {
-  detail::ProtoFileStore<DLT645Proto::PointTablesConfig> store(pointTablesPath_, validatePointTablesConfig);
+  mskdsp::detail::ProtoFileStore<DLT645Proto::PointTablesConfig> store(pointTablesPath_, validatePointTablesConfig);
   return store.backupPath();
 }
 
 std::filesystem::path DLT645PointTableStore::tmpPath() const {
-  detail::ProtoFileStore<DLT645Proto::PointTablesConfig> store(pointTablesPath_, validatePointTablesConfig);
+  mskdsp::detail::ProtoFileStore<DLT645Proto::PointTablesConfig> store(pointTablesPath_, validatePointTablesConfig);
   return store.tmpPath();
 }
 }  // namespace DLT645

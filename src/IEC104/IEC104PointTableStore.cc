@@ -5,7 +5,7 @@
 #include <utility>
 
 #include "IEC104PointTable.h"
-#include "detail/ProtoFileStore.hpp"
+#include "mskdsp/detail/ProtoFileStore.hpp"
 
 namespace IEC104 {
 
@@ -13,12 +13,12 @@ IEC104PointTableStore::IEC104PointTableStore(std::filesystem::path pointTablesPa
   pointTablesPath_(std::move(pointTablesPath)) {}
 
 grpc::Status IEC104PointTableStore::Save(const IEC104Proto::PointTablesConfig& config) {
-  detail::ProtoFileStore<IEC104Proto::PointTablesConfig> store(pointTablesPath_, ValidatePointTablesConfig);
+  mskdsp::detail::ProtoFileStore<IEC104Proto::PointTablesConfig> store(pointTablesPath_, ValidatePointTablesConfig);
   return store.Save(config);
 }
 
 grpc::Status IEC104PointTableStore::Load(IEC104Proto::PointTablesConfig* out) {
-  detail::ProtoFileStore<IEC104Proto::PointTablesConfig> store(pointTablesPath_, ValidatePointTablesConfig);
+  mskdsp::detail::ProtoFileStore<IEC104Proto::PointTablesConfig> store(pointTablesPath_, ValidatePointTablesConfig);
   return store.Load(out);
 }
 
@@ -27,12 +27,12 @@ std::filesystem::path IEC104PointTableStore::pointTablesPath() const {
 }
 
 std::filesystem::path IEC104PointTableStore::backupPath() const {
-  detail::ProtoFileStore<IEC104Proto::PointTablesConfig> store(pointTablesPath_, ValidatePointTablesConfig);
+  mskdsp::detail::ProtoFileStore<IEC104Proto::PointTablesConfig> store(pointTablesPath_, ValidatePointTablesConfig);
   return store.backupPath();
 }
 
 std::filesystem::path IEC104PointTableStore::tmpPath() const {
-  detail::ProtoFileStore<IEC104Proto::PointTablesConfig> store(pointTablesPath_, ValidatePointTablesConfig);
+  mskdsp::detail::ProtoFileStore<IEC104Proto::PointTablesConfig> store(pointTablesPath_, ValidatePointTablesConfig);
   return store.tmpPath();
 }
 

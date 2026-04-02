@@ -8,7 +8,10 @@ configure_file(
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR} DATACENTER_SRCS)
 add_library(${LIB_NAME} SHARED ${DATACENTER_SRCS})
 
-target_include_directories(${LIB_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(${LIB_NAME} PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${MSKDSP_COMMON_INCLUDE_DIR}
+)
 target_link_libraries(${LIB_NAME} PUBLIC 
     moduleManager
 )

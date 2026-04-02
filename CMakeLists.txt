@@ -105,6 +105,8 @@ if(MSKDSP_BUILD_TESTS)
   mskdsp_enable_coverage_flags()
 endif()
 
+set(MSKDSP_COMMON_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/src/common/include")
+
 add_subdirectory(protobuf)
 add_subdirectory(src)
 if(MSKDSP_BUILD_TOOLS)

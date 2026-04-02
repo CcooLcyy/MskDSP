@@ -1,6 +1,6 @@
 #include "DataCenterRouteStore.h"
 
-#include "detail/ProtoFileStore.hpp"
+#include "mskdsp/detail/ProtoFileStore.hpp"
 
 namespace DataCenter {
 namespace {
@@ -27,12 +27,14 @@ DataCenterRouteStore::DataCenterRouteStore(std::filesystem::path routesPath) :
   routesPath_(std::move(routesPath)) {}
 
 grpc::Status DataCenterRouteStore::Save(const DataCenterProto::RoutesConfig& config) {
-  detail::ProtoFileStore<DataCenterProto::RoutesConfig> store(routesPath_, validateRoutesConfig);
+  mskdsp::detail::ProtoFileStore<DataCenterProto::RoutesConfig> store(routesPath_,
+                                                                      validateRoutesConfig);
   return store.Save(config);
 }
 
 grpc::Status DataCenterRouteStore::Load(DataCenterProto::RoutesConfig* out) {
-  detail::ProtoFileStore<DataCenterProto::RoutesConfig> store(routesPath_, validateRoutesConfig);
+  mskdsp::detail::ProtoFileStore<DataCenterProto::RoutesConfig> store(routesPath_,
+                                                                      validateRoutesConfig);
   return store.Load(out);
 }
 
@@ -41,12 +43,14 @@ std::filesystem::path DataCenterRouteStore::routesPath() const {
 }
 
 std::filesystem::path DataCenterRouteStore::backupPath() const {
-  detail::ProtoFileStore<DataCenterProto::RoutesConfig> store(routesPath_, validateRoutesConfig);
+  mskdsp::detail::ProtoFileStore<DataCenterProto::RoutesConfig> store(routesPath_,
+                                                                      validateRoutesConfig);
   return store.backupPath();
 }
 
 std::filesystem::path DataCenterRouteStore::tmpPath() const {
-  detail::ProtoFileStore<DataCenterProto::RoutesConfig> store(routesPath_, validateRoutesConfig);
+  mskdsp::detail::ProtoFileStore<DataCenterProto::RoutesConfig> store(routesPath_,
+                                                                      validateRoutesConfig);
   return store.tmpPath();
 }
 }  // namespace DataCenter

@@ -11,7 +11,7 @@
 
 #include <grpcpp/support/status.h>
 
-namespace DataCenter::detail {
+namespace mskdsp::detail {
 template <typename ProtoT>
 class ProtoFileStore {
 public:
@@ -214,4 +214,4 @@ private:
   std::filesystem::path path_;
   ValidateFn validate_{nullptr};
 };
-}  // namespace DataCenter::detail
+}  // namespace mskdsp::detail

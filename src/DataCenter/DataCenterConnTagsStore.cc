@@ -3,7 +3,7 @@
 #include <system_error>
 
 #include "Logger.h"
-#include "detail/ProtoFileStore.hpp"
+#include "mskdsp/detail/ProtoFileStore.hpp"
 
 namespace DataCenter {
 namespace {
@@ -41,12 +41,14 @@ DataCenterConnTagsStore::DataCenterConnTagsStore(std::filesystem::path connTagsP
   connTagsPath_(std::move(connTagsPath)) {}
 
 grpc::Status DataCenterConnTagsStore::Save(const DataCenterProto::ConnTagsConfig& config) {
-  detail::ProtoFileStore<DataCenterProto::ConnTagsConfig> store(connTagsPath_, validateConnTagsConfig);
+  mskdsp::detail::ProtoFileStore<DataCenterProto::ConnTagsConfig> store(connTagsPath_,
+                                                                        validateConnTagsConfig);
   return store.Save(config);
 }
 
 grpc::Status DataCenterConnTagsStore::Load(DataCenterProto::ConnTagsConfig* out) {
-  detail::ProtoFileStore<DataCenterProto::ConnTagsConfig> store(connTagsPath_, validateConnTagsConfig);
+  mskdsp::detail::ProtoFileStore<DataCenterProto::ConnTagsConfig> store(connTagsPath_,
+                                                                        validateConnTagsConfig);
   const bool hasCurrentFiles = hasStoreFiles(connTagsPath_);
   auto status = store.Load(out);
   if (!status.ok() || hasCurrentFiles) {
@@ -58,7 +60,8 @@ grpc::Status DataCenterConnTagsStore::Load(DataCenterProto::ConnTagsConfig* out)
     return status;
   }
 
-  detail::ProtoFileStore<DataCenterProto::ConnTagsConfig> legacyStore(legacyPath, validateConnTagsConfig);
+  mskdsp::detail::ProtoFileStore<DataCenterProto::ConnTagsConfig> legacyStore(
+      legacyPath, validateConnTagsConfig);
   auto legacyStatus = legacyStore.Load(out);
   if (legacyStatus.ok()) {
     LOG_INFO("DataCenter 连接标签注册表按历史文件名兼容路径尝试加载: 当前路径={}, 历史路径={}",
@@ -72,12 +75,14 @@ std::filesystem::path DataCenterConnTagsStore::connTagsPath() const {
 }
 
 std::filesystem::path DataCenterConnTagsStore::backupPath() const {
-  detail::ProtoFileStore<DataCenterProto::ConnTagsConfig> store(connTagsPath_, validateConnTagsConfig);
+  mskdsp::detail::ProtoFileStore<DataCenterProto::ConnTagsConfig> store(connTagsPath_,
+                                                                        validateConnTagsConfig);
   return store.backupPath();
 }
 
 std::filesystem::path DataCenterConnTagsStore::tmpPath() const {
-  detail::ProtoFileStore<DataCenterProto::ConnTagsConfig> store(connTagsPath_, validateConnTagsConfig);
+  mskdsp::detail::ProtoFileStore<DataCenterProto::ConnTagsConfig> store(connTagsPath_,
+                                                                        validateConnTagsConfig);
   return store.tmpPath();
 }
 }  // namespace DataCenter

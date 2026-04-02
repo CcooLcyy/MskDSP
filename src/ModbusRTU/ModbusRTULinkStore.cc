@@ -3,7 +3,7 @@
 #include <unordered_set>
 #include <utility>
 
-#include "detail/ProtoFileStore.hpp"
+#include "mskdsp/detail/ProtoFileStore.hpp"
 
 namespace ModbusRTU {
 namespace {
@@ -35,12 +35,12 @@ ModbusRTULinkStore::ModbusRTULinkStore(std::filesystem::path linksPath) :
   linksPath_(std::move(linksPath)) {}
 
 grpc::Status ModbusRTULinkStore::Save(const ModbusRTUProto::LinksConfig& config) {
-  detail::ProtoFileStore<ModbusRTUProto::LinksConfig> store(linksPath_, validateLinksConfig);
+  mskdsp::detail::ProtoFileStore<ModbusRTUProto::LinksConfig> store(linksPath_, validateLinksConfig);
   return store.Save(config);
 }
 
 grpc::Status ModbusRTULinkStore::Load(ModbusRTUProto::LinksConfig* out) {
-  detail::ProtoFileStore<ModbusRTUProto::LinksConfig> store(linksPath_, validateLinksConfig);
+  mskdsp::detail::ProtoFileStore<ModbusRTUProto::LinksConfig> store(linksPath_, validateLinksConfig);
   return store.Load(out);
 }
 
@@ -49,12 +49,12 @@ std::filesystem::path ModbusRTULinkStore::linksPath() const {
 }
 
 std::filesystem::path ModbusRTULinkStore::backupPath() const {
-  detail::ProtoFileStore<ModbusRTUProto::LinksConfig> store(linksPath_, validateLinksConfig);
+  mskdsp::detail::ProtoFileStore<ModbusRTUProto::LinksConfig> store(linksPath_, validateLinksConfig);
   return store.backupPath();
 }
 
 std::filesystem::path ModbusRTULinkStore::tmpPath() const {
-  detail::ProtoFileStore<ModbusRTUProto::LinksConfig> store(linksPath_, validateLinksConfig);
+  mskdsp::detail::ProtoFileStore<ModbusRTUProto::LinksConfig> store(linksPath_, validateLinksConfig);
   return store.tmpPath();
 }
 }  // namespace ModbusRTU

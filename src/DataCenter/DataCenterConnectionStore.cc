@@ -6,7 +6,7 @@
 #include <unordered_set>
 #include <utility>
 
-#include "detail/ProtoFileStore.hpp"
+#include "mskdsp/detail/ProtoFileStore.hpp"
 
 namespace DataCenter {
 namespace {
@@ -58,12 +58,14 @@ DataCenterConnectionStore::DataCenterConnectionStore(std::filesystem::path conne
   connectionsPath_(std::move(connectionsPath)) {}
 
 grpc::Status DataCenterConnectionStore::Save(const DataCenterProto::ConnectionsConfig& config) {
-  detail::ProtoFileStore<DataCenterProto::ConnectionsConfig> store(connectionsPath_, validateConnectionsConfig);
+  mskdsp::detail::ProtoFileStore<DataCenterProto::ConnectionsConfig> store(
+      connectionsPath_, validateConnectionsConfig);
   return store.Save(config);
 }
 
 grpc::Status DataCenterConnectionStore::Load(DataCenterProto::ConnectionsConfig* out) {
-  detail::ProtoFileStore<DataCenterProto::ConnectionsConfig> store(connectionsPath_, validateConnectionsConfig);
+  mskdsp::detail::ProtoFileStore<DataCenterProto::ConnectionsConfig> store(
+      connectionsPath_, validateConnectionsConfig);
   return store.Load(out);
 }
 
@@ -72,12 +74,14 @@ std::filesystem::path DataCenterConnectionStore::connectionsPath() const {
 }
 
 std::filesystem::path DataCenterConnectionStore::backupPath() const {
-  detail::ProtoFileStore<DataCenterProto::ConnectionsConfig> store(connectionsPath_, validateConnectionsConfig);
+  mskdsp::detail::ProtoFileStore<DataCenterProto::ConnectionsConfig> store(
+      connectionsPath_, validateConnectionsConfig);
   return store.backupPath();
 }
 
 std::filesystem::path DataCenterConnectionStore::tmpPath() const {
-  detail::ProtoFileStore<DataCenterProto::ConnectionsConfig> store(connectionsPath_, validateConnectionsConfig);
+  mskdsp::detail::ProtoFileStore<DataCenterProto::ConnectionsConfig> store(
+      connectionsPath_, validateConnectionsConfig);
   return store.tmpPath();
 }
 }  // namespace DataCenter

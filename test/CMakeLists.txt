@@ -110,6 +110,21 @@ target_link_libraries(mqtt_manager_test PRIVATE
 
 mskdsp_add_isolated_test(mqtt_manager_test)
 
+add_executable(protoFileStore_test
+  proto_file_store_test.cc
+)
+
+target_include_directories(protoFileStore_test PRIVATE
+  ${MSKDSP_COMMON_INCLUDE_DIR}
+)
+
+target_link_libraries(protoFileStore_test PRIVATE
+  GTest::gtest_main
+  dspProto
+)
+
+mskdsp_add_isolated_test(protoFileStore_test)
+
 add_executable(dataCenterCore_test
   data_center_core_test.cc
   ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCore.cc
@@ -137,6 +152,7 @@ add_executable(dataCenterPointTableStore_test
 
 target_include_directories(dataCenterPointTableStore_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/DataCenter/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
   ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
 )
 
@@ -155,6 +171,7 @@ add_executable(dataCenterRouteStore_test
 
 target_include_directories(dataCenterRouteStore_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/DataCenter/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
 )
 
 target_link_libraries(dataCenterRouteStore_test PRIVATE
@@ -171,6 +188,7 @@ add_executable(dataCenterConnectionStore_test
 
 target_include_directories(dataCenterConnectionStore_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/DataCenter/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
 )
 
 target_link_libraries(dataCenterConnectionStore_test PRIVATE
@@ -195,6 +213,7 @@ add_executable(dataCenterGrpcService_test
 
 target_include_directories(dataCenterGrpcService_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/DataCenter/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
   ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
 )
 
@@ -272,6 +291,7 @@ add_dependencies(dlt645LinkManager_test dspProto)
 
 target_include_directories(dlt645LinkManager_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/DLT645/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
   ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
 )
 
@@ -439,6 +459,7 @@ add_executable(iec104LinkManager_test
 
 target_include_directories(iec104LinkManager_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/IEC104/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
   ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
 )
 
@@ -466,6 +487,7 @@ add_executable(iec104Persistence_test
 
 target_include_directories(iec104Persistence_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/IEC104/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
   ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
 )
 
@@ -496,6 +518,7 @@ add_executable(modbusRtuLinkManager_test
 
 target_include_directories(modbusRtuLinkManager_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/ModbusRTU/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
   ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
 )
 
@@ -567,6 +590,7 @@ add_executable(agcGroupManager_test
 
 target_include_directories(agcGroupManager_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
   ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
 )
 
@@ -588,6 +612,7 @@ add_executable(agcGroupStore_test
 
 target_include_directories(agcGroupStore_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
 )
 
 target_link_libraries(agcGroupStore_test PRIVATE
@@ -674,6 +699,7 @@ set(MSKDSP_TEST_TARGETS
   moduleInterface_test
   logger_test
   mqtt_manager_test
+  protoFileStore_test
   dataCenterCore_test
   dataCenterPointTableStore_test
   dataCenterRouteStore_test
