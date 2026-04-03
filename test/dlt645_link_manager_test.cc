@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <future>
 #include <mutex>
 #include <set>
@@ -227,6 +228,33 @@ DLT645Proto::BlockItem MakeBlockItemProto(const char *tag, uint32_t dataLen, DLT
   item.set_offset(0.0);
   item.set_deadband(0.0);
   return item;
+}
+
+void InstallSuccessfulSerialMqttStub(
+    MQTTManagerProto::MockMQTTManagerServiceStub *mqttStub,
+    std::function<void(const MQTTManagerProto::RequestAndWaitRequest &)> onRequest = {}) {
+  EXPECT_CALL(*mqttStub, SubscribeRaw(_, _))
+      .Times(::testing::AnyNumber())
+      .WillRepeatedly([](grpc::ClientContext *, const MQTTManagerProto::SubscribeRequest &) {
+        return static_cast<grpc::ClientReaderInterface<MQTTManagerProto::SubscribeResponse> *>(nullptr);
+      });
+  EXPECT_CALL(*mqttStub, RequestAndWait(_, _, _))
+      .Times(::testing::AnyNumber())
+      .WillRepeatedly(::testing::Invoke([onRequest = std::move(onRequest)](
+                                            grpc::ClientContext *,
+                                            const MQTTManagerProto::RequestAndWaitRequest &req,
+                                            MQTTManagerProto::RequestAndWaitResponse *resp) {
+        if (resp == nullptr) {
+          return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
+        }
+        if (onRequest) {
+          onRequest(req);
+        }
+        resp->set_ok(true);
+        resp->set_message("成功");
+        resp->set_payload("{\"status\":0,\"data\":\"AQ==\"}");
+        return grpc::Status::OK;
+      }));
 }
 
 bool WaitForLinkState(LinkManager &mgr,
@@ -748,9 +776,12 @@ TEST(Dlt645LinkManagerTest, UpdateConfigKeepsStoppedWhenReadyLinkExists) {
 TEST(Dlt645LinkManagerTest, UpsertPointTableKeepsStoppedUntilExplicitStart) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
+  auto mqttStub = std::make_shared<MQTTManagerProto::MockMQTTManagerServiceStub>();
+  InstallSuccessfulSerialMqttStub(mqttStub.get());
 
   LinkManager mgr("DLT645");
   mgr.setDataCenterStub(stub);
+  mgr.setMqttStub(mqttStub);
 
   auto updateReq = MakeMqttUpdateRequest("127.0.0.1", 1883, "cfg-point");
   DLT645Proto::UpdateConfigResponse updateResp;
@@ -776,6 +807,57 @@ TEST(Dlt645LinkManagerTest, UpsertPointTableKeepsStoppedUntilExplicitStart) {
   ASSERT_TRUE(mgr.GetLink("conn-explicit", &got).ok());
   EXPECT_EQ(got.state(), DLT645Proto::LINK_STATE_RUNNING);
   EXPECT_TRUE(got.last_error().empty());
+  ASSERT_TRUE(mgr.StopLink("conn-explicit").ok());
+}
+
+// 验证：成功启动串口链路后即使未显式 StopLink，LinkManager 析构也会回收后台线程而不崩溃。
+TEST(Dlt645LinkManagerTest, DestroyAfterStartLinkWithoutExplicitStopDoesNotCrash) {
+  FakeDataCenterState state;
+  auto dcStub = MakeStub(&state);
+  auto mqttStub = std::make_shared<MQTTManagerProto::MockMQTTManagerServiceStub>();
+
+  std::mutex requestMu;
+  std::condition_variable requestCv;
+  size_t requestCount = 0;
+  InstallSuccessfulSerialMqttStub(
+      mqttStub.get(),
+      [&requestMu, &requestCv, &requestCount](const MQTTManagerProto::RequestAndWaitRequest &req) {
+        if (req.request_topic().find("uartManager") == std::string::npos) {
+          return;
+        }
+        {
+          std::lock_guard<std::mutex> lock(requestMu);
+          ++requestCount;
+        }
+        requestCv.notify_all();
+      });
+
+  {
+    LinkManager mgr("DLT645");
+    mgr.setDataCenterStub(dcStub);
+    mgr.setMqttStub(mqttStub);
+
+    auto updateReq = MakeMqttUpdateRequest("127.0.0.1", 1883, "cfg-destroy");
+    DLT645Proto::UpdateConfigResponse updateResp;
+    ASSERT_TRUE(mgr.UpdateConfig(updateReq, &updateResp).ok());
+
+    DLT645Proto::UpsertLinkRequest linkReq;
+    *linkReq.mutable_config() = MakeValidLinkConfig("conn-destroy", DLT645Proto::COMM_MODE_SERIAL);
+    DLT645Proto::LinkInfo linkInfo;
+    ASSERT_TRUE(mgr.UpsertLink(linkReq, &linkInfo).ok());
+
+    DLT645Proto::UpsertPointTableRequest ptReq;
+    ptReq.set_conn_name("conn-destroy");
+    *ptReq.add_points() = MakePointProto("P1", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16);
+    ptReq.set_replace(true);
+    ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+    ASSERT_TRUE(mgr.StartLink("conn-destroy").ok());
+    std::unique_lock<std::mutex> lock(requestMu);
+    ASSERT_TRUE(requestCv.wait_for(lock, std::chrono::seconds(3), [&requestCount]() { return requestCount >= 1; }));
+  }
+
+  EXPECT_GE(requestCount, 1u);
 }
 
 // 验证：停止态且点表已就绪的链路执行 UpsertLink 更新后，仍保持 STOPPED。
@@ -819,9 +901,12 @@ TEST(Dlt645LinkManagerTest, UpsertLinkUpdateKeepsStoppedWhenPointTableReady) {
 TEST(Dlt645LinkManagerTest, StartLinkSerialModeStartsSuccessfully) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
+  auto mqttStub = std::make_shared<MQTTManagerProto::MockMQTTManagerServiceStub>();
+  InstallSuccessfulSerialMqttStub(mqttStub.get());
 
   LinkManager mgr("DLT645");
   mgr.setDataCenterStub(stub);
+  mgr.setMqttStub(mqttStub);
 
   auto updateReq = MakeMqttUpdateRequest("127.0.0.1", 1883, "c1");
   DLT645Proto::UpdateConfigResponse updateResp;
@@ -838,6 +923,7 @@ TEST(Dlt645LinkManagerTest, StartLinkSerialModeStartsSuccessfully) {
   DLT645Proto::LinkInfo got;
   ASSERT_TRUE(mgr.GetLink("conn-serial", &got).ok());
   EXPECT_EQ(got.state(), DLT645Proto::LINK_STATE_RUNNING);
+  ASSERT_TRUE(mgr.StopLink("conn-serial").ok());
 }
 
 // 验证：配置 poll_item_interval_ms 后，单次点抄收发之间会按配置等待。
@@ -1179,6 +1265,10 @@ TEST(Dlt645LinkManagerTest, StartLinkLoraBlockedDoesNotBlockUart) {
           resp->set_payload("{\"status\":0}");
           return grpc::Status::OK;
         }
+        if (req.request_topic().find("delslaveNode") != std::string::npos) {
+          resp->set_payload("{\"status\":0}");
+          return grpc::Status::OK;
+        }
         resp->set_payload("{\"status\":1}");
         return grpc::Status::OK;
       }));
@@ -1210,6 +1300,8 @@ TEST(Dlt645LinkManagerTest, StartLinkLoraBlockedDoesNotBlockUart) {
   ASSERT_TRUE(mgr.GetLink("conn-uart", &uartGot).ok());
   EXPECT_EQ(loraGot.state(), DLT645Proto::LINK_STATE_RUNNING);
   EXPECT_EQ(uartGot.state(), DLT645Proto::LINK_STATE_RUNNING);
+  ASSERT_TRUE(mgr.StopLink("conn-uart").ok());
+  ASSERT_TRUE(mgr.StopLink("conn-lora").ok());
 }
 
 // 验证：多个 Lora 连接的点抄请求在模块内按全局串行顺序执行。

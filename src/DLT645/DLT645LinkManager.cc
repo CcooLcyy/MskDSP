@@ -41,6 +41,7 @@ constexpr uint32_t kDefaultSerialDataBits = 8;
 constexpr uint32_t kDefaultSerialByteTimeoutMs = 100;
 constexpr uint32_t kDefaultSerialFrameTimeoutMs = 100;
 constexpr uint32_t kDefaultSerialEstSize = 256;
+constexpr const char *kShutdownStartRejected = "模块正在销毁，禁止启动连接功能";
 
 bool useArchiveManagement(DLT645Proto::CommMode mode) {
   return mode == DLT645Proto::COMM_MODE_LORA || mode == DLT645Proto::COMM_MODE_CARRIER;
@@ -361,7 +362,120 @@ LinkManager::LinkManager(std::string moduleName) :
   mqttClient_(moduleName),
   moduleName_(std::move(moduleName)) {}
 
+LinkManager::~LinkManager() noexcept {
+  shutdownForDestroy();
+}
+
+void LinkManager::shutdownForDestroy() noexcept {
+  bool expected = false;
+  if (!shuttingDown_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+    return;
+  }
+
+  try {
+    std::vector<std::shared_ptr<LinkRuntime>> links;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      links.reserve(linksByName_.size());
+      for (auto &[_, link] : linksByName_) {
+        if (link) {
+          links.push_back(link);
+        }
+      }
+      linksByName_.clear();
+      pendingCreateByName_.clear();
+      archiveRefCountByKey_.clear();
+      archiveAddInFlightByKey_.clear();
+      archiveDelInFlightByKey_.clear();
+    }
+
+    LOG_INFO("DLT645 开始回收后台线程: 模块={}, 链路数={}", moduleName_, links.size());
+    archiveStateCv_.notify_all();
+    for (const auto &link : links) {
+      stopLinkThreadsForDestroy(link);
+    }
+    LOG_INFO("DLT645 后台线程回收完成: 模块={}, 链路数={}", moduleName_, links.size());
+  } catch (const std::exception &ex) {
+    LOG_ERROR("DLT645 销毁阶段回收后台线程失败: 模块={}, 原因={}", moduleName_, ex.what());
+  } catch (...) {
+    LOG_ERROR("DLT645 销毁阶段回收后台线程失败: 模块={}, 原因=未知异常", moduleName_);
+  }
+}
+
+void LinkManager::stopLinkThreadsForDestroy(const std::shared_ptr<LinkRuntime> &link) noexcept {
+  if (!link) {
+    return;
+  }
+
+  try {
+    const std::string &connName = link->config.conn_name();
+    std::jthread archiveRetryThread = std::move(link->archiveRetryThread);
+    std::jthread pollThread = std::move(link->pollThread);
+    std::jthread mqttSubscribeThread = std::move(link->mqttSubscribeThread);
+    std::jthread dcSubscribeThread = std::move(link->dcSubscribeThread);
+    auto mqttSubscribeContext = std::move(link->mqttSubscribeContext);
+    auto dcSubscribeContext = std::move(link->dcSubscribeContext);
+
+    auto requestStop = [](std::jthread &thread) {
+      if (thread.joinable()) {
+        thread.request_stop();
+      }
+    };
+    requestStop(archiveRetryThread);
+    requestStop(pollThread);
+    requestStop(mqttSubscribeThread);
+    requestStop(dcSubscribeThread);
+
+    if (mqttSubscribeContext) {
+      mqttSubscribeContext->TryCancel();
+    }
+    if (dcSubscribeContext) {
+      dcSubscribeContext->TryCancel();
+    }
+    archiveStateCv_.notify_all();
+
+    auto joinThread = [this, &connName](const char *threadName, std::jthread &thread) noexcept {
+      if (!thread.joinable()) {
+        return;
+      }
+      try {
+        thread.join();
+      } catch (const std::exception &ex) {
+        LOG_ERROR("DLT645 销毁阶段回收线程失败: 模块={}, conn_name={}, 线程={}, 原因={}", moduleName_, connName, threadName, ex.what());
+        try {
+          thread.detach();
+        } catch (...) {
+        }
+      } catch (...) {
+        LOG_ERROR("DLT645 销毁阶段回收线程失败: 模块={}, conn_name={}, 线程={}, 原因=未知异常", moduleName_, connName, threadName);
+        try {
+          thread.detach();
+        } catch (...) {
+        }
+      }
+    };
+    joinThread("archiveRetryThread", archiveRetryThread);
+    joinThread("pollThread", pollThread);
+    joinThread("mqttSubscribeThread", mqttSubscribeThread);
+    joinThread("dcSubscribeThread", dcSubscribeThread);
+
+    {
+      std::lock_guard<std::mutex> lock(link->pendingMutex);
+      link->pending.clear();
+    }
+    link->archiveRetrying = false;
+  } catch (const std::exception &ex) {
+    LOG_ERROR("DLT645 销毁阶段整理链路线程失败: 模块={}, 原因={}", moduleName_, ex.what());
+  } catch (...) {
+    LOG_ERROR("DLT645 销毁阶段整理链路线程失败: 模块={}, 原因=未知异常", moduleName_);
+  }
+}
+
 void LinkManager::LoadPersistedConfig() {
+  if (shuttingDown_.load(std::memory_order_acquire)) {
+    LOG_WARNING("DLT645 跳过加载本地持久化配置: 原因=模块正在销毁");
+    return;
+  }
   LOG_INFO("DLT645 开始加载本地持久化配置");
 
   {
@@ -801,11 +915,19 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
   if (!status.ok()) {
     return status;
   }
+  if (shuttingDown_.load(std::memory_order_acquire)) {
+    LOG_WARNING("DLT645 启动连接功能失败: conn_name={}, 原因={}", connName, kShutdownStartRejected);
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, kShutdownStartRejected);
+  }
   LOG_INFO("DLT645 开始启动连接功能: conn_name={}", connName);
 
   std::shared_ptr<LinkRuntime> link;
   {
     std::lock_guard<std::mutex> lock(mu_);
+    if (shuttingDown_.load(std::memory_order_acquire)) {
+      LOG_WARNING("DLT645 启动连接功能失败: conn_name={}, 原因={}", connName, kShutdownStartRejected);
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, kShutdownStartRejected);
+    }
     auto it = linksByName_.find(connName);
     if (it == linksByName_.end()) {
       return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接不存在");
@@ -841,6 +963,13 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
   {
     std::lock_guard<std::mutex> lock(mu_);
     startMqttSubscribeLocked(connName, link);
+  }
+  if (shuttingDown_.load(std::memory_order_acquire)) {
+    std::lock_guard<std::mutex> lock(mu_);
+    stopMqttSubscribeLocked(link.get());
+    link->lastError = kShutdownStartRejected;
+    LOG_WARNING("DLT645 启动连接功能失败: conn_name={}, 原因={}", connName, kShutdownStartRejected);
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, kShutdownStartRejected);
   }
 
   const bool useArchive = useArchiveManagement(link->config.comm_mode());
@@ -910,12 +1039,17 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
   }
 
   bool linkMissing = false;
+  bool shutdownAbort = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = linksByName_.find(connName);
     if (it == linksByName_.end() || it->second.get() != link.get()) {
       stopMqttSubscribeLocked(link.get());
       linkMissing = true;
+    } else if (shuttingDown_.load(std::memory_order_acquire)) {
+      stopMqttSubscribeLocked(link.get());
+      link->lastError = kShutdownStartRejected;
+      shutdownAbort = true;
     } else {
       startPollingLocked(connName, link);
       startDataCenterSubscribeLocked(connName, link);
@@ -928,6 +1062,13 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
       releaseArchiveRefOnStartAbort(connName, link, archiveKey);
     }
     return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接不存在");
+  }
+  if (shutdownAbort) {
+    if (useArchive && holdArchiveRef) {
+      releaseArchiveRefOnStartAbort(connName, link, archiveKey);
+    }
+    LOG_WARNING("DLT645 启动连接功能失败: conn_name={}, 原因={}", connName, kShutdownStartRejected);
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, kShutdownStartRejected);
   }
   LOG_INFO("DLT645 启动连接功能完成: conn_name={}", connName);
   return grpc::Status::OK;
@@ -1383,9 +1524,17 @@ bool LinkManager::isLinkAutoStartReadyLocked(const LinkRuntime &link, std::strin
 }
 
 grpc::Status LinkManager::maybeAutoStartLink(const std::string &connName, std::string_view trigger) {
+  if (shuttingDown_.load(std::memory_order_acquire)) {
+    LOG_INFO("DLT645 跳过自动启动连接: conn_name={}, 触发来源={}, 原因=模块正在销毁", connName, trigger);
+    return grpc::Status::OK;
+  }
   std::string reason;
   {
     std::lock_guard<std::mutex> lock(mu_);
+    if (shuttingDown_.load(std::memory_order_acquire)) {
+      LOG_INFO("DLT645 跳过自动启动连接: conn_name={}, 触发来源={}, 原因=模块正在销毁", connName, trigger);
+      return grpc::Status::OK;
+    }
     auto it = linksByName_.find(connName);
     if (it == linksByName_.end() || !it->second) {
       return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接不存在");
@@ -1408,6 +1557,10 @@ grpc::Status LinkManager::maybeAutoStartLink(const std::string &connName, std::s
 }
 
 void LinkManager::autoStartEligibleLinks(std::string_view trigger) {
+  if (shuttingDown_.load(std::memory_order_acquire)) {
+    LOG_INFO("DLT645 跳过批量自动启动连接: 触发来源={}, 原因=模块正在销毁", trigger);
+    return;
+  }
   std::vector<std::string> connNames;
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -1430,6 +1583,10 @@ void LinkManager::autoStartEligibleLinks(std::string_view trigger) {
 
   {
     std::lock_guard<std::mutex> lock(mu_);
+    if (shuttingDown_.load(std::memory_order_acquire)) {
+      LOG_INFO("DLT645 跳过批量自动启动连接: 触发来源={}, 原因=模块正在销毁", trigger);
+      return;
+    }
     for (const auto &connName : connNames) {
       auto it = linksByName_.find(connName);
       if (it == linksByName_.end() || !it->second) {
@@ -1480,6 +1637,15 @@ void LinkManager::autoStartEligibleLinks(std::string_view trigger) {
     for (const auto &archiveKey : batchGroupOrder) {
       requestLinks.push_back(batchGroupsByKey.at(archiveKey).links.front().get());
     }
+    if (shuttingDown_.load(std::memory_order_acquire)) {
+      std::lock_guard<std::mutex> lock(mu_);
+      for (const auto &archiveKey : batchGroupOrder) {
+        archiveAddInFlightByKey_.erase(archiveKey);
+      }
+      archiveStateCv_.notify_all();
+      LOG_INFO("DLT645 跳过批量档案下发: 触发来源={}, 原因=模块正在销毁", trigger);
+      return;
+    }
 
     bool archiveAlreadyExists = false;
     auto batchStatus = sendAddSlaveNodes(requestLinks, &archiveAlreadyExists);
@@ -1509,6 +1675,12 @@ void LinkManager::autoStartEligibleLinks(std::string_view trigger) {
             }
             if (link->state == DLT645Proto::LINK_STATE_PENDING_DELETE) {
               LOG_WARNING("DLT645 批量自动启动跳过待删除链路: conn_name={}", connName);
+              continue;
+            }
+            if (shuttingDown_.load(std::memory_order_acquire)) {
+              link->lastError = kShutdownStartRejected;
+              handledConnNames.insert(connName);
+              LOG_INFO("DLT645 批量自动启动跳过链路: conn_name={}, 原因=模块正在销毁", connName);
               continue;
             }
 
@@ -1591,6 +1763,10 @@ void LinkManager::autoStartEligibleLinks(std::string_view trigger) {
 }
 
 void LinkManager::TryAutoStartReadyLinks(std::string_view trigger) {
+  if (shuttingDown_.load(std::memory_order_acquire)) {
+    LOG_INFO("DLT645 跳过自动启动就绪连接: 触发来源={}, 原因=模块正在销毁", trigger);
+    return;
+  }
   autoStartEligibleLinks(trigger);
 }
 
@@ -1612,6 +1788,10 @@ void LinkManager::stopArchiveRetryLocked(LinkRuntime *link, std::jthread *outThr
 
 void LinkManager::releaseArchiveRefOnStartAbort(const std::string &connName, const std::shared_ptr<LinkRuntime> &link, const std::string &archiveKey) {
   if (!link || archiveKey.empty()) {
+    return;
+  }
+  if (shuttingDown_.load(std::memory_order_acquire)) {
+    LOG_INFO("DLT645 启动连接功能回滚跳过档案删除: conn_name={}, 原因=模块正在销毁", connName);
     return;
   }
 
@@ -1671,6 +1851,11 @@ void LinkManager::launchArchiveRetryLocked(const std::string &connName, const st
   if (!link) {
     return;
   }
+  if (shuttingDown_.load(std::memory_order_acquire)) {
+    link->archiveRetrying = false;
+    LOG_INFO("DLT645 跳过启动档案后台重试: conn_name={}, 原因=模块正在销毁", connName);
+    return;
+  }
   if (link->archiveRetrying) {
     LOG_INFO("DLT645 启动连接功能已在后台重试档案添加: conn_name={}", connName);
     return;
@@ -1726,7 +1911,10 @@ void LinkManager::runArchiveRetryLoop(std::string connName, std::shared_ptr<Link
       }
     }
 
-    if (st.stop_requested()) {
+    if (st.stop_requested() || shuttingDown_.load(std::memory_order_acquire)) {
+      if (shuttingDown_.load(std::memory_order_acquire)) {
+        link->lastError = kShutdownStartRejected;
+      }
       if (holdArchiveRef) {
         releaseArchiveRefOnStartAbort(connName, link, archiveKey);
       }
@@ -1767,7 +1955,8 @@ void LinkManager::runArchiveRetryLoop(std::string connName, std::shared_ptr<Link
       std::lock_guard<std::mutex> lock(mu_);
       auto it = linksByName_.find(connName);
       if (!st.stop_requested() && it != linksByName_.end() && it->second.get() == link.get() &&
-          link->state != DLT645Proto::LINK_STATE_PENDING_DELETE) {
+          link->state != DLT645Proto::LINK_STATE_PENDING_DELETE &&
+          !shuttingDown_.load(std::memory_order_acquire)) {
         startPollingLocked(connName, link);
         startDataCenterSubscribeLocked(connName, link);
         link->state = DLT645Proto::LINK_STATE_RUNNING;
@@ -1776,6 +1965,9 @@ void LinkManager::runArchiveRetryLoop(std::string connName, std::shared_ptr<Link
         started = true;
       } else {
         link->archiveRetrying = false;
+        if (shuttingDown_.load(std::memory_order_acquire)) {
+          link->lastError = kShutdownStartRejected;
+        }
       }
     }
     if (started) {
@@ -1800,6 +1992,10 @@ void LinkManager::runArchiveRetryLoop(std::string connName, std::shared_ptr<Link
 
 void LinkManager::startPollingLocked(const std::string &connName, const std::shared_ptr<LinkRuntime> &link) {
   if (!link) {
+    return;
+  }
+  if (shuttingDown_.load(std::memory_order_acquire)) {
+    LOG_INFO("DLT645 跳过启动轮询线程: conn_name={}, 原因=模块正在销毁", connName);
     return;
   }
   stopPollingLocked(link.get());
@@ -1945,6 +2141,10 @@ void LinkManager::startMqttSubscribeLocked(const std::string &connName, const st
   if (!link) {
     return;
   }
+  if (shuttingDown_.load(std::memory_order_acquire)) {
+    LOG_INFO("DLT645 跳过启动 MQTT 订阅线程: conn_name={}, 原因=模块正在销毁", connName);
+    return;
+  }
   stopMqttSubscribeLocked(link.get());
 
   std::vector<MQTTManagerProto::TopicFilter> topics;
@@ -2081,6 +2281,10 @@ void LinkManager::stopMqttSubscribeLocked(LinkRuntime *link) {
 
 void LinkManager::startDataCenterSubscribeLocked(const std::string &connName, const std::shared_ptr<LinkRuntime> &link) {
   if (!link) {
+    return;
+  }
+  if (shuttingDown_.load(std::memory_order_acquire)) {
+    LOG_INFO("DLT645 跳过启动 DataCenter 订阅线程: conn_name={}, 原因=模块正在销毁", connName);
     return;
   }
   stopDataCenterSubscribeLocked(link.get());

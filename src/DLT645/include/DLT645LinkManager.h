@@ -31,6 +31,7 @@ namespace DLT645 {
 class LinkManager {
 public:
   explicit LinkManager(std::string moduleName);
+  ~LinkManager() noexcept;
 
   grpc::Status UpdateConfig(const DLT645Proto::UpdateConfigRequest &request, DLT645Proto::UpdateConfigResponse *response);
   grpc::Status UpsertLink(const DLT645Proto::UpsertLinkRequest &request, DLT645Proto::LinkInfo *out);
@@ -162,6 +163,8 @@ private:
   static bool reverseScale(double value, double scale, double offset, double *out);
 
   std::string nextToken();
+  void shutdownForDestroy() noexcept;
+  void stopLinkThreadsForDestroy(const std::shared_ptr<LinkRuntime> &link) noexcept;
 
   mutable std::mutex mu_;
   std::unordered_map<std::string, std::shared_ptr<LinkRuntime>> linksByName_;
@@ -177,6 +180,7 @@ private:
   DLT645PointTableStore pointTableStore_;
   std::string moduleName_;
   std::atomic<uint64_t> tokenCounter_{0};
+  std::atomic<bool> shuttingDown_{false};
   std::mutex loraRequestMutex_;
 };
 
