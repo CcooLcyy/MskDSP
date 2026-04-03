@@ -5,8 +5,10 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stop_token>
 #include <string>
 #include <thread>
@@ -19,6 +21,37 @@
 
 namespace MQTTManager {
 class MQTTManagerGrpcServiceImpl;
+
+struct MQTTConsumedMessage {
+  std::string topic;
+  std::string payload;
+};
+
+struct MQTTClientConnectOptions {
+  std::string username;
+  std::string password;
+  uint32_t keepaliveSec{0};
+  bool cleanSession{true};
+  uint32_t connectTimeoutMs{0};
+};
+
+class IMQTTClient {
+public:
+  virtual ~IMQTTClient() = default;
+
+  virtual void startConsuming() = 0;
+  virtual void stopConsuming() = 0;
+  virtual bool isConnected() const = 0;
+  virtual void connect(const MQTTClientConnectOptions& options) = 0;
+  virtual void disconnect() = 0;
+  virtual void publish(const std::string& topic, const std::string& payload, uint32_t qos, bool retain) = 0;
+  virtual void subscribe(const std::string& topic, uint32_t qos) = 0;
+  virtual std::optional<MQTTConsumedMessage> consumeMessage() = 0;
+};
+
+using MQTTClientFactory =
+    std::function<std::unique_ptr<IMQTTClient>(const MQTTManagerProto::ConnectionInfo&, const std::string&)>;
+
 class MQTTManager : public ModuleInterface::ModuleInterface {
 public:
   explicit MQTTManager();
@@ -59,5 +92,6 @@ private:
   std::unordered_map<std::string, std::unordered_set<std::shared_ptr<Subscriber>>> subscribers_;
 
   std::shared_ptr<MQTTManagerGrpcServiceImpl> mQTTManagerService_;
+  MQTTClientFactory clientFactory_;
 };
 }  // namespace MQTTManager

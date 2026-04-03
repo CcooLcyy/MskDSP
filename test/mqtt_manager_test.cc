@@ -2,7 +2,16 @@
 
 #include <boost/json.hpp>
 
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <stdexcept>
 #include <string>
+#include <unordered_map>
+#include <utility>
 
 #include "MQTTJsonPath.hpp"
 #include "MQTTManager.h"
@@ -21,11 +30,183 @@ public:
   }
 
   static size_t ConnectionCount(MQTTManager &mgr) { return mgr.connections_.size(); }
+
+  static void SetClientFactory(MQTTManager &mgr, MQTTClientFactory factory) {
+    mgr.clientFactory_ = std::move(factory);
+  }
 };
 }  // namespace MQTTManager
 
 namespace {
 using MQTTManager::MQTTManagerTestPeer;
+using Manager = MQTTManager::MQTTManager;
+
+class FakeMqttClientState {
+public:
+  void SetRequestResponseTopics(const std::string &requestTopic, const std::string &responseTopic) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    requestTopic_ = requestTopic;
+    responseTopic_ = responseTopic;
+  }
+
+  void StartConsuming() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    stopRequested_ = false;
+  }
+
+  void StopConsuming() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stopRequested_ = true;
+    }
+    cv_.notify_all();
+  }
+
+  bool IsConnected() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return connected_;
+  }
+
+  void Connect(const MQTTManager::MQTTClientConnectOptions &options) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      connected_ = true;
+      cleanSession_ = options.cleanSession;
+      ++connectCount_;
+      if (cleanSession_) {
+        brokerSubscriptions_.clear();
+      }
+    }
+    cv_.notify_all();
+  }
+
+  void Disconnect() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      connected_ = false;
+    }
+    cv_.notify_all();
+  }
+
+  void Subscribe(const std::string &topic, uint32_t qos) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!connected_) {
+        throw std::runtime_error("FakeMqttClient 未连接");
+      }
+      brokerSubscriptions_[topic] = qos;
+      ++subscribeCount_;
+    }
+    cv_.notify_all();
+  }
+
+  void Publish(const std::string &topic, const std::string &payload) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!connected_) {
+        throw std::runtime_error("FakeMqttClient 未连接");
+      }
+      ++publishCount_;
+      if (topic == requestTopic_ && brokerSubscriptions_.contains(responseTopic_)) {
+        consumeQueue_.push_back(MQTTManager::MQTTConsumedMessage{responseTopic_, payload});
+      }
+    }
+    cv_.notify_all();
+  }
+
+  std::optional<MQTTManager::MQTTConsumedMessage> ConsumeMessage() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait(lock, [this]() { return stopRequested_ || !consumeQueue_.empty(); });
+    if (consumeQueue_.empty()) {
+      return std::nullopt;
+    }
+    auto next = std::move(consumeQueue_.front());
+    consumeQueue_.pop_front();
+    return next;
+  }
+
+  void ForceDisconnect() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      connected_ = false;
+    }
+    cv_.notify_all();
+  }
+
+  void QueueNullMessage() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      consumeQueue_.push_back(std::nullopt);
+    }
+    cv_.notify_all();
+  }
+
+  bool WaitForConnectCount(size_t expected, std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return cv_.wait_for(lock, timeout, [this, expected]() { return connectCount_ >= expected; });
+  }
+
+  bool WaitForSubscribeCount(size_t expected, std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return cv_.wait_for(lock, timeout, [this, expected]() { return subscribeCount_ >= expected; });
+  }
+
+private:
+  mutable std::mutex mutex_;
+  std::condition_variable cv_;
+  bool connected_{false};
+  bool stopRequested_{false};
+  bool cleanSession_{true};
+  size_t connectCount_{0};
+  size_t subscribeCount_{0};
+  size_t publishCount_{0};
+  std::string requestTopic_;
+  std::string responseTopic_;
+  std::unordered_map<std::string, uint32_t> brokerSubscriptions_;
+  std::deque<std::optional<MQTTManager::MQTTConsumedMessage>> consumeQueue_;
+};
+
+class FakeMqttClient final : public MQTTManager::IMQTTClient {
+public:
+  explicit FakeMqttClient(std::shared_ptr<FakeMqttClientState> state) : state_(std::move(state)) {}
+
+  void startConsuming() override {
+    state_->StartConsuming();
+  }
+
+  void stopConsuming() override {
+    state_->StopConsuming();
+  }
+
+  bool isConnected() const override {
+    return state_->IsConnected();
+  }
+
+  void connect(const MQTTManager::MQTTClientConnectOptions &options) override {
+    state_->Connect(options);
+  }
+
+  void disconnect() override {
+    state_->Disconnect();
+  }
+
+  void publish(const std::string &topic, const std::string &payload, uint32_t qos, bool retain) override {
+    (void)qos;
+    (void)retain;
+    state_->Publish(topic, payload);
+  }
+
+  void subscribe(const std::string &topic, uint32_t qos) override {
+    state_->Subscribe(topic, qos);
+  }
+
+  std::optional<MQTTManager::MQTTConsumedMessage> consumeMessage() override {
+    return state_->ConsumeMessage();
+  }
+
+private:
+  std::shared_ptr<FakeMqttClientState> state_;
+};
 
 MQTTManagerProto::ConnectionInfo MakeConnectionInfo(const std::string &clientId,
                                                     uint32_t keepaliveSec = 30,
@@ -43,6 +224,23 @@ MQTTManagerProto::ConnectionInfo MakeConnectionInfo(const std::string &clientId,
   info.set_clean_session(cleanSession);
   info.set_connect_timeout_ms(connectTimeoutMs);
   return info;
+}
+
+MQTTManagerProto::RequestAndWaitRequest MakeRequestAndWaitRequest(const std::string &clientId,
+                                                                 const std::string &payload,
+                                                                 bool cleanSession = true,
+                                                                 uint32_t timeoutMs = 200) {
+  MQTTManagerProto::RequestAndWaitRequest req;
+  *req.mutable_connection() = MakeConnectionInfo(clientId, 30, cleanSession, 3000);
+  req.set_request_topic("demo/request");
+  req.set_response_topic("demo/response");
+  req.set_qos(1);
+  req.set_retain(false);
+  req.set_timeout_ms(timeoutMs);
+  req.set_retry_times(0);
+  req.set_match_field("id");
+  req.set_payload(payload);
+  return req;
 }
 }  // namespace
 
@@ -231,4 +429,73 @@ TEST(MqttManagerServiceTest, RequestAndWaitRejectsMissingMatchField) {
   auto st = mgr.RequestAndWait(req, &resp);
   EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
   EXPECT_FALSE(resp.ok());
+}
+
+// 验证 clean_session=true 下已缓存的响应主题在 publish 触发重连后会重新订阅。
+TEST(MqttManagerReconnectTest, RequestAndWaitRestoresSubscriptionAfterPublishReconnect) {
+  Manager mgr;
+  auto fakeState = std::make_shared<FakeMqttClientState>();
+  fakeState->SetRequestResponseTopics("demo/request", "demo/response");
+  MQTTManagerTestPeer::SetClientFactory(
+      mgr, [fakeState](const MQTTManagerProto::ConnectionInfo &,
+                       const std::string &) -> std::unique_ptr<MQTTManager::IMQTTClient> {
+        return std::make_unique<FakeMqttClient>(fakeState);
+      });
+
+  auto req = MakeRequestAndWaitRequest("client-a", R"({"id":"token-1"})");
+  MQTTManagerProto::RequestAndWaitResponse firstResp;
+  auto firstStatus = mgr.RequestAndWait(req, &firstResp);
+  ASSERT_TRUE(firstStatus.ok());
+  ASSERT_TRUE(firstResp.ok());
+  ASSERT_EQ(firstResp.payload(), R"({"id":"token-1"})");
+  ASSERT_TRUE(fakeState->WaitForConnectCount(1, std::chrono::milliseconds(200)));
+  ASSERT_TRUE(fakeState->WaitForSubscribeCount(1, std::chrono::milliseconds(200)));
+
+  fakeState->ForceDisconnect();
+
+  MQTTManagerProto::PublishRequest publishReq;
+  MQTTManagerProto::PublishResponse publishResp;
+  *publishReq.mutable_connection() = MakeConnectionInfo("client-a");
+  publishReq.set_topic("demo/trigger");
+  publishReq.set_qos(1);
+  publishReq.set_retain(false);
+  publishReq.set_payload("trigger");
+  auto publishStatus = mgr.Publish(publishReq, &publishResp);
+  ASSERT_TRUE(publishStatus.ok());
+  ASSERT_TRUE(publishResp.ok());
+  ASSERT_TRUE(fakeState->WaitForConnectCount(2, std::chrono::milliseconds(500)));
+  ASSERT_TRUE(fakeState->WaitForSubscribeCount(2, std::chrono::milliseconds(500)));
+
+  req.set_payload(R"({"id":"token-2"})");
+  MQTTManagerProto::RequestAndWaitResponse secondResp;
+  auto secondStatus = mgr.RequestAndWait(req, &secondResp);
+  EXPECT_TRUE(secondStatus.ok());
+  EXPECT_TRUE(secondResp.ok());
+  EXPECT_EQ(secondResp.payload(), R"({"id":"token-2"})");
+}
+
+// 验证 consume_message 返回空消息且底层已断链时，消费线程会触发重连并恢复订阅。
+TEST(MqttManagerReconnectTest, ConsumeNullMessageTriggersReconnectAndResubscribe) {
+  Manager mgr;
+  auto fakeState = std::make_shared<FakeMqttClientState>();
+  fakeState->SetRequestResponseTopics("demo/request", "demo/response");
+  MQTTManagerTestPeer::SetClientFactory(
+      mgr, [fakeState](const MQTTManagerProto::ConnectionInfo &,
+                       const std::string &) -> std::unique_ptr<MQTTManager::IMQTTClient> {
+        return std::make_unique<FakeMqttClient>(fakeState);
+      });
+
+  auto req = MakeRequestAndWaitRequest("client-a", R"({"id":"token-3"})");
+  MQTTManagerProto::RequestAndWaitResponse resp;
+  auto status = mgr.RequestAndWait(req, &resp);
+  ASSERT_TRUE(status.ok());
+  ASSERT_TRUE(resp.ok());
+  ASSERT_TRUE(fakeState->WaitForConnectCount(1, std::chrono::milliseconds(200)));
+  ASSERT_TRUE(fakeState->WaitForSubscribeCount(1, std::chrono::milliseconds(200)));
+
+  fakeState->ForceDisconnect();
+  fakeState->QueueNullMessage();
+
+  EXPECT_TRUE(fakeState->WaitForConnectCount(2, std::chrono::milliseconds(500)));
+  EXPECT_TRUE(fakeState->WaitForSubscribeCount(2, std::chrono::milliseconds(500)));
 }

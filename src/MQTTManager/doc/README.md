@@ -29,9 +29,33 @@ MQTTManager 提供通用 MQTT 连接与请求-响应能力，业务模块通过 
 - 发布/订阅/重订阅在单连接内做串行化，避免并发操作导致 MQTT 客户端阻塞或超时。
 - 连接断开时可能出现短暂不可用；建议业务侧使用 QoS 1 并配合持久会话（`clean_session=false`）降低丢消息概率。
 
-## 断线与恢复建议
-- 断线后，如使用 `clean_session=true`，broker 不保留订阅；需要业务侧重新触发订阅（或重启/重配）。
-- 若发现请求偶发超时，请优先检查 `MQTTManager.log` 中的 `Disconnected`、`订阅失败/发布失败` 日志。
+## 重连后订阅恢复说明
+### 问题现象
+- 业务侧已成功订阅响应主题后，若 MQTT 连接中途断开，再由后续 `publish` 路径触发重连，现场可能出现“请求仍能继续发送，但响应主题再也收不到消息”的现象。
+- 在 DLT645 LoRa 超时排查中，可观察到 `RequestAndWait` 持续发起请求，但 `RTU.log` 中不再出现 `MQTTManager 收到消息: 主题=loraManager/AGVC/JSON/action/response/monitorNode`。
+- 该现象同样会影响 ModbusRTU 等依赖 `RequestAndWait` 或预先订阅响应主题的业务模块，表现通常为请求超时、重试增多或链路看似在线但响应长期缺失。
+
+### 根因分析
+- `RequestAndWait` 会先订阅 `response_topic`，再发布请求消息；首次调用时 broker 端订阅通常可以建立成功。
+- MQTTManager 内部维护了本地 `subscriptions` 缓存；若同一主题已记录在缓存中，后续 `subscribe()` 会直接返回，不会再次向 broker 发起订阅。
+- `publish()` 路径在发现连接断开后会通过 `ensureConnected()` 触发重连，但旧实现不会在该路径补发 `resubscribeAll()`。
+- `resubscribeAll()` 旧实现只在 `consumeLoop()` 捕获异常后才会触发；若底层 `consume_message()` 在断链时返回空消息而不是抛异常，消费线程会静默空转，绕过重连后的订阅恢复。
+
+### clean_session=true 的风险
+- 当 `clean_session=true` 时，broker 在客户端断线并重新建立会话后不会保留旧订阅。
+- 若模块仅凭本地 `subscriptions` 缓存判断“已经订阅过”，就会出现“代码认为已订阅，但 broker 实际未订阅”的状态偏差。
+- 该状态下请求主题仍可能继续发布成功，但响应主题因为 broker 端没有订阅而无法收到消息，最终表现为请求超时。
+
+### 当前修复策略
+- MQTTManager 在检测到连接刚刚建立或刚刚重连成功，且本地缓存中已有订阅主题时，会主动执行重订阅，而不是只在消费线程异常分支中补救。
+- `publish()` 路径触发重连后，会先恢复订阅，再继续执行发布，避免请求先发出而响应主题尚未恢复订阅。
+- `consumeLoop()` 在收到空消息且检测到底层连接已断开时，不再只做休眠，而是进入断线恢复链路，执行重连与重订阅。
+- 恢复链路会输出中文日志，明确记录“检测断链、触发重连、开始重订阅、重订阅结果”，便于后续定位现场问题。
+
+### 对业务侧的影响
+- DLT645、ModbusRTU 等通过 MQTTManager 发起请求-响应的模块，无需再依赖“重新下发配置”或“人工重复订阅”来恢复响应主题订阅。
+- 业务侧仍建议根据现场可靠性选择合适的 QoS，并优先评估 `clean_session=false` 的持久会话能力，以进一步降低断线窗口内的消息丢失概率。
+- 若 broker 不可达、鉴权失败或重订阅本身失败，业务侧仍可能看到请求超时；此时应优先检查 `MQTTManager.log` 中的重连、重订阅相关日志。
 
 ## 请求-响应模型
 1) 调用 `RequestAndWait`，指定 `match_field`（JSON 字段路径）  

@@ -158,6 +158,64 @@ const std::string& GetSerializedManifest() {
   }();
   return kSerialized;
 }
+
+class PahoMQTTClient final : public MQTTManager::IMQTTClient {
+public:
+  PahoMQTTClient(std::string brokerUri, std::string clientId)
+      : client_(std::move(brokerUri), std::move(clientId)) {}
+
+  void startConsuming() override {
+    client_.start_consuming();
+  }
+
+  void stopConsuming() override {
+    client_.stop_consuming();
+  }
+
+  bool isConnected() const override {
+    return client_.is_connected();
+  }
+
+  void connect(const MQTTManager::MQTTClientConnectOptions& options) override {
+    mqtt::connect_options connOpts;
+    connOpts.set_keep_alive_interval(
+        std::chrono::seconds(options.keepaliveSec > 0 ? options.keepaliveSec : kDefaultKeepaliveSec));
+    connOpts.set_clean_session(options.cleanSession);
+    if (!options.username.empty()) {
+      connOpts.set_user_name(options.username);
+      connOpts.set_password(options.password);
+    }
+    connOpts.set_connect_timeout(
+        std::chrono::milliseconds(options.connectTimeoutMs > 0 ? options.connectTimeoutMs : kDefaultConnectTimeoutMs));
+    client_.connect(connOpts)->wait();
+  }
+
+  void disconnect() override {
+    client_.disconnect()->wait();
+  }
+
+  void publish(const std::string& topic, const std::string& payload, uint32_t qos, bool retain) override {
+    auto msg = mqtt::make_message(topic, payload);
+    msg->set_qos(static_cast<int>(qos));
+    msg->set_retained(retain);
+    client_.publish(msg)->wait();
+  }
+
+  void subscribe(const std::string& topic, uint32_t qos) override {
+    client_.subscribe(topic, static_cast<int>(qos))->wait();
+  }
+
+  std::optional<MQTTManager::MQTTConsumedMessage> consumeMessage() override {
+    auto msg = client_.consume_message();
+    if (!msg) {
+      return std::nullopt;
+    }
+    return MQTTManager::MQTTConsumedMessage{msg->get_topic(), msg->to_string()};
+  }
+
+private:
+  mqtt::async_client client_;
+};
 }  // namespace
 
 namespace MQTTManager {
@@ -186,7 +244,7 @@ struct MQTTManager::PendingResponse {
 };
 
 struct MQTTManager::ConnectionContext {
-  explicit ConnectionContext(const MQTTManagerProto::ConnectionInfo& info, std::string key)
+  ConnectionContext(const MQTTManagerProto::ConnectionInfo& info, std::string key, std::unique_ptr<IMQTTClient> mqttClient)
       : connectionKey(std::move(key)),
         brokerUri(formatBrokerUri(info)),
         clientId(info.client_id()),
@@ -195,7 +253,7 @@ struct MQTTManager::ConnectionContext {
         keepaliveSec(info.keepalive_sec()),
         cleanSession(info.clean_session()),
         connectTimeoutMs(info.connect_timeout_ms()),
-        client(brokerUri, clientId) {}
+        client(std::move(mqttClient)) {}
 
   std::string connectionKey;
   std::string brokerUri;
@@ -206,16 +264,100 @@ struct MQTTManager::ConnectionContext {
   bool cleanSession{true};
   uint32_t connectTimeoutMs{0};
 
-  mqtt::async_client client;
+  std::unique_ptr<IMQTTClient> client;
   std::atomic<bool> running{false};
   std::thread worker;
 
   std::mutex subMutex;
   std::unordered_map<std::string, uint32_t> subscriptions;
+  bool subscriptionsDirty{false};
 
   std::mutex opMutex;
   std::mutex cbMutex;
   std::function<void(const std::string&, const std::string&)> messageHandler;
+
+  bool replaySubscriptionsLocked(const char* reason, bool force, std::string* error) {
+    std::vector<std::pair<std::string, uint32_t>> topics;
+    {
+      std::lock_guard<std::mutex> lock(subMutex);
+      if (!force && !subscriptionsDirty) {
+        return true;
+      }
+      topics.reserve(subscriptions.size());
+      for (const auto& item : subscriptions) {
+        topics.emplace_back(item.first, item.second);
+      }
+      if (topics.empty()) {
+        subscriptionsDirty = false;
+        LOG_INFO("MQTTManager 无需恢复订阅: 连接={}, 原因={}, 本地无缓存主题", connectionKey, reason);
+        return true;
+      }
+    }
+
+    LOG_INFO("MQTTManager 开始恢复订阅: 连接={}, 原因={}, 主题数量={}", connectionKey, reason, topics.size());
+    bool ok = true;
+    std::string lastError;
+    for (const auto& topic : topics) {
+      try {
+        client->subscribe(topic.first, topic.second);
+        LOG_INFO("MQTTManager 恢复订阅成功: 连接={}, 主题={}, 质量等级={}",
+                 connectionKey, formatTopic(topic.first), topic.second);
+      } catch (const std::exception& ex) {
+        ok = false;
+        lastError = std::string("重订阅失败: ") + ex.what();
+        LOG_ERROR("MQTTManager 恢复订阅失败: 连接={}, 主题={}, 原因={}",
+                  connectionKey, formatTopic(topic.first), ex.what());
+      }
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(subMutex);
+      subscriptionsDirty = !ok;
+    }
+    if (!ok && error != nullptr) {
+      *error = lastError;
+    }
+    if (ok) {
+      LOG_INFO("MQTTManager 恢复订阅完成: 连接={}, 原因={}, 主题数量={}", connectionKey, reason, topics.size());
+    }
+    return ok;
+  }
+
+  bool ensureSessionReadyLocked(const char* reason, std::string* error) {
+    bool reconnected = false;
+    if (!ensureConnected(error, &reconnected)) {
+      return false;
+    }
+
+    size_t topicCount = 0;
+    bool needsReplay = false;
+    {
+      std::lock_guard<std::mutex> lock(subMutex);
+      topicCount = subscriptions.size();
+      needsReplay = subscriptionsDirty;
+    }
+    if (!needsReplay) {
+      if (reconnected) {
+        LOG_INFO("MQTTManager 连接恢复后无需恢复订阅: 连接={}, 原因={}", connectionKey, reason);
+      }
+      return true;
+    }
+
+    if (reconnected) {
+      LOG_WARNING("MQTTManager 检测到连接已重建，准备恢复订阅: 连接={}, 原因={}, 主题数量={}",
+                  connectionKey, reason, topicCount);
+    } else {
+      LOG_WARNING("MQTTManager 检测到订阅状态待恢复: 连接={}, 原因={}, 主题数量={}",
+                  connectionKey, reason, topicCount);
+    }
+    return replaySubscriptionsLocked(reason, false, error);
+  }
+
+  bool recoverConnectionAndSubscriptions(const char* reason, std::string* error) {
+    std::lock_guard<std::mutex> lock(opMutex);
+    LOG_WARNING("MQTTManager 触发连接恢复: 连接={}, 原因={}", connectionKey, reason);
+    return ensureSessionReadyLocked(reason, error);
+  }
 
   ~ConnectionContext() {
     stop();
@@ -226,7 +368,7 @@ struct MQTTManager::ConnectionContext {
       return true;
     }
     try {
-      client.start_consuming();
+      client->startConsuming();
     } catch (const std::exception& ex) {
       if (error != nullptr) {
         *error = std::string("启动消费失败: ") + ex.what();
@@ -241,14 +383,16 @@ struct MQTTManager::ConnectionContext {
   void stop() {
     running.store(false);
     try {
-      if (client.is_connected()) {
-        client.disconnect()->wait();
+      if (client != nullptr && client->isConnected()) {
+        client->disconnect();
       }
     } catch (const std::exception& ex) {
       LOG_WARNING("MQTTManager 断开连接失败: 连接={}, 原因={}", connectionKey, ex.what());
     }
     try {
-      client.stop_consuming();
+      if (client != nullptr) {
+        client->stopConsuming();
+      }
     } catch (const std::exception& ex) {
       LOG_WARNING("MQTTManager 停止消费失败: 连接={}, 原因={}", connectionKey, ex.what());
     }
@@ -257,21 +401,28 @@ struct MQTTManager::ConnectionContext {
     }
   }
 
-  bool ensureConnected(std::string* error) {
-    if (client.is_connected()) {
+  bool ensureConnected(std::string* error, bool* reconnected = nullptr) {
+    if (reconnected != nullptr) {
+      *reconnected = false;
+    }
+    if (client->isConnected()) {
       return true;
     }
-    mqtt::connect_options connOpts;
-    connOpts.set_keep_alive_interval(std::chrono::seconds(keepaliveSec > 0 ? keepaliveSec : kDefaultKeepaliveSec));
-    connOpts.set_clean_session(cleanSession);
-    if (!username.empty()) {
-      connOpts.set_user_name(username);
-      connOpts.set_password(password);
-    }
-    connOpts.set_connect_timeout(std::chrono::milliseconds(
-        connectTimeoutMs > 0 ? connectTimeoutMs : kDefaultConnectTimeoutMs));
+    MQTTClientConnectOptions options;
+    options.username = username;
+    options.password = password;
+    options.keepaliveSec = keepaliveSec;
+    options.cleanSession = cleanSession;
+    options.connectTimeoutMs = connectTimeoutMs;
     try {
-      client.connect(connOpts)->wait();
+      client->connect(options);
+      {
+        std::lock_guard<std::mutex> lock(subMutex);
+        subscriptionsDirty = !subscriptions.empty();
+      }
+      if (reconnected != nullptr) {
+        *reconnected = true;
+      }
       LOG_INFO("MQTTManager 连接成功: 连接={}, 代理={}", connectionKey, brokerUri);
       return true;
     } catch (const std::exception& ex) {
@@ -286,14 +437,11 @@ struct MQTTManager::ConnectionContext {
   bool publish(const std::string& topic, const std::string& payload, uint32_t qos, bool retain, std::string* error) {
     std::lock_guard<std::mutex> lock(opMutex);
     LOG_INFO("MQTTManager 串行化执行发布: 连接={}, 主题={}", connectionKey, formatTopic(topic));
-    if (!ensureConnected(error)) {
+    if (!ensureSessionReadyLocked("发布前检查", error)) {
       return false;
     }
     try {
-      auto msg = mqtt::make_message(topic, payload);
-      msg->set_qos(static_cast<int>(qos));
-      msg->set_retained(retain);
-      client.publish(msg)->wait();
+      client->publish(topic, payload, qos, retain);
       return true;
     } catch (const std::exception& ex) {
       if (error != nullptr) {
@@ -305,19 +453,36 @@ struct MQTTManager::ConnectionContext {
   }
 
   bool subscribe(const std::string& topic, uint32_t qos, std::string* error) {
-    std::lock_guard<std::mutex> lock(subMutex);
-    auto it = subscriptions.find(topic);
-    if (it != subscriptions.end() && it->second == qos) {
-      return true;
-    }
     std::lock_guard<std::mutex> opLock(opMutex);
+    {
+      std::lock_guard<std::mutex> lock(subMutex);
+      auto it = subscriptions.find(topic);
+      if (it != subscriptions.end() && it->second == qos && !subscriptionsDirty && client->isConnected()) {
+        LOG_INFO("MQTTManager 命中订阅缓存，跳过重复订阅: 连接={}, 主题={}, 质量等级={}",
+                 connectionKey, formatTopic(topic), qos);
+        return true;
+      }
+    }
     LOG_INFO("MQTTManager 串行化执行订阅: 连接={}, 主题={}, 质量等级={}", connectionKey, formatTopic(topic), qos);
-    if (!ensureConnected(error)) {
+    if (!ensureSessionReadyLocked("订阅前检查", error)) {
       return false;
     }
+    {
+      std::lock_guard<std::mutex> lock(subMutex);
+      auto it = subscriptions.find(topic);
+      if (it != subscriptions.end() && it->second == qos && !subscriptionsDirty) {
+        LOG_INFO("MQTTManager 订阅已在恢复流程中完成，跳过重复订阅: 连接={}, 主题={}, 质量等级={}",
+                 connectionKey, formatTopic(topic), qos);
+        return true;
+      }
+    }
     try {
-      client.subscribe(topic, static_cast<int>(qos))->wait();
-      subscriptions[topic] = qos;
+      client->subscribe(topic, qos);
+      {
+        std::lock_guard<std::mutex> lock(subMutex);
+        subscriptions[topic] = qos;
+        subscriptionsDirty = false;
+      }
       LOG_INFO("MQTTManager 订阅成功: 连接={}, 主题={}, 质量等级={}", connectionKey, formatTopic(topic), qos);
       return true;
     } catch (const std::exception& ex) {
@@ -330,38 +495,16 @@ struct MQTTManager::ConnectionContext {
   }
 
   bool resubscribeAll(std::string* error) {
-    std::vector<std::pair<std::string, uint32_t>> topics;
-    {
-      std::lock_guard<std::mutex> lock(subMutex);
-      topics.reserve(subscriptions.size());
-      for (const auto& item : subscriptions) {
-        topics.emplace_back(item.first, item.second);
-      }
-    }
-    if (topics.empty()) {
-      return true;
-    }
     std::lock_guard<std::mutex> opLock(opMutex);
-    LOG_INFO("MQTTManager 串行化执行重订阅: 连接={}, 主题数量={}", connectionKey, topics.size());
+    LOG_INFO("MQTTManager 串行化执行重订阅: 连接={}", connectionKey);
     if (!ensureConnected(error)) {
       return false;
     }
-    bool ok = true;
-    for (const auto& topic : topics) {
-      try {
-        client.subscribe(topic.first, static_cast<int>(topic.second))->wait();
-        LOG_INFO("MQTTManager 重新订阅成功: 连接={}, 主题={}, 质量等级={}",
-                 connectionKey, formatTopic(topic.first), topic.second);
-      } catch (const std::exception& ex) {
-        ok = false;
-        if (error != nullptr) {
-          *error = std::string("重订阅失败: ") + ex.what();
-        }
-        LOG_ERROR("MQTTManager 重新订阅失败: 连接={}, 主题={}, 原因={}",
-                  connectionKey, formatTopic(topic.first), ex.what());
-      }
+    {
+      std::lock_guard<std::mutex> lock(subMutex);
+      subscriptionsDirty = !subscriptions.empty();
     }
-    return ok;
+    return replaySubscriptionsLocked("显式重订阅", true, error);
   }
 
   void setMessageHandler(std::function<void(const std::string&, const std::string&)> handler) {
@@ -372,10 +515,18 @@ struct MQTTManager::ConnectionContext {
   void consumeLoop() {
     while (running.load()) {
       try {
-        auto msg = client.consume_message();
+        auto msg = client->consumeMessage();
         if (!msg) {
           if (!running.load()) {
             break;
+          }
+          if (!client->isConnected()) {
+            std::string error;
+            if (!recoverConnectionAndSubscriptions("消费线程收到空消息且连接已断开", &error)) {
+              LOG_ERROR("MQTTManager 消费线程恢复失败: 连接={}, 原因={}", connectionKey, error);
+              std::this_thread::sleep_for(std::chrono::milliseconds(kDefaultRetryIntervalMs));
+            }
+            continue;
           }
           std::this_thread::sleep_for(std::chrono::milliseconds(50));
           continue;
@@ -386,7 +537,7 @@ struct MQTTManager::ConnectionContext {
           handler = messageHandler;
         }
         if (handler) {
-          handler(msg->get_topic(), msg->to_string());
+          handler(msg->topic, msg->payload);
         }
       } catch (const std::exception& ex) {
         LOG_ERROR("MQTTManager 消费线程异常: 连接={}, 原因={}", connectionKey, ex.what());
@@ -394,25 +545,28 @@ struct MQTTManager::ConnectionContext {
           break;
         }
         std::string error;
-        if (!ensureConnected(&error)) {
-          LOG_ERROR("MQTTManager 重新连接失败: 连接={}, 原因={}", connectionKey, error);
-          std::this_thread::sleep_for(std::chrono::milliseconds(kDefaultRetryIntervalMs));
-          continue;
-        }
-        if (!resubscribeAll(&error)) {
+        if (!recoverConnectionAndSubscriptions("消费线程异常", &error)) {
           if (!error.empty()) {
-            LOG_WARNING("MQTTManager 重订阅存在失败: 连接={}, 原因={}", connectionKey, error);
+            LOG_WARNING("MQTTManager 消费线程恢复存在失败: 连接={}, 原因={}", connectionKey, error);
           } else {
-            LOG_WARNING("MQTTManager 重订阅存在失败: 连接={}", connectionKey);
+            LOG_WARNING("MQTTManager 消费线程恢复存在失败: 连接={}", connectionKey);
           }
+          std::this_thread::sleep_for(std::chrono::milliseconds(kDefaultRetryIntervalMs));
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(kDefaultRetryIntervalMs));
       } catch (...) {
         LOG_ERROR("MQTTManager 消费线程异常: 连接={}, 原因=未知异常", connectionKey);
         if (!running.load()) {
           break;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(kDefaultRetryIntervalMs));
+        std::string error;
+        if (!recoverConnectionAndSubscriptions("消费线程未知异常", &error)) {
+          if (!error.empty()) {
+            LOG_WARNING("MQTTManager 消费线程恢复存在失败: 连接={}, 原因={}", connectionKey, error);
+          } else {
+            LOG_WARNING("MQTTManager 消费线程恢复存在失败: 连接={}", connectionKey);
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(kDefaultRetryIntervalMs));
+        }
       }
     }
   }
@@ -420,7 +574,11 @@ struct MQTTManager::ConnectionContext {
 
 MQTTManager::MQTTManager() :
   ModuleInterface(),
-  mQTTManagerService_(std::make_shared<MQTTManagerGrpcServiceImpl>()) {
+  mQTTManagerService_(std::make_shared<MQTTManagerGrpcServiceImpl>()),
+  clientFactory_([](const MQTTManagerProto::ConnectionInfo& info,
+                    const std::string& brokerUri) -> std::unique_ptr<IMQTTClient> {
+    return std::make_unique<PahoMQTTClient>(brokerUri, info.client_id());
+  }) {
   initLibInfo(MQTTManagerLibInfo);
 }
 
@@ -770,7 +928,24 @@ std::shared_ptr<MQTTManager::ConnectionContext> MQTTManager::getOrCreateConnecti
     }
   }
 
-  auto context = std::make_shared<ConnectionContext>(info, key);
+  if (!clientFactory_) {
+    if (error != nullptr) {
+      *error = "MQTT客户端工厂未配置";
+    }
+    LOG_ERROR("MQTTManager 创建连接失败: 连接={}, 原因=MQTT客户端工厂未配置", key);
+    return nullptr;
+  }
+
+  auto client = clientFactory_(info, formatBrokerUri(info));
+  if (!client) {
+    if (error != nullptr) {
+      *error = "MQTT客户端创建失败";
+    }
+    LOG_ERROR("MQTTManager 创建连接失败: 连接={}, 原因=MQTT客户端创建失败", key);
+    return nullptr;
+  }
+
+  auto context = std::make_shared<ConnectionContext>(info, key, std::move(client));
   if (!context->start(error)) {
     return nullptr;
   }
