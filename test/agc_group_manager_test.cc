@@ -423,6 +423,7 @@ TEST(AgcGroupManagerTest, RestartGroupReusesInitialSnapshotWithoutWaitingForNewI
 
   AGCProto::GroupInfo info;
   ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+  ASSERT_TRUE(mgr.StopGroup("g-restart-snapshot").ok());
   PublishDoublePoint(&state, info.conn_id(), "P_CMD", 60.0);
   PublishDoublePoint(&state, info.conn_id(), "INV1_P_MEAS", 10.0);
   PublishDoublePoint(&state, info.conn_id(), "INV2_P_MEAS", 20.0);
