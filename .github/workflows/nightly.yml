@@ -17,6 +17,7 @@ jobs:
     name: 产出 arm64 Nightly 包
     runs-on: ubuntu-24.04
     env:
+      VCPKG_HOST_BINARY_CACHE_DIR: ${{ github.workspace }}/.cache/vcpkg/x64-linux-dynamic
       VCPKG_BINARY_CACHE_DIR: ${{ github.workspace }}/.cache/vcpkg/arm64-linux-dynamic
       CCACHE_DIR: ${{ github.workspace }}/.cache/ccache/arm64-linux-dynamic
     steps:
@@ -26,6 +27,14 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
           submodules: false
+
+      - name: 恢复 vcpkg host 二进制缓存
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_HOST_BINARY_CACHE_DIR }}
+          key: vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          restore-keys: |
+            vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-
 
       - name: 恢复 vcpkg 二进制缓存
         uses: actions/cache@v4
@@ -47,10 +56,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p "${VCPKG_HOST_BINARY_CACHE_DIR}"
           mkdir -p "${VCPKG_BINARY_CACHE_DIR}"
           mkdir -p "${CCACHE_DIR}"
           echo "VCPKG_DEFAULT_BINARY_CACHE=${VCPKG_BINARY_CACHE_DIR}" >> "${GITHUB_ENV}"
-          echo "VCPKG_BINARY_SOURCES=clear;files,${VCPKG_BINARY_CACHE_DIR},readwrite" >> "${GITHUB_ENV}"
+          echo "VCPKG_BINARY_SOURCES=clear;files,${VCPKG_HOST_BINARY_CACHE_DIR},read;files,${VCPKG_BINARY_CACHE_DIR},readwrite" >> "${GITHUB_ENV}"
           echo "CCACHE_DIR=${CCACHE_DIR}" >> "${GITHUB_ENV}"
           echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}" >> "${GITHUB_ENV}"
           echo "CCACHE_COMPILERCHECK=content" >> "${GITHUB_ENV}"
