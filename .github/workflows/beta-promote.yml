@@ -1,0 +1,146 @@
+name: Beta 自动晋升
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: beta-promote-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  promote-latest-beta:
+    name: 检查最新 Beta 是否满足自动晋升条件
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 拉取主仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: 拉取远端 Beta 分支与 tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin '+refs/heads/beta/*:refs/remotes/origin/beta/*' '+refs/tags/*:refs/tags/*'
+
+      - name: 分析最新 Beta 是否需要自动晋升
+        id: analyze
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          echo "should_create_tag=false" >> "${GITHUB_OUTPUT}"
+          echo "should_dispatch_release=false" >> "${GITHUB_OUTPUT}"
+
+          mapfile -t BETA_REFS < <(git for-each-ref --sort=-committerdate --format='%(refname:short)' refs/remotes/origin/beta/*)
+          if [ "${#BETA_REFS[@]}" -eq 0 ]; then
+            echo "未找到任何 beta 分支，跳过自动晋升。"
+            exit 0
+          fi
+
+          LATEST_REMOTE_REF="${BETA_REFS[0]}"
+          BETA_REF="${LATEST_REMOTE_REF#origin/}"
+          SUFFIX="${BETA_REF#beta/}"
+          RELEASE_TAG="v${SUFFIX}"
+          COMMIT_SHA="$(git rev-parse "${LATEST_REMOTE_REF}")"
+          LAST_COMMIT_TS="$(git log -1 --format=%ct "${LATEST_REMOTE_REF}")"
+          NOW_TS="$(date +%s)"
+          WINDOW_SEC="$((72 * 3600))"
+          AGE_SEC="$((NOW_TS - LAST_COMMIT_TS))"
+          AGE_HOURS="$((AGE_SEC / 3600))"
+
+          echo "beta_ref=${BETA_REF}" >> "${GITHUB_OUTPUT}"
+          echo "release_tag=${RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "commit_sha=${COMMIT_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "last_commit_ts=${LAST_COMMIT_TS}" >> "${GITHUB_OUTPUT}"
+
+          echo "当前最新 Beta 分支: ${BETA_REF}"
+          echo "目标正式 tag: ${RELEASE_TAG}"
+          echo "最新 Beta 当前指向提交: ${COMMIT_SHA}"
+          echo "距最新提交已过去约 ${AGE_HOURS} 小时"
+
+          RELEASE_EXISTS=false
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            RELEASE_EXISTS=true
+            echo "检测到正式 Release ${RELEASE_TAG} 已存在。"
+          else
+            echo "当前尚未检测到正式 Release ${RELEASE_TAG}。"
+          fi
+
+          if git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null; then
+            echo "检测到正式 tag ${RELEASE_TAG} 已存在，视为 Beta 分支 ${BETA_REF} 已晋升过。"
+            if [ "${RELEASE_EXISTS}" = false ]; then
+              echo "正式 tag 已存在但 Release 页面尚未创建，准备补触发正式发布 workflow。"
+              echo "should_dispatch_release=true" >> "${GITHUB_OUTPUT}"
+            fi
+            exit 0
+          fi
+
+          if [ "${AGE_SEC}" -lt "${WINDOW_SEC}" ]; then
+            REMAIN_SEC="$((WINDOW_SEC - AGE_SEC))"
+            REMAIN_HOURS="$(((REMAIN_SEC + 3599) / 3600))"
+            echo "最新 Beta ${BETA_REF} 尚未静默满 72 小时，预计还需约 ${REMAIN_HOURS} 小时，跳过自动晋升。"
+            exit 0
+          fi
+
+          echo "最新 Beta ${BETA_REF} 已静默满 72 小时，准备自动晋升为 ${RELEASE_TAG}。"
+          echo "should_create_tag=true" >> "${GITHUB_OUTPUT}"
+          echo "should_dispatch_release=true" >> "${GITHUB_OUTPUT}"
+
+      - name: 配置 Git 身份
+        if: ${{ steps.analyze.outputs.should_create_tag == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: 创建并推送正式 tag
+        if: ${{ steps.analyze.outputs.should_create_tag == 'true' }}
+        shell: bash
+        env:
+          BETA_REF: ${{ steps.analyze.outputs.beta_ref }}
+          RELEASE_TAG: ${{ steps.analyze.outputs.release_tag }}
+          COMMIT_SHA: ${{ steps.analyze.outputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          git fetch origin '+refs/tags/*:refs/tags/*'
+          if git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null; then
+            echo "正式 tag ${RELEASE_TAG} 已在远端存在，说明可能已被并发流程或人工创建，本次不再重复推送。"
+            exit 0
+          fi
+
+          git tag -a "${RELEASE_TAG}" "${COMMIT_SHA}" -m "自动晋升 ${BETA_REF} 为 ${RELEASE_TAG}"
+          if git push origin "refs/tags/${RELEASE_TAG}"; then
+            echo "已成功创建并推送正式 tag ${RELEASE_TAG}。"
+          else
+            git fetch origin '+refs/tags/*:refs/tags/*'
+            if git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null; then
+              echo "推送正式 tag ${RELEASE_TAG} 时检测到远端已存在同名 tag，按已完成处理。"
+            else
+              echo "推送正式 tag ${RELEASE_TAG} 失败，且远端未检测到该 tag。"
+              exit 1
+            fi
+          fi
+
+      - name: 触发正式发布 workflow
+        if: ${{ steps.analyze.outputs.should_dispatch_release == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.analyze.outputs.release_tag }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          echo "准备显式触发正式发布 workflow，目标 tag: ${RELEASE_TAG}"
+          gh workflow run release.yml --ref "${DEFAULT_BRANCH}" -f release_tag="${RELEASE_TAG}"
+          echo "已提交正式发布 workflow 触发请求。"

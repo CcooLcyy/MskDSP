@@ -4,12 +4,18 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 要发布的正式版本 tag，例如 v0.1.1
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -17,21 +23,24 @@ jobs:
     name: x64 Debug 发布前校验
     runs-on: ubuntu-24.04
     env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
       VCPKG_BINARY_CACHE_DIR: ${{ github.workspace }}/.cache/vcpkg/x64-linux-dynamic
       CCACHE_DIR: ${{ github.workspace }}/.cache/ccache/x64-linux-dynamic
     steps:
       - name: 拉取主仓库
         uses: actions/checkout@v4
         with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
           fetch-depth: 0
           submodules: false
 
-      - name: 恢复 vcpkg 二进制缓存
-        uses: actions/cache@v4
+      - name: 恢复 vcpkg 二进制缓存（只读）
+        uses: actions/cache/restore@v4
         with:
           path: ${{ env.VCPKG_BINARY_CACHE_DIR }}
-          key: vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          key: vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-mainline-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
           restore-keys: |
+            vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-mainline-
             vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-
 
       - name: 恢复 ccache 编译缓存
@@ -179,6 +188,7 @@ jobs:
     needs:
       - x64-verify
     env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
       VCPKG_HOST_BINARY_CACHE_DIR: ${{ github.workspace }}/.cache/vcpkg/x64-linux-dynamic
       VCPKG_BINARY_CACHE_DIR: ${{ github.workspace }}/.cache/vcpkg/arm64-linux-dynamic
       CCACHE_DIR: ${{ github.workspace }}/.cache/ccache/arm64-linux-dynamic
@@ -186,23 +196,26 @@ jobs:
       - name: 拉取主仓库
         uses: actions/checkout@v4
         with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
           fetch-depth: 0
           submodules: false
 
-      - name: 恢复 vcpkg 二进制缓存
-        uses: actions/cache@v4
+      - name: 恢复 vcpkg 二进制缓存（只读）
+        uses: actions/cache/restore@v4
         with:
           path: ${{ env.VCPKG_BINARY_CACHE_DIR }}
-          key: vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          key: vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-mainline-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
           restore-keys: |
+            vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-mainline-
             vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-
 
-      - name: 恢复 vcpkg host 二进制缓存
-        uses: actions/cache@v4
+      - name: 恢复 vcpkg host 二进制缓存（只读）
+        uses: actions/cache/restore@v4
         with:
           path: ${{ env.VCPKG_HOST_BINARY_CACHE_DIR }}
-          key: vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          key: vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-mainline-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
           restore-keys: |
+            vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-mainline-
             vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-
 
       - name: 恢复 ccache 编译缓存
@@ -232,7 +245,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TAG_NAME="${GITHUB_REF_NAME}"
+          TAG_NAME="${RELEASE_TAG}"
           IMAGE_VERSION="${TAG_NAME}-linux-arm64"
           ARCHIVE_NAME="mskdsp-${IMAGE_VERSION}"
           DEBUG_ARCHIVE_NAME="mskdsp-${TAG_NAME}-debugsymbols-linux-arm64"
@@ -407,8 +420,8 @@ jobs:
             ASSETS+=("${{ steps.meta.outputs.debug_archive_name }}.tar.gz")
           fi
           ASSETS+=(SHA256SUMS)
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" "${ASSETS[@]}" --clobber
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" "${ASSETS[@]}" --clobber
           else
-            gh release create "${GITHUB_REF_NAME}" "${ASSETS[@]}" --verify-tag --generate-notes
+            gh release create "${RELEASE_TAG}" "${ASSETS[@]}" --verify-tag --generate-notes
           fi

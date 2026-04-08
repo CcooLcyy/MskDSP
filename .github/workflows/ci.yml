@@ -29,12 +29,38 @@ jobs:
           fetch-depth: 0
           submodules: false
 
+      - name: 计算 vcpkg 缓存作用域
+        id: cache_scope
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          TARGET_REF="${REF_NAME}"
+          if [ "${EVENT_NAME}" = "pull_request" ] && [ -n "${BASE_REF:-}" ]; then
+            TARGET_REF="${BASE_REF}"
+          fi
+
+          if [[ "${TARGET_REF}" =~ ^beta/ ]]; then
+            BETA_LINE="${TARGET_REF#beta/}"
+            CACHE_SCOPE="beta-$(printf '%s' "${BETA_LINE}" | tr '/' '-')"
+          else
+            CACHE_SCOPE="mainline"
+          fi
+
+          echo "scope=${CACHE_SCOPE}" >> "${GITHUB_OUTPUT}"
+          echo "本次使用的 vcpkg 缓存作用域: ${CACHE_SCOPE}（来源引用: ${TARGET_REF}）"
+
       - name: 恢复 vcpkg 二进制缓存
         uses: actions/cache@v4
         with:
           path: ${{ env.VCPKG_BINARY_CACHE_DIR }}
-          key: vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          key: vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-${{ steps.cache_scope.outputs.scope }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
           restore-keys: |
+            vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-${{ steps.cache_scope.outputs.scope }}-
+            vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-mainline-
             vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-
 
       - name: 恢复 ccache 编译缓存
@@ -193,16 +219,18 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.VCPKG_HOST_BINARY_CACHE_DIR }}
-          key: vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          key: vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-mainline-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
           restore-keys: |
+            vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-mainline-
             vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-
 
       - name: 恢复 vcpkg 二进制缓存
         uses: actions/cache@v4
         with:
           path: ${{ env.VCPKG_BINARY_CACHE_DIR }}
-          key: vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          key: vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-mainline-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
           restore-keys: |
+            vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-mainline-
             vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-
 
       - name: 恢复 ccache 编译缓存

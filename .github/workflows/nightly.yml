@@ -32,16 +32,18 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.VCPKG_HOST_BINARY_CACHE_DIR }}
-          key: vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          key: vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-mainline-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
           restore-keys: |
+            vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-mainline-
             vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-
 
       - name: 恢复 vcpkg 二进制缓存
         uses: actions/cache@v4
         with:
           path: ${{ env.VCPKG_BINARY_CACHE_DIR }}
-          key: vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          key: vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-mainline-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
           restore-keys: |
+            vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-mainline-
             vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-
 
       - name: 恢复 ccache 编译缓存

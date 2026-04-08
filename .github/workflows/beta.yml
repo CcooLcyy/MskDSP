@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - beta/**
-  schedule:
-    - cron: '0 18 */2 * *'
   workflow_dispatch:
     inputs:
       beta_ref:
@@ -24,7 +22,6 @@ jobs:
   x64-verify:
     name: x64 Debug 校验
     runs-on: ubuntu-24.04
-    if: ${{ github.event_name != 'schedule' || vars.MSKDSP_ACTIVE_BETA_REF != '' }}
     env:
       VCPKG_BINARY_CACHE_DIR: ${{ github.workspace }}/.cache/vcpkg/x64-linux-dynamic
       CCACHE_DIR: ${{ github.workspace }}/.cache/ccache/x64-linux-dynamic
@@ -34,22 +31,22 @@ jobs:
         shell: bash
         env:
           INPUT_BETA_REF: ${{ inputs.beta_ref }}
-          ACTIVE_BETA_REF: ${{ vars.MSKDSP_ACTIVE_BETA_REF }}
         run: |
           set -euo pipefail
           TARGET_REF="${INPUT_BETA_REF:-}"
-          if [ -z "${TARGET_REF}" ]; then
-            TARGET_REF="${ACTIVE_BETA_REF:-}"
-          fi
           if [ -z "${TARGET_REF}" ]; then
             TARGET_REF="${GITHUB_REF_NAME}"
           fi
           if [[ ! "${TARGET_REF}" =~ ^beta/ ]]; then
             echo "未能解析有效的 beta 分支。当前值: ${TARGET_REF}"
-            echo "请在手动触发时提供 beta_ref，或在仓库变量中设置 MSKDSP_ACTIVE_BETA_REF。"
+            echo "请在手动触发时提供 beta_ref，或从目标 beta 分支触发该 workflow。"
             exit 1
           fi
+          BETA_LINE="${TARGET_REF#beta/}"
+          CACHE_SCOPE="beta-$(printf '%s' "${BETA_LINE}" | tr '/' '-')"
           echo "target_ref=${TARGET_REF}" >> "${GITHUB_OUTPUT}"
+          echo "cache_scope=${CACHE_SCOPE}" >> "${GITHUB_OUTPUT}"
+          echo "已解析 Beta 版本线缓存作用域: ${CACHE_SCOPE}"
 
       - name: 拉取主仓库
         uses: actions/checkout@v4
@@ -62,8 +59,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.VCPKG_BINARY_CACHE_DIR }}
-          key: vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          key: vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-${{ steps.ref.outputs.cache_scope }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
           restore-keys: |
+            vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-${{ steps.ref.outputs.cache_scope }}-
+            vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-mainline-
             vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-
 
       - name: 恢复 ccache 编译缓存
@@ -201,7 +200,6 @@ jobs:
     runs-on: ubuntu-24.04
     needs:
       - x64-verify
-    if: ${{ github.event_name != 'schedule' || vars.MSKDSP_ACTIVE_BETA_REF != '' }}
     env:
       VCPKG_HOST_BINARY_CACHE_DIR: ${{ github.workspace }}/.cache/vcpkg/x64-linux-dynamic
       VCPKG_BINARY_CACHE_DIR: ${{ github.workspace }}/.cache/vcpkg/arm64-linux-dynamic
@@ -212,22 +210,22 @@ jobs:
         shell: bash
         env:
           INPUT_BETA_REF: ${{ inputs.beta_ref }}
-          ACTIVE_BETA_REF: ${{ vars.MSKDSP_ACTIVE_BETA_REF }}
         run: |
           set -euo pipefail
           TARGET_REF="${INPUT_BETA_REF:-}"
-          if [ -z "${TARGET_REF}" ]; then
-            TARGET_REF="${ACTIVE_BETA_REF:-}"
-          fi
           if [ -z "${TARGET_REF}" ]; then
             TARGET_REF="${GITHUB_REF_NAME}"
           fi
           if [[ ! "${TARGET_REF}" =~ ^beta/ ]]; then
             echo "未能解析有效的 beta 分支。当前值: ${TARGET_REF}"
-            echo "请在手动触发时提供 beta_ref，或在仓库变量中设置 MSKDSP_ACTIVE_BETA_REF。"
+            echo "请在手动触发时提供 beta_ref，或从目标 beta 分支触发该 workflow。"
             exit 1
           fi
+          BETA_LINE="${TARGET_REF#beta/}"
+          CACHE_SCOPE="beta-$(printf '%s' "${BETA_LINE}" | tr '/' '-')"
           echo "target_ref=${TARGET_REF}" >> "${GITHUB_OUTPUT}"
+          echo "cache_scope=${CACHE_SCOPE}" >> "${GITHUB_OUTPUT}"
+          echo "已解析 Beta 版本线缓存作用域: ${CACHE_SCOPE}"
 
       - name: 拉取主仓库
         uses: actions/checkout@v4
@@ -240,16 +238,20 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.VCPKG_BINARY_CACHE_DIR }}
-          key: vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          key: vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-${{ steps.ref.outputs.cache_scope }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
           restore-keys: |
+            vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-${{ steps.ref.outputs.cache_scope }}-
+            vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-mainline-
             vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-
 
       - name: 恢复 vcpkg host 二进制缓存
         uses: actions/cache@v4
         with:
           path: ${{ env.VCPKG_HOST_BINARY_CACHE_DIR }}
-          key: vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          key: vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-${{ steps.ref.outputs.cache_scope }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
           restore-keys: |
+            vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-${{ steps.ref.outputs.cache_scope }}-
+            vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-mainline-
             vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-
 
       - name: 恢复 ccache 编译缓存
