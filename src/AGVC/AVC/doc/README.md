@@ -11,7 +11,7 @@ AVC（Automatic Voltage Control）自动电压控制模块（骨架/预留）：
 - gRPC Service：`AVCProto::AVCService`
 
 ## 运行与地址
-- 对外 gRPC：随机选择 `0.0.0.0:<port>`（7001–7999）
+- 对外 gRPC：随机选择 `0.0.0.0:<port>`（17001–17999）
 - 内部 gRPC：`unix socket`：`./socket/AVC.sock`
 - 运行时可通过管理器 `GetRunningModuleInfo` 查询实际地址
 

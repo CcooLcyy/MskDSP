@@ -148,7 +148,7 @@ TODO：一句话说明模块职责/边界。
 - gRPC Service：\`${MODULE_NAME}Proto::${MODULE_NAME}Service\`
 
 ## 运行与地址
-- 对外 gRPC：随机选择 \`0.0.0.0:<port>\`（7001–7999）
+- 对外 gRPC：随机选择 \`0.0.0.0:<port>\`（17001–17999）
 - 内部 gRPC：\`unix socket\`：\`./socket/${LIB_NAME}.sock\`
 - 运行时可通过管理器 \`GetRunningModuleInfo\` 查询实际地址
 

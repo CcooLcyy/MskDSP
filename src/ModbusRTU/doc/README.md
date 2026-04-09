@@ -19,7 +19,7 @@ ModbusRTU 模块负责管理 ModbusRTU 链路与点表，当前同时支持两�
 ## 接口与运行
 - Protobuf：`protobuf/ModbusRTU.proto`
 - gRPC Service：`ModbusRTUProto::ModbusRTUService`
-- 对外 gRPC：随机 `0.0.0.0:<port>`（7001-7999）
+- 对外 gRPC：随机 `0.0.0.0:<port>`（17001-17999）
 - 内部 gRPC：`./socket/ModbusRTU.sock`
 - 接口规划：当前顶层全局配置仅提供 `UpdateConfig` 写接口；后续建议补充 `GetConfig` 或 `GetGlobalConfig` 回读接口，供上位机做界面回显、配置对账与一致性校验；当前版本尚未实现。
 

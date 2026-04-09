@@ -23,7 +23,7 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
 - 若需修改运行中链路配置，应先调用 `StopLink` 让链路退出运行态，再执行 `UpsertLink`。
 
 ## 运行与地址
-- 对外 gRPC：随机选择 `0.0.0.0:<port>`（7001–7999）
+- 对外 gRPC：随机选择 `0.0.0.0:<port>`（17001–17999）
 - 内部 gRPC：`unix socket`：`./socket/DLT645.sock`
 - 运行时可通过管理器 `GetRunningModuleInfo` 查询实际地址
 

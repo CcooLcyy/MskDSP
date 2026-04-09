@@ -16,7 +16,7 @@ AGC（Automatic Generation Control）自动功率控制模块：从 DataCenter �
 - gRPC Service：`AGCProto::AGCService`
 
 ## 运行与地址
-- 对外 gRPC：随机选择 `0.0.0.0:<port>`（7001–7999）
+- 对外 gRPC：随机选择 `0.0.0.0:<port>`（17001–17999）
 - 内部 gRPC：`unix socket`：`./socket/AGC.sock`
 - 运行时可通过管理器 `GetRunningModuleInfo` 查询实际地址
 

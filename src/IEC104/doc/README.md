@@ -28,7 +28,7 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
 - gRPC Service：`IEC104Proto::IEC104Service`
 
 ## 运行与地址
-- 对外 gRPC：随机选择 `0.0.0.0:<port>`（7001–7999）
+- 对外 gRPC：随机选择 `0.0.0.0:<port>`（17001–17999）
 - 内部 gRPC：`unix socket`：`./socket/IEC104.sock`
 - 运行时可通过管理器 `GetRunningModuleInfo` 查询实际地址
 

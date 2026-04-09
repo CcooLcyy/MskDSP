@@ -7,9 +7,9 @@ MskDSP 是一个基于 C++23 的模块化系统：核心由 `ModuleManager` 管�
 - 模块以共享库形式接入：构建产物输出到 `package/module/`，运行时由模块管理器从工作目录的 `./module` 扫描发现并动态加载。
 - 加载约定：模块库需要导出 `create()` 工厂函数，返回 `ModuleInterface::ModuleInterface*`（示例：`src/DataCenter/DataCenter.cc`、`src/IEC104/IEC104.cc`）。
 - 依赖约定：模块需导出 `GetModuleManifestPb`，返回 `ModuleManagerProto::ModuleManifest`（模块名/版本/依赖）；ModuleManager 启动时构建依赖图，`StartModule` 会自动拉起依赖。
-- 服务约定：每个模块基于 `ModuleInterface` 同时启动两套 gRPC Server：内部 `unix socket`（`./socket/<模块名>.sock`）+ 对外 `0.0.0.0:<端口>`（默认范围 7001–7999）。
+- 服务约定：每个模块基于 `ModuleInterface` 同时启动两套 gRPC Server：内部 `unix socket`（`./socket/<模块名>.sock`）+ 对外 `0.0.0.0:<端口>`（默认范围 17001–17999）。
 - 线程与日志：模块内部线程统一使用 `ModuleManager::StartModuleThread(模块LibInfo.LIB_NAME, ...)` 创建，自动绑定日志模块名上下文。
-- 管理端口：模块管理器对外 gRPC 固定监听 `0.0.0.0:7000`。
+- 管理端口：模块管理器对外 gRPC 固定监听 `0.0.0.0:17000`。
 
 ## 开发指南
 

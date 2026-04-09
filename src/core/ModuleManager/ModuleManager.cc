@@ -884,7 +884,7 @@ ModuleManager::ModuleManager() :
   ModuleInterface::ModuleInterface() {
   initLibInfo(moduleManagerLibInfo);
   releasePort(metaData_.outerGRPCServer);
-  metaData_.outerGRPCServer = std::string("0.0.0.0:7000");
+  metaData_.outerGRPCServer = std::string("0.0.0.0:17000");
   reservePort(metaData_.outerGRPCServer);
 }
 ModuleManager::~ModuleManager() {}

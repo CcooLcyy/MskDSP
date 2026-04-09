@@ -300,13 +300,14 @@ void ModuleInterface::reservePort(std::string address) {
 std::string ModuleInterface::getRandomPort() {
   std::random_device rd;
   std::mt19937 gen(rd());
-  std::uniform_int_distribution<> dist(7001, 7999);
+  std::uniform_int_distribution<> dist(17001, 17999);
 
   while (true) {
     auto port = std::to_string(dist(gen));
     std::lock_guard<std::mutex> lock(portMutex_);
     auto [_, inserted] = allocatedPorts_.emplace(port);
     if (inserted) {
+      LOG_INFO("已为模块分配对外 gRPC 端口: {}", port);
       return port;
     }
   }

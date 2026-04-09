@@ -119,6 +119,6 @@ TEST(ModuleInterfaceTest, ReserveAndReleasePortIgnoreAddressesWithoutColon) {
   module.ReservePortForTest("invalid");
   module.ReleasePortForTest("invalid");
 
-  module.ReservePortForTest("0.0.0.0:7001");
-  module.ReleasePortForTest("0.0.0.0:7001");
+  module.ReservePortForTest("0.0.0.0:17001");
+  module.ReleasePortForTest("0.0.0.0:17001");
 }

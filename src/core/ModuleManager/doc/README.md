@@ -108,9 +108,9 @@ extern "C" BOOST_SYMBOL_EXPORT bool GetModuleManifestPb(const uint8_t **data, si
 涉及上位机页面结构、菜单组织与完整操作流程的统一说明，见 `doc/上位机设计指导.md`。本节仅保留模块管理器对接时必须关注的事实性约束。
 
 ### 入口与地址
-- 上位机入口：连接模块管理器对外地址 `0.0.0.0:7000`。
+- 上位机入口：连接模块管理器对外地址 `0.0.0.0:17000`。
 - `inner_grpc_server`（unix socket）：用于进程内模块间互联；一般不建议上位机使用。
-- `outer_grpc_server`（TCP）：用于上位机调用；普通模块端口为随机 7001–7999，重启后可能变化。
+- `outer_grpc_server`（TCP）：用于上位机调用；普通模块端口为随机 17001–17999，重启后可能变化。
 
 ### 稳定性与容错
 - 模块重启/Stop 后其 `outer_grpc_server` 可能变化，上位机应在连接失败时重新调用 `GetRunningModuleInfo` 刷新地址并重连。
@@ -118,8 +118,8 @@ extern "C" BOOST_SYMBOL_EXPORT bool GetModuleManifestPb(const uint8_t **data, si
 - 若启用了 `./conf/module_manager.jsonc` 的自启动列表，或在 `UPPER` 模式下命中了持久化配置文件痕迹自动启动，可跳过 `StartModule`，直接通过 `GetRunningModuleInfo` 获取已启动模块信息。
 
 ## 端口策略
-- 模块管理器对外 gRPC：固定监听 `0.0.0.0:7000`。
-- 普通模块对外 gRPC：随机选择 7001–7999（进程内避免冲突）。
+- 模块管理器对外 gRPC：固定监听 `0.0.0.0:17000`。
+- 普通模块对外 gRPC：随机选择 17001–17999（进程内避免冲突）。
 - 模块内部 gRPC：使用 `./socket/<模块名>.sock`（实际监听为绝对路径形式的 unix domain socket）。
 
 ## 测试
