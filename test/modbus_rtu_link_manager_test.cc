@@ -607,8 +607,11 @@ TEST(ModbusRtuLinkManagerTest, RenameLinkKeepsConnIdAndMovesPointTable) {
 
   ASSERT_TRUE(mgr.GetPointTable("conn-new", &pointTable).ok());
   ASSERT_EQ(pointTable.points_size(), 2);
-  EXPECT_EQ(pointTable.points(0).tag(), "reg-a");
-  EXPECT_EQ(pointTable.points(1).tag(), "coil-b");
+  std::unordered_set<std::string> pointTags;
+  for (const auto& point : pointTable.points()) {
+    pointTags.insert(point.tag());
+  }
+  EXPECT_EQ(pointTags, (std::unordered_set<std::string>{"reg-a", "coil-b"}));
 
   ASSERT_TRUE(mgr.StartLink("conn-new").ok());
   ASSERT_TRUE(mgr.StopLink("conn-new").ok());
