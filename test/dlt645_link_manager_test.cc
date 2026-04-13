@@ -163,6 +163,10 @@ public:
     }
     return mgr.sendMonitorRequest(it->second.get(), frame, outPayloadBase64, outStatus);
   }
+
+  static std::vector<uint8_t> EncodeData(const PointTable::Point &point, const DataCenterProto::PointValue &value, std::string *error) {
+    return LinkManager::encodeData(point, value, error);
+  }
 };
 }  // namespace DLT645
 namespace {
@@ -2279,4 +2283,47 @@ TEST(Dlt645LinkManagerTest, DecodeAndPublishNumericAndBcdErrors) {
   std::vector<uint8_t> bad = {0xFA};
   st = DLT645LinkManagerTestPeer::DecodeAndPublish(mgr, "conn-num", bcd, bad, 1, false);
   EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+// 验证：decodeAndPublish 按最高位符号规则解析 BCD 负数。
+TEST(Dlt645LinkManagerTest, DecodeAndPublishSignedBcdNegativeValue) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(stub);
+
+  DLT645Proto::UpsertLinkRequest linkReq;
+  *linkReq.mutable_config() = MakeValidLinkConfig("conn-signed-bcd", DLT645Proto::COMM_MODE_LORA);
+  DLT645Proto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(linkReq, &info).ok());
+
+  PointTable::Point bcd = MakePoint("BCD_NEG", 3, DLT645Proto::DATA_TYPE_BCD, 1.0, 0.0, 0.0);
+  std::vector<uint8_t> payload = {0x31, 0x00, 0x80};
+  auto st = DLT645LinkManagerTestPeer::DecodeAndPublish(mgr, "conn-signed-bcd", bcd, payload, 1, false);
+  ASSERT_TRUE(st.ok());
+
+  DataCenterProto::GetLatestRequest req;
+  req.set_conn_id(DLT645LinkManagerTestPeer::GetConnId(mgr, "conn-signed-bcd"));
+  req.add_tags("BCD_NEG");
+  DataCenterProto::GetLatestResponse resp;
+  ASSERT_TRUE(state.GetLatest(req, &resp).ok());
+  ASSERT_EQ(resp.updates_size(), 1);
+  EXPECT_DOUBLE_EQ(resp.updates(0).value().double_value(), -31.0);
+}
+
+// 验证：encodeData 按最高位符号规则编码 BCD 负数。
+TEST(Dlt645LinkManagerTest, EncodeDataSignedBcdNegativeValue) {
+  PointTable::Point bcd = MakePoint("BCD_NEG", 3, DLT645Proto::DATA_TYPE_BCD, 1.0, 0.0, 0.0);
+  DataCenterProto::PointValue value;
+  value.set_double_value(-31.0);
+  std::string error;
+
+  auto payload = DLT645LinkManagerTestPeer::EncodeData(bcd, value, &error);
+
+  EXPECT_TRUE(error.empty());
+  ASSERT_EQ(payload.size(), 3u);
+  EXPECT_EQ(payload[0], 0x31);
+  EXPECT_EQ(payload[1], 0x00);
+  EXPECT_EQ(payload[2], 0x80);
 }

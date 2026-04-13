@@ -2746,11 +2746,18 @@ grpc::Status LinkManager::decodeAndPublish(LinkRuntime *link, const PointTable::
   } else if (point.type == DLT645Proto::DATA_TYPE_BCD) {
     std::string digits;
     digits.reserve(point.dataLen * 2);
+    bool negative = false;
     for (size_t i = 0; i < point.dataLen; ++i) {
       uint8_t b = payload[point.dataLen - 1 - i];
       uint8_t low = b & 0x0F;
       uint8_t high = (b >> 4) & 0x0F;
-      if (low > 9 || high > 9) {
+      if (low > 9) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "BCD 数据格式非法");
+      }
+      if (i == 0) {
+        negative = (high & 0x08) != 0;
+        high = static_cast<uint8_t>(high & 0x07);
+      } else if (high > 9) {
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "BCD 数据格式非法");
       }
       digits.push_back(static_cast<char>('0' + high));
@@ -2758,9 +2765,13 @@ grpc::Status LinkManager::decodeAndPublish(LinkRuntime *link, const PointTable::
     }
     try {
       raw = std::stod(digits);
+      if (negative && raw != 0.0) {
+        raw = -raw;
+      }
     } catch (const std::exception &) {
       return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "BCD 数值解析失败");
     }
+    LOG_DEBUG("DLT645 解析有符号 BCD: tag={}, digits={}, negative={}, raw={}", point.tag, digits, negative, raw);
   } else {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "不支持的数据类型");
   }
@@ -3033,13 +3044,9 @@ std::vector<uint8_t> LinkManager::encodeData(const PointTable::Point &point, con
     return out;
   }
   if (point.type == DLT645Proto::DATA_TYPE_BCD) {
-    if (raw < 0) {
-      if (error != nullptr) {
-        *error = "BCD 不支持负数";
-      }
-      return {};
-    }
-    const auto digits = std::to_string(static_cast<uint64_t>(std::llround(raw)));
+    const auto rounded = static_cast<uint64_t>(std::llround(std::abs(raw)));
+    const bool negative = raw < 0 && rounded != 0;
+    const auto digits = std::to_string(rounded);
     auto bcd = encodeBcd(digits);
     if (bcd.size() > point.dataLen) {
       if (error != nullptr) {
@@ -3051,6 +3058,21 @@ std::vector<uint8_t> LinkManager::encodeData(const PointTable::Point &point, con
     while (bcd.size() < point.dataLen) {
       bcd.push_back(0);
     }
+    if ((bcd.back() & 0xF0) > 0x70) {
+      if (error != nullptr) {
+        *error = "BCD 数值超出有符号范围";
+      }
+      return {};
+    }
+    if (negative) {
+      bcd.back() = static_cast<uint8_t>(bcd.back() | 0x80);
+    }
+    LOG_DEBUG("DLT645 编码有符号 BCD: tag={}, raw={}, digits={}, negative={}, payload={}",
+              point.tag,
+              raw,
+              digits,
+              negative,
+              formatHex(bcd));
     return bcd;
   }
 

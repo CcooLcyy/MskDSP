@@ -66,6 +66,8 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
 - `di`：4 字节数据标识，使用 8 位十六进制字符串表示；配置为人读顺序（高字节在前），模块发送时按字节逆序（低字节在前）。
 - `data_len`：数据域字节数（不包含 DI 或设备序号）。
 - `type`：数据类型（例如 `DATA_TYPE_UINT16/UINT32/FLOAT/STRING/BCD/BOOL`）。
+  `DATA_TYPE_BCD` 按有符号 BCD 处理：最高有效半字节的最高位 `0` 表示正数、`1` 表示负数，
+  去掉该符号位后其余 BCD 位按十进制数值解析；例如 `80031` 表示 `-31`。
 - `access`：读写属性（`ACCESS_READ_ONLY/ACCESS_WRITE_ONLY/ACCESS_READ_WRITE`）。
 - `scale/offset`：工程量换算 `value = raw * scale + offset`（`scale=0` 视为 1）。
 - `deadband`：工程量单位，`<=0` 不过滤；BOOL 忽略 `scale/offset/deadband`。
