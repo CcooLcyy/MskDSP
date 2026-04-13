@@ -19,6 +19,10 @@ TEST(IEC104GrpcServiceTest, RejectsWhenModuleNotReady) {
   auto st = service.UpsertLink(&ctx, &linkReq, &linkResp);
   EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
 
+  IEC104Proto::RenameLinkRequest renameReq;
+  st = service.RenameLink(&ctx, &renameReq, &linkResp);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+
   IEC104Proto::GetLinkRequest getReq;
   st = service.GetLink(&ctx, &getReq, &linkResp);
   EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
@@ -40,6 +44,9 @@ TEST(IEC104GrpcServiceTest, RejectsNullRequestOrResponse) {
 
   IEC104Proto::UpsertLinkRequest linkReq;
   st = service.UpsertLink(&ctx, &linkReq, nullptr);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+
+  st = service.RenameLink(&ctx, nullptr, nullptr);
   EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
 }
 

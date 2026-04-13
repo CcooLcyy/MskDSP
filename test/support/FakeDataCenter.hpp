@@ -213,6 +213,45 @@ public:
     return grpc::Status::OK;
   }
 
+  grpc::Status RenameConnection(const DataCenterProto::RenameConnectionRequest& request,
+                                DataCenterProto::ConnectionInfo* response) {
+    if (response == nullptr) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
+    }
+    if (!request.has_old_key() || request.old_key().module_name().empty() || request.old_key().conn_name().empty()) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "old_key.module_name/conn_name 不能为空");
+    }
+    if (!request.has_new_key() || request.new_key().module_name().empty() || request.new_key().conn_name().empty()) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "new_key.module_name/conn_name 不能为空");
+    }
+
+    std::lock_guard<std::mutex> lock(mu_);
+    ConnKey oldKey{request.old_key().module_name(), request.old_key().conn_name()};
+    auto it = conns_.find(oldKey);
+    if (it == conns_.end()) {
+      return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接不存在");
+    }
+
+    ConnKey newKey{request.new_key().module_name(), request.new_key().conn_name()};
+    if (oldKey == newKey) {
+      response->CopyFrom(it->second);
+      return grpc::Status::OK;
+    }
+
+    auto newIt = conns_.find(newKey);
+    if (newIt != conns_.end() && newIt->second.conn_id() != it->second.conn_id()) {
+      return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "连接已存在");
+    }
+
+    auto info = it->second;
+    conns_.erase(it);
+    info.set_module_name(newKey.module);
+    info.set_conn_name(newKey.conn);
+    conns_[newKey] = info;
+    response->CopyFrom(info);
+    return grpc::Status::OK;
+  }
+
   grpc::Status DeleteConnection(const DataCenterProto::DeleteConnectionRequest& request) {
     if (!request.has_key() || request.key().module_name().empty() || request.key().conn_name().empty()) {
       return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "key.module_name/conn_name is required");
@@ -393,6 +432,13 @@ inline std::shared_ptr<DataCenterProto::MockDataCenterServiceStub> MakeStub(Fake
   ON_CALL(*stub, GetOrCreateConnection(::testing::_, ::testing::_, ::testing::_))
       .WillByDefault(::testing::Invoke([state](grpc::ClientContext*, const DataCenterProto::GetOrCreateConnectionRequest& req, DataCenterProto::ConnectionInfo* resp) {
         return state->GetOrCreateConnection(req, resp);
+      }));
+
+  ON_CALL(*stub, RenameConnection(::testing::_, ::testing::_, ::testing::_))
+      .WillByDefault(::testing::Invoke([state](grpc::ClientContext*,
+                                               const DataCenterProto::RenameConnectionRequest& req,
+                                               DataCenterProto::ConnectionInfo* resp) {
+        return state->RenameConnection(req, resp);
       }));
 
   ON_CALL(*stub, DeleteConnection(::testing::_, ::testing::_, ::testing::_))

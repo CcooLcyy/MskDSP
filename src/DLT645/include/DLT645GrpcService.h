@@ -18,6 +18,9 @@ public:
   grpc::Status UpsertLink(grpc::ServerContext* context,
                           const DLT645Proto::UpsertLinkRequest* request,
                           DLT645Proto::LinkInfo* response) override;
+  grpc::Status RenameLink(grpc::ServerContext* context,
+                          const DLT645Proto::RenameLinkRequest* request,
+                          DLT645Proto::LinkInfo* response) override;
   grpc::Status GetLink(grpc::ServerContext* context,
                        const DLT645Proto::GetLinkRequest* request,
                        DLT645Proto::LinkInfo* response) override;

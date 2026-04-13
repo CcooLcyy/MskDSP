@@ -47,6 +47,31 @@ grpc::Status ModbusRTUGrpcServiceImpl::UpsertLink(
   return status;
 }
 
+grpc::Status ModbusRTUGrpcServiceImpl::RenameLink(
+    grpc::ServerContext*, const ModbusRTUProto::RenameLinkRequest* request, ModbusRTUProto::LinkInfo* response) {
+  if (module_ == nullptr) {
+    LOG_ERROR("ModbusRTU 服务未就绪");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
+  }
+  if (request == nullptr || response == nullptr) {
+    LOG_ERROR("ModbusRTU RenameLink 请求为空");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
+  }
+  auto status = module_->linkManager().RenameLink(request->old_conn_name(), request->new_conn_name(), response);
+  if (!status.ok()) {
+    LOG_ERROR("ModbusRTU 改名连接失败: old_conn_name={}, new_conn_name={}, 原因={}",
+              request->old_conn_name(),
+              request->new_conn_name(),
+              status.error_message());
+  } else {
+    LOG_INFO("ModbusRTU 已改名连接: old_conn_name={}, new_conn_name={}, conn_id={}",
+             request->old_conn_name(),
+             request->new_conn_name(),
+             response->conn_id());
+  }
+  return status;
+}
+
 grpc::Status ModbusRTUGrpcServiceImpl::GetLink(
     grpc::ServerContext*, const ModbusRTUProto::GetLinkRequest* request, ModbusRTUProto::LinkInfo* response) {
   if (module_ == nullptr) {

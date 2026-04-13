@@ -154,6 +154,36 @@ grpc::Status makeNotFound(const std::string& connName) {
   return grpc::Status(grpc::StatusCode::NOT_FOUND, std::format("未找到链路: {}", connName));
 }
 
+bool renamePersistedLinkConfig(ModbusRTUProto::LinksConfig* config,
+                               const std::string& oldConnName,
+                               const std::string& newConnName) {
+  if (config == nullptr) {
+    return false;
+  }
+  for (auto& link : *config->mutable_links()) {
+    if (link.config().conn_name() != oldConnName) {
+      continue;
+    }
+    link.mutable_config()->set_conn_name(newConnName);
+    return true;
+  }
+  return false;
+}
+
+void renamePersistedPointTableConfig(ModbusRTUProto::PointTablesConfig* config,
+                                     const std::string& oldConnName,
+                                     const std::string& newConnName) {
+  if (config == nullptr) {
+    return;
+  }
+  for (auto& table : *config->mutable_point_tables()) {
+    if (table.conn_name() == oldConnName) {
+      table.set_conn_name(newConnName);
+      return;
+    }
+  }
+}
+
 std::string formatRegisterWords(const std::vector<uint16_t>& values) {
   if (values.empty()) {
     return {};
@@ -1308,6 +1338,160 @@ grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& re
       return status;
     }
   }
+  return grpc::Status::OK;
+}
+
+grpc::Status LinkManager::RenameLink(const std::string& oldConnName,
+                                     const std::string& newConnName,
+                                     ModbusRTUProto::LinkInfo* out) {
+  if (out == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
+  }
+  auto status = validateConnName(oldConnName);
+  if (!status.ok()) {
+    return status;
+  }
+  status = validateConnName(newConnName);
+  if (!status.ok()) {
+    return status;
+  }
+
+  uint32_t expectedConnId = 0;
+  bool reservedRenameName = false;
+  ModbusRTUProto::LinksConfig linksConfig;
+  ModbusRTUProto::PointTablesConfig pointTablesConfig;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = linksByName_.find(oldConnName);
+    if (it == linksByName_.end()) {
+      return makeNotFound(oldConnName);
+    }
+    if (oldConnName == newConnName) {
+      return fillLinkInfoLocked(it->second, out);
+    }
+    if (linksByName_.contains(newConnName) || pendingCreateByName_.contains(newConnName)) {
+      return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name 已存在");
+    }
+    if (it->second.state == ModbusRTUProto::LINK_STATE_RUNNING) {
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "更新配置前请先停止链路");
+    }
+    if (it->second.state == ModbusRTUProto::LINK_STATE_PENDING_DELETE) {
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路处于待删除状态");
+    }
+
+    pendingCreateByName_.insert(newConnName);
+    reservedRenameName = true;
+    expectedConnId = it->second.connId;
+    linksConfig = dumpLinksConfigLocked();
+    pointTablesConfig = dumpPointTablesConfigLocked();
+  }
+
+  auto releaseRenameReservation = [this, &newConnName, &reservedRenameName]() {
+    if (!reservedRenameName) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mu_);
+    pendingCreateByName_.erase(newConnName);
+    reservedRenameName = false;
+  };
+
+  if (!renamePersistedLinkConfig(&linksConfig, oldConnName, newConnName)) {
+    releaseRenameReservation();
+    return grpc::Status(grpc::StatusCode::INTERNAL, "本地链路配置快照缺少待改名连接");
+  }
+  renamePersistedPointTableConfig(&pointTablesConfig, oldConnName, newConnName);
+
+  DataCenterProto::ConnectionInfo connInfo;
+  status = dataCenter_.RenameConnection(oldConnName, newConnName, &connInfo);
+  if (!status.ok() && status.error_code() == grpc::StatusCode::NOT_FOUND) {
+    bool oldExists = false;
+    bool newExists = false;
+    auto existsStatus = dataCenter_.ConnectionExists(oldConnName, &oldExists);
+    if (!existsStatus.ok()) {
+      releaseRenameReservation();
+      return existsStatus;
+    }
+    existsStatus = dataCenter_.ConnectionExists(newConnName, &newExists);
+    if (!existsStatus.ok()) {
+      releaseRenameReservation();
+      return existsStatus;
+    }
+    if (!oldExists && newExists) {
+      auto getStatus = dataCenter_.GetOrCreateConnection(newConnName, &connInfo);
+      if (!getStatus.ok()) {
+        releaseRenameReservation();
+        return getStatus;
+      }
+      if (connInfo.conn_id() != expectedConnId) {
+        releaseRenameReservation();
+        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name 已存在");
+      }
+      LOG_WARNING("ModbusRTU 检测到 DataCenter 连接已提前完成改名，继续收敛本地配置: old_conn_name={}, new_conn_name={}, conn_id={}",
+                  oldConnName,
+                  newConnName,
+                  connInfo.conn_id());
+      status = grpc::Status::OK;
+    }
+  }
+  if (!status.ok()) {
+    releaseRenameReservation();
+    return status;
+  }
+  if (connInfo.conn_id() == 0) {
+    releaseRenameReservation();
+    return grpc::Status(grpc::StatusCode::INTERNAL, "DataCenter 返回 conn_id=0");
+  }
+  if (connInfo.conn_id() != expectedConnId) {
+    releaseRenameReservation();
+    return grpc::Status(grpc::StatusCode::INTERNAL, "DataCenter 返回的 conn_id 与本地链路不一致");
+  }
+
+  status = saveLinksConfig(linksConfig);
+  if (!status.ok()) {
+    releaseRenameReservation();
+    return status;
+  }
+  status = savePointTablesConfig(pointTablesConfig);
+  if (!status.ok()) {
+    releaseRenameReservation();
+    return status;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    pendingCreateByName_.erase(newConnName);
+    reservedRenameName = false;
+
+    auto oldIt = linksByName_.find(oldConnName);
+    if (oldIt == linksByName_.end()) {
+      auto newIt = linksByName_.find(newConnName);
+      if (newIt == linksByName_.end()) {
+        return makeNotFound(oldConnName);
+      }
+      return fillLinkInfoLocked(newIt->second, out);
+    }
+    if (linksByName_.contains(newConnName)) {
+      return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name 已存在");
+    }
+
+    auto linkNode = linksByName_.extract(oldConnName);
+    linkNode.key() = newConnName;
+    linkNode.mapped().config.set_conn_name(newConnName);
+    linkNode.mapped().connId = connInfo.conn_id();
+    auto insertResult = linksByName_.insert(std::move(linkNode));
+    if (!insertResult.inserted) {
+      return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name 已存在");
+    }
+    status = fillLinkInfoLocked(insertResult.position->second, out);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+
+  LOG_INFO("ModbusRTU 链路改名成功: old_conn_name={}, new_conn_name={}, conn_id={}",
+           oldConnName,
+           newConnName,
+           connInfo.conn_id());
   return grpc::Status::OK;
 }
 

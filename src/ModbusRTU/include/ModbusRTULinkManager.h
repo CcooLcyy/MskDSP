@@ -45,6 +45,7 @@ public:
                             ModbusRTUProto::UpdateConfigResponse* response);
 
   grpc::Status UpsertLink(const ModbusRTUProto::UpsertLinkRequest& request, ModbusRTUProto::LinkInfo* out);
+  grpc::Status RenameLink(const std::string& oldConnName, const std::string& newConnName, ModbusRTUProto::LinkInfo* out);
   grpc::Status GetLink(const std::string& connName, ModbusRTUProto::LinkInfo* out) const;
   grpc::Status ListLinks(ModbusRTUProto::ListLinksResponse* out) const;
   grpc::Status StartLink(const std::string& connName);

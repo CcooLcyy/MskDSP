@@ -24,6 +24,10 @@ TEST(Dlt645GrpcServiceTest, RejectsWhenModuleNotReady) {
   st = service.UpsertLink(&ctx, &linkReq, &linkResp);
   EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
 
+  DLT645Proto::RenameLinkRequest renameReq;
+  st = service.RenameLink(&ctx, &renameReq, &linkResp);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+
   DLT645Proto::GetLinkRequest getReq;
   st = service.GetLink(&ctx, &getReq, &linkResp);
   EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
@@ -70,6 +74,9 @@ TEST(Dlt645GrpcServiceTest, RejectsNullRequestOrResponse) {
   EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
 
   st = service.UpsertLink(&ctx, nullptr, nullptr);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+
+  st = service.RenameLink(&ctx, nullptr, nullptr);
   EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
 }
 

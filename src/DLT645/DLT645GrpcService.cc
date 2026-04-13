@@ -52,6 +52,29 @@ grpc::Status DLT645GrpcServiceImpl::UpsertLink(grpc::ServerContext*,
   return status;
 }
 
+grpc::Status DLT645GrpcServiceImpl::RenameLink(grpc::ServerContext*,
+                                               const DLT645Proto::RenameLinkRequest* request,
+                                               DLT645Proto::LinkInfo* response) {
+  if (module_ == nullptr) {
+    LOG_ERROR("DLT645 服务未就绪");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
+  }
+  if (request == nullptr || response == nullptr) {
+    LOG_ERROR("DLT645 RenameLink 请求/响应为空");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
+  }
+  LOG_INFO("收到 DLT645 连接改名请求报文: {}", formatProtoForLog(*request));
+  auto status = module_->linkManager().RenameLink(request->old_conn_name(), request->new_conn_name(), response);
+  LOG_INFO("收到 DLT645 连接改名响应报文: {}", formatProtoForLog(*response));
+  if (!status.ok()) {
+    LOG_ERROR("DLT645 连接改名失败: old_conn_name={}, new_conn_name={}, 原因={}",
+              request->old_conn_name(),
+              request->new_conn_name(),
+              status.error_message());
+  }
+  return status;
+}
+
 grpc::Status DLT645GrpcServiceImpl::GetLink(grpc::ServerContext*,
                                             const DLT645Proto::GetLinkRequest* request,
                                             DLT645Proto::LinkInfo* response) {

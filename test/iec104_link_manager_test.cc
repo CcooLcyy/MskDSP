@@ -398,6 +398,121 @@ TEST(IEC104LinkManagerTest, UpsertLinkUpdateKeepsStoppedWhenPointTableReady) {
   EXPECT_TRUE(got.last_error().empty());
 }
 
+// 验证：RenameLink 成功后保留 conn_id，旧名字失效，新名字可继续操作点表与启停。
+TEST(IEC104LinkManagerTest, RenameLinkKeepsConnIdAndMovesPointTable) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+
+  const auto port = AllocateFreeTcpPort();
+  auto createReq = MakeServerLinkReq("conn-old", "0.0.0.0", port);
+  IEC104Proto::LinkInfo created;
+  ASSERT_TRUE(mgr.UpsertLink(createReq, &created).ok());
+
+  IEC104Proto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-old");
+  *ptReq.add_points() = MakePoint("A", 100);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+  ASSERT_TRUE(mgr.StopLink("conn-old").ok());
+
+  IEC104Proto::LinkInfo renamed;
+  ASSERT_TRUE(mgr.RenameLink("conn-old", "conn-new", &renamed).ok());
+  EXPECT_EQ(renamed.conn_id(), created.conn_id());
+  EXPECT_EQ(renamed.config().conn_name(), "conn-new");
+  EXPECT_FALSE(state.HasConnection("IEC104", "conn-old"));
+  EXPECT_TRUE(state.HasConnection("IEC104", "conn-new"));
+
+  IEC104Proto::LinkInfo oldInfo;
+  auto oldStatus = mgr.GetLink("conn-old", &oldInfo);
+  EXPECT_EQ(oldStatus.error_code(), grpc::StatusCode::NOT_FOUND);
+
+  IEC104Proto::ListLinksResponse listResp;
+  ASSERT_TRUE(mgr.ListLinks(&listResp).ok());
+  ASSERT_EQ(listResp.links_size(), 1);
+  EXPECT_EQ(listResp.links(0).config().conn_name(), "conn-new");
+
+  IEC104Proto::PointTable pointTable;
+  ASSERT_TRUE(mgr.GetPointTable("conn-new", &pointTable).ok());
+  ASSERT_EQ(pointTable.points_size(), 1);
+  EXPECT_EQ(pointTable.points(0).tag(), "A");
+
+  IEC104Proto::UpsertPointTableRequest ptUpdateReq;
+  ptUpdateReq.set_conn_name("conn-new");
+  *ptUpdateReq.add_points() = MakePoint("B", 101);
+  ptUpdateReq.set_replace(false);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptUpdateReq).ok());
+
+  ASSERT_TRUE(mgr.GetPointTable("conn-new", &pointTable).ok());
+  ASSERT_EQ(pointTable.points_size(), 2);
+  EXPECT_EQ(pointTable.points(0).tag(), "A");
+  EXPECT_EQ(pointTable.points(1).tag(), "B");
+
+  ASSERT_TRUE(mgr.StartLink("conn-new").ok());
+  ASSERT_TRUE(mgr.StopLink("conn-new").ok());
+  ASSERT_TRUE(mgr.DeleteLink("conn-new").ok());
+  EXPECT_FALSE(state.HasConnection("IEC104", "conn-new"));
+}
+
+// 验证：RenameLink 在目标名字已存在时返回 ALREADY_EXISTS。
+TEST(IEC104LinkManagerTest, RenameLinkRejectsWhenNewConnNameExists) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+
+  IEC104Proto::LinkInfo oldInfo;
+  ASSERT_TRUE(mgr.UpsertLink(MakeClientLinkReq("conn-old"), &oldInfo).ok());
+  IEC104Proto::LinkInfo newInfo;
+  ASSERT_TRUE(mgr.UpsertLink(MakeClientLinkReq("conn-new"), &newInfo).ok());
+
+  IEC104Proto::LinkInfo renamed;
+  auto status = mgr.RenameLink("conn-old", "conn-new", &renamed);
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::ALREADY_EXISTS);
+}
+
+// 验证：RenameLink 在旧名字不存在时返回 NOT_FOUND。
+TEST(IEC104LinkManagerTest, RenameLinkRejectsWhenOldConnNameMissing) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+
+  IEC104Proto::LinkInfo info;
+  auto status = mgr.RenameLink("missing", "conn-new", &info);
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::NOT_FOUND);
+}
+
+// 验证：运行中的链路不允许 RenameLink。
+TEST(IEC104LinkManagerTest, RenameLinkRejectsWhenLinkRunning) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+
+  auto createReq = MakeServerLinkReq("conn-running-rename", "0.0.0.0", AllocateFreeTcpPort());
+  IEC104Proto::LinkInfo created;
+  ASSERT_TRUE(mgr.UpsertLink(createReq, &created).ok());
+
+  IEC104Proto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-running-rename");
+  *ptReq.add_points() = MakePoint("A", 100);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+  ASSERT_TRUE(mgr.StartLink("conn-running-rename").ok());
+
+  IEC104Proto::LinkInfo renamed;
+  auto status = mgr.RenameLink("conn-running-rename", "conn-renamed", &renamed);
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+
+  ASSERT_TRUE(mgr.StopLink("conn-running-rename").ok());
+}
+
 // 验证：链路配置与点表落盘后，新实例恢复时仍会自动恢复链路连接功能。
 TEST(IEC104LinkManagerTest, LoadPersistedConfigAutoStartsRestoredReadyLink) {
   ScopedTempDir dir;
@@ -443,6 +558,55 @@ TEST(IEC104LinkManagerTest, LoadPersistedConfigAutoStartsRestoredReadyLink) {
     EXPECT_EQ(pointTable.points(0).tag(), "A");
 
     ASSERT_TRUE(mgr.StopLink("conn-persist").ok());
+  }
+}
+
+// 验证：RenameLink 落盘后，新实例恢复时仅保留新名字且点表仍可读取。
+TEST(IEC104LinkManagerTest, LoadPersistedConfigKeepsRenamedLink) {
+  ScopedTempDir dir;
+  const auto linksPath = dir.path() / "links.pb";
+  const auto pointTablesPath = dir.path() / "point_tables.pb";
+
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  uint32_t connId = 0;
+  {
+    LinkManager mgr("IEC104", linksPath, pointTablesPath);
+    mgr.setDataCenterStub(stub);
+
+    auto req = MakeServerLinkReq("conn-old-persist", "0.0.0.0", AllocateFreeTcpPort());
+    IEC104Proto::LinkInfo info;
+    ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+    connId = info.conn_id();
+
+    IEC104Proto::UpsertPointTableRequest ptReq;
+    ptReq.set_conn_name("conn-old-persist");
+    *ptReq.add_points() = MakePoint("A", 100);
+    ptReq.set_replace(true);
+    ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+    ASSERT_TRUE(mgr.RenameLink("conn-old-persist", "conn-new-persist", &info).ok());
+    ASSERT_TRUE(mgr.StopLink("conn-new-persist").ok());
+  }
+
+  {
+    LinkManager mgr("IEC104", linksPath, pointTablesPath);
+    mgr.setDataCenterStub(stub);
+    mgr.LoadPersistedConfig();
+
+    IEC104Proto::LinkInfo info;
+    auto oldStatus = mgr.GetLink("conn-old-persist", &info);
+    EXPECT_EQ(oldStatus.error_code(), grpc::StatusCode::NOT_FOUND);
+
+    ASSERT_TRUE(mgr.GetLink("conn-new-persist", &info).ok());
+    EXPECT_EQ(info.conn_id(), connId);
+
+    IEC104Proto::PointTable pointTable;
+    ASSERT_TRUE(mgr.GetPointTable("conn-new-persist", &pointTable).ok());
+    ASSERT_EQ(pointTable.points_size(), 1);
+    EXPECT_EQ(pointTable.points(0).tag(), "A");
+
+    ASSERT_TRUE(mgr.StopLink("conn-new-persist").ok());
   }
 }
 

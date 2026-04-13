@@ -60,6 +60,31 @@ grpc::Status IEC104GrpcServiceImpl::UpsertLink(
   return status;
 }
 
+grpc::Status IEC104GrpcServiceImpl::RenameLink(
+    grpc::ServerContext *, const IEC104Proto::RenameLinkRequest *request, IEC104Proto::LinkInfo *response) {
+  if (iec104_ == nullptr) {
+    LOG_ERROR("IEC104 服务未就绪");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
+  }
+  if (request == nullptr || response == nullptr) {
+    LOG_ERROR("IEC104 改名连接请求为空");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
+  }
+  auto status = iec104_->linkManager().RenameLink(request->old_conn_name(), request->new_conn_name(), response);
+  if (!status.ok()) {
+    LOG_ERROR("IEC104 改名连接失败: old_conn_name={}, new_conn_name={}, 原因={}",
+              request->old_conn_name(),
+              request->new_conn_name(),
+              status.error_message());
+  } else {
+    LOG_INFO("IEC104 已改名连接: old_conn_name={}, new_conn_name={}, conn_id={}",
+             request->old_conn_name(),
+             request->new_conn_name(),
+             response->conn_id());
+  }
+  return status;
+}
+
 grpc::Status IEC104GrpcServiceImpl::GetLink(
     grpc::ServerContext *, const IEC104Proto::GetLinkRequest *request, IEC104Proto::LinkInfo *response) {
   if (iec104_ == nullptr) {

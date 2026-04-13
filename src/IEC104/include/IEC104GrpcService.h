@@ -12,6 +12,7 @@ class IEC104GrpcServiceImpl : public IEC104Proto::IEC104Service::Service {
 public:
   void getIEC104(IEC104 *iec104);
   grpc::Status UpsertLink(grpc::ServerContext *context, const IEC104Proto::UpsertLinkRequest *request, IEC104Proto::LinkInfo *response) override;
+  grpc::Status RenameLink(grpc::ServerContext *context, const IEC104Proto::RenameLinkRequest *request, IEC104Proto::LinkInfo *response) override;
   grpc::Status GetLink(grpc::ServerContext *context, const IEC104Proto::GetLinkRequest *request, IEC104Proto::LinkInfo *response) override;
   grpc::Status ListLinks(grpc::ServerContext *context, const IEC104Proto::Empty *, IEC104Proto::ListLinksResponse *response) override;
   grpc::Status DeleteLink(grpc::ServerContext *context, const IEC104Proto::DeleteLinkRequest *request, IEC104Proto::Empty *) override;

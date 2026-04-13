@@ -556,6 +556,128 @@ TEST(ModbusRtuLinkManagerTest, UpsertLinkUpdatesExistingConfig) {
   EXPECT_EQ(info2.config().poll_interval_ms(), 2000u);
 }
 
+// 验证：RenameLink 成功后保留 conn_id，旧名字失效，新名字可继续操作点表与启停。
+TEST(ModbusRtuLinkManagerTest, RenameLinkKeepsConnIdAndMovesPointTable) {
+  ScopedPseudoTty pty;
+  ASSERT_TRUE(pty.ok()) << pty.error();
+
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManagerTestEnv env;
+  auto& mgr = env.mgr;
+  mgr.setDataCenterStub(stub);
+
+  ModbusRTUProto::LinkInfo created;
+  ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("conn-old", pty.slavePath().c_str(), 1), &created).ok());
+
+  ModbusRTUProto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-old");
+  *ptReq.add_points() = MakeWriteSingleRegisterPoint("reg-a", 1);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+  ASSERT_TRUE(mgr.StopLink("conn-old").ok());
+
+  ModbusRTUProto::LinkInfo renamed;
+  ASSERT_TRUE(mgr.RenameLink("conn-old", "conn-new", &renamed).ok());
+  EXPECT_EQ(renamed.conn_id(), created.conn_id());
+  EXPECT_EQ(renamed.config().conn_name(), "conn-new");
+  EXPECT_FALSE(state.HasConnection("ModbusRTU", "conn-old"));
+  EXPECT_TRUE(state.HasConnection("ModbusRTU", "conn-new"));
+
+  ModbusRTUProto::LinkInfo oldInfo;
+  auto oldStatus = mgr.GetLink("conn-old", &oldInfo);
+  EXPECT_EQ(oldStatus.error_code(), grpc::StatusCode::NOT_FOUND);
+
+  ModbusRTUProto::ListLinksResponse listResp;
+  ASSERT_TRUE(mgr.ListLinks(&listResp).ok());
+  ASSERT_EQ(listResp.links_size(), 1);
+  EXPECT_EQ(listResp.links(0).config().conn_name(), "conn-new");
+
+  ModbusRTUProto::PointTable pointTable;
+  ASSERT_TRUE(mgr.GetPointTable("conn-new", &pointTable).ok());
+  ASSERT_EQ(pointTable.points_size(), 1);
+  EXPECT_EQ(pointTable.points(0).tag(), "reg-a");
+
+  ModbusRTUProto::UpsertPointTableRequest ptUpdateReq;
+  ptUpdateReq.set_conn_name("conn-new");
+  *ptUpdateReq.add_points() = MakeCoilPoint("coil-b", 2);
+  ptUpdateReq.set_replace(false);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptUpdateReq).ok());
+
+  ASSERT_TRUE(mgr.GetPointTable("conn-new", &pointTable).ok());
+  ASSERT_EQ(pointTable.points_size(), 2);
+  EXPECT_EQ(pointTable.points(0).tag(), "reg-a");
+  EXPECT_EQ(pointTable.points(1).tag(), "coil-b");
+
+  ASSERT_TRUE(mgr.StartLink("conn-new").ok());
+  ASSERT_TRUE(mgr.StopLink("conn-new").ok());
+  ASSERT_TRUE(mgr.DeleteLink("conn-new").ok());
+  EXPECT_FALSE(state.HasConnection("ModbusRTU", "conn-new"));
+}
+
+// 验证：RenameLink 在目标名字已存在时返回 ALREADY_EXISTS。
+TEST(ModbusRtuLinkManagerTest, RenameLinkRejectsWhenNewConnNameExists) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManagerTestEnv env;
+  auto& mgr = env.mgr;
+  mgr.setDataCenterStub(stub);
+
+  ModbusRTUProto::LinkInfo oldInfo;
+  ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("conn-old", "/dev/ttyUSB0", 1), &oldInfo).ok());
+  ModbusRTUProto::LinkInfo newInfo;
+  ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("conn-new", "/dev/ttyUSB1", 2), &newInfo).ok());
+
+  ModbusRTUProto::LinkInfo renamed;
+  auto status = mgr.RenameLink("conn-old", "conn-new", &renamed);
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::ALREADY_EXISTS);
+}
+
+// 验证：RenameLink 在旧名字不存在时返回 NOT_FOUND。
+TEST(ModbusRtuLinkManagerTest, RenameLinkRejectsWhenOldConnNameMissing) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManagerTestEnv env;
+  auto& mgr = env.mgr;
+  mgr.setDataCenterStub(stub);
+
+  ModbusRTUProto::LinkInfo info;
+  auto status = mgr.RenameLink("missing", "conn-new", &info);
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::NOT_FOUND);
+}
+
+// 验证：运行中的链路不允许 RenameLink。
+TEST(ModbusRtuLinkManagerTest, RenameLinkRejectsWhenLinkRunning) {
+  ScopedPseudoTty pty;
+  ASSERT_TRUE(pty.ok()) << pty.error();
+
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManagerTestEnv env;
+  auto& mgr = env.mgr;
+  mgr.setDataCenterStub(stub);
+
+  ModbusRTUProto::LinkInfo created;
+  ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("conn-running-rename", pty.slavePath().c_str(), 1), &created).ok());
+
+  ModbusRTUProto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-running-rename");
+  *ptReq.add_points() = MakeWriteSingleRegisterPoint("reg-a", 1);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+  ASSERT_TRUE(mgr.StartLink("conn-running-rename").ok());
+
+  ModbusRTUProto::LinkInfo renamed;
+  auto status = mgr.RenameLink("conn-running-rename", "conn-renamed", &renamed);
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+
+  ASSERT_TRUE(mgr.StopLink("conn-running-rename").ok());
+}
+
 // 验证：GetLink 与 ListLinks 能正确返回已配置的连接。
 TEST(ModbusRtuLinkManagerTest, GetLinkAndListLinksReturnConfiguredLinks) {
   FakeDataCenterState state;
@@ -702,6 +824,57 @@ TEST(ModbusRtuLinkManagerTest, LoadsPersistedLinkAndPointTableAfterRestart) {
     EXPECT_EQ(pointTable.points(0).address(), 1u);
 
     ASSERT_TRUE(mgr.StopLink("conn-persist").ok());
+  }
+}
+
+// 验证：RenameLink 落盘后，新实例恢复时仅保留新名字且点表仍可读取。
+TEST(ModbusRtuLinkManagerTest, LoadsRenamedLinkAfterRestart) {
+  ScopedTempDir dir;
+  ScopedPseudoTty pty;
+  const auto mqttPath = dir.path() / "mqtt.pb";
+  const auto linksPath = dir.path() / "links.pb";
+  const auto pointTablesPath = dir.path() / "point_tables.pb";
+  ASSERT_TRUE(pty.ok()) << pty.error();
+
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  uint32_t connId = 0;
+  {
+    LinkManager mgr("ModbusRTU", mqttPath, linksPath, pointTablesPath);
+    mgr.setDataCenterStub(stub);
+
+    ModbusRTUProto::LinkInfo info;
+    ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("conn-old-persist", pty.slavePath().c_str(), 1), &info).ok());
+    connId = info.conn_id();
+
+    ModbusRTUProto::UpsertPointTableRequest ptReq;
+    ptReq.set_conn_name("conn-old-persist");
+    ptReq.set_replace(true);
+    *ptReq.add_points() = MakeWriteSingleRegisterPoint("reg-write-a", 1);
+    ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+    ASSERT_TRUE(mgr.RenameLink("conn-old-persist", "conn-new-persist", &info).ok());
+    ASSERT_TRUE(mgr.StopLink("conn-new-persist").ok());
+  }
+
+  {
+    LinkManager mgr("ModbusRTU", mqttPath, linksPath, pointTablesPath);
+    mgr.setDataCenterStub(stub);
+    mgr.LoadPersistedConfig();
+
+    ModbusRTUProto::LinkInfo info;
+    auto oldStatus = mgr.GetLink("conn-old-persist", &info);
+    EXPECT_EQ(oldStatus.error_code(), grpc::StatusCode::NOT_FOUND);
+
+    ASSERT_TRUE(mgr.GetLink("conn-new-persist", &info).ok());
+    EXPECT_EQ(info.conn_id(), connId);
+
+    ModbusRTUProto::PointTable pointTable;
+    ASSERT_TRUE(mgr.GetPointTable("conn-new-persist", &pointTable).ok());
+    ASSERT_EQ(pointTable.points_size(), 1);
+    EXPECT_EQ(pointTable.points(0).tag(), "reg-write-a");
+
+    ASSERT_TRUE(mgr.StopLink("conn-new-persist").ok());
   }
 }
 

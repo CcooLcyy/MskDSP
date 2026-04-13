@@ -34,6 +34,7 @@ public:
 
   void LoadPersistedConfig();
   grpc::Status UpsertLink(const IEC104Proto::UpsertLinkRequest &request, IEC104Proto::LinkInfo *out);
+  grpc::Status RenameLink(const std::string &oldConnName, const std::string &newConnName, IEC104Proto::LinkInfo *out);
   grpc::Status GetLink(const std::string &connName, IEC104Proto::LinkInfo *out) const;
   grpc::Status ListLinks(IEC104Proto::ListLinksResponse *out) const;
   grpc::Status StartLink(const std::string &connName);

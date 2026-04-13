@@ -530,6 +530,125 @@ TEST(Dlt645LinkManagerTest, UpsertLinkRejectsUpdateWhenRunningOrPendingDelete) {
   EXPECT_NE(got.config().poll_interval_ms(), 2000u);
 }
 
+// 验证：RenameLink 成功后保留 conn_id，旧名字失效，新名字可继续操作点表且保留数据块。
+TEST(Dlt645LinkManagerTest, RenameLinkKeepsConnIdAndMovesPointTableAndBlocks) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(stub);
+
+  DLT645Proto::UpsertLinkRequest createReq;
+  *createReq.mutable_config() = MakeValidLinkConfig("conn-old", DLT645Proto::COMM_MODE_LORA);
+  DLT645Proto::LinkInfo created;
+  ASSERT_TRUE(mgr.UpsertLink(createReq, &created).ok());
+
+  DLT645Proto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-old");
+  *ptReq.add_points() = MakePointProto("P1", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16);
+  auto *block = ptReq.add_blocks();
+  block->set_block_di("0201FF00");
+  block->set_block_data_len(2);
+  *block->add_items() = MakeBlockItemProto("B1", 2, DLT645Proto::DATA_TYPE_UINT16);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  DLT645Proto::LinkInfo renamed;
+  ASSERT_TRUE(mgr.RenameLink("conn-old", "conn-new", &renamed).ok());
+  EXPECT_EQ(renamed.conn_id(), created.conn_id());
+  EXPECT_EQ(renamed.config().conn_name(), "conn-new");
+  EXPECT_FALSE(state.HasConnection("DLT645", "conn-old"));
+  EXPECT_TRUE(state.HasConnection("DLT645", "conn-new"));
+
+  DLT645Proto::LinkInfo oldInfo;
+  auto oldStatus = mgr.GetLink("conn-old", &oldInfo);
+  EXPECT_EQ(oldStatus.error_code(), grpc::StatusCode::NOT_FOUND);
+
+  DLT645Proto::ListLinksResponse listResp;
+  ASSERT_TRUE(mgr.ListLinks(&listResp).ok());
+  ASSERT_EQ(listResp.links_size(), 1);
+  EXPECT_EQ(listResp.links(0).config().conn_name(), "conn-new");
+
+  DLT645Proto::PointTable pointTable;
+  ASSERT_TRUE(mgr.GetPointTable("conn-new", &pointTable).ok());
+  ASSERT_EQ(pointTable.points_size(), 1);
+  EXPECT_EQ(pointTable.points(0).tag(), "P1");
+  ASSERT_EQ(pointTable.blocks_size(), 1);
+  EXPECT_EQ(pointTable.blocks(0).block_di(), "0201FF00");
+  ASSERT_EQ(pointTable.blocks(0).items_size(), 1);
+  EXPECT_EQ(pointTable.blocks(0).items(0).tag(), "B1");
+
+  DLT645Proto::UpsertPointTableRequest ptUpdateReq;
+  ptUpdateReq.set_conn_name("conn-new");
+  *ptUpdateReq.add_points() = MakePointProto("P2", "02010200", 2, DLT645Proto::DATA_TYPE_UINT16);
+  ptUpdateReq.set_replace(false);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptUpdateReq).ok());
+
+  ASSERT_TRUE(mgr.GetPointTable("conn-new", &pointTable).ok());
+  ASSERT_EQ(pointTable.points_size(), 2);
+  ASSERT_EQ(pointTable.blocks_size(), 1);
+  EXPECT_EQ(pointTable.blocks(0).items(0).tag(), "B1");
+
+  ASSERT_TRUE(mgr.DeleteLink("conn-new").ok());
+  EXPECT_FALSE(state.HasConnection("DLT645", "conn-new"));
+}
+
+// 验证：RenameLink 在目标名字已存在时返回 ALREADY_EXISTS。
+TEST(Dlt645LinkManagerTest, RenameLinkRejectsWhenNewConnNameExists) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(stub);
+
+  DLT645Proto::UpsertLinkRequest oldReq;
+  *oldReq.mutable_config() = MakeValidLinkConfig("conn-old", DLT645Proto::COMM_MODE_LORA);
+  DLT645Proto::LinkInfo oldInfo;
+  ASSERT_TRUE(mgr.UpsertLink(oldReq, &oldInfo).ok());
+
+  DLT645Proto::UpsertLinkRequest newReq;
+  *newReq.mutable_config() = MakeValidLinkConfig("conn-new", DLT645Proto::COMM_MODE_LORA);
+  DLT645Proto::LinkInfo newInfo;
+  ASSERT_TRUE(mgr.UpsertLink(newReq, &newInfo).ok());
+
+  DLT645Proto::LinkInfo renamed;
+  auto status = mgr.RenameLink("conn-old", "conn-new", &renamed);
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::ALREADY_EXISTS);
+}
+
+// 验证：RenameLink 在旧名字不存在时返回 NOT_FOUND。
+TEST(Dlt645LinkManagerTest, RenameLinkRejectsWhenOldConnNameMissing) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(stub);
+
+  DLT645Proto::LinkInfo info;
+  auto status = mgr.RenameLink("missing", "conn-new", &info);
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::NOT_FOUND);
+}
+
+// 验证：运行中的连接不允许 RenameLink。
+TEST(Dlt645LinkManagerTest, RenameLinkRejectsWhenLinkRunning) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(stub);
+
+  DLT645Proto::UpsertLinkRequest createReq;
+  *createReq.mutable_config() = MakeValidLinkConfig("conn-running-rename", DLT645Proto::COMM_MODE_LORA);
+  DLT645Proto::LinkInfo created;
+  ASSERT_TRUE(mgr.UpsertLink(createReq, &created).ok());
+
+  DLT645LinkManagerTestPeer::SetLinkState(mgr, "conn-running-rename", DLT645Proto::LINK_STATE_RUNNING);
+
+  DLT645Proto::LinkInfo renamed;
+  auto status = mgr.RenameLink("conn-running-rename", "conn-renamed", &renamed);
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+}
+
 // 验证：UpsertLink DataCenter 创建失败会透传错误。
 TEST(Dlt645LinkManagerTest, UpsertLinkPropagatesDataCenterError) {
   auto stub = std::make_shared<DataCenterProto::MockDataCenterServiceStub>();
@@ -681,6 +800,61 @@ TEST(Dlt645LinkManagerTest, LoadPersistedConfigAutoStartsRestoredReadyLink) {
     EXPECT_EQ(pointTable.points(0).tag(), "P1");
 
     ASSERT_TRUE(mgr.StopLink("conn-persist").ok());
+  }
+}
+
+// 验证：RenameLink 落盘后，新实例恢复时仅保留新名字且数据块仍可读取。
+TEST(Dlt645LinkManagerTest, LoadPersistedConfigKeepsRenamedLinkAndBlocks) {
+  ScopedTempDir dir;
+  ScopedCwd cwd(dir.path());
+  std::filesystem::create_directories("conf/DLT645");
+
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  uint32_t connId = 0;
+  {
+    LinkManager mgr("DLT645");
+    mgr.setDataCenterStub(stub);
+
+    DLT645Proto::UpsertLinkRequest req;
+    *req.mutable_config() = MakeValidLinkConfig("conn-old-persist", DLT645Proto::COMM_MODE_LORA);
+    DLT645Proto::LinkInfo info;
+    ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+    connId = info.conn_id();
+
+    DLT645Proto::UpsertPointTableRequest ptReq;
+    ptReq.set_conn_name("conn-old-persist");
+    *ptReq.add_points() = MakePointProto("P1", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16);
+    auto *block = ptReq.add_blocks();
+    block->set_block_di("0201FF00");
+    block->set_block_data_len(2);
+    *block->add_items() = MakeBlockItemProto("B1", 2, DLT645Proto::DATA_TYPE_UINT16);
+    ptReq.set_replace(true);
+    ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+    ASSERT_TRUE(mgr.RenameLink("conn-old-persist", "conn-new-persist", &info).ok());
+  }
+
+  {
+    LinkManager mgr("DLT645");
+    mgr.setDataCenterStub(stub);
+    mgr.LoadPersistedConfig();
+
+    DLT645Proto::LinkInfo info;
+    auto oldStatus = mgr.GetLink("conn-old-persist", &info);
+    EXPECT_EQ(oldStatus.error_code(), grpc::StatusCode::NOT_FOUND);
+
+    ASSERT_TRUE(mgr.GetLink("conn-new-persist", &info).ok());
+    EXPECT_EQ(info.conn_id(), connId);
+
+    DLT645Proto::PointTable pointTable;
+    ASSERT_TRUE(mgr.GetPointTable("conn-new-persist", &pointTable).ok());
+    ASSERT_EQ(pointTable.points_size(), 1);
+    EXPECT_EQ(pointTable.points(0).tag(), "P1");
+    ASSERT_EQ(pointTable.blocks_size(), 1);
+    EXPECT_EQ(pointTable.blocks(0).block_di(), "0201FF00");
+    ASSERT_EQ(pointTable.blocks(0).items_size(), 1);
+    EXPECT_EQ(pointTable.blocks(0).items(0).tag(), "B1");
   }
 }
 
