@@ -1,8 +1,5 @@
 #include "AGCControl.h"
 
-#include <algorithm>
-#include <numeric>
-
 #include "Logger.h"
 
 namespace AGC {
@@ -40,7 +37,34 @@ double effectiveMemberMaxKw(const AGCProto::MemberConfig& member) {
   }
   return 0.0;
 }
+
+double computeTotalMeasKw(const AGCProto::GroupConfig& config, const ControlInput& input) {
+  const auto memberCount = static_cast<size_t>(config.members_size());
+  double totalMeasKw = 0.0;
+  for (size_t i = 0; i < memberCount; ++i) {
+    if (i < input.memberMeasRaw.size() && i < input.hasMemberMeasRaw.size() && input.hasMemberMeasRaw[i]) {
+      totalMeasKw += toPhysicalAbs(config.members(static_cast<int>(i)).p_meas(), input.memberMeasRaw[i]);
+    }
+  }
+  return totalMeasKw;
+}
 }  // namespace
+
+std::optional<double> ComputeTotalMeasRaw(const AGCProto::GroupConfig& config, const ControlInput& input, double* totalMeasKwOut) {
+  if (!config.has_outputs()) {
+    return std::nullopt;
+  }
+  const auto& outputs = config.outputs();
+  if (!outputs.has_p_total_meas() || outputs.p_total_meas().tag().empty()) {
+    return std::nullopt;
+  }
+
+  const auto totalMeasKw = computeTotalMeasKw(config, input);
+  if (totalMeasKwOut != nullptr) {
+    *totalMeasKwOut = totalMeasKw;
+  }
+  return toRawAbs(outputs.p_total_meas(), totalMeasKw);
+}
 
 DefaultPointOutput ComputeDefaultPointOutput(const AGCProto::GroupConfig& config, const ControlInput& input) {
   DefaultPointOutput out;
@@ -101,7 +125,7 @@ std::optional<ControlOutput> ComputeControlOutput(
     }
   }
 
-  out.totalMeasKw = std::accumulate(measKw.begin(), measKw.end(), 0.0);
+  out.totalMeasKw = computeTotalMeasKw(config, input);
 
   const auto& cmdSpec = config.p_cmd();
   double cmdKw = 0.0;
@@ -138,10 +162,10 @@ std::optional<ControlOutput> ComputeControlOutput(
   out.totalErrorKw = desiredTotalKw - out.totalMeasKw;
 
   if (config.has_outputs()) {
-    const auto& o = config.outputs();
-    if (o.has_p_total_meas() && !o.p_total_meas().tag().empty()) {
+    const auto& outputs = config.outputs();
+    if (outputs.has_p_total_meas() && !outputs.p_total_meas().tag().empty()) {
       out.publishTotalMeas = true;
-      out.totalMeasRaw = toRawAbs(o.p_total_meas(), out.totalMeasKw);
+      out.totalMeasRaw = toRawAbs(outputs.p_total_meas(), out.totalMeasKw);
     }
   }
 

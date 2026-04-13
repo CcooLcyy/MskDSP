@@ -940,6 +940,28 @@ void GroupManager::controlTick(const std::string &groupName) {
   if (connId == 0) {
     return;
   }
+  const auto quality = DataCenterProto::QUALITY_GOOD;
+  double totalMeasKw = 0.0;
+  if (const auto totalMeasRaw = ComputeTotalMeasRaw(config, input, &totalMeasKw)) {
+    auto status = dataCenter_.PublishDouble(connId, config.outputs().p_total_meas().tag(), *totalMeasRaw, quality, 0);
+    if (!status.ok()) {
+      LOG_ERROR(
+          "AGC 发布总实时测量值失败: group_name={}, conn_id={}, tag={}, total_meas_kw={}, 原因={}",
+          groupName,
+          connId,
+          config.outputs().p_total_meas().tag(),
+          totalMeasKw,
+          status.error_message());
+    } else {
+      LOG_DEBUG(
+          "AGC 已发布总实时测量值: group_name={}, conn_id={}, tag={}, total_meas_kw={}, raw={}",
+          groupName,
+          connId,
+          config.outputs().p_total_meas().tag(),
+          totalMeasKw,
+          *totalMeasRaw);
+    }
+  }
   publishDefaultLimitPoints(groupName, "事件触发控制");
 
   const auto outputOpt = ComputeControlOutput(config, input, weightedStrategy_);
@@ -948,12 +970,8 @@ void GroupManager::controlTick(const std::string &groupName) {
   }
   const auto &output = *outputOpt;
 
-  const auto quality = DataCenterProto::QUALITY_GOOD;
   if (config.has_outputs()) {
     const auto &o = config.outputs();
-    if (output.publishTotalMeas) {
-      (void)dataCenter_.PublishDouble(connId, o.p_total_meas().tag(), output.totalMeasRaw, quality, 0);
-    }
     if (output.publishTotalTarget) {
       (void)dataCenter_.PublishDouble(connId, o.p_total_target().tag(), output.totalTargetRaw, quality, 0);
     }

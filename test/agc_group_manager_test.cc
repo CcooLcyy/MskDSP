@@ -608,6 +608,35 @@ TEST(AgcGroupManagerTest, RuntimeCommandUpdateTriggersControlAfterStart) {
   ASSERT_TRUE(mgr.StopGroup("g-runtime-cmd").ok());
 }
 
+// 验证：未下发总设定时，成员量测快照与后续量测变化仍会驱动总实时测量值更新，但不会下发成员设定。
+TEST(AgcGroupManagerTest, MeasurementUpdatesPublishRealtimeTotalWithoutCommand) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  auto req = MakeGroupReq("g-meas-only-total");
+
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+  ASSERT_TRUE(mgr.StopGroup("g-meas-only-total").ok());
+  PublishDoublePoint(&state, info.conn_id(), "INV1_P_MEAS", 10.0);
+  PublishDoublePoint(&state, info.conn_id(), "INV2_P_MEAS", 20.0);
+
+  ASSERT_TRUE(mgr.StartGroup("g-meas-only-total").ok());
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "P_TOTAL", 30.0));
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV1_P_SET"), 0u);
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV2_P_SET"), 0u);
+
+  PublishDoublePoint(&state, info.conn_id(), "INV1_P_MEAS", 15.0);
+  EXPECT_TRUE(WaitForPublishCount(state, info.conn_id(), "P_TOTAL", 2u));
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "P_TOTAL", 35.0));
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV1_P_SET"), 0u);
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV2_P_SET"), 0u);
+
+  ASSERT_TRUE(mgr.StopGroup("g-meas-only-total").ok());
+}
+
 // 验证：控制组运行中收到新的成员量测输入时，会重新触发一次控制计算。
 TEST(AgcGroupManagerTest, RuntimeMeasurementUpdateTriggersRecalculation) {
   FakeDataCenterState state;

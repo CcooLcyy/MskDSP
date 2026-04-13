@@ -64,6 +64,10 @@ struct DefaultPointOutput {
   size_t missingUncontrollableMemberCount{0};
 };
 
+std::optional<double> ComputeTotalMeasRaw(
+    const AGCProto::GroupConfig& config,
+    const ControlInput& input,
+    double* totalMeasKwOut = nullptr);
 DefaultPointOutput ComputeDefaultPointOutput(const AGCProto::GroupConfig& config, const ControlInput& input);
 std::optional<ControlOutput> ComputeControlOutput(
     const AGCProto::GroupConfig& config,
