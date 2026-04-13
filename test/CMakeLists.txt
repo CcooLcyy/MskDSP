@@ -584,6 +584,7 @@ add_executable(agcGroupManager_test
   agc_group_manager_test.cc
   ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCGroupManager.cc
   ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCGroupStore.cc
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCDefaultPoints.cc
   ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCGroupValidation.cc
   ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCControl.cc
 )
@@ -607,6 +608,7 @@ mskdsp_add_isolated_test(agcGroupManager_test)
 add_executable(agcGroupStore_test
   agc_group_store_test.cc
   ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCGroupStore.cc
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCDefaultPoints.cc
   ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCGroupValidation.cc
 )
 

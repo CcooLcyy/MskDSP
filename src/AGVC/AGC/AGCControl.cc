@@ -30,7 +30,45 @@ double toRawDelta(const AGCProto::SignalSpec& s, double physicalDelta) {
   const auto scale = effectiveScale(s);
   return physicalDelta / scale;
 }
+
+double effectiveMemberMaxKw(const AGCProto::MemberConfig& member) {
+  if (member.max_kw() != 0.0) {
+    return member.max_kw();
+  }
+  if (member.capacity_kw() > 0.0) {
+    return member.capacity_kw();
+  }
+  return 0.0;
+}
 }  // namespace
+
+DefaultPointOutput ComputeDefaultPointOutput(const AGCProto::GroupConfig& config, const ControlInput& input) {
+  DefaultPointOutput out;
+  const auto memberCount = static_cast<size_t>(config.members_size());
+  for (size_t i = 0; i < memberCount; ++i) {
+    const auto& member = config.members(static_cast<int>(i));
+    if (member.controllable()) {
+      out.theoreticalLowerKw += member.min_kw();
+      out.theoreticalUpperKw += effectiveMemberMaxKw(member);
+      continue;
+    }
+
+    ++out.uncontrollableMemberCount;
+    if (i < input.memberMeasRaw.size() && i < input.hasMemberMeasRaw.size() && input.hasMemberMeasRaw[i]) {
+      const auto measKw = toPhysicalAbs(member.p_meas(), input.memberMeasRaw[i]);
+      out.dynamicLowerKw += measKw;
+      out.dynamicUpperKw += measKw;
+      continue;
+    }
+    ++out.missingUncontrollableMemberCount;
+  }
+
+  out.dynamicLowerKw += out.theoreticalLowerKw;
+  out.dynamicUpperKw += out.theoreticalUpperKw;
+  out.dynamicQuality = (out.missingUncontrollableMemberCount == 0) ? DataCenterProto::QUALITY_GOOD
+                                                                   : DataCenterProto::QUALITY_BAD;
+  return out;
+}
 
 std::optional<ControlOutput> ComputeControlOutput(
     const AGCProto::GroupConfig& config,

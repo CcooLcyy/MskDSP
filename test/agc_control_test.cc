@@ -242,3 +242,45 @@ TEST(AgcControlTest, UncontrollableMemberIsPassiveOutput) {
   ASSERT_EQ(out->memberTargetKw.size(), 2u);
   EXPECT_NEAR(out->memberTargetKw[1], 40.0, 1e-6);
 }
+
+// 验证：默认上下限点按当前控制口径计算，缺测的不可控成员按 0 参与动态上下限并置 BAD 质量。
+TEST(AgcControlTest, DefaultPointOutputUsesZeroFallbackForMissingUncontrollableMember) {
+  auto cfg = MakeBaseConfig();
+  cfg.mutable_members(0)->set_controllable(false);
+  cfg.mutable_members(1)->set_min_kw(10.0);
+  cfg.mutable_members(1)->set_max_kw(80.0);
+
+  AGC::ControlInput input;
+  input.hasMemberMeasRaw = {false, false};
+  input.memberMeasRaw = {0.0, 0.0};
+
+  const auto out = AGC::ComputeDefaultPointOutput(cfg, input);
+  EXPECT_NEAR(out.theoreticalLowerKw, 10.0, 1e-6);
+  EXPECT_NEAR(out.theoreticalUpperKw, 80.0, 1e-6);
+  EXPECT_NEAR(out.dynamicLowerKw, 10.0, 1e-6);
+  EXPECT_NEAR(out.dynamicUpperKw, 80.0, 1e-6);
+  EXPECT_EQ(out.dynamicQuality, DataCenterProto::QUALITY_BAD);
+  EXPECT_EQ(out.uncontrollableMemberCount, 1u);
+  EXPECT_EQ(out.missingUncontrollableMemberCount, 1u);
+}
+
+// 验证：不可控成员实际值就绪后，会抬高动态上下限并恢复 GOOD 质量。
+TEST(AgcControlTest, DefaultPointOutputAddsMeasuredUncontrollablePowerToDynamicLimits) {
+  auto cfg = MakeBaseConfig();
+  cfg.mutable_members(0)->set_controllable(false);
+  cfg.mutable_members(1)->set_min_kw(10.0);
+  cfg.mutable_members(1)->set_max_kw(80.0);
+
+  AGC::ControlInput input;
+  input.hasMemberMeasRaw = {true, false};
+  input.memberMeasRaw = {20.0, 0.0};
+
+  const auto out = AGC::ComputeDefaultPointOutput(cfg, input);
+  EXPECT_NEAR(out.theoreticalLowerKw, 10.0, 1e-6);
+  EXPECT_NEAR(out.theoreticalUpperKw, 80.0, 1e-6);
+  EXPECT_NEAR(out.dynamicLowerKw, 30.0, 1e-6);
+  EXPECT_NEAR(out.dynamicUpperKw, 100.0, 1e-6);
+  EXPECT_EQ(out.dynamicQuality, DataCenterProto::QUALITY_GOOD);
+  EXPECT_EQ(out.uncontrollableMemberCount, 1u);
+  EXPECT_EQ(out.missingUncontrollableMemberCount, 0u);
+}

@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "AGCControl.h"
+#include "AGCDefaultPoints.h"
 #include "AGCGroupValidation.h"
 #include "AGCLibInfo.h"
 #include "Logger.h"
@@ -45,6 +46,15 @@ constexpr double kValueChangeEps = 1e-6;
 bool sameValue(double lhs, double rhs) {
   return std::fabs(lhs - rhs) <= kValueChangeEps;
 }
+
+std::string_view defaultPointTag(AGCProto::DefaultPointKind kind) {
+  for (const auto &point : DefaultPointDefinitions()) {
+    if (point.kind == kind) {
+      return point.tag;
+    }
+  }
+  return {};
+}
 }  // namespace
 
 GroupManager::GroupManager(std::string moduleName, std::filesystem::path groupsPath) :
@@ -79,6 +89,7 @@ grpc::Status GroupManager::fillGroupInfoLocked(const GroupRuntime &g, AGCProto::
   out->set_conn_id(g.connId);
   out->set_state(g.state);
   out->set_last_error(g.lastError);
+  FillDefaultPointInfos(out->mutable_default_points());
   return grpc::Status::OK;
 }
 
@@ -93,8 +104,7 @@ grpc::Status GroupManager::checkStartPreconditionsLocked(const GroupRuntime &g) 
   if (g.connId == 0) {
     return makePreconditionFailed("控制组 conn_id 无效");
   }
-  const auto tags = collectAllTags(g.config);
-  if (tags.empty()) {
+  if (g.subscribeTags.empty()) {
     return makePreconditionFailed("控制组订阅标签为空，当前规则要求控制组配置完整后才启动控制组功能");
   }
   return grpc::Status::OK;
@@ -211,13 +221,19 @@ grpc::Status GroupManager::restoreGroupFromConfig(const AGCProto::GroupConfig &c
     } else {
       LOG_INFO("AGC 恢复控制组时已同步 DataCenter 连接标签注册表: group_name={}, conn_id={}, 标签数={}", config.group_name(), runtime.connId, tagList.size());
     }
-    std::lock_guard<std::mutex> lock(mu_);
-    groupsByName_[config.group_name()] = std::move(runtime);
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      groupsByName_[config.group_name()] = std::move(runtime);
+    }
+    publishDefaultLimitPoints(config.group_name(), "控制组持久化恢复");
     return connTagsStatus;
   }
 
-  std::lock_guard<std::mutex> lock(mu_);
-  groupsByName_[config.group_name()] = std::move(runtime);
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    groupsByName_[config.group_name()] = std::move(runtime);
+  }
+  publishDefaultLimitPoints(config.group_name(), "控制组持久化恢复");
   return grpc::Status::OK;
 }
 
@@ -373,6 +389,7 @@ grpc::Status GroupManager::UpsertGroup(const AGCProto::UpsertGroupRequest &reque
       }
     }
   }
+  publishDefaultLimitPoints(groupName, "控制组配置更新成功");
   (void)tryAutoStartGroup(groupName, "控制组配置更新成功");
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -467,13 +484,24 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
 
         DataCenterProto::PointUpdate update;
         while (reader->Read(&update)) {
-          std::lock_guard<std::mutex> lock(mu_);
-          auto it = groupsByName_.find(groupName);
-          if (it == groupsByName_.end()) {
-            break;
+          bool publishCommandEcho = false;
+          uint32_t commandEchoConnId = 0;
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            auto it = groupsByName_.find(groupName);
+            if (it == groupsByName_.end()) {
+              break;
+            }
+            if (!it->second.cmdTag.empty() && update.dst_tag() == it->second.cmdTag) {
+              publishCommandEcho = true;
+              commandEchoConnId = it->second.connId;
+            }
+            if (handleUpdateLocked(&it->second, update)) {
+              requestControlLocked(groupName, &it->second, "订阅输入点更新", update.dst_tag());
+            }
           }
-          if (handleUpdateLocked(&it->second, update)) {
-            requestControlLocked(groupName, &it->second, "订阅输入点更新", update.dst_tag());
+          if (publishCommandEcho && commandEchoConnId != 0) {
+            publishCommandEchoPoint(commandEchoConnId, update);
           }
         }
 
@@ -629,6 +657,9 @@ bool GroupManager::pointValueToDouble(const DataCenterProto::PointValue &v, doub
 
 std::unordered_set<std::string> GroupManager::collectAllTags(const AGCProto::GroupConfig &config) {
   std::unordered_set<std::string> tags;
+  for (const auto &point : DefaultPointDefinitions()) {
+    tags.emplace(point.tag);
+  }
   if (config.has_p_cmd() && config.p_cmd().has_signal() && !config.p_cmd().signal().tag().empty()) {
     tags.emplace(config.p_cmd().signal().tag());
     if (config.p_cmd().mode() == AGCProto::VALUE_MODE_DELTA && config.p_cmd().delta_base() == AGCProto::DELTA_BASE_BASE_TAG &&
@@ -813,6 +844,71 @@ bool GroupManager::handleUpdateLocked(GroupRuntime *g, const DataCenterProto::Po
   return false;
 }
 
+void GroupManager::publishDefaultLimitPoints(const std::string &groupName, std::string_view trigger) {
+  AGCProto::GroupConfig config;
+  uint32_t connId = 0;
+  ControlInput input;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end()) {
+      return;
+    }
+    config = it->second.config;
+    connId = it->second.connId;
+    input.hasMemberMeasRaw = it->second.hasMemberMeasRaw;
+    input.memberMeasRaw = it->second.memberMeasRaw;
+  }
+  if (connId == 0) {
+    return;
+  }
+
+  const auto defaultOutput = ComputeDefaultPointOutput(config, input);
+  const auto theoreticalLowerTag = defaultPointTag(AGCProto::DEFAULT_POINT_KIND_THEORETICAL_LOWER);
+  const auto theoreticalUpperTag = defaultPointTag(AGCProto::DEFAULT_POINT_KIND_THEORETICAL_UPPER);
+  const auto dynamicLowerTag = defaultPointTag(AGCProto::DEFAULT_POINT_KIND_DYNAMIC_LOWER);
+  const auto dynamicUpperTag = defaultPointTag(AGCProto::DEFAULT_POINT_KIND_DYNAMIC_UPPER);
+  const auto theoreticalQuality = DataCenterProto::QUALITY_GOOD;
+
+  auto status = dataCenter_.PublishDouble(connId, std::string(theoreticalLowerTag), defaultOutput.theoreticalLowerKw, theoreticalQuality, 0);
+  if (!status.ok()) {
+    LOG_ERROR("AGC 发布默认点失败: group_name={}, tag={}, 触发来源={}, 原因={}", groupName, theoreticalLowerTag, trigger, status.error_message());
+  }
+  status = dataCenter_.PublishDouble(connId, std::string(theoreticalUpperTag), defaultOutput.theoreticalUpperKw, theoreticalQuality, 0);
+  if (!status.ok()) {
+    LOG_ERROR("AGC 发布默认点失败: group_name={}, tag={}, 触发来源={}, 原因={}", groupName, theoreticalUpperTag, trigger, status.error_message());
+  }
+  status = dataCenter_.PublishDouble(connId, std::string(dynamicLowerTag), defaultOutput.dynamicLowerKw, defaultOutput.dynamicQuality, 0);
+  if (!status.ok()) {
+    LOG_ERROR("AGC 发布默认点失败: group_name={}, tag={}, 触发来源={}, 原因={}", groupName, dynamicLowerTag, trigger, status.error_message());
+  }
+  status = dataCenter_.PublishDouble(connId, std::string(dynamicUpperTag), defaultOutput.dynamicUpperKw, defaultOutput.dynamicQuality, 0);
+  if (!status.ok()) {
+    LOG_ERROR("AGC 发布默认点失败: group_name={}, tag={}, 触发来源={}, 原因={}", groupName, dynamicUpperTag, trigger, status.error_message());
+  }
+  LOG_DEBUG(
+      "AGC 已发布默认限值点: group_name={}, 触发来源={}, 理论下限={}, 理论上限={}, 当前下限={}, 当前上限={}, 当前质量={}, 不可控成员数={}, 缺测不可控成员数={}",
+      groupName,
+      trigger,
+      defaultOutput.theoreticalLowerKw,
+      defaultOutput.theoreticalUpperKw,
+      defaultOutput.dynamicLowerKw,
+      defaultOutput.dynamicUpperKw,
+      static_cast<int>(defaultOutput.dynamicQuality),
+      defaultOutput.uncontrollableMemberCount,
+      defaultOutput.missingUncontrollableMemberCount);
+}
+
+void GroupManager::publishCommandEchoPoint(uint32_t connId, const DataCenterProto::PointUpdate &update) {
+  const auto commandEchoTag = defaultPointTag(AGCProto::DEFAULT_POINT_KIND_COMMAND_ECHO);
+  auto status = dataCenter_.PublishValue(connId, std::string(commandEchoTag), update.value(), update.quality(), update.ts_ms());
+  if (!status.ok()) {
+    LOG_ERROR("AGC 发布调节返回值失败: conn_id={}, tag={}, 原因={}", connId, commandEchoTag, status.error_message());
+  } else {
+    LOG_DEBUG("AGC 已发布调节返回值: conn_id={}, tag={}, 质量={}, ts_ms={}", connId, commandEchoTag, static_cast<int>(update.quality()), update.ts_ms());
+  }
+}
+
 void GroupManager::controlTick(const std::string &groupName) {
   AGCProto::GroupConfig config;
   uint32_t connId = 0;
@@ -844,6 +940,7 @@ void GroupManager::controlTick(const std::string &groupName) {
   if (connId == 0) {
     return;
   }
+  publishDefaultLimitPoints(groupName, "事件触发控制");
 
   const auto outputOpt = ComputeControlOutput(config, input, weightedStrategy_);
   if (!outputOpt) {

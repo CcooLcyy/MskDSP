@@ -109,6 +109,42 @@ bool WaitForLatestDouble(const FakeDataCenterState &state, uint32_t connId, cons
   return false;
 }
 
+bool WaitForLatestDoubleWithQuality(
+    const FakeDataCenterState &state, uint32_t connId, const char *tag, double expected, DataCenterProto::Quality quality) {
+  for (int i = 0; i < 50; ++i) {
+    DataCenterProto::GetLatestRequest req;
+    req.set_conn_id(connId);
+    req.add_tags(tag);
+
+    DataCenterProto::GetLatestResponse resp;
+    if (state.GetLatest(req, &resp).ok() && resp.updates_size() == 1 && resp.updates(0).value().has_double_value()) {
+      if (std::fabs(resp.updates(0).value().double_value() - expected) <= 1e-6 && resp.updates(0).quality() == quality) {
+        return true;
+      }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return false;
+}
+
+bool WaitForLatestIntWithQualityAndTs(
+    const FakeDataCenterState &state, uint32_t connId, const char *tag, int64_t expected, DataCenterProto::Quality quality, int64_t tsMs) {
+  for (int i = 0; i < 50; ++i) {
+    DataCenterProto::GetLatestRequest req;
+    req.set_conn_id(connId);
+    req.add_tags(tag);
+
+    DataCenterProto::GetLatestResponse resp;
+    if (state.GetLatest(req, &resp).ok() && resp.updates_size() == 1 && resp.updates(0).value().has_int_value()) {
+      if (resp.updates(0).value().int_value() == expected && resp.updates(0).quality() == quality && resp.updates(0).ts_ms() == tsMs) {
+        return true;
+      }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return false;
+}
+
 bool WaitForPublishCount(const FakeDataCenterState &state, uint32_t connId, const char *tag, size_t expected) {
   for (int i = 0; i < 50; ++i) {
     if (state.GetPublishCount(connId, tag) >= expected) {
@@ -148,6 +184,31 @@ TEST(AgcGroupManagerTest, UpsertGroupCreateOnlyReturnsConnIdAndAutoStartsReadyGr
   ASSERT_TRUE(mgr.StopGroup("g-1").ok());
 }
 
+// 验证：UpsertGroup 返回 AGC 自动生成的默认点列表，供上位机直接发现并配置路由。
+TEST(AgcGroupManagerTest, UpsertGroupReturnsDefaultPointInfos) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(MakeGroupReq("g-default-points"), &info).ok());
+  ASSERT_EQ(info.default_points_size(), 5);
+
+  std::unordered_map<std::string, AGCProto::DefaultPointKind> defaultPoints;
+  for (const auto &point : info.default_points()) {
+    defaultPoints.emplace(point.tag(), point.kind());
+  }
+  EXPECT_EQ(defaultPoints["理论可调有功下限"], AGCProto::DEFAULT_POINT_KIND_THEORETICAL_LOWER);
+  EXPECT_EQ(defaultPoints["理论可调有功上限"], AGCProto::DEFAULT_POINT_KIND_THEORETICAL_UPPER);
+  EXPECT_EQ(defaultPoints["当前可调有功下限"], AGCProto::DEFAULT_POINT_KIND_DYNAMIC_LOWER);
+  EXPECT_EQ(defaultPoints["当前可调有功上限"], AGCProto::DEFAULT_POINT_KIND_DYNAMIC_UPPER);
+  EXPECT_EQ(defaultPoints["调节返回值"], AGCProto::DEFAULT_POINT_KIND_COMMAND_ECHO);
+
+  ASSERT_TRUE(mgr.StopGroup("g-default-points").ok());
+}
+
 // 验证：当 DataCenter 已存在相同 (module_name, conn_name) 时，create_only UpsertGroup 返回 ALREADY_EXISTS。
 TEST(AgcGroupManagerTest, UpsertGroupCreateOnlyRejectsWhenDataCenterAlreadyHasKey) {
   FakeDataCenterState state;
@@ -182,6 +243,40 @@ TEST(AgcGroupManagerTest, DeleteGroupCallsDataCenterDeleteAndRemovesLocal) {
   AGCProto::GroupInfo got;
   auto st = mgr.GetGroup("g-del", &got);
   EXPECT_EQ(st.error_code(), grpc::StatusCode::NOT_FOUND);
+}
+
+// 验证：默认限值点会注册到 DataCenter 标签注册表并在不可控缺测时先发布 BAD 质量，量测到来后转为 GOOD。
+TEST(AgcGroupManagerTest, UpsertGroupRegistersAndPublishesDefaultLimitPoints) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  auto req = MakeGroupReq("g-default-limit");
+  req.mutable_config()->mutable_members(0)->set_controllable(false);
+  req.mutable_config()->mutable_members(1)->set_min_kw(10.0);
+  req.mutable_config()->mutable_members(1)->set_max_kw(80.0);
+
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+  ASSERT_NE(info.conn_id(), 0u);
+
+  EXPECT_TRUE(WaitForLatestDoubleWithQuality(
+      state, info.conn_id(), "理论可调有功下限", 10.0, DataCenterProto::QUALITY_GOOD));
+  EXPECT_TRUE(WaitForLatestDoubleWithQuality(
+      state, info.conn_id(), "理论可调有功上限", 80.0, DataCenterProto::QUALITY_GOOD));
+  EXPECT_TRUE(WaitForLatestDoubleWithQuality(
+      state, info.conn_id(), "当前可调有功下限", 10.0, DataCenterProto::QUALITY_BAD));
+  EXPECT_TRUE(WaitForLatestDoubleWithQuality(
+      state, info.conn_id(), "当前可调有功上限", 80.0, DataCenterProto::QUALITY_BAD));
+
+  PublishDoublePoint(&state, info.conn_id(), "INV1_P_MEAS", 20.0);
+  EXPECT_TRUE(WaitForLatestDoubleWithQuality(
+      state, info.conn_id(), "当前可调有功下限", 30.0, DataCenterProto::QUALITY_GOOD));
+  EXPECT_TRUE(WaitForLatestDoubleWithQuality(
+      state, info.conn_id(), "当前可调有功上限", 100.0, DataCenterProto::QUALITY_GOOD));
+
+  ASSERT_TRUE(mgr.StopGroup("g-default-limit").ok());
 }
 
 // 验证：当 DataCenter 删除失败时，DeleteGroup 标记 PENDING_DELETE 且保留本地配置以便重试。
@@ -247,6 +342,11 @@ TEST(AgcGroupManagerTest, UpsertGroupRegistersBaseTagToDataCenterConnTags) {
         EXPECT_TRUE(tags.contains("INV2_P_MEAS"));
         EXPECT_TRUE(tags.contains("INV2_P_SET"));
         EXPECT_TRUE(tags.contains("P_TOTAL"));
+        EXPECT_TRUE(tags.contains("理论可调有功下限"));
+        EXPECT_TRUE(tags.contains("理论可调有功上限"));
+        EXPECT_TRUE(tags.contains("当前可调有功下限"));
+        EXPECT_TRUE(tags.contains("当前可调有功上限"));
+        EXPECT_TRUE(tags.contains("调节返回值"));
         return grpc::Status::OK;
       }));
 
@@ -259,6 +359,48 @@ TEST(AgcGroupManagerTest, UpsertGroupRegistersBaseTagToDataCenterConnTags) {
 
   AGCProto::GroupInfo info;
   ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+}
+
+// 验证：保留给 AGC 默认点的 tag 不能被用户配置点复用。
+TEST(AgcGroupManagerTest, UpsertGroupRejectsReservedDefaultPointTag) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  auto req = MakeGroupReq("g-reserved-tag");
+  req.mutable_config()->mutable_p_cmd()->mutable_signal()->set_tag("理论可调有功上限");
+
+  AGCProto::GroupInfo info;
+  auto st = mgr.UpsertGroup(req, &info);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+// 验证：实时命令输入会将原始值、质量与时间戳原样回显到调节返回值默认点。
+TEST(AgcGroupManagerTest, RealtimeCommandPublishesCommandEchoVerbatim) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  auto req = MakeGroupReq("g-cmd-echo");
+
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+  ASSERT_TRUE(WaitForSubscriptionCount(state, info.conn_id(), 1));
+
+  DataCenterProto::PublishRequest publishReq;
+  publishReq.set_conn_id(info.conn_id());
+  publishReq.set_tag("P_CMD");
+  publishReq.mutable_value()->set_int_value(500);
+  publishReq.set_ts_ms(123456);
+  publishReq.set_quality(DataCenterProto::QUALITY_BAD);
+  ASSERT_TRUE(state.Publish(publishReq).ok());
+
+  EXPECT_TRUE(WaitForLatestIntWithQualityAndTs(
+      state, info.conn_id(), "调节返回值", 500, DataCenterProto::QUALITY_BAD, 123456));
+
+  ASSERT_TRUE(mgr.StopGroup("g-cmd-echo").ok());
 }
 
 // 验证：缺少命令 tag 会返回 INVALID_ARGUMENT。

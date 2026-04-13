@@ -114,20 +114,23 @@ grpc::Status DataCenterClient::UpsertConnTags(uint32_t connId, const std::vector
   return stub->UpsertConnTags(&ctx, req, &resp);
 }
 
-grpc::Status DataCenterClient::PublishDouble(
-    uint32_t connId, const std::string& tag, double value, DataCenterProto::Quality quality, int64_t tsMs) {
+grpc::Status DataCenterClient::PublishValue(
+    uint32_t connId, const std::string& tag, const DataCenterProto::PointValue& value, DataCenterProto::Quality quality, int64_t tsMs) {
   if (connId == 0) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id 不能为空");
   }
   if (tag.empty()) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tag 不能为空");
   }
+  if (value.kind_case() == DataCenterProto::PointValue::KIND_NOT_SET) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "value 不能为空");
+  }
 
   auto stub = getStub();
   DataCenterProto::PublishRequest req;
   req.set_conn_id(connId);
   req.set_tag(tag);
-  req.mutable_value()->set_double_value(value);
+  req.mutable_value()->CopyFrom(value);
   if (tsMs > 0) {
     req.set_ts_ms(tsMs);
   }
@@ -136,6 +139,13 @@ grpc::Status DataCenterClient::PublishDouble(
   grpc::ClientContext ctx;
   DataCenterProto::Empty resp;
   return stub->Publish(&ctx, req, &resp);
+}
+
+grpc::Status DataCenterClient::PublishDouble(
+    uint32_t connId, const std::string& tag, double value, DataCenterProto::Quality quality, int64_t tsMs) {
+  DataCenterProto::PointValue pointValue;
+  pointValue.set_double_value(value);
+  return PublishValue(connId, tag, pointValue, quality, tsMs);
 }
 
 grpc::Status DataCenterClient::GetLatest(

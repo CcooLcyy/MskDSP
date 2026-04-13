@@ -1,12 +1,14 @@
 #pragma once
 
 #include <optional>
+#include <cstddef>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "AGC.pb.h"
 #include "AgvcStrategy.h"
+#include "DataCenter.pb.h"
 
 namespace AGC {
 
@@ -52,6 +54,17 @@ struct ControlOutput {
   std::vector<double> nextLastMemberTargetKw;
 };
 
+struct DefaultPointOutput {
+  double theoreticalLowerKw{0.0};
+  double theoreticalUpperKw{0.0};
+  double dynamicLowerKw{0.0};
+  double dynamicUpperKw{0.0};
+  DataCenterProto::Quality dynamicQuality{DataCenterProto::QUALITY_GOOD};
+  size_t uncontrollableMemberCount{0};
+  size_t missingUncontrollableMemberCount{0};
+};
+
+DefaultPointOutput ComputeDefaultPointOutput(const AGCProto::GroupConfig& config, const ControlInput& input);
 std::optional<ControlOutput> ComputeControlOutput(
     const AGCProto::GroupConfig& config,
     const ControlInput& input,

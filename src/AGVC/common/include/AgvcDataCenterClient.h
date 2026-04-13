@@ -28,6 +28,12 @@ public:
   grpc::Status DeleteConnection(const std::string& connName);
   grpc::Status UpsertConnTags(uint32_t connId, const std::vector<std::string>& tags, bool replace);
 
+  grpc::Status PublishValue(
+      uint32_t connId,
+      const std::string& tag,
+      const DataCenterProto::PointValue& value,
+      DataCenterProto::Quality quality,
+      int64_t tsMs);
   grpc::Status PublishDouble(uint32_t connId, const std::string& tag, double value, DataCenterProto::Quality quality, int64_t tsMs);
 
   grpc::Status GetLatest(uint32_t connId, const std::vector<std::string>& tags, DataCenterProto::GetLatestResponse* out);
