@@ -27,6 +27,10 @@ const std::string &GetSerializedManifest() {
     dependency->set_module_name("DataCenter");
     dependency->set_version_range("=0.0.1");
 
+    auto mqttDependency = manifest.add_dependencies();
+    mqttDependency->set_module_name("MQTTManager");
+    mqttDependency->set_version_range("=0.0.1");
+
     return manifest.SerializeAsString();
   }();
   return kSerialized;
@@ -43,6 +47,7 @@ ModbusRTU::ModbusRTU() :
 ModbusRTU::~ModbusRTU() {}
 void ModbusRTU::start(std::stop_token stopToken) {
   LOG_INFO("ModbusRTU 模块启动");
+  LOG_INFO("ModbusRTU 依赖模块: DataCenter, MQTTManager");
   modbusRTUService_->setModbusRTU(this);
   LOG_INFO("ModbusRTU 服务实例绑定完成");
   grpcServerBuilder(modbusRTUService_);
