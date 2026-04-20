@@ -125,6 +125,23 @@ target_link_libraries(protoFileStore_test PRIVATE
 
 mskdsp_add_isolated_test(protoFileStore_test)
 
+add_executable(calc_group_manager_test
+  calc_group_manager_test.cc
+)
+
+target_include_directories(calc_group_manager_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/Calc/include
+)
+
+target_link_libraries(calc_group_manager_test PRIVATE
+  GTest::gtest_main
+  GTest::gmock
+  dspProto
+  Calc
+)
+
+mskdsp_add_isolated_test(calc_group_manager_test)
+
 add_executable(dataCenterCore_test
   data_center_core_test.cc
   ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCore.cc
