@@ -44,3 +44,6 @@ doc/锦浪逆变器协议/RS485_MODBUS锦浪光伏并网逆变器通信协议.xl
 
 # 测试配置
 testConfig
+
+# 日志数据
+checklog
