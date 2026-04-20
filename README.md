@@ -20,6 +20,7 @@ MskDSP 是一个基于 C++23 的模块化系统：核心由 `ModuleManager` 管�
 - [src/ModbusRTU/](./src/ModbusRTU/)：ModbusRTU 协议相关能力（示例模块，[文档](./src/ModbusRTU/doc/README.md)）
 - [src/AGVC/AGC/](./src/AGVC/AGC/)：AGC 自动功率控制（总设定拆分/派生点计算，通过 DataCenter 路由与上下游联动，[文档](./src/AGVC/AGC/doc/README.md)）
 - [src/AGVC/AVC/](./src/AGVC/AVC/)：AVC 自动电压控制（骨架/预留模块）
+- [src/Calc/](./src/Calc/)：Calc 类型化运算模块（分组化四则/逻辑运算，通过 DataCenter Route 接入已有点，[文档](./src/Calc/doc/README.md)）
 - [src/ConfigPusher/](./src/ConfigPusher/)：配置编排与初始化下发能力（[文档](./src/ConfigPusher/doc/README.md)）
 - [src/MQTTManager/](./src/MQTTManager/)：MQTT 通道管理与协议适配能力
 
