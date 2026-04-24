@@ -68,6 +68,47 @@ ModuleManager 使用模块 manifest 构建依赖图，并自动处理依赖启�
 ## 构建与测试
 依赖通过 CMake + vcpkg manifest 管理（见 `vcpkg.json` / `vcpkg-configuration.json`）。
 
+### 开发容器（推荐）
+推荐使用长期驻留的开发容器 `mskdsp-dev` 承担依赖安装与配置动作，Codex 仍直接在 WSL 仓库路径中读写代码。
+
+```bash
+# 1) 构建开发镜像
+docker build -f .devcontainer/Dockerfile -t mskdsp-dev:ubuntu24.04 .
+
+# 2) 准备卷
+docker volume create mskdsp-vcpkg-root
+docker volume create mskdsp-vcpkg-cache
+docker volume create mskdsp-ccache
+
+# 3) 启动长期驻留容器
+docker run -d --name mskdsp-dev \
+  -w /data/code/mskdsp \
+  -v /home/code/share:/data \
+  -v mskdsp-vcpkg-root:/data/3rdlibs/vcpkg \
+  -v mskdsp-vcpkg-cache:/root/.cache/vcpkg \
+  -v mskdsp-ccache:/root/.cache/ccache \
+  mskdsp-dev:ubuntu24.04
+
+# 4) 进入容器
+docker exec -it mskdsp-dev bash
+```
+
+进入容器后，建议串行执行：
+
+```bash
+cmake --preset x64
+cmake --preset arm64
+```
+
+说明：
+
+- `/data/3rdlibs/vcpkg` 会由容器专用卷接管，不再复用宿主机同路径内容
+- 容器启动时会自动按 `vcpkg-configuration.json` 的 baseline 校验或重建 `vcpkg`
+- 首次初始化后会在容器内构建一个本地修补版 `vcpkg-tool`，规避 WSL/Docker 环境下已复现的 `metrics.cpp` 负耗时崩溃
+- 进入容器 shell 时会自动清理基础镜像继承的全局 `CC/CXX`，避免污染 `arm64` 交叉编译
+- VSCode 默认使用 `Attach to Running Container` 连接 `mskdsp-dev`，不要把 `Reopen in Container` 作为主流程
+- 详细说明见 [doc/开发容器.md](./doc/开发容器.md)
+
 ### 构建
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug \
@@ -164,3 +205,4 @@ cmake --build build-cov --target coverage
 ## 相关文档
 - [模块管理器说明](./src/core/ModuleManager/doc/README.md)
 - [集成测试工具说明](./tools/README.md)
+- [开发容器说明](./doc/开发容器.md)

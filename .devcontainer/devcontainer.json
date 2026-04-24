@@ -1,0 +1,46 @@
+{
+  "name": "mskdsp dev",
+  "build": {
+    "context": "..",
+    "dockerfile": "Dockerfile"
+  },
+  "remoteUser": "root",
+  "containerEnv": {
+    "VCPKG_ROOT": "/opt/vcpkg",
+    "VCPKG_DOWNLOADS": "/root/.cache/vcpkg/downloads",
+    "VCPKG_DEFAULT_BINARY_CACHE": "/root/.cache/vcpkg/archives",
+    "CCACHE_DIR": "/root/.cache/ccache",
+    "CC": "gcc-14",
+    "CXX": "g++-14"
+  },
+  "mounts": [
+    "source=mskdsp-codex-home,target=/root/.codex,type=volume",
+    "source=/home/code/.codex,target=/codex-sync,type=bind,readonly",
+    "source=mskdsp-vcpkg-cache,target=/root/.cache/vcpkg,type=volume",
+    "source=mskdsp-ccache,target=/root/.cache/ccache,type=volume"
+  ],
+  "postCreateCommand": "git config --global --add safe.directory ${containerWorkspaceFolder}",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cmake-tools",
+        "llvm-vs-code-extensions.vscode-clangd",
+        "ms-vscode.cpptools"
+      ],
+      "settings": {
+        "cmake.useCMakePresets": "always",
+        "cmake.defaultConfigurePreset": "x64",
+        "cmake.defaultBuildPreset": "x64",
+        "cmake.configureOnOpen": false,
+        "cmake.preferredGenerators": [
+          "Ninja"
+        ],
+        "clangd.path": "/usr/bin/clangd",
+        "clangd.arguments": [
+          "--background-index"
+        ],
+        "C_Cpp.intelliSenseEngine": "disabled"
+      }
+    }
+  }
+}
