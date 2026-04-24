@@ -438,6 +438,23 @@ target_link_libraries(configPusherApplyAgc_test PRIVATE
 
 mskdsp_add_isolated_test(configPusherApplyAgc_test)
 
+add_executable(configPusherApplyAvc_test
+  config_pusher_apply_avc_test.cc
+)
+
+target_include_directories(configPusherApplyAvc_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/ConfigPusher/include
+)
+
+target_link_libraries(configPusherApplyAvc_test PRIVATE
+  GTest::gtest_main
+  GTest::gmock
+  dspProto
+  ConfigPusher
+)
+
+mskdsp_add_isolated_test(configPusherApplyAvc_test)
+
 add_executable(configPusherApplyDlt645_test
   config_pusher_apply_dlt645_test.cc
 )
@@ -669,6 +686,66 @@ target_link_libraries(agcControl_test PRIVATE
 
 mskdsp_add_isolated_test(agcControl_test)
 
+add_executable(avcGroupManager_test
+  avc_group_manager_test.cc
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AVC/AVCGroupManager.cc
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AVC/AVCGroupStore.cc
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AVC/AVCDefaultPoints.cc
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AVC/AVCGroupValidation.cc
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AVC/AVCControl.cc
+)
+
+target_include_directories(avcGroupManager_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AVC/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+)
+
+target_link_libraries(avcGroupManager_test PRIVATE
+  GTest::gtest_main
+  GTest::gmock
+  agvcCommon
+  dspProto
+  moduleManager
+)
+
+mskdsp_add_isolated_test(avcGroupManager_test)
+
+add_executable(avcGroupStore_test
+  avc_group_store_test.cc
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AVC/AVCGroupStore.cc
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AVC/AVCDefaultPoints.cc
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AVC/AVCGroupValidation.cc
+)
+
+target_include_directories(avcGroupStore_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AVC/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
+)
+
+target_link_libraries(avcGroupStore_test PRIVATE
+  GTest::gtest_main
+  dspProto
+)
+
+mskdsp_add_isolated_test(avcGroupStore_test)
+
+add_executable(avcControl_test
+  avc_control_test.cc
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AVC/AVCControl.cc
+)
+
+target_include_directories(avcControl_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AVC/include
+)
+
+target_link_libraries(avcControl_test PRIVATE
+  GTest::gtest_main
+  agvcCommon
+)
+
+mskdsp_add_isolated_test(avcControl_test)
+
 add_executable(configPusherDataCenter_test
   config_pusher_data_center_test.cc
   ${CMAKE_SOURCE_DIR}/src/ConfigPusher/ConfigPusherDataCenter.cc
@@ -752,11 +829,15 @@ set(MSKDSP_TEST_TARGETS
   agcGroupManager_test
   agcGroupStore_test
   agcControl_test
+  avcGroupManager_test
+  avcGroupStore_test
+  avcControl_test
   configPusherDataCenter_test
   configPusherConfigLoader_test
   configPusherModuleManager_test
   configPusherApplyConfig_test
   configPusherApplyAgc_test
+  configPusherApplyAvc_test
 )
 
 # Allow overriding via -DGCOVR_EXECUTABLE=/path/to/gcovr (cache variable).

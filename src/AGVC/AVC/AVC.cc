@@ -22,6 +22,11 @@ const std::string &GetSerializedManifest() {
     version->set_minor(AVCLibInfo.VERSION_MINOR);
     version->set_patch(AVCLibInfo.VERSION_PATCH);
     version->set_version(AVCLibInfo.VERSION);
+
+    auto depDataCenter = manifest.add_dependencies();
+    depDataCenter->set_module_name("DataCenter");
+    depDataCenter->set_version_range("=0.0.1");
+
     return manifest.SerializeAsString();
   }();
   return kSerialized;
@@ -31,18 +36,35 @@ const std::string &GetSerializedManifest() {
 namespace AVC {
 AVC::AVC() :
   ModuleInterface(),
-  avcService_(std::make_shared<AVCGrpcServiceImpl>()) {
+  avcService_(std::make_shared<AVCGrpcServiceImpl>()),
+  groupManager_(AVCLibInfo.LIB_NAME) {
   initLibInfo(AVCLibInfo);
 }
 AVC::~AVC() {}
 void AVC::start(std::stop_token stopToken) {
   LOG_INFO("AVC 模块启动");
+  LOG_INFO("AVC 依赖模块: DataCenter");
   avcService_->getAVC(this);
   grpcServerBuilder(avcService_);
+  LOG_INFO("AVC 开始在模块启动阶段恢复本地控制组配置");
+  auto restoreStatus = groupManager_.LoadPersistedConfig();
+  if (!restoreStatus.ok()) {
+    LOG_ERROR("AVC 恢复本地控制组配置存在错误: {}", restoreStatus.error_message());
+  }
+  LOG_INFO("AVC 开始在模块启动阶段检查已恢复控制组是否满足自动启动条件");
+  groupManager_.TryAutoStartReadyGroups("模块启动后恢复检查");
   while (!stopToken.stop_requested()) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
   LOG_INFO("AVC 模块停止");
+}
+
+GroupManager &AVC::groupManager() {
+  return groupManager_;
+}
+
+const GroupManager &AVC::groupManager() const {
+  return groupManager_;
 }
 }  // namespace AVC
 

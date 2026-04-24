@@ -11,6 +11,7 @@
 
 #include <grpcpp/grpcpp.h>
 
+#include "AVC.grpc.pb.h"
 #include "ConfigPusher.h"
 #include "DataCenter.grpc.pb.h"
 #include "ModuleManager_mock.grpc.pb.h"
@@ -18,6 +19,7 @@
 namespace {
 using ::testing::_;
 using ::testing::AtLeast;
+using ::testing::InSequence;
 using ::testing::Invoke;
 using ::testing::Return;
 
@@ -153,6 +155,99 @@ private:
   std::vector<DataCenterProto::UpsertRoutesRequest> routeRequests_;
 };
 
+class FakeAvcService final : public AVCProto::AVCService::Service {
+public:
+  void addExistingGroup(const std::string &groupName, AVCProto::GroupState state) {
+    auto *group = groups_.add_groups();
+    group->mutable_config()->set_group_name(groupName);
+    group->set_state(state);
+  }
+
+  grpc::Status ListGroups(grpc::ServerContext *,
+                          const AVCProto::Empty *,
+                          AVCProto::ListGroupsResponse *response) override {
+    if (response == nullptr) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应对象为空");
+    }
+    std::lock_guard<std::mutex> lock(mu_);
+    *response = groups_;
+    return grpc::Status::OK;
+  }
+
+  grpc::Status UpsertGroup(grpc::ServerContext *,
+                           const AVCProto::UpsertGroupRequest *request,
+                           AVCProto::GroupInfo *response) override {
+    if (request == nullptr || response == nullptr) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "AVC 控制组配置请求为空");
+    }
+    std::lock_guard<std::mutex> lock(mu_);
+    upsertRequests_.push_back(*request);
+    response->Clear();
+    *response->mutable_config() = request->config();
+    response->set_conn_id(300 + static_cast<uint32_t>(upsertRequests_.size()));
+    response->set_state(AVCProto::GROUP_STATE_STOPPED);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status DeleteGroup(grpc::ServerContext *,
+                           const AVCProto::DeleteGroupRequest *request,
+                           AVCProto::Empty *) override {
+    if (request == nullptr) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "AVC 删除请求为空");
+    }
+    std::lock_guard<std::mutex> lock(mu_);
+    deleteRequests_.push_back(*request);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status StopGroup(grpc::ServerContext *,
+                         const AVCProto::StopGroupRequest *request,
+                         AVCProto::Empty *) override {
+    if (request == nullptr) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "AVC 停止请求为空");
+    }
+    std::lock_guard<std::mutex> lock(mu_);
+    stopRequests_.push_back(*request);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status StartGroup(grpc::ServerContext *,
+                          const AVCProto::StartGroupRequest *,
+                          AVCProto::Empty *) override {
+    std::lock_guard<std::mutex> lock(mu_);
+    ++startGroupCalls_;
+    return grpc::Status::OK;
+  }
+
+  std::vector<AVCProto::UpsertGroupRequest> upsertRequests() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return upsertRequests_;
+  }
+
+  std::vector<AVCProto::DeleteGroupRequest> deleteRequests() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return deleteRequests_;
+  }
+
+  std::vector<AVCProto::StopGroupRequest> stopRequests() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return stopRequests_;
+  }
+
+  size_t startGroupCalls() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return startGroupCalls_;
+  }
+
+private:
+  mutable std::mutex mu_;
+  AVCProto::ListGroupsResponse groups_;
+  std::vector<AVCProto::UpsertGroupRequest> upsertRequests_;
+  std::vector<AVCProto::DeleteGroupRequest> deleteRequests_;
+  std::vector<AVCProto::StopGroupRequest> stopRequests_;
+  size_t startGroupCalls_ = 0;
+};
+
 }  // 命名空间结束
 
 // 验证：无配置文件时直接返回，不触发模块管理请求。
@@ -180,6 +275,7 @@ TEST(ConfigPusherApplyConfigTest, PersistentTraceWithoutJsonStillReturnsEarly) {
   WriteFile(workDir.path() / "conf" / "ModbusRTU" / "links.pb", "trace");
   WriteFile(workDir.path() / "conf" / "DLT645" / "links.pb", "trace");
   WriteFile(workDir.path() / "conf" / "AGC" / "groups.pb", "trace");
+  WriteFile(workDir.path() / "conf" / "AVC" / "groups.pb", "trace");
 
   auto stub = std::make_shared<ModuleManagerProto::MockModuleManageStub>();
   EXPECT_CALL(*stub, GetModuleInfo(_, _, _)).Times(0);
@@ -471,4 +567,140 @@ TEST(ConfigPusherApplyConfigTest, EmptyDataCenterJsonStillAppliesAsTargetState) 
   EXPECT_EQ(routeRequests[0].routes_size(), 0);
 
   server->Shutdown();
+}
+
+// 验证：存在 AVC jsonc 时，ConfigPusher 会启动 DataCenter 与 AVC，并按目标态收敛删除旧组、停止运行中的同名组后下发配置。
+TEST(ConfigPusherApplyConfigTest, AppliesAvcJsoncAndStartsDataCenterAndAvcModules) {
+  ScopedTempDir workDir;
+  ScopedCwd cwd(workDir.path());
+
+  const auto configDir = workDir.path() / "configPusher";
+  WriteFile(configDir / "avc.jsonc", R"json(
+{
+  "avc": {
+    "groups": [
+      {
+        "upsert": {
+          "create_only": false,
+          "config": {
+            "group_name": "avc-1",
+            "voltage_meas": { "tag": "BUS_V_MEAS", "unit": "V" },
+            "voltage_cmd": { "tag": "BUS_V_CMD", "unit": "V" },
+            "voltage_control": {
+              "kp": 2.0,
+              "deadband": 0.1
+            },
+            "strategy": {
+              "weighted": {}
+            },
+            "members": [
+              {
+                "member_name": "svg-1",
+                "controllable": true,
+                "weight": 1.0,
+                "q_min_kvar": -150,
+                "q_max_kvar": 150,
+                "q_meas": { "tag": "SVG1_Q_MEAS", "unit": "kVar" },
+                "q_set": {
+                  "signal": { "tag": "SVG1_Q_SET", "unit": "kVar" },
+                  "mode": "VALUE_MODE_ABSOLUTE"
+                }
+              }
+            ]
+          }
+        },
+        "start": true
+      }
+    ]
+  }
+}
+)json");
+
+  WriteFile(workDir.path() / "conf" / "dataCenter" / "connections.pb", "trace");
+  WriteFile(workDir.path() / "conf" / "AVC" / "groups.pb", "trace");
+
+  FakeAvcService avcService;
+  avcService.addExistingGroup("avc-legacy", AVCProto::GROUP_STATE_STOPPED);
+  avcService.addExistingGroup("avc-1", AVCProto::GROUP_STATE_RUNNING);
+
+  grpc::ServerBuilder builder;
+  int avcPort = 0;
+  builder.RegisterService(&avcService);
+  builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &avcPort);
+  auto avcServer = builder.BuildAndStart();
+  ASSERT_NE(avcServer, nullptr);
+  ASSERT_GT(avcPort, 0);
+  const auto avcAddr = std::string("127.0.0.1:") + std::to_string(avcPort);
+
+  auto stub = std::make_shared<ModuleManagerProto::MockModuleManageStub>();
+  EXPECT_CALL(*stub, GetModuleInfo(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext *, const ModuleManagerProto::Empty &, ModuleManagerProto::ModuleInfos *resp) {
+        resp->Clear();
+        *resp->add_module_info() = MakeModuleInfo("DataCenter");
+        *resp->add_module_info() = MakeModuleInfo("AVC");
+        return grpc::Status::OK;
+      }));
+
+  size_t runningInfoCalls = 0;
+  EXPECT_CALL(*stub, GetRunningModuleInfo(_, _, _))
+      .Times(AtLeast(3))
+      .WillRepeatedly(Invoke([&](grpc::ClientContext *, const ModuleManagerProto::Empty &, ModuleManagerProto::ModuleRunningInfos *resp) {
+        resp->Clear();
+        const size_t currentCall = runningInfoCalls++;
+        if (currentCall >= 1) {
+          auto *dataCenter = resp->add_module_running_info();
+          dataCenter->set_module_name("DataCenter");
+          dataCenter->set_inner_grpc_server("127.0.0.1:19001");
+        }
+        if (currentCall >= 2) {
+          auto *avc = resp->add_module_running_info();
+          avc->set_module_name("AVC");
+          avc->set_inner_grpc_server(avcAddr);
+        }
+        return grpc::Status::OK;
+      }));
+
+  {
+    InSequence seq;
+    EXPECT_CALL(*stub, StartModule(_, _, _))
+        .WillOnce(Invoke([](grpc::ClientContext *,
+                            const ModuleManagerProto::ModuleInfo &info,
+                            ModuleManagerProto::Empty *) {
+          EXPECT_EQ(info.module_name(), "DataCenter");
+          return grpc::Status::OK;
+        }));
+    EXPECT_CALL(*stub, StartModule(_, _, _))
+        .WillOnce(Invoke([](grpc::ClientContext *,
+                            const ModuleManagerProto::ModuleInfo &info,
+                            ModuleManagerProto::Empty *) {
+          EXPECT_EQ(info.module_name(), "AVC");
+          return grpc::Status::OK;
+        }));
+  }
+
+  ConfigPusherClass pusher;
+  pusher.setModuleManagerStub(stub);
+  pusher.setConfigDirForTest(configDir);
+
+  ConfigPusherTestPeer::ApplyConfig(pusher);
+
+  const auto deleteRequests = avcService.deleteRequests();
+  ASSERT_EQ(deleteRequests.size(), 1u);
+  EXPECT_EQ(deleteRequests[0].group_name(), "avc-legacy");
+
+  const auto stopRequests = avcService.stopRequests();
+  ASSERT_EQ(stopRequests.size(), 1u);
+  EXPECT_EQ(stopRequests[0].group_name(), "avc-1");
+
+  const auto upsertRequests = avcService.upsertRequests();
+  ASSERT_EQ(upsertRequests.size(), 1u);
+  EXPECT_EQ(upsertRequests[0].config().group_name(), "avc-1");
+  EXPECT_TRUE(upsertRequests[0].config().has_voltage_meas());
+  EXPECT_TRUE(upsertRequests[0].config().has_voltage_cmd());
+  ASSERT_EQ(upsertRequests[0].config().members_size(), 1);
+  EXPECT_EQ(upsertRequests[0].config().members(0).q_set().mode(), AVCProto::VALUE_MODE_ABSOLUTE);
+
+  EXPECT_EQ(avcService.startGroupCalls(), 0u);
+
+  avcServer->Shutdown();
 }

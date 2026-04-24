@@ -75,6 +75,27 @@ grpc::Status DataCenterClient::GetOrCreateConnection(const std::string& connName
   return stub->GetOrCreateConnection(&ctx, req, out);
 }
 
+grpc::Status DataCenterClient::RenameConnection(
+    const std::string& oldConnName, const std::string& newConnName, DataCenterProto::ConnectionInfo* out) {
+  if (out == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
+  }
+  if (oldConnName.empty() || newConnName.empty()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "old_conn_name/new_conn_name 不能为空");
+  }
+
+  auto stub = getStub();
+  DataCenterProto::RenameConnectionRequest req;
+  req.mutable_old_key()->set_module_name(moduleName_);
+  req.mutable_old_key()->set_conn_name(oldConnName);
+  req.mutable_new_key()->set_module_name(moduleName_);
+  req.mutable_new_key()->set_conn_name(newConnName);
+
+  grpc::ClientContext ctx;
+  out->Clear();
+  return stub->RenameConnection(&ctx, req, out);
+}
+
 grpc::Status DataCenterClient::DeleteConnection(const std::string& connName) {
   if (connName.empty()) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_name 不能为空");

@@ -17,8 +17,10 @@
 #include <string>
 
 #include "AGC.grpc.pb.h"
+#include "AVC.grpc.pb.h"
 #include "ConfigPusher.pb.h"
 #include "ConfigPusherApplyAgc.h"
+#include "ConfigPusherApplyAvc.h"
 #include "ConfigPusherApplyDlt645.h"
 #include "ConfigPusherApplyIec104.h"
 #include "ConfigPusherApplyModbusRtu.h"
@@ -60,6 +62,7 @@ constexpr const char *kModbusRtuConfigPath = "./conf/configPusher/modbus_rtu.jso
 constexpr const char *kDlt645ConfigPath = "./conf/configPusher/DLT645.jsonc";
 constexpr const char *kDataCenterConfigPath = "./conf/configPusher/DataCenter.jsonc";
 constexpr const char *kAgcConfigPath = "./conf/configPusher/agc.jsonc";
+constexpr const char *kAvcConfigPath = "./conf/configPusher/avc.jsonc";
 constexpr const char *kModuleManagerAddress = "127.0.0.1:17000";
 constexpr const char *kDataCenterModuleName = "DataCenter";
 constexpr const char *kIec104ModuleName = "IEC104";
@@ -67,6 +70,7 @@ constexpr const char *kModbusRtuModuleName = "ModbusRTU";
 constexpr const char *kDlt645ModuleName = "DLT645";
 constexpr const char *kMqttManagerModuleName = "MQTTManager";
 constexpr const char *kAgcModuleName = "AGC";
+constexpr const char *kAvcModuleName = "AVC";
 constexpr auto kModuleStartTimeout = std::chrono::seconds(5);
 
 std::optional<std::filesystem::path> ResolveConfigPusherDir() {
@@ -182,16 +186,18 @@ void ConfigPusher::applyConfig() {
   auto dlt645Config = LoadConfigFile(ResolveConfigPath(configDir, kDlt645ConfigPath));
   auto dataCenterConfig = LoadDataCenterConfigFile(ResolveConfigPath(configDir, kDataCenterConfigPath));
   auto agcConfig = LoadConfigFile(ResolveConfigPath(configDir, kAgcConfigPath));
+  auto avcConfig = LoadConfigFile(ResolveConfigPath(configDir, kAvcConfigPath));
 
   const bool hasIec104 = iec104Config && iec104Config->has_iec104();
   const bool hasModbus = modbusConfig && modbusConfig->has_modbus_rtu();
   const bool hasModbusMqtt = modbusConfig && modbusNeedsMqtt(*modbusConfig);
   const bool hasDlt645 = dlt645Config && dlt645Config->has_dlt645();
   const bool hasAgc = agcConfig && agcConfig->has_agc();
+  const bool hasAvc = avcConfig && avcConfig->has_avc();
   const bool hasDataCenter = dataCenterConfig.has_value();
-  const bool needsDataCenter = hasIec104 || hasModbus || hasDlt645 || hasAgc || hasDataCenter;
-  if (!hasIec104 && !hasModbus && !hasDlt645 && !hasAgc && !hasDataCenter) {
-    LOG_INFO("配置中未包含 IEC104/ModbusRTU/DLT645/AGC/DataCenter 配置");
+  const bool needsDataCenter = hasIec104 || hasModbus || hasDlt645 || hasAgc || hasAvc || hasDataCenter;
+  if (!hasIec104 && !hasModbus && !hasDlt645 && !hasAgc && !hasAvc && !hasDataCenter) {
+    LOG_INFO("配置中未包含 IEC104/ModbusRTU/DLT645/AGC/AVC/DataCenter 配置");
     return;
   }
   LOG_INFO("ConfigPusher 配置解析完成，开始准备下发配置");
@@ -253,6 +259,14 @@ void ConfigPusher::applyConfig() {
     agcInfo = findModuleInfo(moduleInfos, kAgcModuleName);
     if (!agcInfo) {
       LOG_ERROR("未找到模块: {}", kAgcModuleName);
+      return;
+    }
+  }
+  std::optional<ModuleManagerProto::ModuleInfo> avcInfo;
+  if (hasAvc) {
+    avcInfo = findModuleInfo(moduleInfos, kAvcModuleName);
+    if (!avcInfo) {
+      LOG_ERROR("未找到模块: {}", kAvcModuleName);
       return;
     }
   }
@@ -380,6 +394,26 @@ void ConfigPusher::applyConfig() {
     }
   }
 
+  std::optional<ModuleManagerProto::ModuleRunningInfo> runningAvc;
+  if (hasAvc) {
+    runningAvc = findRunningInfo(running, kAvcModuleName);
+    if (!runningAvc) {
+      LOG_INFO("AVC 未运行，开始启动");
+      if (!startModule(moduleStub.get(), *avcInfo)) {
+        LOG_ERROR("启动模块 {} 失败", kAvcModuleName);
+        return;
+      }
+      runningAvc = waitForModule(moduleStub.get(), kAvcModuleName, kModuleStartTimeout);
+      if (!runningAvc) {
+        LOG_ERROR("等待 AVC 启动超时");
+        return;
+      }
+      LOG_INFO("AVC 已启动");
+    } else {
+      LOG_INFO("AVC 已在运行");
+    }
+  }
+
   if (hasIec104 && runningIec104) {
     auto iecChannel = grpc::CreateChannel(runningIec104->inner_grpc_server(), grpc::InsecureChannelCredentials());
     auto iecStub = IEC104Proto::IEC104Service::NewStub(iecChannel);
@@ -417,6 +451,16 @@ void ConfigPusher::applyConfig() {
       LOG_ERROR("AGC 配置下发存在错误");
     } else {
       LOG_INFO("AGC 配置下发完成");
+    }
+  }
+
+  if (hasAvc && runningAvc) {
+    auto avcChannel = grpc::CreateChannel(runningAvc->inner_grpc_server(), grpc::InsecureChannelCredentials());
+    auto avcStub = AVCProto::AVCService::NewStub(avcChannel);
+    if (!applyAvcConfig(avcConfig->avc(), avcStub.get())) {
+      LOG_ERROR("AVC 配置下发存在错误");
+    } else {
+      LOG_INFO("AVC 配置下发完成");
     }
   }
 

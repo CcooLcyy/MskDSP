@@ -1,21 +1,22 @@
 # ConfigPusher 模块
 
 ## 简介
-ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRTU/DLT645/AGC，并按配置调用对应 gRPC 接口完成 IEC104/ModbusRTU/DLT645 连接与点表下发、AGC 控制组下发，以及 DataCenter 连接标签注册表/路由下发。链路或控制组的模块内功能是否进入运行态，由各模块在配置达到可运行条件后自动判定。
+ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRTU/DLT645/AGC/AVC，并按配置调用对应 gRPC 接口完成 IEC104/ModbusRTU/DLT645 连接与点表下发、AGC/AVC 控制组下发，以及 DataCenter 连接标签注册表/路由下发。链路或控制组的模块内功能是否进入运行态，由各模块在配置达到可运行条件后自动判定。
 
 在 `CONFIG_PUSHER` 模式下，ConfigPusher 将 `jsonc` 视为当前进程的目标态与最终真相源，而不是增量补丁：若旧 `pb` 中存在 `jsonc` 未声明的链路、控制组、点表、连接标签注册表或路由，ConfigPusher 会在本次编排时将其收敛删除或覆盖，避免旧持久化内容继续生效。
 
 ConfigPusher 更适合作为初始化配置导入与批量编排执行器，不作为上位机日常在线操作的统一入口。
 
 ## 能力清单
-- 自动通过 ModuleManager 启动 DataCenter 与 IEC104/ModbusRTU/DLT645/AGC
+- 自动通过 ModuleManager 启动 DataCenter 与 IEC104/ModbusRTU/DLT645/AGC/AVC
 - 解析 JSONC（支持 `//` 与 `/* */` 注释）
 - 下发 IEC104 配置：UpsertLink / UpsertPointTable
 - 下发 ModbusRTU 配置：UpdateConfig / UpsertLink / UpsertPointTable
 - 下发 DLT645 配置：UpdateConfig / UpsertLink / UpsertPointTable
 - 下发 AGC 配置：UpsertGroup
+- 下发 AVC 配置：UpsertGroup
 - 下发 DataCenter 配置：UpsertConnTags / UpsertRoutes（仅对已存在连接生效）
-- 下发流程记录请求/响应报文日志（ModuleManager/IEC104/ModbusRTU/DLT645/AGC/DataCenter）
+- 下发流程记录请求/响应报文日志（ModuleManager/IEC104/ModbusRTU/DLT645/AGC/AVC/DataCenter）
 - 失败记录日志（当前不做重试）
 - 在 `CONFIG_PUSHER` 模式下按 `jsonc` 目标态收敛：删除 `jsonc` 未声明的旧链路/控制组，并覆盖点表/连接标签注册表/路由
 - 对 `start` 字段仅保留兼容日志，不再额外调用 `StartLink/StartGroup`
@@ -58,6 +59,7 @@ README 这里只保留模块说明、启动方式、配置入口与基础语义�
   - `./conf/configPusher/DataCenter.jsonc`
   - `./conf/configPusher/DLT645.jsonc`
   - `./conf/configPusher/agc.jsonc`
+  - `./conf/configPusher/avc.jsonc`
   - `./conf/configPusher/iec104.jsonc`
   - `./conf/configPusher/modbus_rtu.jsonc`
 - 使用 Protobuf JSON 映射：枚举需写全名（例如 `ROLE_SERVER`、`POINT_TYPE_FLOAT`、`FUNCTION_READ_COILS`）
@@ -78,6 +80,9 @@ README 这里只保留模块说明、启动方式、配置入口与基础语义�
 - AGC 控制组配置已不再包含 `loop`、`kp`、`deadband_kw`、`max_step_kw` 等旧闭环参数；ConfigPusher 只接受当前 `GroupConfig` 结构
 - AGC 会在 `p_cmd`、成员量测或 `base_tag` 等相关输入点变化时，直接按 `p_cmd` 计算出的目标总功率进行成员分配；成员上下限、不可控成员扣减、`ABSOLUTE/DELTA` 与 `DELTA_BASE_LAST_TARGET` 等语义保持不变
 - 若 JSONC 里仍保留旧 `loop` 字段，ConfigPusher 会在解析阶段直接报错，避免继续向 AGC 下发过期配置
+- AVC 配置使用 `avc.groups[].upsert` 下发控制组；`avc.groups[].start` 为兼容保留字段，当前仅记录日志，不再额外调用 `StartGroup`
+- AVC 的 `jsonc` 改名语义按“删除旧组 + 创建新组”处理；ConfigPusher 不提供显式 `RenameGroup` 任务
+- AVC 支持 `voltage_cmd` 或 `q_total_cmd` 两类主命令输入；ConfigPusher 只负责按 `jsonc` 收敛下发，控制组是否自动进入运行态由 AVC 模块依据当前配置判定
 - DataCenter 配置要求连接已存在（由模块或上位机创建）；若 `point_tables/routes` 引用连接不存在，则该次 DataCenter 配置不下发。注意：这里的 `point_tables` 配置项当前仍沿用历史字段名，实际对应 DataCenter 的连接标签注册表 `ConnTags`。
 - 在 `CONFIG_PUSHER` 严格目标态语义下，`point_tables` 视为 ConnTags 的完整目标集合；路由中涉及的连接也应在 `point_tables` 中显式声明所需 tag，否则旧标签会被清空，路由校验也可能失败。
 - 对 ConfigPusher 而言，`jsonc` 表达的是最终目标态：即使底层 gRPC 结构复用了 `replace` 字段，ConfigPusher 也会确保最终生效结果不保留 `jsonc` 未声明的旧条目
@@ -88,11 +93,12 @@ README 这里只保留模块说明、启动方式、配置入口与基础语义�
 - ModbusRTU 链路固定按主站方式运行
 - 当 DLT645 或 ModbusRTU 需要 MQTT 时，ConfigPusher 会按需启动 `MQTTManager`
 - DLT645 配置会启动 DLT645 与 MQTTManager，并先下发 MQTT 全局参数
-- `iec104.links[].start`、`modbus_rtu.links[].start`、`dlt645.links[].start` 与 `agc.groups[].start` 当前均为兼容保留字段：ConfigPusher 仅输出兼容日志，模块会在配置达到可运行条件后自动启动模块内功能
+- `iec104.links[].start`、`modbus_rtu.links[].start`、`dlt645.links[].start`、`agc.groups[].start` 与 `avc.groups[].start` 当前均为兼容保留字段：ConfigPusher 仅输出兼容日志，模块会在配置达到可运行条件后自动启动模块内功能
 
 ### 设计与验收要点
 - 若旧 `pb` 中存在两条 DLT645/IEC104/ModbusRTU 链路，而本次 `jsonc` 只声明一条，则本次下发完成后最终有效链路应仅剩 `jsonc` 声明的那一条。
 - 若旧 `pb` 中存在 `jsonc` 未声明的 AGC 控制组，则该旧控制组不应继续保留为有效配置，也不应继续运行控制组功能。
+- 若旧 `pb` 中存在 `jsonc` 未声明的 AVC 控制组，则该旧控制组不应继续保留为有效配置，也不应继续运行控制组功能。
 - 若同名链路/控制组仍被 `jsonc` 保留，但其点表、标签或路由内容发生变化，则最终以 `jsonc` 内容为准，旧条目不应残留。
 
 涉及上位机页面结构、模板建模、交互校验与导入流程的统一说明，见 `doc/上位机设计指导.md`。本节以下内容仅保留 ConfigPusher 的字段语义、展开规则与校验约束。

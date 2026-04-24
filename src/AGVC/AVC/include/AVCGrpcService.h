@@ -12,9 +12,16 @@ namespace AVC {
 class AVCGrpcServiceImpl : public AVCProto::AVCService::Service {
 public:
   void getAVC(AVC* module);
-  grpc::Status Ping(grpc::ServerContext* context, const AVCProto::Empty*, AVCProto::Empty*) override;
+
+  grpc::Status UpsertGroup(grpc::ServerContext* context, const AVCProto::UpsertGroupRequest* request, AVCProto::GroupInfo* response) override;
+  grpc::Status RenameGroup(grpc::ServerContext* context, const AVCProto::RenameGroupRequest* request, AVCProto::GroupInfo* response) override;
+  grpc::Status GetGroup(grpc::ServerContext* context, const AVCProto::GetGroupRequest* request, AVCProto::GroupInfo* response) override;
+  grpc::Status ListGroups(grpc::ServerContext* context, const AVCProto::Empty* request, AVCProto::ListGroupsResponse* response) override;
+  grpc::Status DeleteGroup(grpc::ServerContext* context, const AVCProto::DeleteGroupRequest* request, AVCProto::Empty* response) override;
+  grpc::Status StartGroup(grpc::ServerContext* context, const AVCProto::StartGroupRequest* request, AVCProto::Empty* response) override;
+  grpc::Status StopGroup(grpc::ServerContext* context, const AVCProto::StopGroupRequest* request, AVCProto::Empty* response) override;
 
 private:
-  AVC* module_;
+  AVC* module_{nullptr};
 };
 }  // namespace AVC

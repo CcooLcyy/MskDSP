@@ -6,6 +6,7 @@
 #include <string>
 
 #include "AGC.pb.h"
+#include "AVC.pb.h"
 #include "ConfigPusherConfigLoader.h"
 #include "Logger.h"
 #include "ModbusRTU.pb.h"
@@ -226,6 +227,79 @@ TEST(ConfigPusherConfigLoaderTest, RejectAgcDeprecatedLoopField) {
 
   auto loaded = ConfigPusher::LoadConfigFile(path);
   EXPECT_FALSE(loaded.has_value());
+}
+
+// 验证：加载 AVC 配置时可解析控制组任务与 UpsertGroup 字段。
+TEST(ConfigPusherConfigLoaderTest, LoadAvcConfigFile) {
+  InitLoggerOnce();
+  ScopedTempDir dir;
+  const auto path = dir.path() / "avc.jsonc";
+  const std::string content = R"json(
+{
+  "avc": {
+    "groups": [
+      {
+        "upsert": {
+          "create_only": false,
+          "config": {
+            "group_name": "avc-1",
+            "voltage_meas": { "tag": "BUS_V_MEAS", "unit": "V" },
+            "voltage_cmd": { "tag": "BUS_V_CMD", "unit": "V" },
+            "voltage_control": {
+              "kp": 1.5,
+              "deadband": 0.2
+            },
+            "strategy": {
+              "weighted": {}
+            },
+            "members": [
+              {
+                "member_name": "svg-1",
+                "controllable": true,
+                "weight": 1.2,
+                "q_min_kvar": -200,
+                "q_max_kvar": 200,
+                "q_meas": { "tag": "SVG1_Q_MEAS", "unit": "kVar" },
+                "q_set": {
+                  "signal": { "tag": "SVG1_Q_SET", "unit": "kVar" },
+                  "mode": "VALUE_MODE_ABSOLUTE"
+                }
+              }
+            ]
+          }
+        },
+        "start": true
+      }
+    ]
+  }
+}
+)json";
+  WriteFile(path, content);
+
+  auto loaded = ConfigPusher::LoadConfigFile(path);
+  ASSERT_TRUE(loaded.has_value());
+  ASSERT_TRUE(loaded->has_avc());
+  ASSERT_EQ(loaded->avc().groups_size(), 1);
+  const auto &task = loaded->avc().groups(0);
+  ASSERT_TRUE(task.has_upsert());
+  EXPECT_FALSE(task.upsert().create_only());
+  ASSERT_TRUE(task.upsert().has_config());
+  EXPECT_EQ(task.upsert().config().group_name(), "avc-1");
+  ASSERT_TRUE(task.upsert().config().has_voltage_meas());
+  EXPECT_EQ(task.upsert().config().voltage_meas().tag(), "BUS_V_MEAS");
+  ASSERT_TRUE(task.upsert().config().has_voltage_cmd());
+  EXPECT_EQ(task.upsert().config().voltage_cmd().tag(), "BUS_V_CMD");
+  ASSERT_TRUE(task.upsert().config().has_voltage_control());
+  EXPECT_DOUBLE_EQ(task.upsert().config().voltage_control().kp(), 1.5);
+  EXPECT_DOUBLE_EQ(task.upsert().config().voltage_control().deadband(), 0.2);
+  ASSERT_TRUE(task.upsert().config().has_strategy());
+  EXPECT_TRUE(task.upsert().config().strategy().has_weighted());
+  ASSERT_EQ(task.upsert().config().members_size(), 1);
+  const auto &member = task.upsert().config().members(0);
+  EXPECT_EQ(member.member_name(), "svg-1");
+  EXPECT_DOUBLE_EQ(member.weight(), 1.2);
+  EXPECT_EQ(member.q_set().mode(), AVCProto::VALUE_MODE_ABSOLUTE);
+  EXPECT_TRUE(task.start());
 }
 
 // 验证：加载 DLT645 配置时支持解析 device_nos 批量设备序号字段。
