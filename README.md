@@ -206,3 +206,4 @@ cmake --build build-cov --target coverage
 - [模块管理器说明](./src/core/ModuleManager/doc/README.md)
 - [集成测试工具说明](./tools/README.md)
 - [开发容器说明](./doc/开发容器.md)
+- [工作机连接与 APP 更新](./doc/工作机连接与APP更新.md)
