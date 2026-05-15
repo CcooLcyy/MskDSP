@@ -5,17 +5,31 @@
     "dockerfile": "Dockerfile"
   },
   "remoteUser": "root",
+  "runArgs": [
+    "--network",
+    "host"
+  ],
+  "workspaceMount": "source=/home/code/share,target=/data,type=bind",
+  "workspaceFolder": "/data/code/mskdsp",
   "containerEnv": {
-    "VCPKG_ROOT": "/opt/vcpkg",
+    "VCPKG_ROOT": "/data/3rdlibs/vcpkg",
     "VCPKG_DOWNLOADS": "/root/.cache/vcpkg/downloads",
     "VCPKG_DEFAULT_BINARY_CACHE": "/root/.cache/vcpkg/archives",
     "CCACHE_DIR": "/root/.cache/ccache",
     "CC": "gcc-14",
-    "CXX": "g++-14"
+    "CXX": "g++-14",
+    "HTTP_PROXY": "${localEnv:HTTP_PROXY}",
+    "HTTPS_PROXY": "${localEnv:HTTPS_PROXY}",
+    "NO_PROXY": "${localEnv:NO_PROXY}",
+    "http_proxy": "${localEnv:http_proxy}",
+    "https_proxy": "${localEnv:https_proxy}",
+    "no_proxy": "${localEnv:no_proxy}"
   },
   "mounts": [
+    "source=/home/code/share,target=/home/code/share,type=bind,readonly",
     "source=mskdsp-codex-home,target=/root/.codex,type=volume",
     "source=/home/code/.codex,target=/codex-sync,type=bind,readonly",
+    "source=mskdsp-vcpkg-root,target=/data/3rdlibs/vcpkg,type=volume",
     "source=mskdsp-vcpkg-cache,target=/root/.cache/vcpkg,type=volume",
     "source=mskdsp-ccache,target=/root/.cache/ccache,type=volume"
   ],
@@ -23,6 +37,7 @@
   "customizations": {
     "vscode": {
       "extensions": [
+        "openai.chatgpt@prerelease",
         "ms-vscode.cmake-tools",
         "llvm-vs-code-extensions.vscode-clangd",
         "ms-vscode.cpptools"

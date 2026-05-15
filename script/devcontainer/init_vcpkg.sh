@@ -69,19 +69,7 @@ link_codex_sync_entry() {
 }
 
 sync_codex_auth() {
-  local source_path="${CODEX_SYNC_ROOT}/auth.json"
-  local target_path="${CODEX_HOME}/auth.json"
-
-  [ -f "${source_path}" ] || return 0
-
-  mkdir -p "${CODEX_HOME}"
-  if [ -L "${target_path}" ]; then
-    rm -f "${target_path}"
-  fi
-
-  if [ ! -f "${target_path}" ] || ! cmp -s "${source_path}" "${target_path}"; then
-    install -m 600 "${source_path}" "${target_path}"
-  fi
+  link_codex_sync_entry "auth.json"
 }
 
 prepare_codex_home() {
@@ -95,7 +83,15 @@ prepare_codex_home() {
   log "已准备 Codex 配置同步：${CODEX_SYNC_ROOT} -> ${CODEX_HOME}"
 }
 
+ensure_safe_directory() {
+  local repo_path="$1"
+  if ! git config --global --get-all safe.directory | grep -Fxq "${repo_path}"; then
+    git config --global --add safe.directory "${repo_path}"
+  fi
+}
+
 prepare_codex_home
+ensure_safe_directory "${REPO_ROOT}"
 
 read_tool_metadata() {
   local key="$1"

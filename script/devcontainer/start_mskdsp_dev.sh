@@ -90,14 +90,26 @@ if [ "${container_exists}" -eq 1 ] && [ "${RECREATE}" -eq 0 ]; then
 fi
 
 if [ "${container_exists}" -eq 1 ] && [ "${RECREATE}" -eq 0 ]; then
+  network_mode="$(docker inspect --format '{{.HostConfig.NetworkMode}}' "${CONTAINER_NAME}")"
+  if [ "${network_mode}" != "host" ]; then
+    log "检测到开发容器网络模式不是 host，准备重建容器"
+    RECREATE=1
+  fi
+fi
+
+if [ "${container_exists}" -eq 1 ] && [ "${RECREATE}" -eq 0 ]; then
   codex_home_type="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/root/.codex"}}{{.Type}}{{end}}{{end}}' "${CONTAINER_NAME}")"
   codex_home_name="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/root/.codex"}}{{.Name}}{{end}}{{end}}' "${CONTAINER_NAME}")"
   codex_sync_source="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/codex-sync"}}{{.Source}}{{end}}{{end}}' "${CONTAINER_NAME}")"
   codex_sync_rw="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/codex-sync"}}{{.RW}}{{end}}{{end}}' "${CONTAINER_NAME}")"
+  share_root_source="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/home/code/share"}}{{.Source}}{{end}}{{end}}' "${CONTAINER_NAME}")"
+  share_root_rw="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/home/code/share"}}{{.RW}}{{end}}{{end}}' "${CONTAINER_NAME}")"
   if [ "${codex_home_type}" != "volume" ] || \
      [ "${codex_home_name}" != "${CODEX_HOME_VOLUME}" ] || \
      [ "${codex_sync_source}" != "${CODEX_ROOT}" ] || \
-     [ "${codex_sync_rw}" != "false" ]; then
+     [ "${codex_sync_rw}" != "false" ] || \
+     [ "${share_root_source}" != "${SHARE_ROOT}" ] || \
+     [ "${share_root_rw}" != "false" ]; then
     log "检测到 Codex 挂载策略已变化，准备重建容器"
     RECREATE=1
   fi
@@ -115,14 +127,23 @@ if [ "${container_exists}" -eq 0 ]; then
     docker run -d
     --name "${CONTAINER_NAME}"
     --hostname "${CONTAINER_NAME}"
+    --network host
     -w "${WORKDIR}"
     -v "${SHARE_ROOT}:/data"
+    -v "${SHARE_ROOT}:${SHARE_ROOT}:ro"
     -v "${CODEX_HOME_VOLUME}:/root/.codex"
     -v "${CODEX_ROOT}:${CODEX_SYNC_ROOT}:ro"
     -v mskdsp-vcpkg-root:/data/3rdlibs/vcpkg
     -v mskdsp-vcpkg-cache:/root/.cache/vcpkg
     -v mskdsp-ccache:/root/.cache/ccache
   )
+
+  for proxy_var in HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy; do
+    if [ -n "${!proxy_var:-}" ]; then
+      docker_run_args+=(-e "${proxy_var}=${!proxy_var}")
+    fi
+  done
+
   "${docker_run_args[@]}" "${IMAGE_TAG}" >/dev/null
 else
   log "启动已有容器 ${CONTAINER_NAME}"

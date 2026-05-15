@@ -1,5 +1,7 @@
 FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 
+LABEL devcontainer.metadata='[{"customizations":{"vscode":{"extensions":["openai.chatgpt@prerelease"]}}}]'
+
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then \
