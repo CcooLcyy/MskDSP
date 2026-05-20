@@ -14,6 +14,7 @@ namespace {
 namespace fs = std::filesystem;
 
 constexpr const char *kDummyModuleName = "Dummy";
+constexpr const char *kAvcModuleName = "AVC";
 
 fs::path LibDir() {
   return fs::path("module");
@@ -34,6 +35,9 @@ fs::path AutoStartConfigPath() {
 std::string DummyLibPrefix() {
   return std::string("lib") + kDummyModuleName + ".so";
 }
+std::string AvcLibPrefix() {
+  return std::string("lib") + kAvcModuleName + ".so";
+}
 
 std::string FindDummyLibFileName() {
   const auto prefix = DummyLibPrefix();
@@ -49,6 +53,10 @@ std::string FindDummyLibFileName() {
   return {};
 }
 
+bool IsTestModuleLibFile(const std::string &name) {
+  return name.rfind(DummyLibPrefix(), 0) == 0 || name.rfind(AvcLibPrefix(), 0) == 0;
+}
+
 void CleanTestEnvKeepDummyLib() {
   // 清理并重建 conf/socket/log，覆盖目录创建相关代码路径。
   fs::remove_all(ConfDir());
@@ -58,10 +66,9 @@ void CleanTestEnvKeepDummyLib() {
 
   // 保留假模块共享库及其符号链接链路，移除测试过程中产生的其他产物。
   fs::create_directories(LibDir());
-  const auto prefix = DummyLibPrefix();
   for (const auto &entry : fs::directory_iterator(LibDir())) {
     const auto name = entry.path().filename().string();
-    if (name.rfind(prefix, 0) == 0) {
+    if (IsTestModuleLibFile(name)) {
       continue;
     }
     fs::remove_all(entry.path());
@@ -376,6 +383,27 @@ TEST_F(ModuleManagerTest, UpperModeAutoStartsModuleFromPersistentTrace) {
 
   const auto running = mgr.getModuleRunningInfos();
   EXPECT_EQ(CountRunningModuleByName(running, candidate->moduleName), 1);
+}
+
+// 验证：`UPPER` 模式下 AVC 控制组持久化文件会触发 AVC 模块自动启动。
+TEST_F(ModuleManagerTest, UpperModeAutoStartsAvcFromGroupsPersistentTrace) {
+  ModuleManager::ModuleManager mgr;
+  const auto &infos = mgr.getModuleInfos();
+  ASSERT_TRUE(HasUsableModuleInfo(infos, kAvcModuleName));
+
+  TouchFile(ConfDir() / "AVC" / "groups.pb");
+  WriteAutoStartConfig(R"jsonc(
+{
+  "boot_config_mode": "UPPER"
+}
+)jsonc");
+
+  std::stop_source stopSource;
+  stopSource.request_stop();
+  mgr.start(stopSource.get_token());
+
+  const auto running = mgr.getModuleRunningInfos();
+  EXPECT_EQ(CountRunningModuleByName(running, kAvcModuleName), 1);
 }
 
 // 验证：`auto_start_modules` 与持久化文件痕迹同时命中时，重复启动会被安全跳过。

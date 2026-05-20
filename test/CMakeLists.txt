@@ -45,6 +45,25 @@ target_link_libraries(moduleManagerDummyModule PRIVATE
   moduleManager
 )
 
+add_library(moduleManagerAvcTraceModule SHARED
+  module_manager_dummy_module.cc
+)
+
+target_compile_definitions(moduleManagerAvcTraceModule PRIVATE
+  MSKDSP_TEST_MODULE_NAME="AVC"
+)
+
+set_target_properties(moduleManagerAvcTraceModule PROPERTIES
+  OUTPUT_NAME AVC
+  VERSION 0.0.1
+  SOVERSION 0
+  LIBRARY_OUTPUT_DIRECTORY "${MSKDSP_MODULE_MANAGER_TEST_LIB_DIR}"
+)
+
+target_link_libraries(moduleManagerAvcTraceModule PRIVATE
+  moduleManager
+)
+
 add_executable(moduleManager_test
   module_manager_test.cc
 )
@@ -56,6 +75,7 @@ target_link_libraries(moduleManager_test PRIVATE
 
 add_dependencies(moduleManager_test
   moduleManagerDummyModule
+  moduleManagerAvcTraceModule
 )
 
 mskdsp_add_isolated_test(moduleManager_test

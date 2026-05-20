@@ -83,6 +83,9 @@ extern "C" BOOST_SYMBOL_EXPORT bool GetModuleManifestPb(const uint8_t **data, si
 - `AGC`
   - `./conf/AGC/groups.pb`
   - `./conf/AGC/groups.pb.bak`
+- `AVC`
+  - `./conf/AVC/groups.pb`
+  - `./conf/AVC/groups.pb.bak`
 - `Calc`
   - `./conf/Calc/groups.pb`
   - `./conf/Calc/groups.pb.bak`

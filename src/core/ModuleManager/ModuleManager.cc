@@ -198,7 +198,8 @@ std::vector<ModuleTraceAutoStartRule> buildUpperModeTraceAutoStartRules() {
       {"IEC104", {"./conf/IEC104/links.pb", "./conf/IEC104/point_tables.pb"}},
       {"ModbusRTU", {"./conf/ModbusRTU/mqtt.pb", "./conf/ModbusRTU/links.pb", "./conf/ModbusRTU/point_tables.pb"}},
       {"DLT645", {"./conf/DLT645/mqtt.pb", "./conf/DLT645/links.pb", "./conf/DLT645/point_tables.pb"}},
-      {"AGC", {"./conf/AGC/groups.pb"}}};
+      {"AGC", {"./conf/AGC/groups.pb"}},
+      {"AVC", {"./conf/AVC/groups.pb"}}};
 }
 
 std::vector<std::filesystem::path> collectMatchedPersistentTracePaths(const std::vector<std::filesystem::path> &tracePaths) {

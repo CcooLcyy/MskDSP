@@ -9,12 +9,19 @@
 #include "ModuleInterface.h"
 
 namespace {
+constexpr const char *kTestModuleName =
+#ifdef MSKDSP_TEST_MODULE_NAME
+    MSKDSP_TEST_MODULE_NAME;
+#else
+    "Dummy";
+#endif
+
 const LibInfo kDummyLibInfo{
     .VERSION_MAJOR = "0",
     .VERSION_MINOR = "0",
     .VERSION_PATCH = "1",
     .VERSION = "0.0.1",
-    .LIB_NAME = "Dummy",
+    .LIB_NAME = kTestModuleName,
 };
 
 // 供单元测试使用的最小模块实现。它不会主动启动任何 gRPC 服务，
