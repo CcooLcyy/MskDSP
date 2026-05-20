@@ -41,7 +41,7 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
 - `station_role`：站点角色（Master/Slave），决定业务语义；未设置时默认 `ROLE_CLIENT -> MASTER`、`ROLE_SERVER -> SLAVE`；可与 `role` 任意组合
 
 ### DataCenter 交互与路由配置
-- DataCenter 以 `conn_id + tag` 作为路由端点；上位机负责下发连接/连接标签注册表/路由配置，IEC104 仅负责 Publish/Subscribe 与协议互操作。
+- DataCenter 路由配置优先以 `module_name + conn_name + tag` 作为稳定端点；`conn_id + tag` 仍用于 IEC104 运行期 Publish/Subscribe 和旧路由请求兼容。上位机负责下发连接/连接标签注册表/路由配置，IEC104 仅负责 Publish/Subscribe 与协议互操作。
 - IEC104 在 `UpsertPointTable` 成功后，会把点表 tags（包含 `time_sync_tag`）同步到 DataCenter 连接标签注册表，用于路由校验、展示与自愈；这不是协议地址映射点表。
 - STATION_ROLE_MASTER：收到 IEC104 点值后 `Publish(conn_id, tag, value)` 到 DataCenter；是否能转发给其他模块由 DataCenter 路由配置决定。
 - STATION_ROLE_SLAVE：通过 `Subscribe(conn_id)` 接收 DataCenter 更新并转为 IEC104 自发上送；总召通过 `GetLatest(conn_id)` 拉取快照。
@@ -84,7 +84,7 @@ ConfigPusher 点表示例（含 scale/offset/deadband，字段可省略，默认
 - 合包策略：按 IOA 顺序组织报文；连续 IOA 使用 SQ=1 压缩，不连续则 SQ=0 带 IOA。
 
 ### 遥控/设点（命令触发）
-- 触发方式：上位机或其他模块通过 DataCenter 路由将命令写入 IEC104 的 `conn_id + tag`，IEC104 主站订阅后发送命令。
+- 触发方式：上位机或其他模块通过 DataCenter 路由将命令写入 IEC104 的稳定端点；IEC104 主站按当前 `conn_id + tag` 订阅后发送命令。
 - 单点遥控：`POINT_TYPE_SINGLE`，DataCenter value 使用 `bool`（或 int/double 非 0 视为 true）；IEC104 发送 `C_SC_NA_1`，先预置再执行。
 - 短浮点设点：`POINT_TYPE_FLOAT`，DataCenter value 使用 `double`（或 int 转换为 double）；IEC104 发送 `C_SE_NC_1`（执行）。
 - 设点工程量：DataCenter 侧提供工程量；IEC104 发送前按 `scale/offset` 反向换算为原始值；从站收到命令后按 `scale/offset` 正向换算再发布到 DataCenter。

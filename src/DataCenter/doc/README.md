@@ -19,9 +19,9 @@ DataCenter 是进程内的“数据总线/转发枢纽”，用于在不同协�
 - 多对一仲裁（多个源同时写入同一目的点时暂不保证行为）
 
 ## 关键概念
-- `connId`：连接的全局唯一 ID（建议使用无符号整型），建议通过 DataCenter 的 connId 分配器按 `(module_name, conn_name)` 分配/查询；要求重启后保持不变。
+- `connId`：连接的运行时全局唯一 ID（建议使用无符号整型），建议通过 DataCenter 的 connId 分配器按 `(module_name, conn_name)` 分配/查询；运行发布、订阅、最新值查询继续使用当前 `connId`。
 - `tag`：逻辑点名（UTF-8，可使用中文），用于跨协议对齐同一业务量；协议地址（IOA/寄存器等）应由各协议模块自身点表维护。
-- `Endpoint`：`(connId, tag)`，表示某连接中的一个逻辑点。
+- `Endpoint`：路由配置端点优先使用 `(module_name, conn_name, tag)` 作为稳定身份；`conn_id` 仅作为运行时展示/过滤和旧配置兼容字段。
 - `Route`：有向路由绑定，表示数据从 `src Endpoint` 转发到一个或多个 `dst Endpoint`。
 
 ## 数据方向与路由
@@ -39,7 +39,7 @@ DataCenter 是进程内的“数据总线/转发枢纽”，用于在不同协�
 DataCenter 对外提供一组面向“连接/连接标签注册表/路由/转发”的 gRPC 接口，用于支撑跨协议数据转发闭环。
 
 ### 术语
-- `Endpoint`：`(connId, tag)`；`tag` 为连接内的逻辑点名（UTF-8，可中文）。
+- `Endpoint`：路由配置端点优先使用 `(module_name, conn_name, tag)`；旧请求只传 `(conn_id, tag)` 时会按连接注册表转换为稳定端点。
 - `Route`：有向绑定 `src Endpoint -> dst Endpoint`；允许 `srcTag != dstTag`，转发时会按目的端点重写为 `dstTag`。
 - `PointUpdate`：路由后的更新，包含 `src/dst` 端点信息与 `value/ts_ms/quality`。
 
@@ -65,13 +65,15 @@ DataCenter 对外提供一组面向“连接/连接标签注册表/路由/转发
 ### 路由管理（有向绑定）
 - `UpsertRoutes(UpsertRoutesRequest) -> Empty`
   - 配置路由；`replace=true` 会清空后重新写入。
+  - 新配置应填写端点的 `module_name/conn_name/tag`；兼容旧请求只填 `conn_id/tag`，但该 `conn_id` 必须能从连接注册表解析。
   - 支持一对一与一对多；多对一暂不保证行为（建议避免）。
   - 说明：该 RPC 成功后会触发路由配置落盘；若落盘失败会返回 `INTERNAL`（内存中的路由不会回滚）。
 - `DeleteRoutes(DeleteRoutesRequest) -> Empty`
   - 删除指定路由绑定。
+  - 支持按稳定端点删除；旧格式 `conn_id/tag` 会先转换为稳定端点。
   - 说明：该 RPC 成功后会触发路由配置落盘；若落盘失败会返回 `INTERNAL`（内存中的路由不会回滚）。
 - `ListRoutes(ListRoutesRequest) -> ListRoutesResponse`
-  - 查询路由；支持按 `src/dst` 的 `conn_id/tag` 进行可选过滤。
+  - 查询路由；支持按 `src/dst` 的 `conn_id/tag` 进行可选过滤，响应会同时返回稳定字段与当前 `conn_id`。
 
 ### 数据转发（核心）
 - `Publish(PublishRequest) -> Empty`
@@ -97,11 +99,12 @@ DataCenter 对外提供一组面向“连接/连接标签注册表/路由/转发
 
 ### 2) connId 分配与删除语义
 - 集成侧或协议模块在“配置阶段”先调用 `GetOrCreateConnection` 获取 `connId`，并将返回的 `connId` 固化到该连接配置中（后续运行期 `Publish/Subscribe` 使用同一 `connId`）。
-- `RenameConnection` 用于仅修改主键（`connId` 不变）：因此路由、连接标签注册表不需要改写，只需更新显示/引用主键即可。
+- `RenameConnection` 用于仅修改主键（`connId` 不变）：DataCenter 会同步改写稳定路由中的连接主键引用。
 - `DeleteConnection` 为破坏性操作：会清理该 `connId` 的连接标签注册表/路由/最新值缓存，并关闭该 `connId` 的订阅者连接（best-effort）。
 
 ### 3) 标签注册表与路由校验
 - 当连接标签注册表存在时，路由会校验 `tag` 必须在注册表中；因此连接标签注册表/路由的 UI 编辑可通过 `GetConnTags` / `ListRoutes` 做回读校验与展示。
+- 配置端应保存和下发 `module_name/conn_name/tag`；`conn_id` 可展示给用户并用于运行期查询，但不应作为路由长期持久化身份。
 
 ### 4) 实时值与订阅语义
 - 接收方启动后若希望“先拿到当前值再跟随实时更新”，建议使用 `Subscribe(snapshot=true)`；若只关心一次性拉取，则使用 `GetLatest`。
@@ -146,7 +149,7 @@ DataCenter 会将 `conn_id -> tags` 连接标签注册表落盘到工作目录�
 - 若主/备均不可用：以空连接标签注册表启动，等待重新下发。
 
 ## 路由配置持久化（当前实现）
-DataCenter 会将路由配置落盘到工作目录下的 `./conf/dataCenter/routes.pb`，用于进程重启后的自动恢复。
+DataCenter 会将路由配置落盘到工作目录下的 `./conf/dataCenter/routes.pb`，用于进程重启后的自动恢复；新落盘内容会包含稳定连接主键，避免连接 ID 重排后路由错位。
 
 ### 文件与策略
 - 主文件：`./conf/dataCenter/routes.pb`

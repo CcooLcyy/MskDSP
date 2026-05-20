@@ -272,15 +272,51 @@ public:
   }
 
   grpc::Status UpsertRoutes(const DataCenterProto::UpsertRoutesRequest& request) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    std::unordered_map<uint32_t, ConnKey> keysByConnId;
+    for (const auto& [key, conn] : conns_) {
+      keysByConnId.emplace(conn.conn_id(), key);
+    }
+    const auto resolveEndpoint = [&](const DataCenterProto::Endpoint& endpoint,
+                                     const char* direction) -> grpc::Status {
+      if (endpoint.tag().empty()) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tag 不能为空");
+      }
+      if (endpoint.module_name().empty() != endpoint.conn_name().empty()) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::string(direction) + " 稳定连接主键不完整");
+      }
+      const bool hasStableKey = !endpoint.module_name().empty() && !endpoint.conn_name().empty();
+      if (!hasStableKey) {
+        if (endpoint.conn_id() == 0) {
+          return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id 不能为空");
+        }
+        if (!keysByConnId.contains(endpoint.conn_id())) {
+          return grpc::Status(grpc::StatusCode::NOT_FOUND, std::string(direction) + " conn_id 未找到");
+        }
+        return grpc::Status::OK;
+      }
+
+      if (endpoint.conn_id() == 0) {
+        return grpc::Status::OK;
+      }
+      auto connIt = keysByConnId.find(endpoint.conn_id());
+      if (connIt != keysByConnId.end() &&
+          (connIt->second.module != endpoint.module_name() || connIt->second.conn != endpoint.conn_name())) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::string(direction) + " conn_id 与稳定连接主键不匹配");
+      }
+      return grpc::Status::OK;
+    };
     for (const auto& route : request.routes()) {
       if (!route.has_src() || !route.has_dst()) {
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "route src/dst is required");
       }
-      if (route.src().conn_id() == 0 || route.dst().conn_id() == 0) {
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id is required");
+      auto status = resolveEndpoint(route.src(), "src");
+      if (!status.ok()) {
+        return status;
       }
-      if (route.src().tag().empty() || route.dst().tag().empty()) {
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tag is required");
+      status = resolveEndpoint(route.dst(), "dst");
+      if (!status.ok()) {
+        return status;
       }
     }
     return grpc::Status::OK;

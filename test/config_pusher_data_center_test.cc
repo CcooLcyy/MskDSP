@@ -61,20 +61,30 @@ DataCenterProto::ConnectionInfo MakeConnection(uint32_t connId,
 }
 
 DataCenterProto::Route MakeResolvedRoute(uint32_t srcConnId,
+                                         const char* srcModule,
+                                         const char* srcConn,
                                          const char* srcTag,
                                          uint32_t dstConnId,
+                                         const char* dstModule,
+                                         const char* dstConn,
                                          const char* dstTag) {
   DataCenterProto::Route route;
   route.mutable_src()->set_conn_id(srcConnId);
+  route.mutable_src()->set_module_name(srcModule);
+  route.mutable_src()->set_conn_name(srcConn);
   route.mutable_src()->set_tag(srcTag);
   route.mutable_dst()->set_conn_id(dstConnId);
+  route.mutable_dst()->set_module_name(dstModule);
+  route.mutable_dst()->set_conn_name(dstConn);
   route.mutable_dst()->set_tag(dstTag);
   return route;
 }
 
 bool RouteEquals(const DataCenterProto::Route& lhs, const DataCenterProto::Route& rhs) {
   return lhs.src().conn_id() == rhs.src().conn_id() && lhs.src().tag() == rhs.src().tag() &&
-         lhs.dst().conn_id() == rhs.dst().conn_id() && lhs.dst().tag() == rhs.dst().tag();
+         lhs.src().module_name() == rhs.src().module_name() && lhs.src().conn_name() == rhs.src().conn_name() &&
+         lhs.dst().conn_id() == rhs.dst().conn_id() && lhs.dst().tag() == rhs.dst().tag() &&
+         lhs.dst().module_name() == rhs.dst().module_name() && lhs.dst().conn_name() == rhs.dst().conn_name();
 }
 
 bool RouteMatchesRequest(const DataCenterProto::Route& route, const DataCenterProto::ListRoutesRequest& req) {
@@ -149,8 +159,12 @@ TEST(ConfigPusherDataCenterTest, ApplyPointTablesAndRoutes) {
         }
         const auto& route = req.routes(0);
         EXPECT_EQ(route.src().conn_id(), 10u);
+        EXPECT_EQ(route.src().module_name(), "IEC104");
+        EXPECT_EQ(route.src().conn_name(), "line-1");
         EXPECT_EQ(route.src().tag(), "P_CMD_SRC");
         EXPECT_EQ(route.dst().conn_id(), 20u);
+        EXPECT_EQ(route.dst().module_name(), "AGC");
+        EXPECT_EQ(route.dst().conn_name(), "g-1");
         EXPECT_EQ(route.dst().tag(), "P_CMD");
         return grpc::Status::OK;
       }));
@@ -173,7 +187,7 @@ TEST(ConfigPusherDataCenterTest, ClearsStaleConnTagsAndConvergesRoutesToJsoncTar
       {10, {"OLD_A", "OLD_B"}},
       {30, {"OLD_LEGACY"}}};
   std::vector<DataCenterProto::Route> routes{
-      MakeResolvedRoute(30, "OLD_LEGACY", 20, "P_CMD")};
+      MakeResolvedRoute(30, "ModbusRTU", "legacy", "OLD_LEGACY", 20, "AGC", "g-1", "P_CMD")};
 
   bool updatedTargetConnTags = false;
   bool updatedDstConnTags = false;
@@ -289,7 +303,7 @@ TEST(ConfigPusherDataCenterTest, ClearsStaleConnTagsAndConvergesRoutesToJsoncTar
   ASSERT_TRUE(connTagsByConnId.contains(30u));
   EXPECT_TRUE(connTagsByConnId.at(30u).empty());
 
-  const auto targetRoute = MakeResolvedRoute(10, "P_CMD_SRC", 20, "P_CMD");
+  const auto targetRoute = MakeResolvedRoute(10, "IEC104", "line-1", "P_CMD_SRC", 20, "AGC", "g-1", "P_CMD");
   ASSERT_EQ(routes.size(), 1u);
   EXPECT_TRUE(RouteEquals(routes.front(), targetRoute));
 }

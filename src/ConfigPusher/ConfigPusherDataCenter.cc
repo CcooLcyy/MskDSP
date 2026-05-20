@@ -201,8 +201,12 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
 
       DataCenterProto::Route resolved;
       resolved.mutable_src()->set_conn_id(srcConnId);
+      resolved.mutable_src()->set_module_name(src.module_name());
+      resolved.mutable_src()->set_conn_name(src.conn_name());
       resolved.mutable_src()->set_tag(src.tag());
       resolved.mutable_dst()->set_conn_id(dstConnId);
+      resolved.mutable_dst()->set_module_name(dst.module_name());
+      resolved.mutable_dst()->set_conn_name(dst.conn_name());
       resolved.mutable_dst()->set_tag(dst.tag());
       routes.emplace_back(std::move(resolved));
     }

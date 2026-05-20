@@ -128,7 +128,11 @@ TEST(ConfigPusherConfigLoaderTest, LoadDataCenterConfigWithComments) {
   ASSERT_EQ(routes.routes_size(), 1);
   const auto &route = routes.routes(0);
   EXPECT_EQ(route.src().module_name(), "IEC104");
+  EXPECT_EQ(route.src().conn_name(), "line-1");
+  EXPECT_EQ(route.src().tag(), "P_CMD_SRC");
   EXPECT_EQ(route.dst().module_name(), "AGC");
+  EXPECT_EQ(route.dst().conn_name(), "g-1");
+  EXPECT_EQ(route.dst().tag(), "P_CMD");
 }
 
 // 验证：加载 AGC 配置时可解析控制组任务与 UpsertGroup 字段。

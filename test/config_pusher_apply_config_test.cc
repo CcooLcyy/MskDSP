@@ -484,8 +484,12 @@ TEST(ConfigPusherApplyConfigTest, AppliesJsoncConfigAndStartsModuleEvenWhenPersi
   ASSERT_EQ(routeRequests[0].routes_size(), 1);
   EXPECT_TRUE(routeRequests[0].replace());
   EXPECT_EQ(routeRequests[0].routes(0).src().conn_id(), 10u);
+  EXPECT_EQ(routeRequests[0].routes(0).src().module_name(), "IEC104");
+  EXPECT_EQ(routeRequests[0].routes(0).src().conn_name(), "line-1");
   EXPECT_EQ(routeRequests[0].routes(0).src().tag(), "P_CMD_SRC");
   EXPECT_EQ(routeRequests[0].routes(0).dst().conn_id(), 20u);
+  EXPECT_EQ(routeRequests[0].routes(0).dst().module_name(), "AGC");
+  EXPECT_EQ(routeRequests[0].routes(0).dst().conn_name(), "g-1");
   EXPECT_EQ(routeRequests[0].routes(0).dst().tag(), "P_CMD");
 
   server->Shutdown();
