@@ -29,7 +29,11 @@ grpc::Status DataCenterCore::Publish(const DataCenterProto::PublishRequest &requ
   }
 
   outUpdates->clear();
-  EndpointKey src{request.conn_id(), request.tag()};
+  auto connIt = connections_.find(request.conn_id());
+  if (connIt == connections_.end()) {
+    return grpc::Status(grpc::StatusCode::NOT_FOUND, "conn_id 未在连接注册表中找到，无法匹配稳定路由");
+  }
+  StableEndpointKey src{connIt->second.module_name(), connIt->second.conn_name(), request.tag()};
   auto it = routes_.find(src);
   if (it == routes_.end()) {
     return grpc::Status::OK;
@@ -37,16 +41,23 @@ grpc::Status DataCenterCore::Publish(const DataCenterProto::PublishRequest &requ
 
   outUpdates->reserve(it->second.size());
   for (const auto &dst : it->second) {
+    if (!tryResolveConnId(dst, nullptr)) {
+      return grpc::Status(grpc::StatusCode::NOT_FOUND, "目的连接未在连接注册表中找到，无法生成路由更新");
+    }
+  }
+  for (const auto &dst : it->second) {
+    uint32_t dstConnId = 0;
+    (void)tryResolveConnId(dst, &dstConnId);
     DataCenterProto::PointUpdate update;
     update.set_src_conn_id(request.conn_id());
     update.set_src_tag(request.tag());
-    update.set_dst_conn_id(dst.connId);
+    update.set_dst_conn_id(dstConnId);
     update.set_dst_tag(dst.tag);
     update.mutable_value()->CopyFrom(request.value());
     update.set_ts_ms(tsMs);
     update.set_quality(request.quality());
 
-    latestByDst_[dst] = update;
+    latestByDst_[EndpointKey{dstConnId, dst.tag}] = update;
     outUpdates->emplace_back(std::move(update));
   }
   return grpc::Status::OK;
@@ -70,32 +81,49 @@ grpc::Status DataCenterCore::BatchPublish(const DataCenterProto::BatchPublishReq
 
   size_t estimatedUpdates = 0;
   for (const auto &point : request.points()) {
-    EndpointKey src{point.conn_id(), point.tag()};
+    auto connIt = connections_.find(point.conn_id());
+    if (connIt == connections_.end()) {
+      return grpc::Status(grpc::StatusCode::NOT_FOUND, "conn_id 未在连接注册表中找到，无法匹配稳定路由");
+    }
+    StableEndpointKey src{connIt->second.module_name(), connIt->second.conn_name(), point.tag()};
     auto it = routes_.find(src);
     if (it == routes_.end()) {
       continue;
+    }
+    for (const auto &dst : it->second) {
+      if (!tryResolveConnId(dst, nullptr)) {
+        return grpc::Status(grpc::StatusCode::NOT_FOUND, "目的连接未在连接注册表中找到，无法生成路由更新");
+      }
     }
     estimatedUpdates += it->second.size();
   }
   outUpdates->reserve(estimatedUpdates);
 
   for (const auto &point : request.points()) {
+    auto connIt = connections_.find(point.conn_id());
+    if (connIt == connections_.end()) {
+      return grpc::Status(grpc::StatusCode::NOT_FOUND, "conn_id 未在连接注册表中找到，无法匹配稳定路由");
+    }
     int64_t tsMs = point.ts_ms();
     if (tsMs <= 0) {
       tsMs = nowMs();
     }
 
-    EndpointKey src{point.conn_id(), point.tag()};
+    StableEndpointKey src{connIt->second.module_name(), connIt->second.conn_name(), point.tag()};
     auto it = routes_.find(src);
     if (it == routes_.end()) {
       continue;
     }
 
     for (const auto &dst : it->second) {
+      uint32_t dstConnId = 0;
+      if (!tryResolveConnId(dst, &dstConnId)) {
+        return grpc::Status(grpc::StatusCode::NOT_FOUND, "目的连接未在连接注册表中找到，无法生成路由更新");
+      }
       DataCenterProto::PointUpdate update;
       update.set_src_conn_id(point.conn_id());
       update.set_src_tag(point.tag());
-      update.set_dst_conn_id(dst.connId);
+      update.set_dst_conn_id(dstConnId);
       update.set_dst_tag(dst.tag);
       update.mutable_value()->CopyFrom(point.value());
       update.set_ts_ms(tsMs);

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -12,25 +13,31 @@ grpc::Status DataCenterCore::UpsertRoutes(const DataCenterProto::UpsertRoutesReq
   }
 
   for (const auto &route : request.routes()) {
-    auto status = validateEndpoint(route.src().conn_id(), route.src().tag());
+    StableEndpointKey src;
+    uint32_t srcConnId = 0;
+    auto status = resolveEndpoint(route.src(), &src, &srcConnId);
     if (!status.ok()) {
       return status;
     }
-    status = validateEndpoint(route.dst().conn_id(), route.dst().tag());
+    StableEndpointKey dst;
+    uint32_t dstConnId = 0;
+    status = resolveEndpoint(route.dst(), &dst, &dstConnId);
     if (!status.ok()) {
       return status;
     }
-    status = validateEndpointAgainstConnTags(route.src().conn_id(), route.src().tag());
-    if (!status.ok()) {
-      return status;
+    if (srcConnId != 0) {
+      status = validateEndpointAgainstConnTags(srcConnId, src.tag);
+      if (!status.ok()) {
+        return status;
+      }
     }
-    status = validateEndpointAgainstConnTags(route.dst().conn_id(), route.dst().tag());
-    if (!status.ok()) {
-      return status;
+    if (dstConnId != 0) {
+      status = validateEndpointAgainstConnTags(dstConnId, dst.tag);
+      if (!status.ok()) {
+        return status;
+      }
     }
 
-    EndpointKey src{route.src().conn_id(), route.src().tag()};
-    EndpointKey dst{route.dst().conn_id(), route.dst().tag()};
     routes_[std::move(src)].emplace(std::move(dst));
   }
   return grpc::Status::OK;
@@ -38,17 +45,16 @@ grpc::Status DataCenterCore::UpsertRoutes(const DataCenterProto::UpsertRoutesReq
 
 grpc::Status DataCenterCore::DeleteRoutes(const DataCenterProto::DeleteRoutesRequest &request) {
   for (const auto &route : request.routes()) {
-    auto status = validateEndpoint(route.src().conn_id(), route.src().tag());
+    StableEndpointKey src;
+    auto status = resolveEndpoint(route.src(), &src, nullptr);
     if (!status.ok()) {
       return status;
     }
-    status = validateEndpoint(route.dst().conn_id(), route.dst().tag());
+    StableEndpointKey dst;
+    status = resolveEndpoint(route.dst(), &dst, nullptr);
     if (!status.ok()) {
       return status;
     }
-
-    EndpointKey src{route.src().conn_id(), route.src().tag()};
-    EndpointKey dst{route.dst().conn_id(), route.dst().tag()};
 
     auto srcIt = routes_.find(src);
     if (srcIt == routes_.end()) {
@@ -65,31 +71,35 @@ grpc::Status DataCenterCore::DeleteRoutes(const DataCenterProto::DeleteRoutesReq
 DataCenterProto::ListRoutesResponse DataCenterCore::ListRoutes(const DataCenterProto::ListRoutesRequest &request) const {
   std::vector<DataCenterProto::Route> tmp;
   for (const auto &[src, dstSet] : routes_) {
-    if (request.src_conn_id() != 0 && request.src_conn_id() != src.connId) {
+    uint32_t srcConnId = 0;
+    (void)tryResolveConnId(src, &srcConnId);
+    if (request.src_conn_id() != 0 && request.src_conn_id() != srcConnId) {
       continue;
     }
     if (!request.src_tag().empty() && request.src_tag() != src.tag) {
       continue;
     }
     for (const auto &dst : dstSet) {
-      if (request.dst_conn_id() != 0 && request.dst_conn_id() != dst.connId) {
+      uint32_t dstConnId = 0;
+      (void)tryResolveConnId(dst, &dstConnId);
+      if (request.dst_conn_id() != 0 && request.dst_conn_id() != dstConnId) {
         continue;
       }
       if (!request.dst_tag().empty() && request.dst_tag() != dst.tag) {
         continue;
       }
       DataCenterProto::Route route;
-      route.mutable_src()->set_conn_id(src.connId);
-      route.mutable_src()->set_tag(src.tag);
-      route.mutable_dst()->set_conn_id(dst.connId);
-      route.mutable_dst()->set_tag(dst.tag);
+      *route.mutable_src() = dumpEndpoint(src);
+      *route.mutable_dst() = dumpEndpoint(dst);
       tmp.emplace_back(std::move(route));
     }
   }
 
   std::sort(tmp.begin(), tmp.end(), [](const auto &a, const auto &b) {
-    return std::make_tuple(a.src().conn_id(), a.src().tag(), a.dst().conn_id(), a.dst().tag()) <
-        std::make_tuple(b.src().conn_id(), b.src().tag(), b.dst().conn_id(), b.dst().tag());
+    return std::make_tuple(a.src().module_name(), a.src().conn_name(), a.src().tag(),
+                           a.dst().module_name(), a.dst().conn_name(), a.dst().tag()) <
+        std::make_tuple(b.src().module_name(), b.src().conn_name(), b.src().tag(),
+                        b.dst().module_name(), b.dst().conn_name(), b.dst().tag());
   });
 
   DataCenterProto::ListRoutesResponse resp;
@@ -100,27 +110,33 @@ DataCenterProto::ListRoutesResponse DataCenterCore::ListRoutes(const DataCenterP
 }
 
 grpc::Status DataCenterCore::ReplaceRoutesConfig(const DataCenterProto::RoutesConfig &config) {
-  std::unordered_map<EndpointKey, EndpointKeySet, EndpointKeyHash> next;
+  std::unordered_map<StableEndpointKey, StableEndpointKeySet, StableEndpointKeyHash> next;
   for (const auto &route : config.routes()) {
-    auto status = validateEndpoint(route.src().conn_id(), route.src().tag());
+    StableEndpointKey src;
+    uint32_t srcConnId = 0;
+    auto status = resolveEndpoint(route.src(), &src, &srcConnId);
     if (!status.ok()) {
       return status;
     }
-    status = validateEndpoint(route.dst().conn_id(), route.dst().tag());
+    StableEndpointKey dst;
+    uint32_t dstConnId = 0;
+    status = resolveEndpoint(route.dst(), &dst, &dstConnId);
     if (!status.ok()) {
       return status;
     }
-    status = validateEndpointAgainstConnTags(route.src().conn_id(), route.src().tag());
-    if (!status.ok()) {
-      return status;
+    if (srcConnId != 0) {
+      status = validateEndpointAgainstConnTags(srcConnId, src.tag);
+      if (!status.ok()) {
+        return status;
+      }
     }
-    status = validateEndpointAgainstConnTags(route.dst().conn_id(), route.dst().tag());
-    if (!status.ok()) {
-      return status;
+    if (dstConnId != 0) {
+      status = validateEndpointAgainstConnTags(dstConnId, dst.tag);
+      if (!status.ok()) {
+        return status;
+      }
     }
 
-    EndpointKey src{route.src().conn_id(), route.src().tag()};
-    EndpointKey dst{route.dst().conn_id(), route.dst().tag()};
     next[std::move(src)].emplace(std::move(dst));
   }
 

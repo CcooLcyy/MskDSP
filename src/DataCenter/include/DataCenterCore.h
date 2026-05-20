@@ -62,12 +62,29 @@ private:
     size_t operator()(const EndpointKey &key) const noexcept;
   };
 
+  struct StableEndpointKey {
+    std::string moduleName;
+    std::string connName;
+    std::string tag;
+
+    bool operator==(const StableEndpointKey &other) const;
+  };
+
+  struct StableEndpointKeyHash {
+    size_t operator()(const StableEndpointKey &key) const noexcept;
+  };
+
   using EndpointKeySet = std::unordered_set<EndpointKey, EndpointKeyHash>;
+  using StableEndpointKeySet = std::unordered_set<StableEndpointKey, StableEndpointKeyHash>;
 
   static grpc::Status validateConnKey(const DataCenterProto::ConnectionKey &key);
 
   static grpc::Status validateEndpoint(uint32_t connId, const std::string &tag);
   grpc::Status validateEndpointAgainstConnTags(uint32_t connId, const std::string &tag) const;
+  grpc::Status resolveEndpoint(const DataCenterProto::Endpoint &endpoint, StableEndpointKey *out, uint32_t *resolvedConnId) const;
+  bool tryResolveConnId(const StableEndpointKey &endpoint, uint32_t *outConnId) const;
+  DataCenterProto::Endpoint dumpEndpoint(const StableEndpointKey &endpoint) const;
+  void rewriteConnectionKeyReferences(const ConnKey &oldKey, const ConnKey &newKey);
 
   static int64_t nowMs();
 
@@ -75,7 +92,7 @@ private:
   std::unordered_map<ConnKey, uint32_t, ConnKeyHash> connIdsByKey_;
   uint32_t nextConnId_{1};
   std::unordered_map<uint32_t, std::unordered_set<std::string>> connTagsByConnId_;
-  std::unordered_map<EndpointKey, EndpointKeySet, EndpointKeyHash> routes_;
+  std::unordered_map<StableEndpointKey, StableEndpointKeySet, StableEndpointKeyHash> routes_;
   std::unordered_map<EndpointKey, DataCenterProto::PointUpdate, EndpointKeyHash> latestByDst_;
 };
 }  // namespace DataCenter

@@ -6,17 +6,25 @@ namespace DataCenter {
 namespace {
 grpc::Status validateRoutesConfig(const DataCenterProto::RoutesConfig& config) {
   for (const auto& route : config.routes()) {
-    if (route.src().conn_id() == 0) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "routes 包含 src conn_id=0");
-    }
     if (route.src().tag().empty()) {
       return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "routes 包含空 src tag");
     }
-    if (route.dst().conn_id() == 0) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "routes 包含 dst conn_id=0");
-    }
     if (route.dst().tag().empty()) {
       return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "routes 包含空 dst tag");
+    }
+    if (route.src().module_name().empty() != route.src().conn_name().empty()) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "routes 包含不完整的 src 稳定连接主键");
+    }
+    const bool srcHasStableKey = !route.src().module_name().empty() && !route.src().conn_name().empty();
+    if (!srcHasStableKey && route.src().conn_id() == 0) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "routes 包含无法识别的 src 端点");
+    }
+    if (route.dst().module_name().empty() != route.dst().conn_name().empty()) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "routes 包含不完整的 dst 稳定连接主键");
+    }
+    const bool dstHasStableKey = !route.dst().module_name().empty() && !route.dst().conn_name().empty();
+    if (!dstHasStableKey && route.dst().conn_id() == 0) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "routes 包含无法识别的 dst 端点");
     }
   }
   return grpc::Status::OK;

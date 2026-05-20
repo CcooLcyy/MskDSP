@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <initializer_list>
+#include <string>
 #include <vector>
 
 #include "DataCenterCore.h"
@@ -15,10 +17,27 @@ DataCenterProto::Endpoint MakeEndpoint(uint32_t connId, std::string tag) {
   return ep;
 }
 
+DataCenterProto::Endpoint MakeStableEndpoint(uint32_t connId, std::string moduleName, std::string connName, std::string tag) {
+  DataCenterProto::Endpoint ep;
+  ep.set_conn_id(connId);
+  ep.set_module_name(std::move(moduleName));
+  ep.set_conn_name(std::move(connName));
+  ep.set_tag(std::move(tag));
+  return ep;
+}
+
 DataCenterProto::Route MakeRoute(uint32_t srcConnId, std::string srcTag, uint32_t dstConnId, std::string dstTag) {
   DataCenterProto::Route route;
   *route.mutable_src() = MakeEndpoint(srcConnId, std::move(srcTag));
   *route.mutable_dst() = MakeEndpoint(dstConnId, std::move(dstTag));
+  return route;
+}
+
+DataCenterProto::Route MakeStableRoute(uint32_t srcConnId, std::string srcModuleName, std::string srcConnName, std::string srcTag,
+                                       uint32_t dstConnId, std::string dstModuleName, std::string dstConnName, std::string dstTag) {
+  DataCenterProto::Route route;
+  *route.mutable_src() = MakeStableEndpoint(srcConnId, std::move(srcModuleName), std::move(srcConnName), std::move(srcTag));
+  *route.mutable_dst() = MakeStableEndpoint(dstConnId, std::move(dstModuleName), std::move(dstConnName), std::move(dstTag));
   return route;
 }
 
@@ -35,6 +54,17 @@ DataCenterProto::ConnectionInfo MakeConnInfo(uint32_t connId, std::string module
   info.set_module_name(std::move(moduleName));
   info.set_conn_name(std::move(connName));
   return info;
+}
+
+void InstallLegacyRouteConnections(DataCenterCore &core, std::initializer_list<uint32_t> connIds) {
+  DataCenterProto::ConnectionsConfig cfg;
+  uint32_t maxConnId = 0;
+  for (auto connId : connIds) {
+    maxConnId = std::max(maxConnId, connId);
+    *cfg.add_conns() = MakeConnInfo(connId, "LegacyModule", "conn-" + std::to_string(connId));
+  }
+  cfg.set_next_conn_id(maxConnId + 1);
+  ASSERT_TRUE(core.ReplaceConnectionsConfig(cfg).ok());
 }
 }  // 命名空间结束
 
@@ -155,6 +185,7 @@ TEST(DataCenterCoreTest, DeleteConnectionCleansConnTagsRoutesAndLatest) {
 // 验证：当连接标签注册表存在时，UpsertRoutes 会校验 tag 必须在注册表内。
 TEST(DataCenterCoreTest, UpsertRoutesValidatesAgainstConnTagsWhenPresent) {
   DataCenterCore core;
+  InstallLegacyRouteConnections(core, {1, 2});
 
   DataCenterProto::UpsertConnTagsRequest pt;
   pt.set_conn_id(1);
@@ -174,6 +205,7 @@ TEST(DataCenterCoreTest, UpsertRoutesValidatesAgainstConnTagsWhenPresent) {
 // 验证：Publish 按路由进行 tag 重写（srcTag -> dstTag）的一对一转发。
 TEST(DataCenterCoreTest, PublishRoutesWithTagRewriteOneToOne) {
   DataCenterCore core;
+  InstallLegacyRouteConnections(core, {1, 2});
 
   DataCenterProto::UpsertConnTagsRequest srcPt;
   srcPt.set_conn_id(1);
@@ -211,6 +243,7 @@ TEST(DataCenterCoreTest, PublishRoutesWithTagRewriteOneToOne) {
 // 验证：Publish 支持一对多路由，生成多个目的端点的更新。
 TEST(DataCenterCoreTest, PublishRoutesOneToMany) {
   DataCenterCore core;
+  InstallLegacyRouteConnections(core, {1, 2, 3});
 
   DataCenterProto::UpsertRoutesRequest routes;
   routes.set_replace(true);
@@ -239,6 +272,7 @@ TEST(DataCenterCoreTest, PublishRoutesOneToMany) {
 // 验证：GetLatest 返回目标连接内“按目的端点”最新一次路由后的值（按 dst_tag 排序）。
 TEST(DataCenterCoreTest, GetLatestReturnsLastRoutedValueByDstEndpoint) {
   DataCenterCore core;
+  InstallLegacyRouteConnections(core, {1, 2});
 
   DataCenterProto::UpsertRoutesRequest routes;
   routes.set_replace(true);
@@ -267,6 +301,7 @@ TEST(DataCenterCoreTest, GetLatestReturnsLastRoutedValueByDstEndpoint) {
 // 验证：BatchPublish 在输入合法时会发布全部点并生成对应路由更新。
 TEST(DataCenterCoreTest, BatchPublishPublishesAllPointsWhenValid) {
   DataCenterCore core;
+  InstallLegacyRouteConnections(core, {1, 2});
 
   DataCenterProto::UpsertRoutesRequest routes;
   routes.set_replace(true);
@@ -303,6 +338,7 @@ TEST(DataCenterCoreTest, BatchPublishPublishesAllPointsWhenValid) {
 // 验证：BatchPublish 在校验失败时具有原子性（不输出 updates 且不更新 latest）。
 TEST(DataCenterCoreTest, BatchPublishIsAtomicAndDoesNotUpdateLatestOnValidationFailure) {
   DataCenterCore core;
+  InstallLegacyRouteConnections(core, {1, 2});
 
   DataCenterProto::UpsertRoutesRequest routes;
   routes.set_replace(true);
@@ -384,6 +420,7 @@ TEST(DataCenterCoreTest, ReplaceConnTagsConfigMergesAndDeduplicatesByConnId) {
 // 验证：DumpRoutesConfig 与 ReplaceRoutesConfig 可 roundtrip 恢复路由配置。
 TEST(DataCenterCoreTest, DumpAndReplaceRoutesConfigRoundtrip) {
   DataCenterCore core;
+  InstallLegacyRouteConnections(core, {1, 2, 3});
 
   DataCenterProto::UpsertRoutesRequest routes;
   routes.set_replace(true);
@@ -394,6 +431,7 @@ TEST(DataCenterCoreTest, DumpAndReplaceRoutesConfigRoundtrip) {
   auto config = core.DumpRoutesConfig();
 
   DataCenterCore restored;
+  InstallLegacyRouteConnections(restored, {1, 2, 3});
   ASSERT_TRUE(restored.ReplaceRoutesConfig(config).ok());
 
   DataCenterProto::ListRoutesRequest req;
@@ -407,9 +445,127 @@ TEST(DataCenterCoreTest, DumpAndReplaceRoutesConfigRoundtrip) {
   EXPECT_EQ(resp.routes(1).dst().tag(), "目的点2");
 }
 
+// 验证：稳定路由以 module_name/conn_name/tag 为长期身份，连接 ID 重排后仍能正确转发。
+TEST(DataCenterCoreTest, StableRoutesSurviveConnIdReallocation) {
+  DataCenterCore core;
+
+  DataCenterProto::ConnectionsConfig cfg;
+  cfg.set_next_conn_id(21);
+  *cfg.add_conns() = MakeConnInfo(10, "DLT645", "lora-1");
+  *cfg.add_conns() = MakeConnInfo(20, "IEC104", "upper");
+  ASSERT_TRUE(core.ReplaceConnectionsConfig(cfg).ok());
+
+  DataCenterProto::UpsertRoutesRequest routes;
+  routes.set_replace(true);
+  *routes.add_routes() = MakeStableRoute(10, "DLT645", "lora-1", "A相电压", 20, "IEC104", "upper", "Uab");
+  ASSERT_TRUE(core.UpsertRoutes(routes).ok());
+  const auto stableConfig = core.DumpRoutesConfig();
+
+  DataCenterCore restored;
+  DataCenterProto::ConnectionsConfig remapped;
+  remapped.set_next_conn_id(102);
+  *remapped.add_conns() = MakeConnInfo(101, "DLT645", "lora-1");
+  *remapped.add_conns() = MakeConnInfo(102, "IEC104", "upper");
+  ASSERT_TRUE(restored.ReplaceConnectionsConfig(remapped).ok());
+  ASSERT_TRUE(restored.ReplaceRoutesConfig(stableConfig).ok());
+
+  DataCenterProto::PublishRequest pub;
+  pub.set_conn_id(101);
+  pub.set_tag("A相电压");
+  pub.mutable_value()->set_double_value(220.5);
+
+  std::vector<DataCenterProto::PointUpdate> updates;
+  ASSERT_TRUE(restored.Publish(pub, &updates).ok());
+  ASSERT_EQ(updates.size(), 1u);
+  EXPECT_EQ(updates[0].src_conn_id(), 101u);
+  EXPECT_EQ(updates[0].src_tag(), "A相电压");
+  EXPECT_EQ(updates[0].dst_conn_id(), 102u);
+  EXPECT_EQ(updates[0].dst_tag(), "Uab");
+  EXPECT_EQ(updates[0].value().double_value(), 220.5);
+}
+
+// 验证：旧 conn_id 路由在连接注册表可用时会补齐稳定字段，便于后续持久化迁移。
+TEST(DataCenterCoreTest, LegacyRoutesDumpWithStableConnectionKeysWhenConnectionsExist) {
+  DataCenterCore core;
+
+  DataCenterProto::ConnectionsConfig cfg;
+  cfg.set_next_conn_id(3);
+  *cfg.add_conns() = MakeConnInfo(1, "ModbusRTU", "485-3");
+  *cfg.add_conns() = MakeConnInfo(2, "IEC104", "upper");
+  ASSERT_TRUE(core.ReplaceConnectionsConfig(cfg).ok());
+
+  DataCenterProto::UpsertRoutesRequest routes;
+  routes.set_replace(true);
+  *routes.add_routes() = MakeRoute(1, "功率", 2, "P");
+  ASSERT_TRUE(core.UpsertRoutes(routes).ok());
+
+  auto dumped = core.DumpRoutesConfig();
+  ASSERT_EQ(dumped.routes_size(), 1);
+  EXPECT_EQ(dumped.routes(0).src().conn_id(), 1u);
+  EXPECT_EQ(dumped.routes(0).src().module_name(), "ModbusRTU");
+  EXPECT_EQ(dumped.routes(0).src().conn_name(), "485-3");
+  EXPECT_EQ(dumped.routes(0).src().tag(), "功率");
+  EXPECT_EQ(dumped.routes(0).dst().conn_id(), 2u);
+  EXPECT_EQ(dumped.routes(0).dst().module_name(), "IEC104");
+  EXPECT_EQ(dumped.routes(0).dst().conn_name(), "upper");
+  EXPECT_EQ(dumped.routes(0).dst().tag(), "P");
+}
+
+// 验证：旧 conn_id 路由在缺少连接注册表时拒绝加载，避免把不明语义的路由写入内存。
+TEST(DataCenterCoreTest, LegacyRoutesFailWhenConnectionRegistryMissing) {
+  DataCenterCore core;
+
+  DataCenterProto::UpsertRoutesRequest routes;
+  routes.set_replace(true);
+  *routes.add_routes() = MakeRoute(1, "功率", 2, "P");
+
+  auto status = core.UpsertRoutes(routes);
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::NOT_FOUND);
+}
+
+// 验证：连接重命名后，稳定路由引用会迁移到新连接主键并继续转发。
+TEST(DataCenterCoreTest, RenameConnectionRewritesStableRoutes) {
+  DataCenterCore core;
+
+  DataCenterProto::ConnectionsConfig cfg;
+  cfg.set_next_conn_id(3);
+  *cfg.add_conns() = MakeConnInfo(1, "ModbusRTU", "old");
+  *cfg.add_conns() = MakeConnInfo(2, "IEC104", "upper");
+  ASSERT_TRUE(core.ReplaceConnectionsConfig(cfg).ok());
+
+  DataCenterProto::UpsertRoutesRequest routes;
+  routes.set_replace(true);
+  *routes.add_routes() = MakeStableRoute(1, "ModbusRTU", "old", "功率", 2, "IEC104", "upper", "P");
+  ASSERT_TRUE(core.UpsertRoutes(routes).ok());
+
+  DataCenterProto::RenameConnectionRequest rename;
+  *rename.mutable_old_key() = MakeConnKey("ModbusRTU", "old");
+  *rename.mutable_new_key() = MakeConnKey("ModbusRTU", "new");
+  DataCenterProto::ConnectionInfo renamed;
+  ASSERT_TRUE(core.RenameConnection(rename, &renamed).ok());
+  EXPECT_EQ(renamed.conn_id(), 1u);
+
+  auto dumped = core.DumpRoutesConfig();
+  ASSERT_EQ(dumped.routes_size(), 1);
+  EXPECT_EQ(dumped.routes(0).src().module_name(), "ModbusRTU");
+  EXPECT_EQ(dumped.routes(0).src().conn_name(), "new");
+
+  DataCenterProto::PublishRequest pub;
+  pub.set_conn_id(1);
+  pub.set_tag("功率");
+  pub.mutable_value()->set_int_value(7);
+  std::vector<DataCenterProto::PointUpdate> updates;
+  ASSERT_TRUE(core.Publish(pub, &updates).ok());
+  ASSERT_EQ(updates.size(), 1u);
+  EXPECT_EQ(updates[0].dst_conn_id(), 2u);
+  EXPECT_EQ(updates[0].dst_tag(), "P");
+}
+
 // 验证：ReplaceRoutesConfig 会按 (src,dst) 对路由去重。
 TEST(DataCenterCoreTest, ReplaceRoutesConfigDeduplicatesBySrcDst) {
   DataCenterCore core;
+  InstallLegacyRouteConnections(core, {1, 2});
 
   DataCenterProto::RoutesConfig config;
   *config.add_routes() = MakeRoute(1, "A", 2, "B");
@@ -429,6 +585,7 @@ TEST(DataCenterCoreTest, ReplaceRoutesConfigDeduplicatesBySrcDst) {
 // 验证：当连接标签注册表存在时，ReplaceRoutesConfig 会校验 tag 必须在注册表内。
 TEST(DataCenterCoreTest, ReplaceRoutesConfigValidatesAgainstConnTagsWhenPresent) {
   DataCenterCore core;
+  InstallLegacyRouteConnections(core, {1, 2});
 
   DataCenterProto::UpsertConnTagsRequest pt;
   pt.set_conn_id(1);
@@ -559,6 +716,7 @@ TEST(DataCenterCoreTest, UpsertConnectionReturnsAlreadyExistsWhenKeyBelongsToOth
 // 验证：ListRoutes 支持按 src/dst 过滤。
 TEST(DataCenterCoreTest, ListRoutesFiltersByFields) {
   DataCenterCore core;
+  InstallLegacyRouteConnections(core, {1, 2, 3});
 
   DataCenterProto::UpsertRoutesRequest routes;
   routes.set_replace(true);
@@ -581,6 +739,7 @@ TEST(DataCenterCoreTest, ListRoutesFiltersByFields) {
 // 验证：DeleteRoutes 会删除指定路由，并使后续 Publish 不再产生更新。
 TEST(DataCenterCoreTest, DeleteRoutesRemovesRouteAndStopsPublish) {
   DataCenterCore core;
+  InstallLegacyRouteConnections(core, {1, 2});
 
   DataCenterProto::UpsertRoutesRequest routes;
   routes.set_replace(true);
@@ -608,6 +767,7 @@ TEST(DataCenterCoreTest, DeleteRoutesRemovesRouteAndStopsPublish) {
 // 验证：GetLatest 支持 tags 过滤，仅返回指定目的点的最新值。
 TEST(DataCenterCoreTest, GetLatestFiltersByTags) {
   DataCenterCore core;
+  InstallLegacyRouteConnections(core, {1, 2});
 
   DataCenterProto::UpsertRoutesRequest routes;
   routes.set_replace(true);

@@ -471,7 +471,7 @@ grpc::Status DataCenterGrpcServiceImpl::UpsertRoutes(grpc::ServerContext*, const
               request->routes_size(), request->replace(), status.error_message());
     return status;
   }
-  LOG_INFO("DataCenter 已更新路由: routes={}, replace={}", request->routes_size(), request->replace());
+  LOG_INFO("DataCenter 已更新路由并按稳定连接主键归一化: routes={}, replace={}", request->routes_size(), request->replace());
   return grpc::Status::OK;
 }
 
@@ -491,7 +491,7 @@ grpc::Status DataCenterGrpcServiceImpl::DeleteRoutes(grpc::ServerContext*, const
     LOG_ERROR("DataCenter 删除路由落盘失败: routes={}, 原因={}", request->routes_size(), status.error_message());
     return status;
   }
-  LOG_INFO("DataCenter 已删除路由: routes={}", request->routes_size());
+  LOG_INFO("DataCenter 已删除稳定连接主键匹配的路由: routes={}", request->routes_size());
   return grpc::Status::OK;
 }
 

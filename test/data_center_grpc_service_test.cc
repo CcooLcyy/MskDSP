@@ -134,6 +134,24 @@ protected:
     ASSERT_TRUE(status.ok()) << status.error_message();
   }
 
+  void UpsertStableRoutes(std::initializer_list<std::tuple<const char*, const char*, const char*, const char*, const char*, const char*>> routes) {
+    grpc::ClientContext ctx;
+    DataCenterProto::UpsertRoutesRequest req;
+    req.set_replace(true);
+    for (const auto& [srcModule, srcConn, srcTag, dstModule, dstConn, dstTag] : routes) {
+      auto* route = req.add_routes();
+      route->mutable_src()->set_module_name(srcModule);
+      route->mutable_src()->set_conn_name(srcConn);
+      route->mutable_src()->set_tag(srcTag);
+      route->mutable_dst()->set_module_name(dstModule);
+      route->mutable_dst()->set_conn_name(dstConn);
+      route->mutable_dst()->set_tag(dstTag);
+    }
+    DataCenterProto::Empty resp;
+    auto status = stub_->UpsertRoutes(&ctx, req, &resp);
+    ASSERT_TRUE(status.ok()) << status.error_message();
+  }
+
   std::unique_ptr<ScopedTempDir> tmpDir_;
   std::unique_ptr<ScopedCwd> cwd_;
   std::unique_ptr<DataCenter::DataCenterGrpcServiceImpl> service_;
@@ -246,7 +264,11 @@ TEST_F(DataCenterGrpcServiceTest, PublishSubscribeSnapshotFilteringAndDeleteConn
     DataCenterProto::ListRoutesResponse resp;
     auto status = stub_->ListRoutes(&ctx, req, &resp);
     ASSERT_TRUE(status.ok()) << status.error_message();
-    EXPECT_EQ(resp.routes_size(), 2);
+    ASSERT_EQ(resp.routes_size(), 2);
+    EXPECT_EQ(resp.routes(0).src().module_name(), "ModbusRTU");
+    EXPECT_EQ(resp.routes(0).src().conn_name(), "src");
+    EXPECT_EQ(resp.routes(0).dst().module_name(), "IEC104");
+    EXPECT_EQ(resp.routes(0).dst().conn_name(), "dst");
   }
 
   {
@@ -331,6 +353,34 @@ TEST_F(DataCenterGrpcServiceTest, PublishSubscribeSnapshotFilteringAndDeleteConn
   EXPECT_FALSE(reader->Read(&ignored));
   auto finishStatus = reader->Finish();
   EXPECT_TRUE(finishStatus.ok()) << finishStatus.error_message();
+}
+
+// 验证：gRPC 路由接口支持稳定连接主键配置，ListRoutes 会返回当前 conn_id 与稳定字段。
+TEST_F(DataCenterGrpcServiceTest, StableRoutesCanBeConfiguredAndListedThroughGrpc) {
+  const auto src = GetOrCreateConnection("DLT645", "meter-1");
+  const auto dst = GetOrCreateConnection("IEC104", "upper");
+
+  UpsertConnTags(src.conn_id(), {"A相电压"});
+  UpsertConnTags(dst.conn_id(), {"Uab"});
+  UpsertStableRoutes({
+      {"DLT645", "meter-1", "A相电压", "IEC104", "upper", "Uab"},
+  });
+
+  grpc::ClientContext ctx;
+  DataCenterProto::ListRoutesRequest req;
+  req.set_src_conn_id(src.conn_id());
+  DataCenterProto::ListRoutesResponse resp;
+  auto status = stub_->ListRoutes(&ctx, req, &resp);
+  ASSERT_TRUE(status.ok()) << status.error_message();
+  ASSERT_EQ(resp.routes_size(), 1);
+  EXPECT_EQ(resp.routes(0).src().conn_id(), src.conn_id());
+  EXPECT_EQ(resp.routes(0).src().module_name(), "DLT645");
+  EXPECT_EQ(resp.routes(0).src().conn_name(), "meter-1");
+  EXPECT_EQ(resp.routes(0).src().tag(), "A相电压");
+  EXPECT_EQ(resp.routes(0).dst().conn_id(), dst.conn_id());
+  EXPECT_EQ(resp.routes(0).dst().module_name(), "IEC104");
+  EXPECT_EQ(resp.routes(0).dst().conn_name(), "upper");
+  EXPECT_EQ(resp.routes(0).dst().tag(), "Uab");
 }
 
 // 验证：DeleteRoutes 可删除指定路由，且不会再产生最新值缓存。

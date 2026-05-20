@@ -1,10 +1,36 @@
 #include <algorithm>
+#include <limits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "DataCenterCore.h"
 
 namespace DataCenter {
+void DataCenterCore::rewriteConnectionKeyReferences(const ConnKey &oldKey, const ConnKey &newKey) {
+  if (oldKey == newKey) {
+    return;
+  }
+
+  std::unordered_map<StableEndpointKey, StableEndpointKeySet, StableEndpointKeyHash> rewrittenRoutes;
+  for (const auto &[src, dstSet] : routes_) {
+    StableEndpointKey nextSrc = src;
+    if (nextSrc.moduleName == oldKey.moduleName && nextSrc.connName == oldKey.connName) {
+      nextSrc.moduleName = newKey.moduleName;
+      nextSrc.connName = newKey.connName;
+    }
+    auto &nextDstSet = rewrittenRoutes[std::move(nextSrc)];
+    for (auto dst : dstSet) {
+      if (dst.moduleName == oldKey.moduleName && dst.connName == oldKey.connName) {
+        dst.moduleName = newKey.moduleName;
+        dst.connName = newKey.connName;
+      }
+      nextDstSet.emplace(std::move(dst));
+    }
+  }
+  routes_ = std::move(rewrittenRoutes);
+}
+
 grpc::Status DataCenterCore::GetConnectionByKey(const DataCenterProto::ConnectionKey &key, DataCenterProto::ConnectionInfo *out) const {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
@@ -174,12 +200,13 @@ grpc::Status DataCenterCore::RenameConnection(const DataCenterProto::RenameConne
   }
 
   connIdsByKey_.erase(it);
-  connIdsByKey_.emplace(std::move(newKey), connId);
+  connIdsByKey_.emplace(newKey, connId);
 
   auto connIt = connections_.find(connId);
   if (connIt == connections_.end()) {
     return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接未找到");
   }
+  rewriteConnectionKeyReferences(oldKey, newKey);
   connIt->second.set_module_name(request.new_key().module_name());
   connIt->second.set_conn_name(request.new_key().conn_name());
   *out = connIt->second;
@@ -204,14 +231,14 @@ grpc::Status DataCenterCore::DeleteConnection(const DataCenterProto::DeleteConne
   connTagsByConnId_.erase(connId);
 
   for (auto routeIt = routes_.begin(); routeIt != routes_.end();) {
-    if (routeIt->first.connId == connId) {
+    if (routeIt->first.moduleName == key.moduleName && routeIt->first.connName == key.connName) {
       routeIt = routes_.erase(routeIt);
       continue;
     }
 
     auto &dstSet = routeIt->second;
     for (auto dstIt = dstSet.begin(); dstIt != dstSet.end();) {
-      if (dstIt->connId == connId) {
+      if (dstIt->moduleName == key.moduleName && dstIt->connName == key.connName) {
         dstIt = dstSet.erase(dstIt);
       } else {
         ++dstIt;
@@ -261,12 +288,13 @@ grpc::Status DataCenterCore::UpsertConnection(const DataCenterProto::UpsertConne
   }
 
   const auto &cur = existing->second;
+  ConnKey curKey{cur.module_name(), cur.conn_name()};
   if (!cur.module_name().empty() && !cur.conn_name().empty()) {
-    ConnKey curKey{cur.module_name(), cur.conn_name()};
     connIdsByKey_.erase(curKey);
   }
 
   connIdsByKey_[std::move(nextKey)] = conn.conn_id();
+  rewriteConnectionKeyReferences(curKey, ConnKey{conn.module_name(), conn.conn_name()});
   existing->second = conn;
   return grpc::Status::OK;
 }

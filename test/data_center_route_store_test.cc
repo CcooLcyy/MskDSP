@@ -32,12 +32,19 @@ private:
   std::filesystem::path path_;
 };
 
-using RouteKey = std::tuple<uint32_t, std::string, uint32_t, std::string>;
+using RouteKey = std::tuple<uint32_t, std::string, std::string, std::string, uint32_t, std::string, std::string, std::string>;
 
 std::set<RouteKey> ToSet(const DataCenterProto::RoutesConfig& cfg) {
   std::set<RouteKey> out;
   for (const auto& route : cfg.routes()) {
-    out.emplace(route.src().conn_id(), route.src().tag(), route.dst().conn_id(), route.dst().tag());
+    out.emplace(route.src().conn_id(),
+                route.src().module_name(),
+                route.src().conn_name(),
+                route.src().tag(),
+                route.dst().conn_id(),
+                route.dst().module_name(),
+                route.dst().conn_name(),
+                route.dst().tag());
   }
   return out;
 }
@@ -51,6 +58,18 @@ DataCenterProto::RoutesConfig MakeConfig(std::initializer_list<std::tuple<uint32
     route->mutable_dst()->set_conn_id(dstConnId);
     route->mutable_dst()->set_tag(dstTag);
   }
+  return cfg;
+}
+
+DataCenterProto::RoutesConfig MakeStableConfig() {
+  DataCenterProto::RoutesConfig cfg;
+  auto* route = cfg.add_routes();
+  route->mutable_src()->set_module_name("DLT645");
+  route->mutable_src()->set_conn_name("meter-1");
+  route->mutable_src()->set_tag("A相电压");
+  route->mutable_dst()->set_module_name("IEC104");
+  route->mutable_dst()->set_conn_name("upper");
+  route->mutable_dst()->set_tag("Uab");
   return cfg;
 }
 }  // 命名空间结束
@@ -81,7 +100,27 @@ TEST(DataCenterRouteStoreTest, SaveAndLoadRoundtrip) {
   EXPECT_EQ(ToSet(loaded), ToSet(cfg));
 }
 
-// 验证：Save 会拒绝非法配置（例如 src/dst conn_id=0 或空 tag）。
+// 验证：稳定路由只携带 module_name/conn_name/tag 且 conn_id=0 时也可落盘并回读。
+TEST(DataCenterRouteStoreTest, SaveAndLoadStableRouteWithoutConnId) {
+  ScopedTempDir dir;
+  DataCenterRouteStore store(dir.path() / "routes.pb");
+
+  auto cfg = MakeStableConfig();
+  ASSERT_TRUE(store.Save(cfg).ok());
+
+  DataCenterProto::RoutesConfig loaded;
+  ASSERT_TRUE(store.Load(&loaded).ok());
+  EXPECT_EQ(ToSet(loaded), ToSet(cfg));
+  ASSERT_EQ(loaded.routes_size(), 1);
+  EXPECT_EQ(loaded.routes(0).src().conn_id(), 0u);
+  EXPECT_EQ(loaded.routes(0).src().module_name(), "DLT645");
+  EXPECT_EQ(loaded.routes(0).src().conn_name(), "meter-1");
+  EXPECT_EQ(loaded.routes(0).dst().conn_id(), 0u);
+  EXPECT_EQ(loaded.routes(0).dst().module_name(), "IEC104");
+  EXPECT_EQ(loaded.routes(0).dst().conn_name(), "upper");
+}
+
+// 验证：Save 会拒绝非法配置（例如缺少稳定主键且 conn_id=0，或 tag 为空）。
 TEST(DataCenterRouteStoreTest, SaveRejectsInvalidConfig) {
   ScopedTempDir dir;
   DataCenterRouteStore store(dir.path() / "routes.pb");
@@ -92,6 +131,19 @@ TEST(DataCenterRouteStoreTest, SaveRejectsInvalidConfig) {
   route->mutable_src()->set_tag("x");
   route->mutable_dst()->set_conn_id(2);
   route->mutable_dst()->set_tag("y");
+
+  auto status = store.Save(cfg);
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+// 验证：Save 会拒绝只有 module_name 或只有 conn_name 的半截稳定连接主键。
+TEST(DataCenterRouteStoreTest, SaveRejectsPartialStableConnectionKey) {
+  ScopedTempDir dir;
+  DataCenterRouteStore store(dir.path() / "routes.pb");
+
+  auto cfg = MakeStableConfig();
+  cfg.mutable_routes(0)->mutable_src()->clear_conn_name();
 
   auto status = store.Save(cfg);
   EXPECT_FALSE(status.ok());
