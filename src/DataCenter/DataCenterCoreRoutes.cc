@@ -8,8 +8,9 @@
 
 namespace DataCenter {
 grpc::Status DataCenterCore::UpsertRoutes(const DataCenterProto::UpsertRoutesRequest &request) {
-  if (request.replace()) {
-    routes_.clear();
+  std::unordered_map<StableEndpointKey, StableEndpointKeySet, StableEndpointKeyHash> next;
+  if (!request.replace()) {
+    next = routes_;
   }
 
   for (const auto &route : request.routes()) {
@@ -38,12 +39,14 @@ grpc::Status DataCenterCore::UpsertRoutes(const DataCenterProto::UpsertRoutesReq
       }
     }
 
-    routes_[std::move(src)].emplace(std::move(dst));
+    next[std::move(src)].emplace(std::move(dst));
   }
+  routes_ = std::move(next);
   return grpc::Status::OK;
 }
 
 grpc::Status DataCenterCore::DeleteRoutes(const DataCenterProto::DeleteRoutesRequest &request) {
+  auto next = routes_;
   for (const auto &route : request.routes()) {
     StableEndpointKey src;
     auto status = resolveEndpoint(route.src(), &src, nullptr);
@@ -56,15 +59,16 @@ grpc::Status DataCenterCore::DeleteRoutes(const DataCenterProto::DeleteRoutesReq
       return status;
     }
 
-    auto srcIt = routes_.find(src);
-    if (srcIt == routes_.end()) {
+    auto srcIt = next.find(src);
+    if (srcIt == next.end()) {
       continue;
     }
     srcIt->second.erase(dst);
     if (srcIt->second.empty()) {
-      routes_.erase(srcIt);
+      next.erase(srcIt);
     }
   }
+  routes_ = std::move(next);
   return grpc::Status::OK;
 }
 

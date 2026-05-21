@@ -177,6 +177,46 @@ TEST(ProtoFileStoreTest, LoadFallsBackToBackupWhenMainCorruptedAndRestoresMainBe
   EXPECT_TRUE(foundCorrupt);
 }
 
+// 验证：主文件和备份文件同时损坏时，Load 返回错误而不是静默返回空配置。
+TEST(ProtoFileStoreTest, LoadReturnsErrorWhenMainAndBackupAreBothCorrupted) {
+  ScopedTempDir dir;
+  const auto base = dir.path() / "connections.pb";
+  ConnectionsStore store(base, ValidateConnectionsConfig);
+
+  {
+    std::ofstream ofs(base, std::ios::binary | std::ios::trunc);
+    ASSERT_TRUE(ofs.is_open());
+    ofs << "corrupt-main";
+  }
+  {
+    std::ofstream ofs(store.backupPath(), std::ios::binary | std::ios::trunc);
+    ASSERT_TRUE(ofs.is_open());
+    ofs << "corrupt-backup";
+  }
+
+  DataCenterProto::ConnectionsConfig loaded;
+  auto status = store.Load(&loaded);
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+  EXPECT_EQ(loaded.conns_size(), 0);
+  EXPECT_FALSE(std::filesystem::exists(base));
+  EXPECT_FALSE(std::filesystem::exists(store.backupPath()));
+
+  bool foundMainCorrupt = false;
+  bool foundBackupCorrupt = false;
+  for (const auto& entry : std::filesystem::directory_iterator(dir.path())) {
+    const auto name = entry.path().filename().string();
+    if (name.rfind("connections.pb.corrupt.", 0) == 0) {
+      foundMainCorrupt = true;
+    }
+    if (name.rfind("connections.pb.bak.corrupt.", 0) == 0) {
+      foundBackupCorrupt = true;
+    }
+  }
+  EXPECT_TRUE(foundMainCorrupt);
+  EXPECT_TRUE(foundBackupCorrupt);
+}
+
 // 验证：backupPath/tmpPath 派生规则与构造路径一致。
 TEST(ProtoFileStoreTest, BackupAndTmpPathsAreDerivedFromBasePath) {
   ScopedTempDir dir;

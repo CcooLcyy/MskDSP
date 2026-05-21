@@ -202,6 +202,88 @@ TEST(DataCenterCoreTest, UpsertRoutesValidatesAgainstConnTagsWhenPresent) {
   EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
 }
 
+// 验证：replace=true 的 UpsertRoutes 校验失败时不会清空已有路由。
+TEST(DataCenterCoreTest, UpsertRoutesReplaceFailureKeepsExistingRoutes) {
+  DataCenterCore core;
+  InstallLegacyRouteConnections(core, {1, 2});
+
+  DataCenterProto::UpsertConnTagsRequest srcTags;
+  srcTags.set_conn_id(1);
+  srcTags.set_replace(true);
+  srcTags.add_tags("A");
+  ASSERT_TRUE(core.UpsertConnTags(srcTags).ok());
+
+  DataCenterProto::UpsertRoutesRequest initial;
+  initial.set_replace(true);
+  *initial.add_routes() = MakeRoute(1, "A", 2, "B");
+  ASSERT_TRUE(core.UpsertRoutes(initial).ok());
+
+  DataCenterProto::UpsertRoutesRequest replacement;
+  replacement.set_replace(true);
+  *replacement.add_routes() = MakeRoute(1, "不存在的点", 2, "C");
+
+  auto status = core.UpsertRoutes(replacement);
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+
+  DataCenterProto::ListRoutesRequest listReq;
+  auto listResp = core.ListRoutes(listReq);
+  ASSERT_EQ(listResp.routes_size(), 1);
+  EXPECT_EQ(listResp.routes(0).src().conn_id(), 1u);
+  EXPECT_EQ(listResp.routes(0).src().tag(), "A");
+  EXPECT_EQ(listResp.routes(0).dst().conn_id(), 2u);
+  EXPECT_EQ(listResp.routes(0).dst().tag(), "B");
+
+  DataCenterProto::PublishRequest pub;
+  pub.set_conn_id(1);
+  pub.set_tag("A");
+  pub.mutable_value()->set_int_value(1);
+  std::vector<DataCenterProto::PointUpdate> updates;
+  ASSERT_TRUE(core.Publish(pub, &updates).ok());
+  EXPECT_EQ(updates.size(), 1u);
+}
+
+// 验证：增量 UpsertRoutes 校验失败时不会留下已经处理过的部分路由。
+TEST(DataCenterCoreTest, UpsertRoutesIncrementalFailureDoesNotKeepPartialRoutes) {
+  DataCenterCore core;
+  InstallLegacyRouteConnections(core, {1, 2});
+
+  DataCenterProto::UpsertConnTagsRequest srcTags;
+  srcTags.set_conn_id(1);
+  srcTags.set_replace(true);
+  srcTags.add_tags("A");
+  srcTags.add_tags("C");
+  ASSERT_TRUE(core.UpsertConnTags(srcTags).ok());
+
+  DataCenterProto::UpsertRoutesRequest initial;
+  initial.set_replace(true);
+  *initial.add_routes() = MakeRoute(1, "A", 2, "B");
+  ASSERT_TRUE(core.UpsertRoutes(initial).ok());
+
+  DataCenterProto::UpsertRoutesRequest incremental;
+  incremental.set_replace(false);
+  *incremental.add_routes() = MakeRoute(1, "C", 2, "D");
+  *incremental.add_routes() = MakeRoute(1, "不存在的点", 2, "E");
+
+  auto status = core.UpsertRoutes(incremental);
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+
+  DataCenterProto::ListRoutesRequest listReq;
+  auto listResp = core.ListRoutes(listReq);
+  ASSERT_EQ(listResp.routes_size(), 1);
+  EXPECT_EQ(listResp.routes(0).src().tag(), "A");
+  EXPECT_EQ(listResp.routes(0).dst().tag(), "B");
+
+  DataCenterProto::PublishRequest pub;
+  pub.set_conn_id(1);
+  pub.set_tag("C");
+  pub.mutable_value()->set_int_value(2);
+  std::vector<DataCenterProto::PointUpdate> updates;
+  ASSERT_TRUE(core.Publish(pub, &updates).ok());
+  EXPECT_TRUE(updates.empty());
+}
+
 // 验证：Publish 按路由进行 tag 重写（srcTag -> dstTag）的一对一转发。
 TEST(DataCenterCoreTest, PublishRoutesWithTagRewriteOneToOne) {
   DataCenterCore core;
@@ -762,6 +844,34 @@ TEST(DataCenterCoreTest, DeleteRoutesRemovesRouteAndStopsPublish) {
   updates.clear();
   ASSERT_TRUE(core.Publish(pub, &updates).ok());
   EXPECT_TRUE(updates.empty());
+}
+
+// 验证：DeleteRoutes 校验失败时不会删除已经处理过的部分路由。
+TEST(DataCenterCoreTest, DeleteRoutesFailureKeepsExistingRoutes) {
+  DataCenterCore core;
+  InstallLegacyRouteConnections(core, {1, 2});
+
+  DataCenterProto::UpsertRoutesRequest routes;
+  routes.set_replace(true);
+  *routes.add_routes() = MakeRoute(1, "A", 2, "B");
+  *routes.add_routes() = MakeRoute(1, "C", 2, "D");
+  ASSERT_TRUE(core.UpsertRoutes(routes).ok());
+
+  DataCenterProto::DeleteRoutesRequest del;
+  *del.add_routes() = MakeRoute(1, "A", 2, "B");
+  *del.add_routes() = MakeRoute(99, "不存在的连接", 2, "D");
+
+  auto status = core.DeleteRoutes(del);
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::NOT_FOUND);
+
+  DataCenterProto::ListRoutesRequest listReq;
+  auto listResp = core.ListRoutes(listReq);
+  ASSERT_EQ(listResp.routes_size(), 2);
+  EXPECT_EQ(listResp.routes(0).src().tag(), "A");
+  EXPECT_EQ(listResp.routes(0).dst().tag(), "B");
+  EXPECT_EQ(listResp.routes(1).src().tag(), "C");
+  EXPECT_EQ(listResp.routes(1).dst().tag(), "D");
 }
 
 // 验证：GetLatest 支持 tags 过滤，仅返回指定目的点的最新值。

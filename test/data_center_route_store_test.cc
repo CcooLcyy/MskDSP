@@ -196,6 +196,30 @@ TEST(DataCenterRouteStoreTest, LoadFallsBackToBackupWhenMainCorruptedAndRestores
   EXPECT_TRUE(foundCorrupt);
 }
 
+// 验证：主路由文件和备份路由文件同时损坏时，Load 返回错误而不是静默返回空路由。
+TEST(DataCenterRouteStoreTest, LoadReturnsErrorWhenMainAndBackupAreBothInvalid) {
+  ScopedTempDir dir;
+  const auto base = dir.path() / "routes.pb";
+  DataCenterRouteStore store(base);
+
+  {
+    std::ofstream ofs(base, std::ios::binary | std::ios::trunc);
+    ASSERT_TRUE(ofs.is_open());
+    ofs << "corrupt-main";
+  }
+  {
+    std::ofstream ofs(store.backupPath(), std::ios::binary | std::ios::trunc);
+    ASSERT_TRUE(ofs.is_open());
+    ofs << "corrupt-backup";
+  }
+
+  DataCenterProto::RoutesConfig loaded;
+  auto status = store.Load(&loaded);
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+  EXPECT_EQ(loaded.routes_size(), 0);
+}
+
 // 验证：backupPath/tmpPath 派生规则与构造路径一致。
 TEST(DataCenterRouteStoreTest, BackupAndTmpPathsAreDerivedFromBasePath) {
   ScopedTempDir dir;

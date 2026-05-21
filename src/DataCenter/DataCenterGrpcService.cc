@@ -76,6 +76,17 @@ std::string formatPointValue(const DataCenterProto::PointValue& value) {
       return "类型=未设置";
   }
 }
+
+std::string contextPeer(grpc::ServerContext* context) {
+  if (context == nullptr) {
+    return "未知调用方";
+  }
+  auto peer = context->peer();
+  if (peer.empty()) {
+    return "未知调用方";
+  }
+  return peer;
+}
 }  // namespace
 
 struct DataCenterGrpcServiceImpl::Impl {
@@ -264,7 +275,7 @@ DataCenterGrpcServiceImpl::DataCenterGrpcServiceImpl() :
     DataCenterProto::RoutesConfig config;
     auto status = impl_->routeStore.Load(&config);
     if (!status.ok()) {
-      LOG_INFO("DataCenter 路由加载失败: {}", status.error_message());
+      LOG_ERROR("DataCenter 路由加载失败: {}", status.error_message());
     } else if (config.routes_size() > 0) {
       status = impl_->core.ReplaceRoutesConfig(config);
       if (!status.ok()) {
@@ -453,45 +464,53 @@ grpc::Status DataCenterGrpcServiceImpl::GetConnTags(grpc::ServerContext*, const 
   return impl_->core.GetConnTags(request->conn_id(), response);
 }
 
-grpc::Status DataCenterGrpcServiceImpl::UpsertRoutes(grpc::ServerContext*, const DataCenterProto::UpsertRoutesRequest* request, DataCenterProto::Empty*) {
+grpc::Status DataCenterGrpcServiceImpl::UpsertRoutes(grpc::ServerContext* context, const DataCenterProto::UpsertRoutesRequest* request, DataCenterProto::Empty*) {
+  const auto peer = contextPeer(context);
   if (request == nullptr) {
-    LOG_ERROR("DataCenter UpsertRoutes 请求为空");
+    LOG_ERROR("DataCenter UpsertRoutes 请求为空: 调用方={}", peer);
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求为空");
   }
   std::lock_guard<std::mutex> lock(impl_->mu);
   auto status = impl_->core.UpsertRoutes(*request);
   if (!status.ok()) {
-    LOG_ERROR("DataCenter 更新路由失败: routes={}, replace={}, 原因={}",
-              request->routes_size(), request->replace(), status.error_message());
+    LOG_ERROR("DataCenter 更新路由失败: 调用方={}, routes={}, replace={}, 原因={}",
+              peer, request->routes_size(), request->replace(), status.error_message());
     return status;
   }
   status = impl_->saveRoutesLocked();
   if (!status.ok()) {
-    LOG_ERROR("DataCenter 路由落盘失败: routes={}, replace={}, 原因={}",
-              request->routes_size(), request->replace(), status.error_message());
+    LOG_ERROR("DataCenter 路由落盘失败: 调用方={}, routes={}, replace={}, 原因={}",
+              peer, request->routes_size(), request->replace(), status.error_message());
     return status;
   }
-  LOG_INFO("DataCenter 已更新路由并按稳定连接主键归一化: routes={}, replace={}", request->routes_size(), request->replace());
+  const auto totalRoutes = impl_->core.DumpRoutesConfig().routes_size();
+  LOG_INFO("DataCenter 已更新路由并按稳定连接主键归一化: 调用方={}, routes={}, replace={}, 总路由数={}",
+           peer, request->routes_size(), request->replace(), totalRoutes);
   return grpc::Status::OK;
 }
 
-grpc::Status DataCenterGrpcServiceImpl::DeleteRoutes(grpc::ServerContext*, const DataCenterProto::DeleteRoutesRequest* request, DataCenterProto::Empty*) {
+grpc::Status DataCenterGrpcServiceImpl::DeleteRoutes(grpc::ServerContext* context, const DataCenterProto::DeleteRoutesRequest* request, DataCenterProto::Empty*) {
+  const auto peer = contextPeer(context);
   if (request == nullptr) {
-    LOG_ERROR("DataCenter DeleteRoutes 请求为空");
+    LOG_ERROR("DataCenter DeleteRoutes 请求为空: 调用方={}", peer);
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求为空");
   }
   std::lock_guard<std::mutex> lock(impl_->mu);
   auto status = impl_->core.DeleteRoutes(*request);
   if (!status.ok()) {
-    LOG_ERROR("DataCenter 删除路由失败: routes={}, 原因={}", request->routes_size(), status.error_message());
+    LOG_ERROR("DataCenter 删除路由失败: 调用方={}, routes={}, 原因={}",
+              peer, request->routes_size(), status.error_message());
     return status;
   }
   status = impl_->saveRoutesLocked();
   if (!status.ok()) {
-    LOG_ERROR("DataCenter 删除路由落盘失败: routes={}, 原因={}", request->routes_size(), status.error_message());
+    LOG_ERROR("DataCenter 删除路由落盘失败: 调用方={}, routes={}, 原因={}",
+              peer, request->routes_size(), status.error_message());
     return status;
   }
-  LOG_INFO("DataCenter 已删除稳定连接主键匹配的路由: routes={}", request->routes_size());
+  const auto totalRoutes = impl_->core.DumpRoutesConfig().routes_size();
+  LOG_INFO("DataCenter 已删除稳定连接主键匹配的路由: 调用方={}, routes={}, 总路由数={}",
+           peer, request->routes_size(), totalRoutes);
   return grpc::Status::OK;
 }
 

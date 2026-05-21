@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <sstream>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -86,28 +87,38 @@ public:
       return grpc::Status::OK;
     }
 
-    if (std::filesystem::exists(path_, ec)) {
+    bool mainExists = std::filesystem::exists(path_, ec);
+    bool backupExists = std::filesystem::exists(backupPath(), ec);
+    grpc::Status mainStatus;
+    grpc::Status backupStatus;
+
+    if (mainExists) {
       ProtoT mainCfg;
-      auto status = parseAndValidate(path_, &mainCfg);
-      if (status.ok()) {
+      mainStatus = parseAndValidate(path_, &mainCfg);
+      if (mainStatus.ok()) {
         *out = std::move(mainCfg);
         return grpc::Status::OK;
       }
     }
 
-    if (std::filesystem::exists(backupPath(), ec)) {
+    if (backupExists) {
       ProtoT bakCfg;
-      auto status = parseAndValidate(backupPath(), &bakCfg);
-      if (status.ok()) {
+      backupStatus = parseAndValidate(backupPath(), &bakCfg);
+      if (backupStatus.ok()) {
         (void)Save(bakCfg);
         *out = std::move(bakCfg);
         return grpc::Status::OK;
       }
     }
 
-    (void)isolateCorruptFile(path_);
-    out->Clear();
-    return grpc::Status::OK;
+    if (mainExists) {
+      (void)isolateCorruptFile(path_);
+    }
+    if (backupExists) {
+      (void)isolateCorruptFile(backupPath());
+    }
+    return grpc::Status(grpc::StatusCode::INTERNAL,
+                        buildLoadFailureMessage(mainExists, mainStatus, backupExists, backupStatus));
   }
 
   const std::filesystem::path& path() const { return path_; }
@@ -173,6 +184,23 @@ private:
     }
     *out = std::move(cfg);
     return grpc::Status::OK;
+  }
+
+  static std::string buildLoadFailureMessage(bool mainExists, const grpc::Status& mainStatus,
+                                             bool backupExists, const grpc::Status& backupStatus) {
+    std::ostringstream oss;
+    oss << "配置主文件和备份文件均不可用";
+    if (mainExists) {
+      oss << "，主文件错误=" << mainStatus.error_message();
+    } else {
+      oss << "，主文件不存在";
+    }
+    if (backupExists) {
+      oss << "，备份文件错误=" << backupStatus.error_message();
+    } else {
+      oss << "，备份文件不存在";
+    }
+    return oss.str();
   }
 
   static int64_t nowMs() {
