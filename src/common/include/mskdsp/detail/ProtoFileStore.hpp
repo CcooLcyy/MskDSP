@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <sstream>
 #include <string>
@@ -17,62 +18,85 @@ template <typename ProtoT>
 class ProtoFileStore {
 public:
   using ValidateFn = grpc::Status (*)(const ProtoT&);
+  using TraceFn = std::function<void(const std::string&)>;
 
-  ProtoFileStore(std::filesystem::path path, ValidateFn validate) :
-    path_(std::move(path)), validate_(validate) {}
+  ProtoFileStore(std::filesystem::path path, ValidateFn validate, TraceFn trace = {}) :
+    path_(std::move(path)), validate_(validate), trace_(std::move(trace)) {}
 
   grpc::Status Save(const ProtoT& config) const {
     auto status = validate(config);
     if (!status.ok()) {
+      trace("保存前配置校验失败: 原因=" + status.error_message() + ", " + allFileStates(-1));
       return status;
     }
 
     std::error_code ec;
     std::filesystem::create_directories(path_.parent_path(), ec);
     if (ec) {
+      trace("创建配置目录失败: 目录=" + path_.parent_path().string() + ", 原因=" + ec.message());
       return grpc::Status(grpc::StatusCode::INTERNAL, "创建配置目录失败");
     }
 
     std::string data;
     if (!config.SerializeToString(&data)) {
+      trace("序列化 protobuf 失败: " + allFileStates(-1));
       return grpc::Status(grpc::StatusCode::INTERNAL, "序列化 protobuf 失败");
     }
+    trace("保存开始: " + allFileStates(static_cast<int64_t>(data.size())));
 
     const auto tmp = tmpPath();
+    trace("准备写入临时文件: 临时文件路径=" + tmp.string() + ", 写入字节数=" + std::to_string(data.size()));
     status = writeStringToFile(tmp, data);
     if (!status.ok()) {
+      trace("写入临时文件失败: 原因=" + status.error_message() + ", " + allFileStates(static_cast<int64_t>(data.size())));
       std::error_code rmEc;
       std::filesystem::remove(tmp, rmEc);
       return status;
     }
+    trace("临时文件写入完成: " + allFileStates(static_cast<int64_t>(data.size())));
 
     ProtoT verify;
+    trace("准备解析校验临时文件: 临时文件路径=" + tmp.string());
     status = parseAndValidate(tmp, &verify);
     if (!status.ok()) {
+      trace("临时文件解析校验失败: 原因=" + status.error_message() + ", " + allFileStates(static_cast<int64_t>(data.size())));
       std::error_code rmEc;
       std::filesystem::remove(tmp, rmEc);
       return status;
     }
+    trace("临时文件解析校验成功: " + allFileStates(static_cast<int64_t>(data.size())));
 
     if (std::filesystem::exists(path_)) {
       ProtoT current;
+      trace("主文件存在，准备解析校验当前主文件: 主文件路径=" + path_.string());
       auto curStatus = parseAndValidate(path_, &current);
       if (curStatus.ok()) {
+        trace("当前主文件解析校验成功，准备将主文件轮转为备份: 主文件路径=" + path_.string() +
+              ", 备份文件路径=" + backupPath().string());
         auto bakStatus = replaceFile(path_, backupPath());
         if (!bakStatus.ok()) {
+          trace("主文件轮转为备份失败: 原因=" + bakStatus.error_message() + ", " + allFileStates(static_cast<int64_t>(data.size())));
           std::error_code rmEc;
           std::filesystem::remove(tmp, rmEc);
           return bakStatus;
         }
+        trace("主文件轮转为备份完成: " + allFileStates(static_cast<int64_t>(data.size())));
       } else {
+        trace("当前主文件解析校验失败，准备隔离主文件: 原因=" + curStatus.error_message() + ", " +
+              allFileStates(static_cast<int64_t>(data.size())));
         (void)isolateCorruptFile(path_);
+        trace("当前主文件隔离流程结束: " + allFileStates(static_cast<int64_t>(data.size())));
       }
     }
 
+    trace("准备将临时文件替换为主文件: 临时文件路径=" + tmp.string() + ", 主文件路径=" + path_.string());
     status = replaceFile(tmp, path_);
     if (!status.ok()) {
+      trace("临时文件替换主文件失败: 原因=" + status.error_message() + ", " + allFileStates(static_cast<int64_t>(data.size())));
       return status;
     }
+    trace("临时文件替换主文件完成: " + allFileStates(static_cast<int64_t>(data.size())));
+    trace("保存完成: " + allFileStates(static_cast<int64_t>(data.size())));
     return grpc::Status::OK;
   }
 
@@ -82,8 +106,10 @@ public:
     }
 
     std::error_code ec;
+    trace("加载开始: " + allFileStates(-1));
     if (!std::filesystem::exists(path_, ec) && !std::filesystem::exists(backupPath(), ec)) {
       out->Clear();
+      trace("主文件和备份文件均不存在，返回空配置: " + allFileStates(-1));
       return grpc::Status::OK;
     }
 
@@ -91,32 +117,53 @@ public:
     bool backupExists = std::filesystem::exists(backupPath(), ec);
     grpc::Status mainStatus;
     grpc::Status backupStatus;
+    if (mainExists && backupExists) {
+      const auto mainState = inspectFileState(path_);
+      const auto backupState = inspectFileState(backupPath());
+      if (mainState.exists == "true" && mainState.size == "0" &&
+          backupState.exists == "true" && backupState.size != "0" && backupState.size != "未知") {
+        trace("告警: 主文件为空但备份文件非空，加载流程会优先尝试主文件；如果空 protobuf 解析成功，将返回空配置而不会恢复备份: " +
+              allFileStates(-1));
+      }
+    }
 
     if (mainExists) {
       ProtoT mainCfg;
+      trace("准备解析校验主文件: 主文件路径=" + path_.string());
       mainStatus = parseAndValidate(path_, &mainCfg);
       if (mainStatus.ok()) {
         *out = std::move(mainCfg);
+        trace("主文件解析校验成功，使用主文件配置: " + allFileStates(-1));
         return grpc::Status::OK;
       }
+      trace("主文件解析校验失败: 原因=" + mainStatus.error_message() + ", " + allFileStates(-1));
     }
 
     if (backupExists) {
       ProtoT bakCfg;
+      trace("准备解析校验备份文件: 备份文件路径=" + backupPath().string());
       backupStatus = parseAndValidate(backupPath(), &bakCfg);
       if (backupStatus.ok()) {
+        trace("备份文件解析校验成功，准备用备份恢复主文件: " + allFileStates(-1));
         (void)Save(bakCfg);
         *out = std::move(bakCfg);
+        trace("备份文件恢复主文件流程结束，使用备份配置: " + allFileStates(-1));
         return grpc::Status::OK;
       }
+      trace("备份文件解析校验失败: 原因=" + backupStatus.error_message() + ", " + allFileStates(-1));
     }
 
     if (mainExists) {
+      trace("主文件不可用，准备隔离主文件: 主文件路径=" + path_.string());
       (void)isolateCorruptFile(path_);
+      trace("主文件隔离流程结束: " + allFileStates(-1));
     }
     if (backupExists) {
+      trace("备份文件不可用，准备隔离备份文件: 备份文件路径=" + backupPath().string());
       (void)isolateCorruptFile(backupPath());
+      trace("备份文件隔离流程结束: " + allFileStates(-1));
     }
+    trace("加载失败: " + buildLoadFailureMessage(mainExists, mainStatus, backupExists, backupStatus) + ", " + allFileStates(-1));
     return grpc::Status(grpc::StatusCode::INTERNAL,
                         buildLoadFailureMessage(mainExists, mainStatus, backupExists, backupStatus));
   }
@@ -126,6 +173,82 @@ public:
   std::filesystem::path tmpPath() const { return std::filesystem::path(path_.string() + ".tmp"); }
 
 private:
+  struct FileState {
+    std::string path;
+    std::string exists{"未知"};
+    std::string size{"未知"};
+    std::string writeTimeTicks{"未知"};
+    std::string error;
+  };
+
+  void trace(const std::string& message) const {
+    if (trace_) {
+      trace_(message);
+    }
+  }
+
+  static void appendFileStateError(FileState* state, const char* action, const std::error_code& ec) {
+    if (!state->error.empty()) {
+      state->error += "; ";
+    }
+    state->error += action;
+    state->error += "失败: ";
+    state->error += ec.message();
+  }
+
+  static FileState inspectFileState(const std::filesystem::path& path) {
+    FileState state;
+    state.path = path.string();
+    std::error_code ec;
+    const bool exists = std::filesystem::exists(path, ec);
+    if (ec) {
+      appendFileStateError(&state, "检查存在性", ec);
+      return state;
+    }
+    state.exists = exists ? "true" : "false";
+    if (!exists) {
+      return state;
+    }
+
+    ec.clear();
+    const auto size = std::filesystem::file_size(path, ec);
+    if (ec) {
+      appendFileStateError(&state, "获取大小", ec);
+    } else {
+      state.size = std::to_string(size);
+    }
+
+    ec.clear();
+    const auto mtime = std::filesystem::last_write_time(path, ec);
+    if (ec) {
+      appendFileStateError(&state, "获取修改时间", ec);
+    } else {
+      state.writeTimeTicks = std::to_string(mtime.time_since_epoch().count());
+    }
+    return state;
+  }
+
+  static std::string formatFileState(const char* label, const FileState& state) {
+    std::ostringstream oss;
+    oss << label << "路径=" << state.path
+        << ", " << label << "存在=" << state.exists
+        << ", " << label << "大小=" << state.size
+        << ", " << label << "修改时间ticks=" << state.writeTimeTicks
+        << ", " << label << "状态错误=" << state.error;
+    return oss.str();
+  }
+
+  std::string allFileStates(int64_t serializedBytes) const {
+    std::ostringstream oss;
+    if (serializedBytes >= 0) {
+      oss << "序列化字节数=" << serializedBytes << ", ";
+    }
+    oss << formatFileState("主文件", inspectFileState(path_)) << ", "
+        << formatFileState("备份文件", inspectFileState(backupPath())) << ", "
+        << formatFileState("临时文件", inspectFileState(tmpPath()));
+    return oss.str();
+  }
+
   grpc::Status validate(const ProtoT& config) const {
     if (validate_ == nullptr) {
       return grpc::Status(grpc::StatusCode::INTERNAL, "validate 为空");
@@ -241,5 +364,6 @@ private:
 
   std::filesystem::path path_;
   ValidateFn validate_{nullptr};
+  TraceFn trace_;
 };
 }  // namespace mskdsp::detail

@@ -1,5 +1,7 @@
 #include "DataCenterRouteStore.h"
 
+#include <utility>
+
 #include "mskdsp/detail/ProtoFileStore.hpp"
 
 namespace DataCenter {
@@ -34,15 +36,17 @@ grpc::Status validateRoutesConfig(const DataCenterProto::RoutesConfig& config) {
 DataCenterRouteStore::DataCenterRouteStore(std::filesystem::path routesPath) :
   routesPath_(std::move(routesPath)) {}
 
-grpc::Status DataCenterRouteStore::Save(const DataCenterProto::RoutesConfig& config) {
+grpc::Status DataCenterRouteStore::Save(const DataCenterProto::RoutesConfig& config, TraceFn trace) {
   mskdsp::detail::ProtoFileStore<DataCenterProto::RoutesConfig> store(routesPath_,
-                                                                      validateRoutesConfig);
+                                                                      validateRoutesConfig,
+                                                                      std::move(trace));
   return store.Save(config);
 }
 
-grpc::Status DataCenterRouteStore::Load(DataCenterProto::RoutesConfig* out) {
+grpc::Status DataCenterRouteStore::Load(DataCenterProto::RoutesConfig* out, TraceFn trace) {
   mskdsp::detail::ProtoFileStore<DataCenterProto::RoutesConfig> store(routesPath_,
-                                                                      validateRoutesConfig);
+                                                                      validateRoutesConfig,
+                                                                      std::move(trace));
   return store.Load(out);
 }
 
