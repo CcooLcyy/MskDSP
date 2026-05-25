@@ -94,6 +94,8 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
   };
   std::vector<ResolvedConnTags> connTagsList;
   connTagsList.reserve(static_cast<size_t>(config.point_tables_size()));
+  std::unordered_map<ConnKey, std::unordered_set<std::string>, ConnKeyHash> desiredTagsByConnKey;
+  desiredTagsByConnKey.reserve(static_cast<size_t>(config.point_tables_size()));
 
   for (const auto &table : config.point_tables()) {
     if (!ValidateConnKey(table.module_name(), table.conn_name())) {
@@ -119,7 +121,9 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
 
     bool tagsOk = true;
     std::vector<std::string> tags;
+    std::unordered_set<std::string> tagSet;
     tags.reserve(static_cast<size_t>(table.tags_size()));
+    tagSet.reserve(static_cast<size_t>(table.tags_size()));
     for (const auto &tag : table.tags()) {
       if (tag.empty()) {
         LOG_ERROR("DataCenter 连接标签注册表配置包含空标签: 模块名={}, 连接名={}", table.module_name(), table.conn_name());
@@ -127,6 +131,7 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
         continue;
       }
       tags.emplace_back(tag);
+      tagSet.emplace(tag);
     }
     if (!tagsOk) {
       ok = false;
@@ -134,6 +139,7 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
     }
 
     desiredConnIds.emplace(connId);
+    desiredTagsByConnKey.emplace(key, std::move(tagSet));
     connTagsList.push_back(ResolvedConnTags{
         .connId = connId,
         .tags = std::move(tags),
@@ -168,6 +174,41 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
         continue;
       }
 
+      ConnKey srcKey{src.module_name(), src.conn_name()};
+      ConnKey dstKey{dst.module_name(), dst.conn_name()};
+      const auto srcTagsIt = desiredTagsByConnKey.find(srcKey);
+      if (srcTagsIt == desiredTagsByConnKey.end()) {
+        LOG_ERROR("DataCenter 路由源连接未在 point_tables 中声明目标标签集合: 模块名={}, 连接名={}",
+                  src.module_name(),
+                  src.conn_name());
+        ok = false;
+        continue;
+      }
+      if (!srcTagsIt->second.contains(src.tag())) {
+        LOG_ERROR("DataCenter 路由源标签未在 point_tables 中声明: 模块名={}, 连接名={}, 标签={}",
+                  src.module_name(),
+                  src.conn_name(),
+                  src.tag());
+        ok = false;
+        continue;
+      }
+      const auto dstTagsIt = desiredTagsByConnKey.find(dstKey);
+      if (dstTagsIt == desiredTagsByConnKey.end()) {
+        LOG_ERROR("DataCenter 路由目的连接未在 point_tables 中声明目标标签集合: 模块名={}, 连接名={}",
+                  dst.module_name(),
+                  dst.conn_name());
+        ok = false;
+        continue;
+      }
+      if (!dstTagsIt->second.contains(dst.tag())) {
+        LOG_ERROR("DataCenter 路由目的标签未在 point_tables 中声明: 模块名={}, 连接名={}, 标签={}",
+                  dst.module_name(),
+                  dst.conn_name(),
+                  dst.tag());
+        ok = false;
+        continue;
+      }
+
       uint32_t srcConnId = 0;
       uint32_t dstConnId = 0;
       if (!ResolveConnId(connIds, src.module_name(), src.conn_name(), &srcConnId)) {
@@ -179,20 +220,6 @@ bool ApplyDataCenterConfig(const ConfigPusherProto::DataCenterConfig &config,
       }
       if (!ResolveConnId(connIds, dst.module_name(), dst.conn_name(), &dstConnId)) {
         LOG_ERROR("DataCenter 未找到路由目的连接: 模块名={}, 连接名={}",
-                  dst.module_name(),
-                  dst.conn_name());
-        ok = false;
-        continue;
-      }
-      if (!desiredConnIds.contains(srcConnId)) {
-        LOG_ERROR("DataCenter 路由源连接未在 point_tables 中声明目标标签集合: 模块名={}, 连接名={}",
-                  src.module_name(),
-                  src.conn_name());
-        ok = false;
-        continue;
-      }
-      if (!desiredConnIds.contains(dstConnId)) {
-        LOG_ERROR("DataCenter 路由目的连接未在 point_tables 中声明目标标签集合: 模块名={}, 连接名={}",
                   dst.module_name(),
                   dst.conn_name());
         ok = false;

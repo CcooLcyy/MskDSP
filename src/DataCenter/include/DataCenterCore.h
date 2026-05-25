@@ -80,18 +80,20 @@ private:
   static grpc::Status validateConnKey(const DataCenterProto::ConnectionKey &key);
 
   static grpc::Status validateEndpoint(uint32_t connId, const std::string &tag);
-  grpc::Status validateEndpointAgainstConnTags(uint32_t connId, const std::string &tag) const;
+  grpc::Status validateEndpointAgainstConnTags(const StableEndpointKey &endpoint) const;
   grpc::Status resolveEndpoint(const DataCenterProto::Endpoint &endpoint, StableEndpointKey *out, uint32_t *resolvedConnId) const;
   bool tryResolveConnId(const StableEndpointKey &endpoint, uint32_t *outConnId) const;
+  bool tryResolveConnKey(uint32_t connId, ConnKey *out) const;
   DataCenterProto::Endpoint dumpEndpoint(const StableEndpointKey &endpoint) const;
   void rewriteConnectionKeyReferences(const ConnKey &oldKey, const ConnKey &newKey);
+  size_t pruneRoutesRejectedByConnTags(const ConnKey &key, const std::unordered_set<std::string> &allowedTags);
 
   static int64_t nowMs();
 
   std::unordered_map<uint32_t, DataCenterProto::ConnectionInfo> connections_;
   std::unordered_map<ConnKey, uint32_t, ConnKeyHash> connIdsByKey_;
   uint32_t nextConnId_{1};
-  std::unordered_map<uint32_t, std::unordered_set<std::string>> connTagsByConnId_;
+  std::unordered_map<ConnKey, std::unordered_set<std::string>, ConnKeyHash> connTagsByKey_;
   std::unordered_map<StableEndpointKey, StableEndpointKeySet, StableEndpointKeyHash> routes_;
   std::unordered_map<EndpointKey, DataCenterProto::PointUpdate, EndpointKeyHash> latestByDst_;
 };

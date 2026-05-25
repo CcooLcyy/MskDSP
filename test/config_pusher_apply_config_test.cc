@@ -270,7 +270,7 @@ TEST(ConfigPusherApplyConfigTest, PersistentTraceWithoutJsonStillReturnsEarly) {
   const auto configDir = workDir.path() / "configPusher";
   std::filesystem::create_directories(configDir);
 
-  WriteFile(workDir.path() / "conf" / "dataCenter" / "connections.pb", "trace");
+  WriteFile(workDir.path() / "conf" / "dataCenter" / "state.pb", "trace");
   WriteFile(workDir.path() / "conf" / "IEC104" / "links.pb", "trace");
   WriteFile(workDir.path() / "conf" / "ModbusRTU" / "links.pb", "trace");
   WriteFile(workDir.path() / "conf" / "DLT645" / "links.pb", "trace");
@@ -410,7 +410,7 @@ TEST(ConfigPusherApplyConfigTest, AppliesJsoncConfigAndStartsModuleEvenWhenPersi
 }
 )json");
 
-  WriteFile(workDir.path() / "conf" / "dataCenter" / "connections.pb", "trace");
+  WriteFile(workDir.path() / "conf" / "dataCenter" / "state.pb", "trace");
   WriteFile(workDir.path() / "conf" / "IEC104" / "links.pb", "trace");
   WriteFile(workDir.path() / "conf" / "AGC" / "groups.pb", "trace");
 
@@ -510,7 +510,7 @@ TEST(ConfigPusherApplyConfigTest, EmptyDataCenterJsonStillAppliesAsTargetState) 
 }
 )json");
 
-  WriteFile(workDir.path() / "conf" / "dataCenter" / "connections.pb", "trace");
+  WriteFile(workDir.path() / "conf" / "dataCenter" / "state.pb", "trace");
 
   FakeDataCenterService dataCenterService;
   grpc::ServerBuilder builder;
@@ -620,7 +620,7 @@ TEST(ConfigPusherApplyConfigTest, AppliesAvcJsoncAndStartsDataCenterAndAvcModule
 }
 )json");
 
-  WriteFile(workDir.path() / "conf" / "dataCenter" / "connections.pb", "trace");
+  WriteFile(workDir.path() / "conf" / "dataCenter" / "state.pb", "trace");
   WriteFile(workDir.path() / "conf" / "AVC" / "groups.pb", "trace");
 
   FakeAvcService avcService;

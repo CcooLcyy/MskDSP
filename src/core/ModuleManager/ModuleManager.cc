@@ -193,8 +193,7 @@ std::filesystem::path makeTmpPath(const std::filesystem::path &path) {
 
 std::vector<ModuleTraceAutoStartRule> buildUpperModeTraceAutoStartRules() {
   return {
-      {"DataCenter",
-       {"./conf/dataCenter/connections.pb", "./conf/dataCenter/conn_tags.pb", "./conf/dataCenter/routes.pb", "./conf/dataCenter/point_tables.pb"}},
+      {"DataCenter", {"./conf/dataCenter/state.pb"}},
       {"IEC104", {"./conf/IEC104/links.pb", "./conf/IEC104/point_tables.pb"}},
       {"ModbusRTU", {"./conf/ModbusRTU/mqtt.pb", "./conf/ModbusRTU/links.pb", "./conf/ModbusRTU/point_tables.pb"}},
       {"DLT645", {"./conf/DLT645/mqtt.pb", "./conf/DLT645/links.pb", "./conf/DLT645/point_tables.pb"}},

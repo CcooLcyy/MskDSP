@@ -15,28 +15,22 @@ grpc::Status DataCenterCore::UpsertRoutes(const DataCenterProto::UpsertRoutesReq
 
   for (const auto &route : request.routes()) {
     StableEndpointKey src;
-    uint32_t srcConnId = 0;
-    auto status = resolveEndpoint(route.src(), &src, &srcConnId);
+    auto status = resolveEndpoint(route.src(), &src, nullptr);
     if (!status.ok()) {
       return status;
     }
     StableEndpointKey dst;
-    uint32_t dstConnId = 0;
-    status = resolveEndpoint(route.dst(), &dst, &dstConnId);
+    status = resolveEndpoint(route.dst(), &dst, nullptr);
     if (!status.ok()) {
       return status;
     }
-    if (srcConnId != 0) {
-      status = validateEndpointAgainstConnTags(srcConnId, src.tag);
-      if (!status.ok()) {
-        return status;
-      }
+    status = validateEndpointAgainstConnTags(src);
+    if (!status.ok()) {
+      return status;
     }
-    if (dstConnId != 0) {
-      status = validateEndpointAgainstConnTags(dstConnId, dst.tag);
-      if (!status.ok()) {
-        return status;
-      }
+    status = validateEndpointAgainstConnTags(dst);
+    if (!status.ok()) {
+      return status;
     }
 
     next[std::move(src)].emplace(std::move(dst));
@@ -117,28 +111,22 @@ grpc::Status DataCenterCore::ReplaceRoutesConfig(const DataCenterProto::RoutesCo
   std::unordered_map<StableEndpointKey, StableEndpointKeySet, StableEndpointKeyHash> next;
   for (const auto &route : config.routes()) {
     StableEndpointKey src;
-    uint32_t srcConnId = 0;
-    auto status = resolveEndpoint(route.src(), &src, &srcConnId);
+    auto status = resolveEndpoint(route.src(), &src, nullptr);
     if (!status.ok()) {
       return status;
     }
     StableEndpointKey dst;
-    uint32_t dstConnId = 0;
-    status = resolveEndpoint(route.dst(), &dst, &dstConnId);
+    status = resolveEndpoint(route.dst(), &dst, nullptr);
     if (!status.ok()) {
       return status;
     }
-    if (srcConnId != 0) {
-      status = validateEndpointAgainstConnTags(srcConnId, src.tag);
-      if (!status.ok()) {
-        return status;
-      }
+    status = validateEndpointAgainstConnTags(src);
+    if (!status.ok()) {
+      return status;
     }
-    if (dstConnId != 0) {
-      status = validateEndpointAgainstConnTags(dstConnId, dst.tag);
-      if (!status.ok()) {
-        return status;
-      }
+    status = validateEndpointAgainstConnTags(dst);
+    if (!status.ok()) {
+      return status;
     }
 
     next[std::move(src)].emplace(std::move(dst));

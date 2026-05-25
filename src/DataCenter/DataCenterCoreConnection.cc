@@ -202,6 +202,13 @@ grpc::Status DataCenterCore::RenameConnection(const DataCenterProto::RenameConne
   connIdsByKey_.erase(it);
   connIdsByKey_.emplace(newKey, connId);
 
+  auto tagsIt = connTagsByKey_.find(oldKey);
+  if (tagsIt != connTagsByKey_.end()) {
+    auto tags = std::move(tagsIt->second);
+    connTagsByKey_.erase(tagsIt);
+    connTagsByKey_[newKey] = std::move(tags);
+  }
+
   auto connIt = connections_.find(connId);
   if (connIt == connections_.end()) {
     return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接未找到");
@@ -228,7 +235,7 @@ grpc::Status DataCenterCore::DeleteConnection(const DataCenterProto::DeleteConne
 
   connIdsByKey_.erase(it);
   connections_.erase(connId);
-  connTagsByConnId_.erase(connId);
+  connTagsByKey_.erase(key);
 
   for (auto routeIt = routes_.begin(); routeIt != routes_.end();) {
     if (routeIt->first.moduleName == key.moduleName && routeIt->first.connName == key.connName) {
@@ -294,6 +301,12 @@ grpc::Status DataCenterCore::UpsertConnection(const DataCenterProto::UpsertConne
   }
 
   connIdsByKey_[std::move(nextKey)] = conn.conn_id();
+  auto tagsIt = connTagsByKey_.find(curKey);
+  if (tagsIt != connTagsByKey_.end()) {
+    auto tags = std::move(tagsIt->second);
+    connTagsByKey_.erase(tagsIt);
+    connTagsByKey_[ConnKey{conn.module_name(), conn.conn_name()}] = std::move(tags);
+  }
   rewriteConnectionKeyReferences(curKey, ConnKey{conn.module_name(), conn.conn_name()});
   existing->second = conn;
   return grpc::Status::OK;

@@ -18,10 +18,8 @@
 #include <utility>
 #include <vector>
 
-#include "DataCenterConnectionStore.h"
 #include "DataCenterCore.h"
-#include "DataCenterConnTagsStore.h"
-#include "DataCenterRouteStore.h"
+#include "DataCenterStateStore.h"
 #include "Logger.h"
 
 namespace DataCenter {
@@ -258,27 +256,27 @@ bool containsTraceWarning(const std::string& message) {
   return message.rfind("告警:", 0) == 0;
 }
 
-void logRouteStoreTrace(const std::string& source, const RouteSummary& summary, const std::string& message) {
+void logStateStoreTrace(const std::string& source, const RouteSummary& summary, const std::string& message) {
   if (containsTraceWarning(message)) {
-    LOG_WARNING("DataCenter 路由持久化详细流程: 来源={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, {}",
+    LOG_WARNING("DataCenter 状态持久化详细流程: 来源={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, {}",
                 source, summary.total, summary.shadow, summary.business, summary.hash, message);
     return;
   }
-  LOG_INFO("DataCenter 路由持久化详细流程: 来源={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, {}",
+  LOG_INFO("DataCenter 状态持久化详细流程: 来源={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, {}",
            source, summary.total, summary.shadow, summary.business, summary.hash, message);
 }
 
-void logRouteStoreFiles(const char* phase, const DataCenterRouteStore& routeStore, const RouteSummary& summary, const std::string& source = {}) {
-  const auto mainFile = inspectRouteFileState(routeStore.routesPath());
-  const auto backupFile = inspectRouteFileState(routeStore.backupPath());
-  const auto tmpFile = inspectRouteFileState(routeStore.tmpPath());
-  LOG_INFO("DataCenter 路由持久化文件状态: 阶段={}, 来源={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 主文件路径={}, 主文件存在={}, 主文件大小={}, 主文件修改时间ticks={}, 主文件状态错误={}, 备份文件路径={}, 备份文件存在={}, 备份文件大小={}, 备份文件修改时间ticks={}, 备份文件状态错误={}, 临时文件路径={}, 临时文件存在={}, 临时文件大小={}, 临时文件修改时间ticks={}, 临时文件状态错误={}",
+void logStateStoreFiles(const char* phase, const DataCenterStateStore& stateStore, const RouteSummary& summary, const std::string& source = {}) {
+  const auto mainFile = inspectRouteFileState(stateStore.statePath());
+  const auto backupFile = inspectRouteFileState(stateStore.backupPath());
+  const auto tmpFile = inspectRouteFileState(stateStore.tmpPath());
+  LOG_INFO("DataCenter 状态持久化文件状态: 阶段={}, 来源={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 主文件路径={}, 主文件存在={}, 主文件大小={}, 主文件修改时间ticks={}, 主文件状态错误={}, 备份文件路径={}, 备份文件存在={}, 备份文件大小={}, 备份文件修改时间ticks={}, 备份文件状态错误={}, 临时文件路径={}, 临时文件存在={}, 临时文件大小={}, 临时文件修改时间ticks={}, 临时文件状态错误={}",
            phase, source, summary.total, summary.shadow, summary.business, summary.hash,
            mainFile.path, mainFile.exists, mainFile.size, mainFile.writeTimeTicks, mainFile.error,
            backupFile.path, backupFile.exists, backupFile.size, backupFile.writeTimeTicks, backupFile.error,
            tmpFile.path, tmpFile.exists, tmpFile.size, tmpFile.writeTimeTicks, tmpFile.error);
   if (isExistingFileWithSize(mainFile, 0) && isExistingNonEmptyFile(backupFile)) {
-    LOG_WARNING("DataCenter 检测到路由主文件为空但备份非空: 阶段={}, 来源={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 主文件路径={}, 主文件大小={}, 备份文件路径={}, 备份文件大小={}",
+    LOG_WARNING("DataCenter 检测到状态主文件为空但备份非空: 阶段={}, 来源={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 主文件路径={}, 主文件大小={}, 备份文件路径={}, 备份文件大小={}",
                 phase, source, summary.total, summary.shadow, summary.business, summary.hash,
                 mainFile.path, mainFile.size, backupFile.path, backupFile.size);
   }
@@ -320,9 +318,7 @@ struct DataCenterGrpcServiceImpl::Impl {
 
   std::mutex mu;
   DataCenterCore core;
-  DataCenterConnectionStore connectionStore;
-  DataCenterConnTagsStore connTagsStore;
-  DataCenterRouteStore routeStore;
+  DataCenterStateStore stateStore;
 
   uint64_t nextSubscriberId{0};
   std::unordered_map<uint32_t, std::unordered_map<uint64_t, std::shared_ptr<Subscriber>>> subscribersByConn;
@@ -415,47 +411,40 @@ struct DataCenterGrpcServiceImpl::Impl {
     subscribersByConn.erase(it);
   }
 
-  grpc::Status saveConnectionsLocked() {
-    auto config = core.DumpConnectionsConfig();
-    auto status = connectionStore.Save(config);
-    if (!status.ok()) {
-      LOG_INFO("DataCenter 连接注册表落盘失败: {}", status.error_message());
-    }
-    return status;
+  DataCenterProto::DataCenterState dumpStateLocked() const {
+    DataCenterProto::DataCenterState state;
+    *state.mutable_connections() = core.DumpConnectionsConfig();
+    *state.mutable_conn_tags() = core.DumpConnTagsConfig();
+    *state.mutable_routes() = core.DumpRoutesConfig();
+    return state;
   }
 
-  grpc::Status saveConnTagsLocked() {
-    auto config = core.DumpConnTagsConfig();
-    auto status = connTagsStore.Save(config);
-    if (!status.ok()) {
-      LOG_INFO("DataCenter 连接标签注册表落盘失败: {}", status.error_message());
-    }
-    return status;
-  }
-
-  grpc::Status saveRoutesLocked(const std::string& source) {
-    auto config = core.DumpRoutesConfig();
-    const auto summary = summarizeRoutes(config.routes());
-    LOG_INFO("DataCenter 准备保存路由配置: 来源={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 路由样本={}",
-             source, summary.total, summary.shadow, summary.business, summary.hash, summary.sample);
+  grpc::Status saveStateLocked(const std::string& source) {
+    auto state = dumpStateLocked();
+    const auto summary = summarizeRoutes(state.routes().routes());
+    LOG_INFO("DataCenter 准备保存完整状态: 来源={}, connections={}, conn_tags={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 路由样本={}",
+             source, state.connections().conns_size(), state.conn_tags().conn_tags_size(),
+             summary.total, summary.shadow, summary.business, summary.hash, summary.sample);
     if (summary.total == 0) {
-      LOG_WARNING("DataCenter 准备保存空路由配置: 来源={}, routes_size=0, 影子路由数=0, 业务路由数=0, 路由hash={}",
-                  source, summary.hash);
+      LOG_WARNING("DataCenter 准备保存完整状态且路由为空: 来源={}, connections={}, conn_tags={}, routes_size=0, 影子路由数=0, 业务路由数=0, 路由hash={}",
+                  source, state.connections().conns_size(), state.conn_tags().conn_tags_size(), summary.hash);
     }
-    logRouteStoreFiles("路由落盘前", routeStore, summary, source);
-    auto status = routeStore.Save(config, [source, summary](const std::string& message) {
-      logRouteStoreTrace(source, summary, message);
+    logStateStoreFiles("状态落盘前", stateStore, summary, source);
+    auto status = stateStore.Save(state, [source, summary](const std::string& message) {
+      logStateStoreTrace(source, summary, message);
     });
     if (!status.ok()) {
-      LOG_ERROR("DataCenter 路由落盘失败: 来源={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 原因={}",
-                source, summary.total, summary.shadow, summary.business, summary.hash, status.error_message());
-      logRouteStoreFiles("路由落盘失败后", routeStore, summary, source);
+      LOG_ERROR("DataCenter 完整状态落盘失败: 来源={}, connections={}, conn_tags={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 原因={}",
+                source, state.connections().conns_size(), state.conn_tags().conn_tags_size(),
+                summary.total, summary.shadow, summary.business, summary.hash, status.error_message());
+      logStateStoreFiles("状态落盘失败后", stateStore, summary, source);
     } else {
-      logRouteStoreFiles("路由落盘后", routeStore, summary, source);
-      const auto mainFile = inspectRouteFileState(routeStore.routesPath());
+      logStateStoreFiles("状态落盘后", stateStore, summary, source);
+      const auto mainFile = inspectRouteFileState(stateStore.statePath());
       if (isExistingFileWithSize(mainFile, 0)) {
-        LOG_WARNING("DataCenter 路由落盘后主文件大小为0: 来源={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 主文件路径={}",
-                    source, summary.total, summary.shadow, summary.business, summary.hash, mainFile.path);
+        LOG_WARNING("DataCenter 完整状态落盘后主文件大小为0: 来源={}, connections={}, conn_tags={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 主文件路径={}",
+                    source, state.connections().conns_size(), state.conn_tags().conn_tags_size(),
+                    summary.total, summary.shadow, summary.business, summary.hash, mainFile.path);
       }
     }
     return status;
@@ -464,88 +453,71 @@ struct DataCenterGrpcServiceImpl::Impl {
 
 DataCenterGrpcServiceImpl::DataCenterGrpcServiceImpl() :
   impl_(std::make_unique<DataCenterGrpcServiceImpl::Impl>()) {
-  {
-    DataCenterProto::ConnectionsConfig config;
-    auto status = impl_->connectionStore.Load(&config);
-    if (!status.ok()) {
-      LOG_INFO("DataCenter 连接注册表加载失败: {}", status.error_message());
-    } else if (config.conns_size() > 0 || config.next_conn_id() != 0) {
-      status = impl_->core.ReplaceConnectionsConfig(config);
-      if (!status.ok()) {
-        LOG_INFO("DataCenter 连接注册表应用失败: {}", status.error_message());
-      } else {
-        const auto count = config.conns_size();
-        LOG_INFO("DataCenter 已加载连接注册表: {} 条", count);
-      }
-    }
+  DataCenterProto::DataCenterState state;
+  auto loadSummary = unknownRouteSummary();
+  logStateStoreFiles("启动模块 DataCenter 加载完整状态前", impl_->stateStore, loadSummary, "启动模块 DataCenter 加载完整状态");
+  auto status = impl_->stateStore.Load(&state, [loadSummary](const std::string& message) {
+    logStateStoreTrace("启动模块 DataCenter 加载完整状态", loadSummary, message);
+  });
+  if (!status.ok()) {
+    LOG_ERROR("DataCenter 完整状态加载失败: {}", status.error_message());
+    return;
   }
 
-  {
-    DataCenterProto::ConnTagsConfig config;
-    auto status = impl_->connTagsStore.Load(&config);
-    if (!status.ok()) {
-      LOG_INFO("DataCenter 连接标签注册表加载失败: {}", status.error_message());
-    } else if (config.conn_tags_size() > 0) {
-      status = impl_->core.ReplaceConnTagsConfig(config);
-      if (!status.ok()) {
-        LOG_INFO("DataCenter 连接标签注册表应用失败: {}", status.error_message());
-      } else {
-        const auto count = config.conn_tags_size();
-        LOG_INFO("DataCenter 已加载连接标签注册表配置: {} 个连接", count);
-      }
-    }
+  const auto summary = summarizeRoutes(state.routes().routes());
+  logStateStoreFiles("启动模块 DataCenter 加载完整状态后", impl_->stateStore, summary, "启动模块 DataCenter 加载完整状态");
+  if (state.connections().conns_size() == 0 && state.connections().next_conn_id() == 0 &&
+      state.conn_tags().conn_tags_size() == 0 && summary.total == 0) {
+    LOG_INFO("DataCenter 完整状态为空，启动模块 DataCenter 将以空状态运行");
+    return;
   }
 
-  {
-    DataCenterProto::RoutesConfig config;
-    auto loadSummary = unknownRouteSummary();
-    logRouteStoreFiles("启动模块 DataCenter 加载路由前", impl_->routeStore, loadSummary, "启动模块 DataCenter 加载路由");
-    auto status = impl_->routeStore.Load(&config, [loadSummary](const std::string& message) {
-      logRouteStoreTrace("启动模块 DataCenter 加载路由", loadSummary, message);
-    });
-    if (!status.ok()) {
-      LOG_ERROR("DataCenter 路由加载失败: {}", status.error_message());
-    } else {
-      const auto summary = summarizeRoutes(config.routes());
-      logRouteStoreFiles("启动模块 DataCenter 加载路由后", impl_->routeStore, summary, "启动模块 DataCenter 加载路由");
-      if (summary.total == 0) {
-        LOG_WARNING("DataCenter 路由持久化文件加载为空配置: routes_size=0, 影子路由数=0, 业务路由数=0, 路由hash={}, 启动模块 DataCenter 不会恢复路由",
-                    summary.hash);
-      } else {
-        status = impl_->core.ReplaceRoutesConfig(config);
-        if (!status.ok()) {
-          LOG_INFO("DataCenter 路由应用失败: {}", status.error_message());
-        } else {
-          LOG_INFO("DataCenter 已加载路由配置: routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 路由样本={}",
-                   summary.total, summary.shadow, summary.business, summary.hash, summary.sample);
-        }
-      }
-    }
+  status = impl_->core.ReplaceConnectionsConfig(state.connections());
+  if (!status.ok()) {
+    LOG_ERROR("DataCenter 完整状态中的连接注册表应用失败: {}", status.error_message());
+    return;
   }
+  status = impl_->core.ReplaceConnTagsConfig(state.conn_tags());
+  if (!status.ok()) {
+    LOG_ERROR("DataCenter 完整状态中的连接标签注册表应用失败: {}", status.error_message());
+    return;
+  }
+  status = impl_->core.ReplaceRoutesConfig(state.routes());
+  if (!status.ok()) {
+    LOG_ERROR("DataCenter 完整状态中的路由应用失败: {}", status.error_message());
+    return;
+  }
+
+  if (summary.total == 0) {
+    LOG_WARNING("DataCenter 完整状态中的路由为空: connections={}, conn_tags={}, routes_size=0, 路由hash={}",
+                state.connections().conns_size(), state.conn_tags().conn_tags_size(), summary.hash);
+  }
+  LOG_INFO("DataCenter 已加载完整状态: connections={}, conn_tags={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 路由样本={}",
+           state.connections().conns_size(), state.conn_tags().conn_tags_size(),
+           summary.total, summary.shadow, summary.business, summary.hash, summary.sample);
 }
 DataCenterGrpcServiceImpl::~DataCenterGrpcServiceImpl() = default;
 
-grpc::Status DataCenterGrpcServiceImpl::UpsertConnection(grpc::ServerContext*, const DataCenterProto::UpsertConnectionRequest* request, DataCenterProto::Empty*) {
+grpc::Status DataCenterGrpcServiceImpl::UpsertConnection(grpc::ServerContext* context, const DataCenterProto::UpsertConnectionRequest* request, DataCenterProto::Empty*) {
   if (request == nullptr) {
     LOG_ERROR("DataCenter UpsertConnection 请求为空");
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求为空");
   }
+  const auto& conn = request->conn();
   std::lock_guard<std::mutex> lock(impl_->mu);
   auto status = impl_->core.UpsertConnection(*request);
   if (!status.ok()) {
-    const auto& conn = request->conn();
     LOG_ERROR("DataCenter 更新连接失败: module_name={}, conn_name={}, conn_id={}, 原因={}",
               conn.module_name(), conn.conn_name(), conn.conn_id(), status.error_message());
     return status;
   }
-  status = impl_->saveConnectionsLocked();
+  status = impl_->saveStateLocked("更新连接接口 调用方=" + contextPeer(context) + ", module_name=" + conn.module_name() +
+                                  ", conn_name=" + conn.conn_name() + ", conn_id=" + std::to_string(conn.conn_id()));
   if (!status.ok()) {
-    const auto& conn = request->conn();
     LOG_ERROR("DataCenter 更新连接落盘失败: module_name={}, conn_name={}, conn_id={}, 原因={}",
               conn.module_name(), conn.conn_name(), conn.conn_id(), status.error_message());
     return status;
   }
-  const auto& conn = request->conn();
   LOG_INFO("DataCenter 已更新连接: module_name={}, conn_name={}, conn_id={}",
            conn.module_name(), conn.conn_name(), conn.conn_id());
   return grpc::Status::OK;
@@ -561,23 +533,23 @@ grpc::Status DataCenterGrpcServiceImpl::ListConnections(grpc::ServerContext*, co
   return grpc::Status::OK;
 }
 
-grpc::Status DataCenterGrpcServiceImpl::GetOrCreateConnection(grpc::ServerContext*, const DataCenterProto::GetOrCreateConnectionRequest* request, DataCenterProto::ConnectionInfo* response) {
+grpc::Status DataCenterGrpcServiceImpl::GetOrCreateConnection(grpc::ServerContext* context, const DataCenterProto::GetOrCreateConnectionRequest* request, DataCenterProto::ConnectionInfo* response) {
   if (request == nullptr || response == nullptr) {
     LOG_ERROR("DataCenter GetOrCreateConnection 请求为空");
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
   }
+  const auto& key = request->key();
 
   std::lock_guard<std::mutex> lock(impl_->mu);
   auto status = impl_->core.GetOrCreateConnection(*request, response);
   if (!status.ok()) {
-    const auto& key = request->key();
     LOG_ERROR("DataCenter 获取/创建连接失败: module_name={}, conn_name={}, 原因={}",
               key.module_name(), key.conn_name(), status.error_message());
     return status;
   }
-  status = impl_->saveConnectionsLocked();
+  status = impl_->saveStateLocked("获取/创建连接接口 调用方=" + contextPeer(context) + ", module_name=" + key.module_name() +
+                                  ", conn_name=" + key.conn_name() + ", conn_id=" + std::to_string(response->conn_id()));
   if (!status.ok()) {
-    const auto& key = request->key();
     LOG_ERROR("DataCenter 获取/创建连接落盘失败: module_name={}, conn_name={}, 原因={}",
               key.module_name(), key.conn_name(), status.error_message());
     return status;
@@ -587,31 +559,29 @@ grpc::Status DataCenterGrpcServiceImpl::GetOrCreateConnection(grpc::ServerContex
   return grpc::Status::OK;
 }
 
-grpc::Status DataCenterGrpcServiceImpl::RenameConnection(grpc::ServerContext*, const DataCenterProto::RenameConnectionRequest* request, DataCenterProto::ConnectionInfo* response) {
+grpc::Status DataCenterGrpcServiceImpl::RenameConnection(grpc::ServerContext* context, const DataCenterProto::RenameConnectionRequest* request, DataCenterProto::ConnectionInfo* response) {
   if (request == nullptr || response == nullptr) {
     LOG_ERROR("DataCenter RenameConnection 请求为空");
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
   }
+  const auto& oldKey = request->old_key();
+  const auto& newKey = request->new_key();
 
   std::lock_guard<std::mutex> lock(impl_->mu);
   auto status = impl_->core.RenameConnection(*request, response);
   if (!status.ok()) {
-    const auto& oldKey = request->old_key();
-    const auto& newKey = request->new_key();
     LOG_ERROR("DataCenter 重命名连接失败: old=({}, {}), new=({}, {}), 原因={}",
               oldKey.module_name(), oldKey.conn_name(), newKey.module_name(), newKey.conn_name(), status.error_message());
     return status;
   }
-  status = impl_->saveConnectionsLocked();
+  status = impl_->saveStateLocked("重命名连接接口 调用方=" + contextPeer(context) + ", old=(" + oldKey.module_name() + ", " + oldKey.conn_name() +
+                                  "), new=(" + newKey.module_name() + ", " + newKey.conn_name() + "), conn_id=" +
+                                  std::to_string(response->conn_id()));
   if (!status.ok()) {
-    const auto& oldKey = request->old_key();
-    const auto& newKey = request->new_key();
     LOG_ERROR("DataCenter 重命名连接落盘失败: old=({}, {}), new=({}, {}), 原因={}",
               oldKey.module_name(), oldKey.conn_name(), newKey.module_name(), newKey.conn_name(), status.error_message());
     return status;
   }
-  const auto& oldKey = request->old_key();
-  const auto& newKey = request->new_key();
   LOG_INFO("DataCenter 已重命名连接: old=({}, {}), new=({}, {}), conn_id={}",
            oldKey.module_name(), oldKey.conn_name(), newKey.module_name(), newKey.conn_name(), response->conn_id());
   return grpc::Status::OK;
@@ -648,27 +618,14 @@ grpc::Status DataCenterGrpcServiceImpl::DeleteConnection(grpc::ServerContext* co
 
   impl_->closeSubscribersLocked(conn.conn_id());
 
-  status = impl_->saveConnectionsLocked();
+  status = impl_->saveStateLocked("删除连接接口 调用方=" + peer + ", module_name=" + conn.module_name() +
+                                  ", conn_name=" + conn.conn_name() + ", conn_id=" + std::to_string(conn.conn_id()));
   if (!status.ok()) {
     LOG_ERROR("DataCenter 删除连接落盘失败: 调用方={}, module_name={}, conn_name={}, conn_id={}, 原因={}",
               peer, conn.module_name(), conn.conn_name(), conn.conn_id(), status.error_message());
     return status;
   }
 
-  status = impl_->saveConnTagsLocked();
-  if (!status.ok()) {
-    LOG_ERROR("DataCenter 删除连接标签注册表落盘失败: 调用方={}, module_name={}, conn_name={}, conn_id={}, 原因={}",
-              peer, conn.module_name(), conn.conn_name(), conn.conn_id(), status.error_message());
-    return status;
-  }
-
-  status = impl_->saveRoutesLocked("删除连接接口 调用方=" + peer + ", module_name=" + conn.module_name() +
-                                   ", conn_name=" + conn.conn_name() + ", conn_id=" + std::to_string(conn.conn_id()));
-  if (!status.ok()) {
-    LOG_ERROR("DataCenter 删除连接路由落盘失败: 调用方={}, module_name={}, conn_name={}, conn_id={}, 原因={}",
-              peer, conn.module_name(), conn.conn_name(), conn.conn_id(), status.error_message());
-    return status;
-  }
   const auto afterSummary = summarizeRoutes(impl_->core.DumpRoutesConfig().routes());
   if (beforeSummary.total > 0 && afterSummary.total == 0) {
     LOG_WARNING("DataCenter 删除连接后路由被清空: 调用方={}, module_name={}, conn_name={}, conn_id={}, 写入前总路由数={}, 写入后总路由数={}, 写入前影子路由数={}, 写入后影子路由数={}, 写入前业务路由数={}, 写入后业务路由数={}, 写入前路由hash={}, 写入后路由hash={}",
@@ -683,7 +640,7 @@ grpc::Status DataCenterGrpcServiceImpl::DeleteConnection(grpc::ServerContext* co
   return grpc::Status::OK;
 }
 
-grpc::Status DataCenterGrpcServiceImpl::UpsertConnTags(grpc::ServerContext*, const DataCenterProto::UpsertConnTagsRequest* request, DataCenterProto::Empty*) {
+grpc::Status DataCenterGrpcServiceImpl::UpsertConnTags(grpc::ServerContext* context, const DataCenterProto::UpsertConnTagsRequest* request, DataCenterProto::Empty*) {
   if (request == nullptr) {
     LOG_ERROR("DataCenter UpsertConnTags 请求为空");
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求为空");
@@ -695,7 +652,9 @@ grpc::Status DataCenterGrpcServiceImpl::UpsertConnTags(grpc::ServerContext*, con
               request->conn_id(), request->tags_size(), request->replace(), status.error_message());
     return status;
   }
-  status = impl_->saveConnTagsLocked();
+  status = impl_->saveStateLocked("更新连接标签注册表接口 调用方=" + contextPeer(context) +
+                                  ", conn_id=" + std::to_string(request->conn_id()) +
+                                  ", replace=" + (request->replace() ? std::string("true") : std::string("false")));
   if (!status.ok()) {
     LOG_ERROR("DataCenter 连接标签注册表落盘失败: conn_id={}, 标签数={}, replace={}, 原因={}",
               request->conn_id(), request->tags_size(), request->replace(), status.error_message());
@@ -738,8 +697,8 @@ grpc::Status DataCenterGrpcServiceImpl::UpsertRoutes(grpc::ServerContext* contex
               peer, request->routes_size(), request->replace(), status.error_message());
     return status;
   }
-  status = impl_->saveRoutesLocked("更新路由接口 调用方=" + peer + ", routes=" + std::to_string(request->routes_size()) +
-                                   ", replace=" + (request->replace() ? std::string("true") : std::string("false")));
+  status = impl_->saveStateLocked("更新路由接口 调用方=" + peer + ", routes=" + std::to_string(request->routes_size()) +
+                                  ", replace=" + (request->replace() ? std::string("true") : std::string("false")));
   if (!status.ok()) {
     LOG_ERROR("DataCenter 路由落盘失败: 调用方={}, routes={}, replace={}, 原因={}",
               peer, request->routes_size(), request->replace(), status.error_message());
@@ -779,7 +738,7 @@ grpc::Status DataCenterGrpcServiceImpl::DeleteRoutes(grpc::ServerContext* contex
               peer, request->routes_size(), status.error_message());
     return status;
   }
-  status = impl_->saveRoutesLocked("删除路由接口 调用方=" + peer + ", routes=" + std::to_string(request->routes_size()));
+  status = impl_->saveStateLocked("删除路由接口 调用方=" + peer + ", routes=" + std::to_string(request->routes_size()));
   if (!status.ok()) {
     LOG_ERROR("DataCenter 删除路由落盘失败: 调用方={}, routes={}, 原因={}",
               peer, request->routes_size(), status.error_message());

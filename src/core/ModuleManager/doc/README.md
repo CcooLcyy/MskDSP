@@ -52,15 +52,9 @@ extern "C" BOOST_SYMBOL_EXPORT bool GetModuleManifestPb(const uint8_t **data, si
 
 ### `UPPER` 模式文件痕迹清单
 - `DataCenter`
-  - `./conf/dataCenter/connections.pb`
-  - `./conf/dataCenter/connections.pb.bak`
-  - `./conf/dataCenter/conn_tags.pb`
-  - `./conf/dataCenter/conn_tags.pb.bak`
-  - `./conf/dataCenter/routes.pb`
-  - `./conf/dataCenter/routes.pb.bak`
-  - `./conf/dataCenter/point_tables.pb`
-  - `./conf/dataCenter/point_tables.pb.bak`
-    说明：这是 `conn_tags.pb` 的历史兼容文件名；若现场仍保留旧文件痕迹，`UPPER` 模式也会自动启动 `DataCenter`
+  - `./conf/dataCenter/state.pb`
+  - `./conf/dataCenter/state.pb.bak`
+    说明：DataCenter 使用单个完整状态文件保存连接注册表、连接标签注册表与路由，避免三类配置文件代际不一致
 - `IEC104`
   - `./conf/IEC104/links.pb`
   - `./conf/IEC104/links.pb.bak`

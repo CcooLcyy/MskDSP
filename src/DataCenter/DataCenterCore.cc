@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <functional>
 
+#include "Logger.h"
+
 namespace DataCenter {
 namespace {
 constexpr size_t kHashCombineMagic = static_cast<size_t>(0x9e3779b9);
@@ -63,12 +65,13 @@ grpc::Status DataCenterCore::validateEndpoint(uint32_t connId, const std::string
   return grpc::Status::OK;
 }
 
-grpc::Status DataCenterCore::validateEndpointAgainstConnTags(uint32_t connId, const std::string &tag) const {
-  auto it = connTagsByConnId_.find(connId);
-  if (it == connTagsByConnId_.end()) {
+grpc::Status DataCenterCore::validateEndpointAgainstConnTags(const StableEndpointKey &endpoint) const {
+  ConnKey key{endpoint.moduleName, endpoint.connName};
+  auto it = connTagsByKey_.find(key);
+  if (it == connTagsByKey_.end()) {
     return grpc::Status::OK;
   }
-  if (!it->second.contains(tag)) {
+  if (!it->second.contains(endpoint.tag)) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "连接标签注册表中未找到 tag");
   }
   return grpc::Status::OK;
@@ -90,22 +93,22 @@ grpc::Status DataCenterCore::resolveEndpoint(const DataCenterProto::Endpoint &en
       return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_name 不能为空");
     }
     *out = StableEndpointKey{endpoint.module_name(), endpoint.conn_name(), endpoint.tag()};
+    uint32_t connId = 0;
+    if (!tryResolveConnId(*out, &connId)) {
+      LOG_WARNING("DataCenter 路由端点稳定连接主键未在连接注册表中找到: module_name={}, conn_name={}, tag={}, conn_id={}",
+                  endpoint.module_name(), endpoint.conn_name(), endpoint.tag(), endpoint.conn_id());
+      return grpc::Status(grpc::StatusCode::NOT_FOUND, "稳定连接主键未在连接注册表中找到");
+    }
     if (endpoint.conn_id() != 0) {
       auto connIt = connections_.find(endpoint.conn_id());
       if (connIt != connections_.end() &&
           (connIt->second.module_name() != endpoint.module_name() || connIt->second.conn_name() != endpoint.conn_name())) {
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id 与稳定连接主键不一致");
+        LOG_WARNING("DataCenter 路由端点 conn_id 与稳定连接主键不一致，已忽略旧 conn_id 并按稳定连接主键解析: conn_id={}, 当前conn=({}, {}), 路由端点=({}, {}, {})",
+                    endpoint.conn_id(), connIt->second.module_name(), connIt->second.conn_name(),
+                    endpoint.module_name(), endpoint.conn_name(), endpoint.tag());
       }
     }
     if (resolvedConnId != nullptr) {
-      uint32_t connId = 0;
-      const bool resolvedByStableKey = tryResolveConnId(*out, &connId);
-      if (endpoint.conn_id() != 0) {
-        auto connIt = connections_.find(endpoint.conn_id());
-        if (!resolvedByStableKey && connIt != connections_.end()) {
-          connId = endpoint.conn_id();
-        }
-      }
       *resolvedConnId = connId;
     }
     return grpc::Status::OK;
@@ -134,6 +137,17 @@ bool DataCenterCore::tryResolveConnId(const StableEndpointKey &endpoint, uint32_
   }
   if (outConnId != nullptr) {
     *outConnId = it->second;
+  }
+  return true;
+}
+
+bool DataCenterCore::tryResolveConnKey(uint32_t connId, ConnKey *out) const {
+  auto it = connections_.find(connId);
+  if (it == connections_.end()) {
+    return false;
+  }
+  if (out != nullptr) {
+    *out = ConnKey{it->second.module_name(), it->second.conn_name()};
   }
   return true;
 }

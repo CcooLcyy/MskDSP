@@ -125,7 +125,7 @@ struct TraceableModule {
 
 std::optional<TraceableModule> FindAvailableTraceableModule(const ModuleManagerProto::ModuleInfos &infos) {
   const std::vector<TraceableModule> candidates = {
-      {"DataCenter", ConfDir() / "dataCenter" / "connections.pb"},
+      {"DataCenter", ConfDir() / "dataCenter" / "state.pb"},
       {"IEC104", ConfDir() / "IEC104" / "links.pb"},
       {"ModbusRTU", ConfDir() / "ModbusRTU" / "links.pb"},
       {"DLT645", ConfDir() / "DLT645" / "links.pb"},

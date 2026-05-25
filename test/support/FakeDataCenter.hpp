@@ -296,13 +296,9 @@ public:
         return grpc::Status::OK;
       }
 
-      if (endpoint.conn_id() == 0) {
-        return grpc::Status::OK;
-      }
-      auto connIt = keysByConnId.find(endpoint.conn_id());
-      if (connIt != keysByConnId.end() &&
-          (connIt->second.module != endpoint.module_name() || connIt->second.conn != endpoint.conn_name())) {
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::string(direction) + " conn_id 与稳定连接主键不匹配");
+      ConnKey stableKey{endpoint.module_name(), endpoint.conn_name()};
+      if (!conns_.contains(stableKey)) {
+        return grpc::Status(grpc::StatusCode::NOT_FOUND, std::string(direction) + " 稳定连接主键未找到");
       }
       return grpc::Status::OK;
     };

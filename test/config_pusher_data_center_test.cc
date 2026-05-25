@@ -121,6 +121,21 @@ TEST(ConfigPusherDataCenterTest, AbortWhenConnectionMissing) {
   EXPECT_FALSE(ConfigPusher::ApplyDataCenterConfig(config, stub.get()));
 }
 
+// 验证：路由 tag 未在目标连接标签注册表中声明时，不执行任何写入。
+TEST(ConfigPusherDataCenterTest, AbortBeforeWritesWhenRouteTagMissingFromConnTags) {
+  FakeDataCenterState state;
+  state.AddConnection(10, "IEC104", "line-1");
+  state.AddConnection(20, "AGC", "g-1");
+  auto stub = MakeStub(&state);
+
+  EXPECT_CALL(*stub, UpsertConnTags(_, _, _)).Times(0);
+  EXPECT_CALL(*stub, UpsertRoutes(_, _, _)).Times(0);
+
+  auto config = MakeConfig("IEC104", "line-1", "AGC", "g-1");
+  config.mutable_routes()->mutable_routes(0)->mutable_src()->set_tag("未声明点");
+  EXPECT_FALSE(ConfigPusher::ApplyDataCenterConfig(config, stub.get()));
+}
+
 // 验证：连接存在时可下发连接标签注册表与路由。
 TEST(ConfigPusherDataCenterTest, ApplyPointTablesAndRoutes) {
   FakeDataCenterState state;

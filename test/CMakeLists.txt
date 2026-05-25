@@ -173,67 +173,33 @@ add_executable(dataCenterCore_test
 
 target_include_directories(dataCenterCore_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/DataCenter/include
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
 )
 
 target_link_libraries(dataCenterCore_test PRIVATE
   GTest::gtest_main
   dspProto
+  moduleManager
 )
 
 mskdsp_add_isolated_test(dataCenterCore_test)
 
-add_executable(dataCenterPointTableStore_test
-  data_center_point_table_store_test.cc
-  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterConnTagsStore.cc
+add_executable(dataCenterStateStore_test
+  data_center_state_store_test.cc
+  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterStateStore.cc
 )
 
-target_include_directories(dataCenterPointTableStore_test PRIVATE
-  ${CMAKE_SOURCE_DIR}/src/DataCenter/include
-  ${MSKDSP_COMMON_INCLUDE_DIR}
-  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
-)
-
-target_link_libraries(dataCenterPointTableStore_test PRIVATE
-  GTest::gtest_main
-  dspProto
-  moduleManager
-)
-
-mskdsp_add_isolated_test(dataCenterPointTableStore_test)
-
-add_executable(dataCenterRouteStore_test
-  data_center_route_store_test.cc
-  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterRouteStore.cc
-)
-
-target_include_directories(dataCenterRouteStore_test PRIVATE
+target_include_directories(dataCenterStateStore_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/DataCenter/include
   ${MSKDSP_COMMON_INCLUDE_DIR}
 )
 
-target_link_libraries(dataCenterRouteStore_test PRIVATE
+target_link_libraries(dataCenterStateStore_test PRIVATE
   GTest::gtest_main
   dspProto
 )
 
-mskdsp_add_isolated_test(dataCenterRouteStore_test)
-
-add_executable(dataCenterConnectionStore_test
-  data_center_connection_store_test.cc
-  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterConnectionStore.cc
-)
-
-target_include_directories(dataCenterConnectionStore_test PRIVATE
-  ${CMAKE_SOURCE_DIR}/src/DataCenter/include
-  ${MSKDSP_COMMON_INCLUDE_DIR}
-)
-
-target_link_libraries(dataCenterConnectionStore_test PRIVATE
-  GTest::gtest_main
-  dspProto
-)
-
-mskdsp_add_isolated_test(dataCenterConnectionStore_test)
+mskdsp_add_isolated_test(dataCenterStateStore_test)
 
 add_executable(dataCenterGrpcService_test
   data_center_grpc_service_test.cc
@@ -243,9 +209,7 @@ add_executable(dataCenterGrpcService_test
   ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCoreConnTags.cc
   ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCoreRoutes.cc
   ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCorePublish.cc
-  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterConnTagsStore.cc
-  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterRouteStore.cc
-  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterConnectionStore.cc
+  ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterStateStore.cc
 )
 
 target_include_directories(dataCenterGrpcService_test PRIVATE
@@ -829,9 +793,7 @@ set(MSKDSP_TEST_TARGETS
   mqtt_manager_test
   protoFileStore_test
   dataCenterCore_test
-  dataCenterPointTableStore_test
-  dataCenterRouteStore_test
-  dataCenterConnectionStore_test
+  dataCenterStateStore_test
   dataCenterGrpcService_test
   iec104PointTable_test
   modbusRtuPointTable_test
