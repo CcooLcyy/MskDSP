@@ -87,6 +87,12 @@ grpc::Status ValidateConnectionsConfig(const DataCenterProto::ConnectionsConfig&
 
   return grpc::Status::OK;
 }
+
+void WriteConfig(const std::filesystem::path& path, const DataCenterProto::ConnectionsConfig& cfg) {
+  std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
+  ASSERT_TRUE(ofs.is_open());
+  ASSERT_TRUE(cfg.SerializeToOstream(&ofs));
+}
 }  // namespace
 
 // 验证：当持久化文件不存在时，Load 返回空配置且不报错。
@@ -175,6 +181,86 @@ TEST(ProtoFileStoreTest, LoadFallsBackToBackupWhenMainCorruptedAndRestoresMainBe
     }
   }
   EXPECT_TRUE(foundCorrupt);
+}
+
+// 验证：主文件损坏且临时文件有效时，Load 优先使用临时文件恢复最新配置，避免回退到落后一代备份。
+TEST(ProtoFileStoreTest, LoadRecoversFromValidTmpBeforeBackupWhenMainCorrupted) {
+  ScopedTempDir dir;
+  const auto base = dir.path() / "connections.pb";
+  ConnectionsStore store(base, ValidateConnectionsConfig);
+
+  auto cfg1 = MakeConfig(10, {
+                                 {1, "IEC104", "104-1"},
+                             });
+  auto cfg2 = MakeConfig(11, {
+                                 {1, "IEC104", "104-1"},
+                                 {2, "ModbusRTU", "mb-1"},
+                             });
+  auto cfg3 = MakeConfig(12, {
+                                 {1, "IEC104", "104-1"},
+                                 {2, "ModbusRTU", "mb-1"},
+                                 {3, "DLT645", "dlt-1"},
+                             });
+
+  ASSERT_TRUE(store.Save(cfg1).ok());
+  ASSERT_TRUE(store.Save(cfg2).ok());
+  WriteConfig(store.tmpPath(), cfg3);
+
+  {
+    std::ofstream ofs(base, std::ios::binary | std::ios::trunc);
+    ASSERT_TRUE(ofs.is_open());
+    ofs << "corrupt";
+  }
+
+  DataCenterProto::ConnectionsConfig loaded;
+  ASSERT_TRUE(store.Load(&loaded).ok());
+  EXPECT_EQ(loaded.next_conn_id(), cfg3.next_conn_id());
+  EXPECT_EQ(ToSet(loaded), ToSet(cfg3));
+  EXPECT_FALSE(std::filesystem::exists(store.tmpPath()));
+
+  DataCenterProto::ConnectionsConfig restoredMain;
+  ASSERT_TRUE(restoredMain.ParseFromString([&]() {
+    std::ifstream ifs(base, std::ios::binary);
+    EXPECT_TRUE(ifs.is_open());
+    return std::string((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+  }()));
+  EXPECT_EQ(ToSet(restoredMain), ToSet(cfg3));
+}
+
+// 验证：主文件有效但临时文件更新时，Load 使用临时文件完成恢复，避免丢失已写入 tmp 的最新一代配置。
+TEST(ProtoFileStoreTest, LoadRecoversFromNewerValidTmpEvenWhenMainIsValid) {
+  ScopedTempDir dir;
+  const auto base = dir.path() / "connections.pb";
+  ConnectionsStore store(base, ValidateConnectionsConfig);
+
+  auto cfg1 = MakeConfig(10, {
+                                 {1, "IEC104", "104-1"},
+                             });
+  auto cfg2 = MakeConfig(11, {
+                                 {1, "IEC104", "104-1"},
+                                 {2, "ModbusRTU", "mb-1"},
+                             });
+
+  ASSERT_TRUE(store.Save(cfg1).ok());
+  WriteConfig(store.tmpPath(), cfg2);
+  const auto oldTime = std::filesystem::file_time_type::clock::now() - std::chrono::seconds(2);
+  const auto newTime = oldTime + std::chrono::seconds(1);
+  std::filesystem::last_write_time(base, oldTime);
+  std::filesystem::last_write_time(store.tmpPath(), newTime);
+
+  DataCenterProto::ConnectionsConfig loaded;
+  ASSERT_TRUE(store.Load(&loaded).ok());
+  EXPECT_EQ(loaded.next_conn_id(), cfg2.next_conn_id());
+  EXPECT_EQ(ToSet(loaded), ToSet(cfg2));
+  EXPECT_FALSE(std::filesystem::exists(store.tmpPath()));
+
+  DataCenterProto::ConnectionsConfig backup;
+  ASSERT_TRUE(backup.ParseFromString([&]() {
+    std::ifstream ifs(store.backupPath(), std::ios::binary);
+    EXPECT_TRUE(ifs.is_open());
+    return std::string((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+  }()));
+  EXPECT_EQ(ToSet(backup), ToSet(cfg1));
 }
 
 // 验证：主文件和备份文件同时损坏时，Load 返回错误而不是静默返回空配置。

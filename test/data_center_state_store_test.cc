@@ -90,6 +90,12 @@ DataCenterProto::DataCenterState MakeState() {
   route->mutable_dst()->set_tag("AGC_控制组1_AGC总有功测量点");
   return state;
 }
+
+void WriteState(const std::filesystem::path& path, const DataCenterProto::DataCenterState& state) {
+  std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
+  ASSERT_TRUE(ofs.is_open());
+  ASSERT_TRUE(state.SerializeToOstream(&ofs));
+}
 }  // 命名空间结束
 
 // 验证：完整状态文件不存在时，Load 返回空状态且不报错。
@@ -193,6 +199,81 @@ TEST(DataCenterStateStoreTest, LoadFallsBackToBackupWhenMainIsZeroBytesAndBackup
   EXPECT_EQ(loaded.schema_version(), 1u);
   EXPECT_EQ(loaded.connections().next_conn_id(), state1.connections().next_conn_id());
   EXPECT_EQ(ConnTagsToSet(loaded), ConnTagsToSet(state1));
+}
+
+// 验证：主状态文件为 0 字节且临时文件有效时，Load 优先用临时文件恢复最新完整状态。
+TEST(DataCenterStateStoreTest, LoadRecoversFromValidTmpBeforeBackupWhenMainIsZeroBytes) {
+  ScopedTempDir dir;
+  const auto base = dir.path() / "state.pb";
+  DataCenterStateStore store(base);
+
+  auto state1 = MakeState();
+  auto state2 = MakeState();
+  state2.mutable_connections()->set_next_conn_id(8);
+  state2.mutable_conn_tags()->mutable_conn_tags(0)->add_tags("中间点");
+  auto state3 = MakeState();
+  state3.set_schema_version(1);
+  state3.mutable_connections()->set_next_conn_id(9);
+  state3.mutable_conn_tags()->mutable_conn_tags(0)->add_tags("最新点");
+
+  ASSERT_TRUE(store.Save(state1).ok());
+  ASSERT_TRUE(store.Save(state2).ok());
+  WriteState(store.tmpPath(), state3);
+
+  {
+    std::ofstream ofs(base, std::ios::binary | std::ios::trunc);
+    ASSERT_TRUE(ofs.is_open());
+  }
+
+  DataCenterProto::DataCenterState loaded;
+  ASSERT_TRUE(store.Load(&loaded).ok());
+  EXPECT_EQ(loaded.schema_version(), 1u);
+  EXPECT_EQ(loaded.connections().next_conn_id(), state3.connections().next_conn_id());
+  EXPECT_EQ(ConnTagsToSet(loaded), ConnTagsToSet(state3));
+  EXPECT_FALSE(std::filesystem::exists(store.tmpPath()));
+
+  DataCenterProto::DataCenterState restoredMain;
+  ASSERT_TRUE(restoredMain.ParseFromString([&]() {
+    std::ifstream ifs(base, std::ios::binary);
+    EXPECT_TRUE(ifs.is_open());
+    return std::string((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+  }()));
+  EXPECT_EQ(ConnTagsToSet(restoredMain), ConnTagsToSet(state3));
+}
+
+// 验证：主状态文件有效但临时文件更新时，Load 使用临时文件恢复最新完整状态。
+TEST(DataCenterStateStoreTest, LoadRecoversFromNewerValidTmpEvenWhenMainIsValid) {
+  ScopedTempDir dir;
+  const auto base = dir.path() / "state.pb";
+  DataCenterStateStore store(base);
+
+  auto state1 = MakeState();
+  auto state2 = MakeState();
+  state2.set_schema_version(1);
+  state2.mutable_connections()->set_next_conn_id(10);
+  state2.mutable_conn_tags()->mutable_conn_tags(0)->add_tags("最新点");
+
+  ASSERT_TRUE(store.Save(state1).ok());
+  WriteState(store.tmpPath(), state2);
+  const auto oldTime = std::filesystem::file_time_type::clock::now() - std::chrono::seconds(2);
+  const auto newTime = oldTime + std::chrono::seconds(1);
+  std::filesystem::last_write_time(base, oldTime);
+  std::filesystem::last_write_time(store.tmpPath(), newTime);
+
+  DataCenterProto::DataCenterState loaded;
+  ASSERT_TRUE(store.Load(&loaded).ok());
+  EXPECT_EQ(loaded.schema_version(), 1u);
+  EXPECT_EQ(loaded.connections().next_conn_id(), state2.connections().next_conn_id());
+  EXPECT_EQ(ConnTagsToSet(loaded), ConnTagsToSet(state2));
+  EXPECT_FALSE(std::filesystem::exists(store.tmpPath()));
+
+  DataCenterProto::DataCenterState backup;
+  ASSERT_TRUE(backup.ParseFromString([&]() {
+    std::ifstream ifs(store.backupPath(), std::ios::binary);
+    EXPECT_TRUE(ifs.is_open());
+    return std::string((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+  }()));
+  EXPECT_EQ(ConnTagsToSet(backup), ConnTagsToSet(state1));
 }
 
 // 验证：主状态文件损坏时 Load 会回退到备份文件，并 best-effort 恢复主文件。
