@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iomanip>
 #include <memory>
@@ -194,6 +195,7 @@ struct RouteFileState {
   std::string exists{"未知"};
   std::string size{"未知"};
   std::string writeTimeTicks{"未知"};
+  std::string hash{"未知"};
   std::string error;
   bool existsValue{false};
   bool sizeKnown{false};
@@ -207,6 +209,31 @@ void appendFileStateError(RouteFileState* state, const char* action, const std::
   state->error += action;
   state->error += "失败: ";
   state->error += ec.message();
+}
+
+std::string fileHashForLog(const std::filesystem::path& path, std::error_code& ec) {
+  std::ifstream ifs(path, std::ios::binary);
+  if (!ifs.is_open()) {
+    ec = std::make_error_code(std::errc::no_such_file_or_directory);
+    return "未知";
+  }
+
+  uint64_t hash = kFnvOffset;
+  char buffer[4096];
+  while (ifs) {
+    ifs.read(buffer, sizeof(buffer));
+    const auto count = ifs.gcount();
+    for (std::streamsize i = 0; i < count; ++i) {
+      hash ^= static_cast<unsigned char>(buffer[i]);
+      hash *= kFnvPrime;
+    }
+  }
+  if (ifs.bad()) {
+    ec = std::make_error_code(std::errc::io_error);
+    return "未知";
+  }
+  ec.clear();
+  return formatHash(hash);
 }
 
 RouteFileState inspectRouteFileState(const std::filesystem::path& path) {
@@ -241,6 +268,14 @@ RouteFileState inspectRouteFileState(const std::filesystem::path& path) {
   } else {
     state.writeTimeTicks = std::to_string(mtime.time_since_epoch().count());
   }
+
+  ec.clear();
+  auto hash = fileHashForLog(path, ec);
+  if (ec) {
+    appendFileStateError(&state, "计算hash", ec);
+  } else {
+    state.hash = hash;
+  }
   return state;
 }
 
@@ -270,15 +305,15 @@ void logStateStoreFiles(const char* phase, const DataCenterStateStore& stateStor
   const auto mainFile = inspectRouteFileState(stateStore.statePath());
   const auto backupFile = inspectRouteFileState(stateStore.backupPath());
   const auto tmpFile = inspectRouteFileState(stateStore.tmpPath());
-  LOG_INFO("DataCenter 状态持久化文件状态: 阶段={}, 来源={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 主文件路径={}, 主文件存在={}, 主文件大小={}, 主文件修改时间ticks={}, 主文件状态错误={}, 备份文件路径={}, 备份文件存在={}, 备份文件大小={}, 备份文件修改时间ticks={}, 备份文件状态错误={}, 临时文件路径={}, 临时文件存在={}, 临时文件大小={}, 临时文件修改时间ticks={}, 临时文件状态错误={}",
+  LOG_INFO("DataCenter 状态持久化文件状态: 阶段={}, 来源={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 主文件路径={}, 主文件存在={}, 主文件大小={}, 主文件修改时间ticks={}, 主文件hash={}, 主文件状态错误={}, 备份文件路径={}, 备份文件存在={}, 备份文件大小={}, 备份文件修改时间ticks={}, 备份文件hash={}, 备份文件状态错误={}, 临时文件路径={}, 临时文件存在={}, 临时文件大小={}, 临时文件修改时间ticks={}, 临时文件hash={}, 临时文件状态错误={}",
            phase, source, summary.total, summary.shadow, summary.business, summary.hash,
-           mainFile.path, mainFile.exists, mainFile.size, mainFile.writeTimeTicks, mainFile.error,
-           backupFile.path, backupFile.exists, backupFile.size, backupFile.writeTimeTicks, backupFile.error,
-           tmpFile.path, tmpFile.exists, tmpFile.size, tmpFile.writeTimeTicks, tmpFile.error);
+           mainFile.path, mainFile.exists, mainFile.size, mainFile.writeTimeTicks, mainFile.hash, mainFile.error,
+           backupFile.path, backupFile.exists, backupFile.size, backupFile.writeTimeTicks, backupFile.hash, backupFile.error,
+           tmpFile.path, tmpFile.exists, tmpFile.size, tmpFile.writeTimeTicks, tmpFile.hash, tmpFile.error);
   if (isExistingFileWithSize(mainFile, 0) && isExistingNonEmptyFile(backupFile)) {
-    LOG_WARNING("DataCenter 检测到状态主文件为空但备份非空: 阶段={}, 来源={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 主文件路径={}, 主文件大小={}, 备份文件路径={}, 备份文件大小={}",
+    LOG_WARNING("DataCenter 检测到状态主文件为空但备份非空: 阶段={}, 来源={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 主文件路径={}, 主文件大小={}, 主文件hash={}, 备份文件路径={}, 备份文件大小={}, 备份文件hash={}",
                 phase, source, summary.total, summary.shadow, summary.business, summary.hash,
-                mainFile.path, mainFile.size, backupFile.path, backupFile.size);
+                mainFile.path, mainFile.size, mainFile.hash, backupFile.path, backupFile.size, backupFile.hash);
   }
 }
 
