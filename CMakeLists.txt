@@ -122,6 +122,7 @@ set(MSKDSP_MODULE_TARGETS
   MQTTManager
   AGC
   AVC
+  Calc
 )
 
 set(MSKDSP_VCPKG_INSTALL_DIR "")

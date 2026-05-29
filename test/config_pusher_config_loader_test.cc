@@ -7,6 +7,7 @@
 
 #include "AGC.pb.h"
 #include "AVC.pb.h"
+#include "Calc.pb.h"
 #include "ConfigPusherConfigLoader.h"
 #include "Logger.h"
 #include "ModbusRTU.pb.h"
@@ -303,6 +304,63 @@ TEST(ConfigPusherConfigLoaderTest, LoadAvcConfigFile) {
   EXPECT_EQ(member.member_name(), "svg-1");
   EXPECT_DOUBLE_EQ(member.weight(), 1.2);
   EXPECT_EQ(member.q_set().mode(), AVCProto::VALUE_MODE_ABSOLUTE);
+  EXPECT_TRUE(task.start());
+}
+
+// 验证：加载 Calc 配置时可解析计算分组任务、运算项与常量操作数。
+TEST(ConfigPusherConfigLoaderTest, LoadCalcConfigFile) {
+  InitLoggerOnce();
+  ScopedTempDir dir;
+  const auto path = dir.path() / "calc.jsonc";
+  const std::string content = R"json(
+{
+  "calc": {
+    "groups": [
+      {
+        "upsert": {
+          "create_only": false,
+          "config": {
+            "group_name": "calc-1",
+            "items": [
+              {
+                "item_name": "sum",
+                "operator_kind": "OPERATOR_KIND_ADD",
+                "left_operand": {
+                  "source_kind": "OPERAND_SOURCE_ROUTED_INPUT"
+                },
+                "right_operand": {
+                  "source_kind": "OPERAND_SOURCE_CONSTANT",
+                  "constant": { "double_value": 10.0 }
+                }
+              }
+            ]
+          }
+        },
+        "start": true
+      }
+    ]
+  }
+}
+)json";
+  WriteFile(path, content);
+
+  auto loaded = ConfigPusher::LoadConfigFile(path);
+  ASSERT_TRUE(loaded.has_value());
+  ASSERT_TRUE(loaded->has_calc());
+  ASSERT_EQ(loaded->calc().groups_size(), 1);
+  const auto &task = loaded->calc().groups(0);
+  ASSERT_TRUE(task.has_upsert());
+  EXPECT_FALSE(task.upsert().create_only());
+  ASSERT_TRUE(task.upsert().has_config());
+  EXPECT_EQ(task.upsert().config().group_name(), "calc-1");
+  ASSERT_EQ(task.upsert().config().items_size(), 1);
+  const auto &item = task.upsert().config().items(0);
+  EXPECT_EQ(item.item_name(), "sum");
+  EXPECT_EQ(item.operator_kind(), CalcProto::OPERATOR_KIND_ADD);
+  EXPECT_EQ(item.left_operand().source_kind(), CalcProto::OPERAND_SOURCE_ROUTED_INPUT);
+  EXPECT_EQ(item.right_operand().source_kind(), CalcProto::OPERAND_SOURCE_CONSTANT);
+  ASSERT_TRUE(item.right_operand().has_constant());
+  EXPECT_DOUBLE_EQ(item.right_operand().constant().double_value(), 10.0);
   EXPECT_TRUE(task.start());
 }
 

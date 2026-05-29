@@ -439,6 +439,23 @@ target_link_libraries(configPusherApplyAvc_test PRIVATE
 
 mskdsp_add_isolated_test(configPusherApplyAvc_test)
 
+add_executable(configPusherApplyCalc_test
+  config_pusher_apply_calc_test.cc
+)
+
+target_include_directories(configPusherApplyCalc_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/ConfigPusher/include
+)
+
+target_link_libraries(configPusherApplyCalc_test PRIVATE
+  GTest::gtest_main
+  GTest::gmock
+  dspProto
+  ConfigPusher
+)
+
+mskdsp_add_isolated_test(configPusherApplyCalc_test)
+
 add_executable(configPusherApplyDlt645_test
   config_pusher_apply_dlt645_test.cc
 )
@@ -820,6 +837,7 @@ set(MSKDSP_TEST_TARGETS
   configPusherApplyConfig_test
   configPusherApplyAgc_test
   configPusherApplyAvc_test
+  configPusherApplyCalc_test
 )
 
 # Allow overriding via -DGCOVR_EXECUTABLE=/path/to/gcovr (cache variable).

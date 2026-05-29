@@ -14,6 +14,7 @@ Calc 类型化运算模块：从 DataCenter 订阅同一计算分组 `conn_id` �
 ## 接口与协议
 - Protobuf：`protobuf/Calc.proto`
 - gRPC Service：`CalcProto::CalcService`
+- ConfigPusher 初始化模板：`./conf/configPusher/calc.jsonc`
 
 控制面 RPC 固定为 group 级 7 项：
 
@@ -26,6 +27,8 @@ Calc 类型化运算模块：从 DataCenter 订阅同一计算分组 `conn_id` �
 - `StopGroup`
 
 `CalcItem` 不单独暴露 item 级 CRUD/启停 RPC。上位机应把 item 视为 `group` 的子配置，通过一次 `UpsertGroup` 覆盖整组 items。
+
+ConfigPusher 在 `CONFIG_PUSHER` 模式下也复用 `UpsertGroup` 作为初始化下发入口：`calc.groups[].upsert` 表示目标态计算分组配置；`jsonc` 未声明的旧分组会被收敛删除，同名运行中分组会先停止分组运算功能再覆盖配置。`calc.groups[].start` 仅保留兼容日志，不会额外调用 `StartGroup`。
 
 ## 运行与地址
 - 对外 gRPC：随机选择 `0.0.0.0:<port>`（17001–17999）
@@ -58,6 +61,7 @@ Calc 不直接对接 IEC104/ModbusRTU/DLT645；上下游均通过 DataCenter 的
 - Calc 自身不保存外部源点 `conn/tag`，避免与 DataCenter Route 形成两份真相
 - `GetGroup/ListGroups` 返回的 `left_input_tag/right_input_tag/result_tag` 就是该 item 的 3 个保留内建点，可直接在上位机路由页复用
 - 即使 `NOT` 这类单目运算，`right_input_tag` 也会保留展示，但不会参与本轮计算
+- ConfigPusher 模板只声明 Calc 计算分组与 item；外部源点到内建输入点、内建结果点到下游点的绑定仍由 DataCenter Route 表达
 
 ### 上位机建模建议
 - 页面建议按“分组列表 + item 列表 + 运算配置 + 内建点说明 + 运行状态”组织，而不是拆成 item 级独立 CRUD

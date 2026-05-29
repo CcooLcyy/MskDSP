@@ -1,0 +1,41 @@
+{
+  "calc": {
+    "groups": [
+      {
+        "upsert": {
+          "create_only": false,
+          "config": {
+            "group_name": "1号计算分组",
+            "items": [
+              {
+                "item_name": "有功加固定偏置",
+                "operator_kind": "OPERATOR_KIND_ADD",
+                // 输入点由 DataCenter Route 转发到该 item 的 left_input 内建点。
+                "left_operand": {
+                  "source_kind": "OPERAND_SOURCE_ROUTED_INPUT"
+                },
+                "right_operand": {
+                  "source_kind": "OPERAND_SOURCE_CONSTANT",
+                  "constant": {
+                    "double_value": 10.0
+                  }
+                }
+              },
+              {
+                "item_name": "遥信取反",
+                "operator_kind": "OPERATOR_KIND_NOT",
+                // NOT 为单目运算，配置中不要携带 right_operand。
+                "left_operand": {
+                  "source_kind": "OPERAND_SOURCE_ROUTED_INPUT"
+                }
+              }
+            ]
+          }
+        },
+        // true 表示旧模板中希望下发后启动分组运算功能；当前版本仅保留兼容日志。
+        // Calc 会在配置达到当前最小可运行条件后自动判定是否启动分组运算功能。
+        "start": true
+      }
+    ]
+  }
+}
