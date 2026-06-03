@@ -8,6 +8,7 @@
     "lua",
     "paho-mqttpp3",
     "protobuf",
+    "sqlite3",
     {
       "name": "grpc",
       "features": [

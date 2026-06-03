@@ -3,39 +3,27 @@
 #include <utility>
 
 #include "AVCGroupValidation.h"
-#include "mskdsp/detail/ProtoFileStore.hpp"
+#include "mskdsp/detail/ProtoSqliteStore.hpp"
 
 namespace AVC {
 
-AVCGroupStore::AVCGroupStore(std::filesystem::path groupsPath) :
-  groupsPath_(std::move(groupsPath)) {}
+AVCGroupStore::AVCGroupStore(std::filesystem::path configDbPath) :
+  configDbPath_(std::move(configDbPath)) {}
 
 grpc::Status AVCGroupStore::Save(const AVCProto::GroupsConfig& config) {
-  mskdsp::detail::ProtoFileStore<AVCProto::GroupsConfig> store(groupsPath_,
-                                                               ValidateGroupsConfig);
+  mskdsp::detail::ProtoSqliteStore<AVCProto::GroupsConfig> store(
+      configDbPath_, "AVC", "groups", "AVCProto.GroupsConfig", ValidateGroupsConfig);
   return store.Save(config);
 }
 
 grpc::Status AVCGroupStore::Load(AVCProto::GroupsConfig* out) {
-  mskdsp::detail::ProtoFileStore<AVCProto::GroupsConfig> store(groupsPath_,
-                                                               ValidateGroupsConfig);
+  mskdsp::detail::ProtoSqliteStore<AVCProto::GroupsConfig> store(
+      configDbPath_, "AVC", "groups", "AVCProto.GroupsConfig", ValidateGroupsConfig);
   return store.Load(out);
 }
 
-std::filesystem::path AVCGroupStore::groupsPath() const {
-  return groupsPath_;
-}
-
-std::filesystem::path AVCGroupStore::backupPath() const {
-  mskdsp::detail::ProtoFileStore<AVCProto::GroupsConfig> store(groupsPath_,
-                                                               ValidateGroupsConfig);
-  return store.backupPath();
-}
-
-std::filesystem::path AVCGroupStore::tmpPath() const {
-  mskdsp::detail::ProtoFileStore<AVCProto::GroupsConfig> store(groupsPath_,
-                                                               ValidateGroupsConfig);
-  return store.tmpPath();
+std::filesystem::path AVCGroupStore::databasePath() const {
+  return configDbPath_;
 }
 
 }  // namespace AVC

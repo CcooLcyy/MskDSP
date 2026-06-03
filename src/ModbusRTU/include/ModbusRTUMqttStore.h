@@ -9,16 +9,14 @@
 namespace ModbusRTU {
 class ModbusRTUMqttStore {
 public:
-  explicit ModbusRTUMqttStore(std::filesystem::path mqttPath = std::filesystem::path("./conf/ModbusRTU/mqtt.pb"));
+  explicit ModbusRTUMqttStore(std::filesystem::path configDbPath = std::filesystem::path("./conf/config.db"));
 
   grpc::Status Save(const ModbusRTUProto::MqttConfig& config);
   grpc::Status Load(ModbusRTUProto::MqttConfig* out);
 
-  std::filesystem::path mqttPath() const;
-  std::filesystem::path backupPath() const;
-  std::filesystem::path tmpPath() const;
+  std::filesystem::path databasePath() const;
 
 private:
-  std::filesystem::path mqttPath_;
+  std::filesystem::path configDbPath_;
 };
 }  // namespace ModbusRTU

@@ -387,9 +387,12 @@ grpc::Status restorePointTableFromProto(const DLT645Proto::PointTable &table, DL
 
 namespace DLT645 {
 
-LinkManager::LinkManager(std::string moduleName) :
+LinkManager::LinkManager(std::string moduleName, std::filesystem::path configDbPath) :
   dataCenter_(moduleName),
   mqttClient_(moduleName),
+  mqttStore_(configDbPath),
+  linkStore_(configDbPath),
+  pointTableStore_(std::move(configDbPath)),
   moduleName_(std::move(moduleName)) {}
 
 LinkManager::~LinkManager() noexcept {
@@ -643,7 +646,12 @@ void LinkManager::LoadPersistedConfig() {
     auto tableIt = pointTablesByConn.find(connName);
     const size_t pointCount = tableIt == pointTablesByConn.end() ? 0u : static_cast<size_t>(tableIt->second.points_size());
     const size_t blockCount = tableIt == pointTablesByConn.end() ? 0u : static_cast<size_t>(tableIt->second.blocks_size());
-    LOG_WARNING("DLT645 点表持久化配置未进入本次恢复快照: conn_name={}, 点数={}, 数据块数={}, 原因={}", connName, pointCount, blockCount, pointTablesLeftByDataCenterFailure.contains(connName) ? "链路恢复阶段获取 DataCenter 连接失败" : "未找到对应链路");
+    const bool leftByDataCenterFailure = pointTablesLeftByDataCenterFailure.contains(connName);
+    LOG_WARNING("DLT645 点表持久化配置未进入本次恢复快照: conn_name={}, 点数={}, 数据块数={}, 原因={}", connName, pointCount, blockCount, leftByDataCenterFailure ? "链路恢复阶段获取 DataCenter 连接失败" : "未找到对应链路");
+    if (leftByDataCenterFailure) {
+      LOG_WARNING("DLT645 因 DataCenter 未就绪保留点表目标配置，禁止本次恢复回写空快照: conn_name={}", connName);
+      continue;
+    }
     needResavePointTables = true;
   }
 

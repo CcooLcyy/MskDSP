@@ -70,10 +70,12 @@ Calc 不直接对接 IEC104/ModbusRTU/DLT645；上下游均通过 DataCenter 的
 - `conn_id` 应作为关键只读字段展示，供用户在 `数据总线` 页面确认 Route 是否绑定到正确分组
 
 ### 配置持久化（当前实现）
-- 主文件：`./conf/Calc/groups.pb`
-- 备份文件：`./conf/Calc/groups.pb.bak`
-- 临时文件：`./conf/Calc/groups.pb.tmp`
-- 隔离文件：`./conf/Calc/groups.pb.corrupt.<timestamp>`
+- Calc 会将计算分组配置作为 protobuf payload 写入 `./conf/config.db`，用于进程重启后的自动恢复。
+- SQLite 表：`config_blobs`
+- 模块：`Calc`
+- 配置项：`groups`
+- protobuf 类型：`CalcProto.GroupsConfig`
+- 兼容策略：不再读取旧 `./conf/Calc/groups.pb/.bak/.tmp`；SQLite 中没有 `Calc/groups` 时返回空配置，等待上位机或 ConfigPusher 重新下发。
 
 ## 线程与日志
 - 模块内部线程统一使用 `ModuleManager::StartModuleThread(模块LibInfo.LIB_NAME, ...)` 创建，自动绑定日志模块名上下文。

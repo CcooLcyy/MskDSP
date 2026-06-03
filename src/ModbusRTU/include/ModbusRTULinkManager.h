@@ -31,9 +31,7 @@ namespace ModbusRTU {
 class LinkManager {
 public:
   explicit LinkManager(std::string moduleName,
-                       std::filesystem::path mqttPath = std::filesystem::path("./conf/ModbusRTU/mqtt.pb"),
-                       std::filesystem::path linksPath = std::filesystem::path("./conf/ModbusRTU/links.pb"),
-                       std::filesystem::path pointTablesPath = std::filesystem::path("./conf/ModbusRTU/point_tables.pb"));
+                       std::filesystem::path configDbPath = std::filesystem::path("./conf/config.db"));
 
   void LoadPersistedConfig();
 

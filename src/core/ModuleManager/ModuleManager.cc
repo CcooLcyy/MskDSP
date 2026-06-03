@@ -37,6 +37,7 @@
 #include "ModuleInterface.h"
 #include "ModuleManager.pb.h"
 #include "ModuleManagerGrpcService.h"
+#include "mskdsp/ConfigDatabase.h"
 #include "moduleManagerLibInfo.h"
 
 namespace {
@@ -46,9 +47,9 @@ constexpr const char *kBootConfigModeConfigPusher = "CONFIG_PUSHER";
 constexpr const char *kBootConfigModeUpper = "UPPER";
 constexpr const char *kConfigPusherModuleName = "ConfigPusher";
 
-struct ModuleTraceAutoStartRule {
+struct ModuleSqliteAutoStartRule {
   std::string_view moduleName;
-  std::vector<std::filesystem::path> tracePaths;
+  std::vector<std::string> configKeys;
 };
 
 std::string stripJsonComments(std::string_view input) {
@@ -174,112 +175,48 @@ std::string toHex(std::string_view text) {
   return oss.str();
 }
 
-std::string joinPaths(const std::vector<std::filesystem::path> &paths, std::string_view sep) {
-  std::vector<std::string> texts;
-  texts.reserve(paths.size());
-  for (const auto &path : paths) {
-    texts.push_back(path.string());
-  }
-  return joinNames(texts, sep);
-}
-
-std::filesystem::path makeBackupPath(const std::filesystem::path &path) {
-  return std::filesystem::path(path.string() + ".bak");
-}
-
-std::filesystem::path makeTmpPath(const std::filesystem::path &path) {
-  return std::filesystem::path(path.string() + ".tmp");
-}
-
-std::vector<ModuleTraceAutoStartRule> buildUpperModeTraceAutoStartRules() {
+std::vector<ModuleSqliteAutoStartRule> buildSqliteAutoStartRules() {
   return {
-      {"DataCenter", {"./conf/dataCenter/state.pb"}},
-      {"IEC104", {"./conf/IEC104/links.pb", "./conf/IEC104/point_tables.pb"}},
-      {"ModbusRTU", {"./conf/ModbusRTU/mqtt.pb", "./conf/ModbusRTU/links.pb", "./conf/ModbusRTU/point_tables.pb"}},
-      {"DLT645", {"./conf/DLT645/mqtt.pb", "./conf/DLT645/links.pb", "./conf/DLT645/point_tables.pb"}},
-      {"AGC", {"./conf/AGC/groups.pb"}},
-      {"AVC", {"./conf/AVC/groups.pb"}}};
+      {"DataCenter", {"state"}},
+      {"IEC104", {"links", "point_tables"}},
+      {"ModbusRTU", {"mqtt", "links", "point_tables"}},
+      {"DLT645", {"mqtt", "links", "point_tables"}},
+      {"AGC", {"groups"}},
+      {"AVC", {"groups"}},
+      {"Calc", {"groups"}}};
 }
 
-std::vector<std::filesystem::path> collectMatchedPersistentTracePaths(const std::vector<std::filesystem::path> &tracePaths) {
-  std::vector<std::filesystem::path> matched;
-  matched.reserve(tracePaths.size() * 2);
-  for (const auto &path : tracePaths) {
-    std::error_code ec;
-    if (std::filesystem::exists(path, ec)) {
-      matched.push_back(path);
-    }
-    const auto backupPath = makeBackupPath(path);
-    ec.clear();
-    if (std::filesystem::exists(backupPath, ec)) {
-      matched.push_back(backupPath);
-    }
-  }
-  return matched;
-}
-
-std::vector<std::pair<std::string, std::vector<std::filesystem::path>>> collectUpperModeAutoStartModulesByTrace() {
-  std::vector<std::pair<std::string, std::vector<std::filesystem::path>>> modules;
-  for (const auto &rule : buildUpperModeTraceAutoStartRules()) {
-    auto matched = collectMatchedPersistentTracePaths(rule.tracePaths);
-    if (matched.empty()) {
+std::vector<std::string> collectUpperModeAutoStartModulesBySqlite() {
+  std::vector<std::string> modules;
+  mskdsp::ConfigDatabase db(std::filesystem::path("./conf/config.db"));
+  for (const auto &rule : buildSqliteAutoStartRules()) {
+    bool found = false;
+    auto status = db.HasAnyBlob(rule.moduleName, rule.configKeys, &found, [](const std::string &message) {
+      LOG_INFO("SQLite 持久化配置痕迹检查: {}", message);
+    });
+    if (!status.ok()) {
+      LOG_ERROR("SQLite 持久化配置痕迹检查失败: 模块={}, 原因={}", rule.moduleName, status.error_message());
       continue;
     }
-    modules.emplace_back(std::string(rule.moduleName), std::move(matched));
+    if (found) {
+      modules.emplace_back(rule.moduleName);
+    }
   }
   return modules;
 }
 
-void clearManagedPersistentTraceFilesForConfigPusher() {
-  LOG_INFO("当前 boot_config_mode={}，开始在模块启动前清理受管持久化文件", kBootConfigModeConfigPusher);
-  size_t removed = 0;
-  size_t missing = 0;
-  size_t failed = 0;
-
-  for (const auto &rule : buildUpperModeTraceAutoStartRules()) {
-    for (const auto &path : rule.tracePaths) {
-      const std::array<std::filesystem::path, 3> cleanupTargets = {
-          path,
-          makeBackupPath(path),
-          makeTmpPath(path),
-      };
-      for (const auto &target : cleanupTargets) {
-        std::error_code ec;
-        const bool exists = std::filesystem::exists(target, ec);
-        if (ec) {
-          ++failed;
-          LOG_ERROR("CONFIG_PUSHER 启动前检查持久化文件失败: 模块={}, 文件={}, 原因={}",
-                    rule.moduleName,
-                    target.string(),
-                    ec.message());
-          continue;
-        }
-        if (!exists) {
-          ++missing;
-          continue;
-        }
-        const bool deleted = std::filesystem::remove(target, ec);
-        if (ec || !deleted) {
-          ++failed;
-          LOG_ERROR("CONFIG_PUSHER 启动前删除持久化文件失败: 模块={}, 文件={}, 原因={}",
-                    rule.moduleName,
-                    target.string(),
-                    ec ? ec.message() : "删除结果为 false");
-          continue;
-        }
-        ++removed;
-        LOG_WARNING("CONFIG_PUSHER 启动前已删除受管持久化文件: 模块={}, 文件={}",
-                    rule.moduleName,
-                    target.string());
-      }
+void clearManagedPersistentSqliteForConfigPusher() {
+  LOG_INFO("当前 boot_config_mode={}，开始在模块启动前清理受管 SQLite 持久化配置", kBootConfigModeConfigPusher);
+  mskdsp::ConfigDatabase db(std::filesystem::path("./conf/config.db"));
+  for (const auto &rule : buildSqliteAutoStartRules()) {
+    auto status = db.DeleteBlobs(rule.moduleName, rule.configKeys, [](const std::string &message) {
+      LOG_INFO("CONFIG_PUSHER 启动前 SQLite 持久化配置清理: {}", message);
+    });
+    if (!status.ok()) {
+      LOG_ERROR("CONFIG_PUSHER 启动前 SQLite 持久化配置清理失败: 模块={}, 原因={}", rule.moduleName, status.error_message());
     }
   }
-
-  LOG_INFO("当前 boot_config_mode={}，模块启动前受管持久化文件清理完成: 删除={}, 缺失={}, 失败={}",
-           kBootConfigModeConfigPusher,
-           removed,
-           missing,
-           failed);
+  LOG_INFO("当前 boot_config_mode={}，模块启动前受管 SQLite 持久化配置清理完成", kBootConfigModeConfigPusher);
 }
 
 void logJsonFieldDetails(std::string_view title, const boost::json::object &obj, std::string_view phase, std::string_view moduleName) {
@@ -407,6 +344,54 @@ bool isRuntimeLibName(std::string_view path) {
       path.find("libstdc++") != std::string_view::npos ||
       path.find("libgcc_s") != std::string_view::npos ||
       path.find("libatomic") != std::string_view::npos;
+}
+
+bool waitForInnerGrpcReady(const ModuleInterface::MetaData &metaData, std::chrono::milliseconds timeout) {
+  if (metaData.innerGRPCServer.rfind("unix:", 0) != 0) {
+    LOG_INFO("模块内部服务不是 unix socket，跳过 socket ready 等待: 模块={}, 地址={}", metaData.name, metaData.innerGRPCServer);
+    return true;
+  }
+  const auto sockPath = std::filesystem::path(metaData.innerGRPCServer.substr(5));
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  std::shared_ptr<grpc::Channel> channel;
+  while (std::chrono::steady_clock::now() < deadline) {
+    std::error_code ec;
+    if (std::filesystem::exists(sockPath, ec)) {
+      if (!channel) {
+        channel = grpc::CreateChannel(metaData.innerGRPCServer, grpc::InsecureChannelCredentials());
+      }
+      const auto now = std::chrono::steady_clock::now();
+      const auto remaining = deadline - now;
+      const auto waitSlice = std::min<std::chrono::milliseconds>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(remaining),
+          std::chrono::milliseconds(100));
+      if (channel->WaitForConnected(std::chrono::system_clock::now() + waitSlice)) {
+        LOG_INFO("模块内部 gRPC 服务已 ready: 模块={}, socket={}", metaData.name, sockPath.string());
+        return true;
+      }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  LOG_ERROR("等待模块内部 gRPC 服务 ready 超时: 模块={}, socket={}, 超时毫秒={}", metaData.name, sockPath.string(), timeout.count());
+  return false;
+}
+
+bool moduleIsDependencyOfLaterModule(const std::string &moduleName,
+                                     const std::vector<std::string> &order,
+                                     size_t currentIndex,
+                                     const std::unordered_map<std::string, ModuleManagerProto::ModuleInfo> &moduleInfoByName) {
+  for (size_t i = currentIndex + 1; i < order.size(); ++i) {
+    auto infoIt = moduleInfoByName.find(order[i]);
+    if (infoIt == moduleInfoByName.end()) {
+      continue;
+    }
+    for (const auto &dependency : infoIt->second.dependencies()) {
+      if (dependency.module_name() == moduleName) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 void logLoadedRuntimeLibs(std::string_view phase, std::string_view moduleName, bool force) {
@@ -980,7 +965,7 @@ void ModuleManager::autoStartModulesFromConfig() {
   if (!readFile(configPath, &raw)) {
     bootConfigMode = kBootConfigModeUpper;
     setProcessBootConfigMode(bootConfigMode);
-    LOG_ERROR("读取自动启动配置失败: {}，将按安全模式继续执行持久化文件痕迹自动启动", configPath.string());
+    LOG_ERROR("读取自动启动配置失败: {}，将按安全模式继续执行 SQLite 持久化配置痕迹自动启动", configPath.string());
   } else {
     LOG_INFO("自动启动配置读取完成，实际字节数: {}", raw.size());
     LOG_INFO("自动启动配置原始文本包含 auto_start_modules: {}", raw.find("auto_start_modules") != std::string::npos ? "是" : "否");
@@ -991,11 +976,11 @@ void ModuleManager::autoStartModulesFromConfig() {
     if (!parseJsonValue(json, &parsed, "自动启动配置", "解析配置", metaData_.name, false)) {
       bootConfigMode = kBootConfigModeUpper;
       setProcessBootConfigMode(bootConfigMode);
-      LOG_WARNING("自动启动配置解析失败，将按安全模式继续执行持久化文件痕迹自动启动");
+      LOG_WARNING("自动启动配置解析失败，将按安全模式继续执行 SQLite 持久化配置痕迹自动启动");
     } else if (!parsed.is_object()) {
       bootConfigMode = kBootConfigModeUpper;
       setProcessBootConfigMode(bootConfigMode);
-      LOG_ERROR("自动启动配置必须为对象，将按安全模式继续执行持久化文件痕迹自动启动");
+      LOG_ERROR("自动启动配置必须为对象，将按安全模式继续执行 SQLite 持久化配置痕迹自动启动");
     } else {
       parsedConfigObject = parsed.as_object();
       bootConfigMode = parseBootConfigMode(*parsedConfigObject);
@@ -1050,7 +1035,7 @@ void ModuleManager::autoStartModulesFromConfig() {
   }
 
   if (bootConfigMode == kBootConfigModeConfigPusher) {
-    clearManagedPersistentTraceFilesForConfigPusher();
+    clearManagedPersistentSqliteForConfigPusher();
   }
 
   if (!autoStartModules.empty() || bootConfigMode == kBootConfigModeUpper) {
@@ -1058,27 +1043,18 @@ void ModuleManager::autoStartModulesFromConfig() {
   }
 
   int started = 0;
-  auto tryStartModule = [this, &bootConfigMode, &started](const std::string &moduleName, std::string_view reason, const std::vector<std::filesystem::path> *tracePaths) {
+  auto tryStartModule = [this, &bootConfigMode, &started](const std::string &moduleName, std::string_view reason) {
     if (bootConfigMode == kBootConfigModeUpper && moduleName == kConfigPusherModuleName) {
       LOG_INFO("当前 boot_config_mode={}，跳过自动启动模块: {}", bootConfigMode, moduleName);
       return;
     }
 
     const bool alreadyRunning = isModuleRunning(moduleName);
-    if (tracePaths != nullptr) {
-      LOG_INFO("当前 boot_config_mode={}，发现模块持久化配置文件痕迹: 模块={}, 文件={}", bootConfigMode, moduleName, joinPaths(*tracePaths, ", "));
-      LOG_INFO("当前 boot_config_mode={}，因{}自动启动模块: 模块={}, 文件={}", bootConfigMode, reason, moduleName, joinPaths(*tracePaths, ", "));
-    } else {
-      LOG_INFO("因{}自动启动模块: {}", reason, moduleName);
-    }
+    LOG_INFO("因{}自动启动模块: {}", reason, moduleName);
 
     auto result = startModuleByName(moduleName);
     if (!result.ok()) {
-      if (tracePaths != nullptr) {
-        LOG_ERROR("按持久化配置文件痕迹自动启动模块失败: 模块={}, 文件={}, 原因={}", moduleName, joinPaths(*tracePaths, ", "), result.message);
-      } else {
-        LOG_ERROR("自动启动模块 {} 失败: {}", moduleName, result.message);
-      }
+      LOG_ERROR("自动启动模块 {} 失败: {}", moduleName, result.message);
       return;
     }
     if (!alreadyRunning) {
@@ -1087,17 +1063,17 @@ void ModuleManager::autoStartModulesFromConfig() {
   };
 
   for (const auto &moduleName : autoStartModules) {
-    tryStartModule(moduleName, "auto_start_modules 配置", nullptr);
+    tryStartModule(moduleName, "auto_start_modules 配置");
   }
 
   if (bootConfigMode == kBootConfigModeUpper) {
-    LOG_INFO("当前 boot_config_mode={}，开始按持久化配置文件痕迹自动启动模块（仅检查文件存在性，不预解析 pb 内容）", bootConfigMode);
-    const auto modulesByTrace = collectUpperModeAutoStartModulesByTrace();
-    if (modulesByTrace.empty()) {
-      LOG_INFO("当前 boot_config_mode={}，未发现任何模块持久化配置文件痕迹", bootConfigMode);
+    LOG_INFO("当前 boot_config_mode={}，开始按 SQLite 持久化配置痕迹自动启动模块", bootConfigMode);
+    const auto modulesBySqlite = collectUpperModeAutoStartModulesBySqlite();
+    if (modulesBySqlite.empty()) {
+      LOG_INFO("当前 boot_config_mode={}，未发现任何 SQLite 持久化配置痕迹", bootConfigMode);
     }
-    for (const auto &[moduleName, tracePaths] : modulesByTrace) {
-      tryStartModule(moduleName, "持久化配置文件痕迹", &tracePaths);
+    for (const auto &moduleName : modulesBySqlite) {
+      tryStartModule(moduleName, "SQLite 持久化配置痕迹");
     }
   }
 
@@ -1172,14 +1148,32 @@ ModuleOpResult ModuleManager::startModuleByName(const std::string &moduleName) {
   LOG_INFO("启动模块 {}，依赖顺序: {}", moduleName, joinNames(order, " -> "));
 
   std::vector<std::string> started;
-  for (const auto &name : order) {
-    if (isModuleRunning(name)) {
+  auto findRunningLibInfo = [this](const std::string &name) -> std::shared_ptr<LibInfo> {
+    auto libInfoIt = std::find_if(libInfoVec_.begin(), libInfoVec_.end(), [&](const std::shared_ptr<LibInfo> &lib) {
+      return lib->MetaData().name == name;
+    });
+    if (libInfoIt == libInfoVec_.end()) {
+      return nullptr;
+    }
+    return *libInfoIt;
+  };
+  for (size_t i = 0; i < order.size(); ++i) {
+    const auto &name = order[i];
+    const bool dependencyForLater = moduleIsDependencyOfLaterModule(name, order, i, moduleInfoByName_);
+    if (auto runningLibInfo = findRunningLibInfo(name)) {
       LOG_INFO("模块已在运行，跳过启动: {}", name);
+      if (dependencyForLater &&
+          !waitForInnerGrpcReady(runningLibInfo->MetaData(), std::chrono::seconds(5))) {
+        LOG_ERROR("已运行依赖模块内部服务未 ready，停止继续启动后续模块: 依赖模块={}", name);
+        return {ModuleOpError::kInternal, "依赖模块内部服务未 ready: " + name};
+      }
       continue;
     }
     const auto info = moduleInfoByName_.at(name);
+    std::shared_ptr<LibInfo> libInfo;
     try {
-      libInfoVec_.emplace_back(LibInfo::create(info));
+      libInfo = LibInfo::create(info);
+      libInfoVec_.emplace_back(libInfo);
     } catch (const std::exception &ex) {
       LOG_ERROR("启动模块 {} 失败: {}", name, ex.what());
       for (auto it = started.rbegin(); it != started.rend(); ++it) {
@@ -1188,6 +1182,18 @@ ModuleOpResult ModuleManager::startModuleByName(const std::string &moduleName) {
         }
       }
       return {ModuleOpError::kInternal, std::string("启动模块失败: ") + ex.what()};
+    }
+    if (dependencyForLater && !waitForInnerGrpcReady(libInfo->MetaData(), std::chrono::seconds(5))) {
+      LOG_ERROR("依赖模块内部服务未 ready，停止继续启动后续模块: 依赖模块={}", name);
+      if (stopRunningModuleByName(name)) {
+        LOG_INFO("回滚停止未 ready 的依赖模块: {}", name);
+      }
+      for (auto it = started.rbegin(); it != started.rend(); ++it) {
+        if (stopRunningModuleByName(*it)) {
+          LOG_INFO("回滚停止模块: {}", *it);
+        }
+      }
+      return {ModuleOpError::kInternal, "依赖模块内部服务未 ready: " + name};
     }
     started.push_back(name);
     LOG_INFO("模块启动完成: {}", name);
@@ -1394,16 +1400,21 @@ ModuleManagerProto::ModuleRunningInfos ModuleManager::getModuleRunningInfos() {
   return result;
 }
 void ModuleManager::saveModuleStartConfig(ModuleManagerProto::ModuleInfos moduleInfos) {
-  std::string configBin("modConf.bin");
-  auto confDir = std::filesystem::path("./conf");
-  if (!std::filesystem::exists(confDir)) {
-    std::filesystem::create_directories(confDir);
+  std::string payload;
+  if (!moduleInfos.SerializeToString(&payload)) {
+    LOG_ERROR("ModuleManager 启动模块列表配置序列化失败");
+    return;
   }
-  std::ofstream ofs(confDir / configBin, std::ios::binary | std::ios::trunc);
-  if (ofs.is_open()) {
-    moduleInfos.SerializeToOstream(&ofs);
-    moduleConfig_ = moduleInfos;
+
+  mskdsp::ConfigDatabase db(std::filesystem::path("./conf/config.db"));
+  auto status = db.SaveBlob("ModuleManager", "module_start_config", "ModuleManagerProto.ModuleInfos", payload, 1, [](const std::string &message) {
+    LOG_INFO("ModuleManager 启动模块列表 SQLite 持久化: {}", message);
+  });
+  if (!status.ok()) {
+    LOG_ERROR("ModuleManager 启动模块列表配置保存失败: {}", status.error_message());
+    return;
   }
+  moduleConfig_ = moduleInfos;
 }
 void ModuleManager::initModuleInfos() {
   ModuleInfosBuildGuard buildGuard(moduleInfosBuilding_, "initModuleInfos");

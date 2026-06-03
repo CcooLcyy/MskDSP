@@ -64,6 +64,25 @@ target_link_libraries(moduleManagerAvcTraceModule PRIVATE
   moduleManager
 )
 
+add_library(moduleManagerDataCenterTraceModule SHARED
+  module_manager_dummy_module.cc
+)
+
+target_compile_definitions(moduleManagerDataCenterTraceModule PRIVATE
+  MSKDSP_TEST_MODULE_NAME="DataCenter"
+)
+
+set_target_properties(moduleManagerDataCenterTraceModule PROPERTIES
+  OUTPUT_NAME DataCenter
+  VERSION 0.0.1
+  SOVERSION 0
+  LIBRARY_OUTPUT_DIRECTORY "${MSKDSP_MODULE_MANAGER_TEST_LIB_DIR}"
+)
+
+target_link_libraries(moduleManagerDataCenterTraceModule PRIVATE
+  moduleManager
+)
+
 add_executable(moduleManager_test
   module_manager_test.cc
 )
@@ -76,6 +95,7 @@ target_link_libraries(moduleManager_test PRIVATE
 add_dependencies(moduleManager_test
   moduleManagerDummyModule
   moduleManagerAvcTraceModule
+  moduleManagerDataCenterTraceModule
 )
 
 mskdsp_add_isolated_test(moduleManager_test
@@ -130,20 +150,21 @@ target_link_libraries(mqtt_manager_test PRIVATE
 
 mskdsp_add_isolated_test(mqtt_manager_test)
 
-add_executable(protoFileStore_test
-  proto_file_store_test.cc
+add_executable(configDatabase_test
+  config_database_test.cc
 )
 
-target_include_directories(protoFileStore_test PRIVATE
+target_include_directories(configDatabase_test PRIVATE
   ${MSKDSP_COMMON_INCLUDE_DIR}
 )
 
-target_link_libraries(protoFileStore_test PRIVATE
+target_link_libraries(configDatabase_test PRIVATE
   GTest::gtest_main
   dspProto
+  mskdspConfigStore
 )
 
-mskdsp_add_isolated_test(protoFileStore_test)
+mskdsp_add_isolated_test(configDatabase_test)
 
 add_executable(calc_group_manager_test
   calc_group_manager_test.cc
@@ -197,6 +218,7 @@ target_include_directories(dataCenterStateStore_test PRIVATE
 target_link_libraries(dataCenterStateStore_test PRIVATE
   GTest::gtest_main
   dspProto
+  mskdspConfigStore
 )
 
 mskdsp_add_isolated_test(dataCenterStateStore_test)
@@ -222,6 +244,7 @@ target_link_libraries(dataCenterGrpcService_test PRIVATE
   GTest::gtest_main
   dspProto
   moduleManager
+  mskdspConfigStore
 )
 
 mskdsp_add_isolated_test(dataCenterGrpcService_test)
@@ -667,6 +690,7 @@ target_include_directories(agcGroupStore_test PRIVATE
 target_link_libraries(agcGroupStore_test PRIVATE
   GTest::gtest_main
   dspProto
+  mskdspConfigStore
 )
 
 mskdsp_add_isolated_test(agcGroupStore_test)
@@ -727,6 +751,7 @@ target_include_directories(avcGroupStore_test PRIVATE
 target_link_libraries(avcGroupStore_test PRIVATE
   GTest::gtest_main
   dspProto
+  mskdspConfigStore
 )
 
 mskdsp_add_isolated_test(avcGroupStore_test)
@@ -808,7 +833,7 @@ set(MSKDSP_TEST_TARGETS
   moduleInterface_test
   logger_test
   mqtt_manager_test
-  protoFileStore_test
+  configDatabase_test
   dataCenterCore_test
   dataCenterStateStore_test
   dataCenterGrpcService_test

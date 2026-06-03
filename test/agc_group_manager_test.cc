@@ -699,10 +699,10 @@ TEST(AgcGroupManagerTest, RestorePersistedGroupsLoadsGroupConfigFromLocalStore) 
   ScopedTempDir dir;
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
-  const auto groupsPath = dir.path() / "groups.pb";
+  const auto configDbPath = dir.path() / "config.db";
 
   {
-    GroupManager writer("AGC", groupsPath);
+    GroupManager writer("AGC", configDbPath);
     writer.setDataCenterStub(stub);
 
     auto req = MakeGroupReq("g-persist");
@@ -711,7 +711,7 @@ TEST(AgcGroupManagerTest, RestorePersistedGroupsLoadsGroupConfigFromLocalStore) 
     ASSERT_NE(info.conn_id(), 0u);
   }
 
-  GroupManager reader("AGC", groupsPath);
+  GroupManager reader("AGC", configDbPath);
   reader.setDataCenterStub(stub);
   ASSERT_TRUE(reader.LoadPersistedConfig().ok());
 
@@ -729,11 +729,11 @@ TEST(AgcGroupManagerTest, RestorePersistedGroupsAutoStartsReadyGroup) {
   ScopedTempDir dir;
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
-  const auto groupsPath = dir.path() / "groups.pb";
+  const auto configDbPath = dir.path() / "config.db";
   uint32_t restoredConnId = 0;
 
   {
-    GroupManager writer("AGC", groupsPath);
+    GroupManager writer("AGC", configDbPath);
     writer.setDataCenterStub(stub);
 
     auto req = MakeGroupReq("g-auto-restore");
@@ -743,7 +743,7 @@ TEST(AgcGroupManagerTest, RestorePersistedGroupsAutoStartsReadyGroup) {
     ASSERT_NE(restoredConnId, 0u);
   }
 
-  GroupManager reader("AGC", groupsPath);
+  GroupManager reader("AGC", configDbPath);
   reader.setDataCenterStub(stub);
   ASSERT_TRUE(reader.LoadPersistedConfig().ok());
 
@@ -763,10 +763,10 @@ TEST(AgcGroupManagerTest, RestorePersistedGroupsLoadsPendingDeleteStateAfterRest
   FakeDataCenterState state;
   state.FailDeleteForConnName("g-pending-persist");
   auto stub = MakeStub(&state);
-  const auto groupsPath = dir.path() / "groups.pb";
+  const auto configDbPath = dir.path() / "config.db";
 
   {
-    GroupManager writer("AGC", groupsPath);
+    GroupManager writer("AGC", configDbPath);
     writer.setDataCenterStub(stub);
 
     auto req = MakeGroupReq("g-pending-persist");
@@ -777,7 +777,7 @@ TEST(AgcGroupManagerTest, RestorePersistedGroupsLoadsPendingDeleteStateAfterRest
     ASSERT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
   }
 
-  GroupManager reader("AGC", groupsPath);
+  GroupManager reader("AGC", configDbPath);
   reader.setDataCenterStub(stub);
   ASSERT_TRUE(reader.LoadPersistedConfig().ok());
 
@@ -796,10 +796,10 @@ TEST(AgcGroupManagerTest, DeleteGroupRemovesPersistedConfig) {
   ScopedTempDir dir;
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
-  const auto groupsPath = dir.path() / "groups.pb";
+  const auto configDbPath = dir.path() / "config.db";
 
   {
-    GroupManager writer("AGC", groupsPath);
+    GroupManager writer("AGC", configDbPath);
     writer.setDataCenterStub(stub);
 
     auto req = MakeGroupReq("g-removed");
@@ -808,7 +808,7 @@ TEST(AgcGroupManagerTest, DeleteGroupRemovesPersistedConfig) {
     ASSERT_TRUE(writer.DeleteGroup("g-removed").ok());
   }
 
-  GroupManager reader("AGC", groupsPath);
+  GroupManager reader("AGC", configDbPath);
   reader.setDataCenterStub(stub);
   ASSERT_TRUE(reader.LoadPersistedConfig().ok());
 

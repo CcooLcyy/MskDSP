@@ -9,16 +9,14 @@
 namespace DLT645 {
 class DLT645MqttStore {
 public:
-  explicit DLT645MqttStore(std::filesystem::path mqttPath = std::filesystem::path("./conf/DLT645/mqtt.pb"));
+  explicit DLT645MqttStore(std::filesystem::path configDbPath = std::filesystem::path("./conf/config.db"));
 
   grpc::Status Save(const DLT645Proto::MqttConfig &config);
   grpc::Status Load(DLT645Proto::MqttConfig *out);
 
-  std::filesystem::path mqttPath() const;
-  std::filesystem::path backupPath() const;
-  std::filesystem::path tmpPath() const;
+  std::filesystem::path databasePath() const;
 
 private:
-  std::filesystem::path mqttPath_;
+  std::filesystem::path configDbPath_;
 };
 }  // namespace DLT645

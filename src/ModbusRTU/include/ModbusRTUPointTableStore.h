@@ -9,17 +9,14 @@
 namespace ModbusRTU {
 class ModbusRTUPointTableStore {
 public:
-  explicit ModbusRTUPointTableStore(
-      std::filesystem::path pointTablesPath = std::filesystem::path("./conf/ModbusRTU/point_tables.pb"));
+  explicit ModbusRTUPointTableStore(std::filesystem::path configDbPath = std::filesystem::path("./conf/config.db"));
 
   grpc::Status Save(const ModbusRTUProto::PointTablesConfig& config);
   grpc::Status Load(ModbusRTUProto::PointTablesConfig* out);
 
-  std::filesystem::path pointTablesPath() const;
-  std::filesystem::path backupPath() const;
-  std::filesystem::path tmpPath() const;
+  std::filesystem::path databasePath() const;
 
 private:
-  std::filesystem::path pointTablesPath_;
+  std::filesystem::path configDbPath_;
 };
 }  // namespace ModbusRTU

@@ -9,16 +9,14 @@
 namespace ModbusRTU {
 class ModbusRTULinkStore {
 public:
-  explicit ModbusRTULinkStore(std::filesystem::path linksPath = std::filesystem::path("./conf/ModbusRTU/links.pb"));
+  explicit ModbusRTULinkStore(std::filesystem::path configDbPath = std::filesystem::path("./conf/config.db"));
 
   grpc::Status Save(const ModbusRTUProto::LinksConfig& config);
   grpc::Status Load(ModbusRTUProto::LinksConfig* out);
 
-  std::filesystem::path linksPath() const;
-  std::filesystem::path backupPath() const;
-  std::filesystem::path tmpPath() const;
+  std::filesystem::path databasePath() const;
 
 private:
-  std::filesystem::path linksPath_;
+  std::filesystem::path configDbPath_;
 };
 }  // namespace ModbusRTU

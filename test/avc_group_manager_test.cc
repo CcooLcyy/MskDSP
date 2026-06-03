@@ -494,11 +494,11 @@ TEST(AvcGroupManagerTest, LoadPersistedConfigRestoresConnIdAndAutoStartsGroup) {
   ScopedTempDir tempDir;
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
-  const auto groupsPath = tempDir.path() / "conf/AVC/groups.pb";
-  std::filesystem::create_directories(groupsPath.parent_path());
+  const auto configDbPath = tempDir.path() / "conf/config.db";
+  std::filesystem::create_directories(configDbPath.parent_path());
 
   {
-    GroupManager writer("AVC", groupsPath);
+    GroupManager writer("AVC", configDbPath);
     writer.setDataCenterStub(stub);
 
     AVCProto::GroupInfo info;
@@ -506,7 +506,7 @@ TEST(AvcGroupManagerTest, LoadPersistedConfigRestoresConnIdAndAutoStartsGroup) {
     ASSERT_TRUE(writer.StopGroup("g-restore").ok());
   }
 
-  GroupManager reader("AVC", groupsPath);
+  GroupManager reader("AVC", configDbPath);
   reader.setDataCenterStub(stub);
   ASSERT_TRUE(reader.LoadPersistedConfig().ok());
 

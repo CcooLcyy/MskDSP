@@ -16,6 +16,7 @@
 #include "ConfigPusher.h"
 #include "DataCenter.grpc.pb.h"
 #include "ModuleManager_mock.grpc.pb.h"
+#include "mskdsp/ConfigDatabase.h"
 
 namespace {
 using ::testing::_;
@@ -85,6 +86,11 @@ void WriteFile(const std::filesystem::path &path, const std::string &content) {
   }
   std::ofstream ofs(path, std::ios::out | std::ios::binary);
   ofs << content;
+}
+
+void WritePersistentTrace(const std::filesystem::path &root, const std::string &moduleName, const std::string &configKey) {
+  mskdsp::ConfigDatabase db(root / "conf" / "config.db");
+  ASSERT_TRUE(db.SaveBlob(moduleName, configKey, "test.PersistentTrace", "trace").ok());
 }
 
 ModuleManagerProto::ModuleInfo MakeModuleInfo(const std::string &name) {
@@ -356,7 +362,7 @@ TEST(ConfigPusherApplyConfigTest, NoConfigReturnsEarly) {
   ConfigPusherTestPeer::ApplyConfig(pusher);
 }
 
-// 验证：即使存在模块持久化 pb 痕迹，但缺少对应 jsonc 配置时，ConfigPusher 仍按无配置处理并直接返回。
+// 验证：即使存在模块 SQLite 持久化痕迹，但缺少对应 jsonc 配置时，ConfigPusher 仍按无配置处理并直接返回。
 TEST(ConfigPusherApplyConfigTest, PersistentTraceWithoutJsonStillReturnsEarly) {
   ScopedTempDir workDir;
   ScopedCwd cwd(workDir.path());
@@ -364,13 +370,13 @@ TEST(ConfigPusherApplyConfigTest, PersistentTraceWithoutJsonStillReturnsEarly) {
   const auto configDir = workDir.path() / "configPusher";
   std::filesystem::create_directories(configDir);
 
-  WriteFile(workDir.path() / "conf" / "dataCenter" / "state.pb", "trace");
-  WriteFile(workDir.path() / "conf" / "IEC104" / "links.pb", "trace");
-  WriteFile(workDir.path() / "conf" / "ModbusRTU" / "links.pb", "trace");
-  WriteFile(workDir.path() / "conf" / "DLT645" / "links.pb", "trace");
-  WriteFile(workDir.path() / "conf" / "AGC" / "groups.pb", "trace");
-  WriteFile(workDir.path() / "conf" / "AVC" / "groups.pb", "trace");
-  WriteFile(workDir.path() / "conf" / "Calc" / "groups.pb", "trace");
+  WritePersistentTrace(workDir.path(), "DataCenter", "state");
+  WritePersistentTrace(workDir.path(), "IEC104", "links");
+  WritePersistentTrace(workDir.path(), "ModbusRTU", "links");
+  WritePersistentTrace(workDir.path(), "DLT645", "links");
+  WritePersistentTrace(workDir.path(), "AGC", "groups");
+  WritePersistentTrace(workDir.path(), "AVC", "groups");
+  WritePersistentTrace(workDir.path(), "Calc", "groups");
 
   auto stub = std::make_shared<ModuleManagerProto::MockModuleManageStub>();
   EXPECT_CALL(*stub, GetModuleInfo(_, _, _)).Times(0);
@@ -471,7 +477,7 @@ TEST(ConfigPusherApplyConfigTest, WaitForModuleStopsOnRunningInfoFailure) {
   ConfigPusherTestPeer::ApplyConfig(pusher);
 }
 
-// 验证：即使存在模块持久化配置文件痕迹，ConfigPusher 仍会按 jsonc 启动 DataCenter 并下发配置。
+// 验证：即使存在模块 SQLite 持久化配置痕迹，ConfigPusher 仍会按 jsonc 启动 DataCenter 并下发配置。
 TEST(ConfigPusherApplyConfigTest, AppliesJsoncConfigAndStartsModuleEvenWhenPersistentTraceExists) {
   ScopedTempDir workDir;
   ScopedCwd cwd(workDir.path());
@@ -505,9 +511,9 @@ TEST(ConfigPusherApplyConfigTest, AppliesJsoncConfigAndStartsModuleEvenWhenPersi
 }
 )json");
 
-  WriteFile(workDir.path() / "conf" / "dataCenter" / "state.pb", "trace");
-  WriteFile(workDir.path() / "conf" / "IEC104" / "links.pb", "trace");
-  WriteFile(workDir.path() / "conf" / "AGC" / "groups.pb", "trace");
+  WritePersistentTrace(workDir.path(), "DataCenter", "state");
+  WritePersistentTrace(workDir.path(), "IEC104", "links");
+  WritePersistentTrace(workDir.path(), "AGC", "groups");
 
   FakeDataCenterService dataCenterService;
   grpc::ServerBuilder builder;
@@ -605,7 +611,7 @@ TEST(ConfigPusherApplyConfigTest, EmptyDataCenterJsonStillAppliesAsTargetState) 
 }
 )json");
 
-  WriteFile(workDir.path() / "conf" / "dataCenter" / "state.pb", "trace");
+  WritePersistentTrace(workDir.path(), "DataCenter", "state");
 
   FakeDataCenterService dataCenterService;
   grpc::ServerBuilder builder;
@@ -715,8 +721,8 @@ TEST(ConfigPusherApplyConfigTest, AppliesAvcJsoncAndStartsDataCenterAndAvcModule
 }
 )json");
 
-  WriteFile(workDir.path() / "conf" / "dataCenter" / "state.pb", "trace");
-  WriteFile(workDir.path() / "conf" / "AVC" / "groups.pb", "trace");
+  WritePersistentTrace(workDir.path(), "DataCenter", "state");
+  WritePersistentTrace(workDir.path(), "AVC", "groups");
 
   FakeAvcService avcService;
   avcService.addExistingGroup("avc-legacy", AVCProto::GROUP_STATE_STOPPED);
@@ -841,8 +847,8 @@ TEST(ConfigPusherApplyConfigTest, AppliesCalcJsoncAndStartsDataCenterAndCalcModu
 }
 )json");
 
-  WriteFile(workDir.path() / "conf" / "dataCenter" / "state.pb", "trace");
-  WriteFile(workDir.path() / "conf" / "Calc" / "groups.pb", "trace");
+  WritePersistentTrace(workDir.path(), "DataCenter", "state");
+  WritePersistentTrace(workDir.path(), "Calc", "groups");
 
   FakeCalcService calcService;
   calcService.addExistingGroup("calc-legacy", CalcProto::GROUP_STATE_STOPPED);

@@ -180,7 +180,7 @@ TEST(CalcGroupManagerTest, UpsertGroupCreateOnlyReturnsConnIdAndAutoStartsReadyG
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
-  GroupManager mgr("Calc", tempDir.path() / "conf/Calc/groups.pb");
+  GroupManager mgr("Calc", tempDir.path() / "conf/config.db");
   mgr.setDataCenterStub(stub);
 
   auto req = MakeAddConstGroupReq("calc-1", 10.0);
@@ -202,7 +202,7 @@ TEST(CalcGroupManagerTest, UpsertGroupRejectsNotWithRightOperand) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
-  GroupManager mgr("Calc", tempDir.path() / "conf/Calc/groups.pb");
+  GroupManager mgr("Calc", tempDir.path() / "conf/config.db");
   mgr.setDataCenterStub(stub);
 
   auto req = MakeNotGroupReq("calc-not-invalid");
@@ -220,7 +220,7 @@ TEST(CalcGroupManagerTest, UpsertGroupRejectsInvalidConfigShapes) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
-  GroupManager mgr("Calc", tempDir.path() / "conf/Calc/groups.pb");
+  GroupManager mgr("Calc", tempDir.path() / "conf/config.db");
   mgr.setDataCenterStub(stub);
 
   CalcProto::CalcGroupInfo info;
@@ -247,7 +247,7 @@ TEST(CalcGroupManagerTest, AddIntAndIntPublishesInt64) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
-  GroupManager mgr("Calc", tempDir.path() / "conf/Calc/groups.pb");
+  GroupManager mgr("Calc", tempDir.path() / "conf/config.db");
   mgr.setDataCenterStub(stub);
 
   auto req = MakeAddGroupReq("calc-add-int");
@@ -267,7 +267,7 @@ TEST(CalcGroupManagerTest, AddIntAndDoublePublishesDouble) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
-  GroupManager mgr("Calc", tempDir.path() / "conf/Calc/groups.pb");
+  GroupManager mgr("Calc", tempDir.path() / "conf/config.db");
   mgr.setDataCenterStub(stub);
 
   auto req = MakeAddGroupReq("calc-add-mixed");
@@ -287,7 +287,7 @@ TEST(CalcGroupManagerTest, DivIntAndIntPublishesDouble) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
-  GroupManager mgr("Calc", tempDir.path() / "conf/Calc/groups.pb");
+  GroupManager mgr("Calc", tempDir.path() / "conf/config.db");
   mgr.setDataCenterStub(stub);
 
   auto req = MakeDivGroupReq("calc-div");
@@ -307,7 +307,7 @@ TEST(CalcGroupManagerTest, IntOverflowPromotesToDouble) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
-  GroupManager mgr("Calc", tempDir.path() / "conf/Calc/groups.pb");
+  GroupManager mgr("Calc", tempDir.path() / "conf/config.db");
   mgr.setDataCenterStub(stub);
 
   auto req = MakeAddGroupReq("calc-overflow");
@@ -328,7 +328,7 @@ TEST(CalcGroupManagerTest, NotPublishesBoolResult) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
-  GroupManager mgr("Calc", tempDir.path() / "conf/Calc/groups.pb");
+  GroupManager mgr("Calc", tempDir.path() / "conf/config.db");
   mgr.setDataCenterStub(stub);
 
   auto req = MakeNotGroupReq("calc-not");
@@ -346,7 +346,7 @@ TEST(CalcGroupManagerTest, AndPublishesBoolResult) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
-  GroupManager mgr("Calc", tempDir.path() / "conf/Calc/groups.pb");
+  GroupManager mgr("Calc", tempDir.path() / "conf/config.db");
   mgr.setDataCenterStub(stub);
 
   auto req = MakeAndGroupReq("calc-and");
@@ -366,7 +366,7 @@ TEST(CalcGroupManagerTest, LogicOperatorRejectsNumericInputAtRuntime) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
-  GroupManager mgr("Calc", tempDir.path() / "conf/Calc/groups.pb");
+  GroupManager mgr("Calc", tempDir.path() / "conf/config.db");
   mgr.setDataCenterStub(stub);
 
   auto req = MakeNotGroupReq("calc-not-int");
@@ -385,7 +385,7 @@ TEST(CalcGroupManagerTest, RenameGroupReusesConnId) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
-  GroupManager mgr("Calc", tempDir.path() / "conf/Calc/groups.pb");
+  GroupManager mgr("Calc", tempDir.path() / "conf/config.db");
   mgr.setDataCenterStub(stub);
 
   auto req = MakeAddConstGroupReq("calc-old", 2.0);
@@ -407,7 +407,7 @@ TEST(CalcGroupManagerTest, RenameGroupRejectsRunningGroup) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
-  GroupManager mgr("Calc", tempDir.path() / "conf/Calc/groups.pb");
+  GroupManager mgr("Calc", tempDir.path() / "conf/config.db");
   mgr.setDataCenterStub(stub);
 
   auto req = MakeAddConstGroupReq("calc-running", 2.0);
@@ -427,7 +427,7 @@ TEST(CalcGroupManagerTest, DeleteGroupRemovesConnection) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
-  GroupManager mgr("Calc", tempDir.path() / "conf/Calc/groups.pb");
+  GroupManager mgr("Calc", tempDir.path() / "conf/config.db");
   mgr.setDataCenterStub(stub);
 
   auto req = MakeAddConstGroupReq("calc-delete", 2.0);
@@ -448,7 +448,7 @@ TEST(CalcGroupManagerTest, DeleteGroupFailureMarksPendingDelete) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
-  GroupManager mgr("Calc", tempDir.path() / "conf/Calc/groups.pb");
+  GroupManager mgr("Calc", tempDir.path() / "conf/config.db");
   mgr.setDataCenterStub(stub);
 
   auto req = MakeAddConstGroupReq("calc-delete-fail", 2.0);
@@ -473,7 +473,7 @@ TEST(CalcGroupManagerTest, LoadPersistedConfigRestoresConnIdAndAutoStartsGroup) 
   uint32_t savedConnId = 0;
 
   {
-    GroupManager mgr("Calc", tempDir.path() / "conf/Calc/groups.pb");
+    GroupManager mgr("Calc", tempDir.path() / "conf/config.db");
     mgr.setDataCenterStub(stub);
 
     auto req = MakeAddConstGroupReq("calc-restore", 10.0);
@@ -483,7 +483,7 @@ TEST(CalcGroupManagerTest, LoadPersistedConfigRestoresConnIdAndAutoStartsGroup) 
     ASSERT_TRUE(mgr.StopGroup("calc-restore").ok());
   }
 
-  GroupManager restored("Calc", tempDir.path() / "conf/Calc/groups.pb");
+  GroupManager restored("Calc", tempDir.path() / "conf/config.db");
   restored.setDataCenterStub(stub);
   ASSERT_TRUE(restored.LoadPersistedConfig().ok());
 

@@ -75,16 +75,18 @@ AVC 为每个控制组固定生成以下 10 个默认点，并自动注册到该
 - 上述 `desired_total_q` 会统一钳制到当前总无功能力范围，再按 weighted 策略分配给可控成员
 
 ### 配置持久化（当前实现）
-AVC 会将控制组配置落盘到工作目录下的 `./conf/AVC/groups.pb`，用于进程重启后的自动恢复。
+AVC 会将控制组配置作为 protobuf payload 写入 `./conf/config.db`，用于进程重启后的自动恢复。
 
-### 文件与策略
-- 主文件：`./conf/AVC/groups.pb`
-- 备份文件：`./conf/AVC/groups.pb.bak`
-- 临时文件：`./conf/AVC/groups.pb.tmp`
-- 隔离文件：`./conf/AVC/groups.pb.corrupt.<timestamp>`
+### SQLite 项
+- 数据库：`./conf/config.db`
+- 表：`config_blobs`
+- 模块：`AVC`
+- 配置项：`groups`
+- protobuf 类型：`AVCProto.GroupsConfig`
+- 兼容策略：不再读取旧 `./conf/AVC/groups.pb/.bak/.tmp`；SQLite 中没有 `AVC/groups` 时返回空配置，等待上位机或 ConfigPusher 重新下发。
 
 ### 启动恢复
-- AVC 启动时会自动加载 `groups.pb`，并按 `group_name` 重新向 DataCenter 调用 `GetOrCreateConnection` 取回稳定 `conn_id`
+- AVC 启动时会自动加载 SQLite 中的 `AVC/groups`，并按 `group_name` 重新向 DataCenter 调用 `GetOrCreateConnection` 取回稳定 `conn_id`
 - 恢复后会重新向 DataCenter 注册 AVC 自身连接标签注册表（`replace=true`），用于路由校验、展示与自愈
 - 恢复出的控制组若满足当前最小可运行条件，会在模块启动阶段自动启动组内控制功能
 - `StartGroup` RPC 仍保留用于兼容，但已改为幂等语义：控制组已在运行时直接返回成功

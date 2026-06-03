@@ -3,35 +3,27 @@
 #include <utility>
 
 #include "CalcValidation.h"
-#include "mskdsp/detail/ProtoFileStore.hpp"
+#include "mskdsp/detail/ProtoSqliteStore.hpp"
 
 namespace Calc {
 
-GroupStore::GroupStore(std::filesystem::path groupsPath) :
-  groupsPath_(std::move(groupsPath)) {}
+GroupStore::GroupStore(std::filesystem::path configDbPath) :
+  configDbPath_(std::move(configDbPath)) {}
 
 grpc::Status GroupStore::Save(const CalcProto::GroupsConfig &config) {
-  mskdsp::detail::ProtoFileStore<CalcProto::GroupsConfig> store(groupsPath_, ValidateGroupsConfig);
+  mskdsp::detail::ProtoSqliteStore<CalcProto::GroupsConfig> store(
+      configDbPath_, "Calc", "groups", "CalcProto.GroupsConfig", ValidateGroupsConfig);
   return store.Save(config);
 }
 
 grpc::Status GroupStore::Load(CalcProto::GroupsConfig *out) {
-  mskdsp::detail::ProtoFileStore<CalcProto::GroupsConfig> store(groupsPath_, ValidateGroupsConfig);
+  mskdsp::detail::ProtoSqliteStore<CalcProto::GroupsConfig> store(
+      configDbPath_, "Calc", "groups", "CalcProto.GroupsConfig", ValidateGroupsConfig);
   return store.Load(out);
 }
 
-std::filesystem::path GroupStore::groupsPath() const {
-  return groupsPath_;
-}
-
-std::filesystem::path GroupStore::backupPath() const {
-  mskdsp::detail::ProtoFileStore<CalcProto::GroupsConfig> store(groupsPath_, ValidateGroupsConfig);
-  return store.backupPath();
-}
-
-std::filesystem::path GroupStore::tmpPath() const {
-  mskdsp::detail::ProtoFileStore<CalcProto::GroupsConfig> store(groupsPath_, ValidateGroupsConfig);
-  return store.tmpPath();
+std::filesystem::path GroupStore::databasePath() const {
+  return configDbPath_;
 }
 
 }  // namespace Calc

@@ -16,6 +16,7 @@ target_include_directories(${LIB_NAME} PUBLIC
 
 target_link_libraries(${LIB_NAME} PUBLIC
     moduleManager
+    mskdspConfigStore
 )
 
 set_target_properties(${LIB_NAME} PROPERTIES

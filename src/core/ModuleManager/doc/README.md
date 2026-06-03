@@ -5,7 +5,7 @@
 ## 运行与目录约定
 - 推荐以 `package/` 作为工作目录运行 `./MskDSP`。
 - `./module/`：模块共享库目录（默认对应 `package/module/`）。
-- `./conf/`：运行时配置目录（`SaveModuleStartConfig` 会写入 `modConf.bin`，该文件默认被 `.gitignore` 忽略）。
+- `./conf/`：运行时配置目录，配置持久化统一写入 `config.db`。
 - `./socket/`：模块内部 gRPC 的 unix socket 文件目录。
 
 ## 模块加载约定
@@ -41,55 +41,31 @@ extern "C" BOOST_SYMBOL_EXPORT bool GetModuleManifestPb(const uint8_t **data, si
   - `auto_start_modules`（字符串数组，模块名需与 `lib<模块名>.so` 对应）
 - 行为：
   - 管理器在进程启动时只读取一次 `boot_config_mode`，并固定为本次运行模式；运行中修改配置文件不会立即生效，需重启 `MskDSP`
-  - `CONFIG_PUSHER`：允许 `ConfigPusher` 在启动后读取 JSONC 并下发配置
+  - `CONFIG_PUSHER`：允许 `ConfigPusher` 在启动后读取 JSONC 并下发配置；启动模块前会清理受管模块的 SQLite 配置项，避免旧配置与本次下发目标态混用
   - 管理器启动后会先读取 `auto_start_modules` 并自动加载列表中的模块；已运行的模块会安全跳过
   - `UPPER`：即使 `auto_start_modules` 中包含 `ConfigPusher`，也会跳过其自动启动；若后续手动启动 `ConfigPusher`，模块仅启动服务，不会执行配置下发
-  - `UPPER`：在处理完 `auto_start_modules` 后，管理器还会继续检查各模块配置目录下是否存在持久化配置主文件或 `.bak` 备份文件；只要发现文件痕迹，就会自动启动对应模块
-  - `UPPER`：管理器只做“文件是否存在”的判断，不会预解析各模块的 pb 内容；pb 合法性、对象恢复以及模块内功能是否能自动进入运行态，统一由模块自身负责
-  - `UPPER`：`auto_start_modules` 与“文件痕迹自动启动”可以同时存在，重复启动会复用现有“已运行则跳过”逻辑，避免双重启动
-  - 若配置文件读取失败、JSONC 解析失败、根节点不是对象，或 `boot_config_mode` 填写非法，管理器会按安全模式回退为 `UPPER`；此时忽略无法解析的 `auto_start_modules`，但仍继续执行“文件痕迹自动启动”
+  - `UPPER`：在处理完 `auto_start_modules` 后，管理器还会继续检查 `./conf/config.db` 中的受管模块配置项；只要发现痕迹，就会自动启动对应模块
+  - `UPPER`：管理器只做“SQLite row 是否存在”的判断，不会预解析 SQLite payload；配置合法性、对象恢复以及模块内功能是否能自动进入运行态，统一由模块自身负责
+  - `UPPER`：`auto_start_modules` 与“SQLite 痕迹自动启动”可以同时存在，重复启动会复用现有“已运行则跳过”逻辑，避免双重启动
+  - 若配置文件读取失败、JSONC 解析失败、根节点不是对象，或 `boot_config_mode` 填写非法，管理器会按安全模式回退为 `UPPER`；此时忽略无法解析的 `auto_start_modules`，但仍继续执行“SQLite 痕迹自动启动”
 - 建议：使用 `CONFIG_PUSHER` 时，自启动列表仅填写 `ConfigPusher`；使用 `UPPER` 时，不要把 `ConfigPusher` 作为启动时配置入口，而应由模块根据持久化配置痕迹自行恢复与启动。
 
-### `UPPER` 模式文件痕迹清单
-- `DataCenter`
-  - `./conf/dataCenter/state.pb`
-  - `./conf/dataCenter/state.pb.bak`
-    说明：DataCenter 使用单个完整状态文件保存连接注册表、连接标签注册表与路由，避免三类配置文件代际不一致
-- `IEC104`
-  - `./conf/IEC104/links.pb`
-  - `./conf/IEC104/links.pb.bak`
-  - `./conf/IEC104/point_tables.pb`
-  - `./conf/IEC104/point_tables.pb.bak`
-- `ModbusRTU`
-  - `./conf/ModbusRTU/mqtt.pb`
-  - `./conf/ModbusRTU/mqtt.pb.bak`
-  - `./conf/ModbusRTU/links.pb`
-  - `./conf/ModbusRTU/links.pb.bak`
-  - `./conf/ModbusRTU/point_tables.pb`
-  - `./conf/ModbusRTU/point_tables.pb.bak`
-- `DLT645`
-  - `./conf/DLT645/mqtt.pb`
-  - `./conf/DLT645/mqtt.pb.bak`
-  - `./conf/DLT645/links.pb`
-  - `./conf/DLT645/links.pb.bak`
-  - `./conf/DLT645/point_tables.pb`
-  - `./conf/DLT645/point_tables.pb.bak`
-- `AGC`
-  - `./conf/AGC/groups.pb`
-  - `./conf/AGC/groups.pb.bak`
-- `AVC`
-  - `./conf/AVC/groups.pb`
-  - `./conf/AVC/groups.pb.bak`
-- `Calc`
-  - `./conf/Calc/groups.pb`
-  - `./conf/Calc/groups.pb.bak`
+### `UPPER` 模式持久化痕迹清单
+- SQLite：`./conf/config.db`
+  - `DataCenter/state`
+  - `IEC104/links`、`IEC104/point_tables`
+  - `ModbusRTU/mqtt`、`ModbusRTU/links`、`ModbusRTU/point_tables`
+  - `DLT645/mqtt`、`DLT645/links`、`DLT645/point_tables`
+  - `AGC/groups`
+  - `AVC/groups`
+  - `Calc/groups`
 
 示例：
 ```jsonc
 {
   // 启动配置模式：仅在进程启动时读取一次；修改后需重启 MskDSP 生效。
   "boot_config_mode": "UPPER",
-  // 显式自动启动模块列表；与 UPPER 模式的“文件痕迹自动启动”可同时存在。
+  // 显式自动启动模块列表；与 UPPER 模式的“SQLite 痕迹自动启动”可同时存在。
   "auto_start_modules": ["DataCenter"]
 }
 ```
@@ -101,7 +77,7 @@ extern "C" BOOST_SYMBOL_EXPORT bool GetModuleManifestPb(const uint8_t **data, si
 - `StartModule`：加载共享库、调用 `create()` 创建实例，并在独立线程中运行模块的 `start()`；自动按依赖拓扑顺序启动依赖模块；依赖缺失/循环/版本不满足返回错误。
 - `StopModule`：请求停止模块、关闭 gRPC Server、回收线程并卸载共享库；级联停止依赖它的上游模块；级联失败返回错误。
 - `GetRunningModuleInfo`：返回已启动模块的运行时信息（版本、inner/outer gRPC 地址等）。
-- `SaveModuleStartConfig`：保存模块启动配置到 `./conf/modConf.bin`（当前实现仅保存，未看到启动时自动读取逻辑）。
+- `SaveModuleStartConfig`：保存模块启动配置到 `./conf/config.db` 的 `ModuleManager/module_start_config`（当前实现仅保存，未看到启动时自动读取逻辑）。
 - `UploadModule`/`DeleteModule`：上传/删除模块当前未实现（no-op），优先级较低，后续再补齐。
 
 ## 地址发现与容错说明
@@ -115,7 +91,7 @@ extern "C" BOOST_SYMBOL_EXPORT bool GetModuleManifestPb(const uint8_t **data, si
 ### 稳定性与容错
 - 模块重启/Stop 后其 `outer_grpc_server` 可能变化，上位机应在连接失败时重新调用 `GetRunningModuleInfo` 刷新地址并重连。
 - `StartModule` 返回后模块线程已启动，但服务就绪可能存在短暂延迟；建议上位机对目标模块做一次健康探测/重试连接后再进入配置流程。
-- 若启用了 `./conf/module_manager.jsonc` 的自启动列表，或在 `UPPER` 模式下命中了持久化配置文件痕迹自动启动，可跳过 `StartModule`，直接通过 `GetRunningModuleInfo` 获取已启动模块信息。
+- 若启用了 `./conf/module_manager.jsonc` 的自启动列表，或在 `UPPER` 模式下命中了 SQLite 持久化配置痕迹自动启动，可跳过 `StartModule`，直接通过 `GetRunningModuleInfo` 获取已启动模块信息。
 
 ## 端口策略
 - 模块管理器对外 gRPC：固定监听 `0.0.0.0:17000`。

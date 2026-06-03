@@ -16,6 +16,7 @@ target_link_libraries(${LIB_NAME} PUBLIC
     Boost::log
     ZLIB::ZLIB
     dspProto
+    mskdspConfigStore
 )
 set_target_properties(${LIB_NAME} PROPERTIES
     VERSION ${VERSION}

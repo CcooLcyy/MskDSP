@@ -9,16 +9,14 @@
 namespace DLT645 {
 class DLT645LinkStore {
 public:
-  explicit DLT645LinkStore(std::filesystem::path linksPath = std::filesystem::path("./conf/DLT645/links.pb"));
+  explicit DLT645LinkStore(std::filesystem::path configDbPath = std::filesystem::path("./conf/config.db"));
 
   grpc::Status Save(const DLT645Proto::LinksConfig &config);
   grpc::Status Load(DLT645Proto::LinksConfig *out);
 
-  std::filesystem::path linksPath() const;
-  std::filesystem::path backupPath() const;
-  std::filesystem::path tmpPath() const;
+  std::filesystem::path databasePath() const;
 
 private:
-  std::filesystem::path linksPath_;
+  std::filesystem::path configDbPath_;
 };
 }  // namespace DLT645

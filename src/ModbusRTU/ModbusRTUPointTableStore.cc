@@ -4,7 +4,7 @@
 #include <utility>
 
 #include "ModbusRTUPointTable.h"
-#include "mskdsp/detail/ProtoFileStore.hpp"
+#include "mskdsp/detail/ProtoSqliteStore.hpp"
 
 namespace ModbusRTU {
 namespace {
@@ -28,30 +28,22 @@ grpc::Status validatePointTablesConfig(const ModbusRTUProto::PointTablesConfig& 
 }
 }  // namespace
 
-ModbusRTUPointTableStore::ModbusRTUPointTableStore(std::filesystem::path pointTablesPath) :
-  pointTablesPath_(std::move(pointTablesPath)) {}
+ModbusRTUPointTableStore::ModbusRTUPointTableStore(std::filesystem::path configDbPath) :
+  configDbPath_(std::move(configDbPath)) {}
 
 grpc::Status ModbusRTUPointTableStore::Save(const ModbusRTUProto::PointTablesConfig& config) {
-  mskdsp::detail::ProtoFileStore<ModbusRTUProto::PointTablesConfig> store(pointTablesPath_, validatePointTablesConfig);
+  mskdsp::detail::ProtoSqliteStore<ModbusRTUProto::PointTablesConfig> store(
+      configDbPath_, "ModbusRTU", "point_tables", "ModbusRTUProto.PointTablesConfig", validatePointTablesConfig);
   return store.Save(config);
 }
 
 grpc::Status ModbusRTUPointTableStore::Load(ModbusRTUProto::PointTablesConfig* out) {
-  mskdsp::detail::ProtoFileStore<ModbusRTUProto::PointTablesConfig> store(pointTablesPath_, validatePointTablesConfig);
+  mskdsp::detail::ProtoSqliteStore<ModbusRTUProto::PointTablesConfig> store(
+      configDbPath_, "ModbusRTU", "point_tables", "ModbusRTUProto.PointTablesConfig", validatePointTablesConfig);
   return store.Load(out);
 }
 
-std::filesystem::path ModbusRTUPointTableStore::pointTablesPath() const {
-  return pointTablesPath_;
-}
-
-std::filesystem::path ModbusRTUPointTableStore::backupPath() const {
-  mskdsp::detail::ProtoFileStore<ModbusRTUProto::PointTablesConfig> store(pointTablesPath_, validatePointTablesConfig);
-  return store.backupPath();
-}
-
-std::filesystem::path ModbusRTUPointTableStore::tmpPath() const {
-  mskdsp::detail::ProtoFileStore<ModbusRTUProto::PointTablesConfig> store(pointTablesPath_, validatePointTablesConfig);
-  return store.tmpPath();
+std::filesystem::path ModbusRTUPointTableStore::databasePath() const {
+  return configDbPath_;
 }
 }  // namespace ModbusRTU

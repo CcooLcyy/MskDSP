@@ -135,14 +135,12 @@ DataCenter 路由配置示例（触发对时）：
 跨模块的上位机页面结构、配置顺序与操作流程，统一见 `doc/上位机设计指导.md`。IEC104 模块内的字段语义、点表约束、删除语义与对时语义仍以本文档和 `protobuf/IEC104.proto` 为准。
 
 ### 本地配置持久化
-IEC104 会将本地链路配置与点表配置落盘到工作目录下的 `./conf/IEC104/`，用于进程重启后的自动恢复。
+IEC104 会将本地链路配置与点表配置落盘到工作目录下的 `./conf/config.db`，用于进程重启后的自动恢复。
 
 文件与策略：
-- 链路主文件：`./conf/IEC104/links.pb`
-- 点表主文件：`./conf/IEC104/point_tables.pb`
-- 备份文件：对应主文件追加 `.bak`
-- 临时文件：对应主文件追加 `.tmp`
-- 隔离文件：对应主文件追加 `.corrupt.<timestamp>`
+- SQLite 配置项：`IEC104/links`、`IEC104/point_tables`
+- 兼容策略：不再读取旧 `.pb/.tmp/.bak` 配置文件；SQLite 中没有对应配置项时返回空配置，等待上位机或 ConfigPusher 重新下发。
+- 正常保存：只写 `./conf/config.db`，不再新建或覆盖旧 `.pb` 文件。
 
 保存时机与语义：
 - 每次 `UpsertLink` 成功后自动落盘链路配置。

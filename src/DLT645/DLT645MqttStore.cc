@@ -2,7 +2,7 @@
 
 #include <utility>
 
-#include "mskdsp/detail/ProtoFileStore.hpp"
+#include "mskdsp/detail/ProtoSqliteStore.hpp"
 
 namespace DLT645 {
 namespace {
@@ -20,30 +20,22 @@ grpc::Status validateMqttConfig(const DLT645Proto::MqttConfig &config) {
 }
 }  // namespace
 
-DLT645MqttStore::DLT645MqttStore(std::filesystem::path mqttPath) :
-  mqttPath_(std::move(mqttPath)) {}
+DLT645MqttStore::DLT645MqttStore(std::filesystem::path configDbPath) :
+  configDbPath_(std::move(configDbPath)) {}
 
 grpc::Status DLT645MqttStore::Save(const DLT645Proto::MqttConfig &config) {
-  mskdsp::detail::ProtoFileStore<DLT645Proto::MqttConfig> store(mqttPath_, validateMqttConfig);
+  mskdsp::detail::ProtoSqliteStore<DLT645Proto::MqttConfig> store(
+      configDbPath_, "DLT645", "mqtt", "DLT645Proto.MqttConfig", validateMqttConfig);
   return store.Save(config);
 }
 
 grpc::Status DLT645MqttStore::Load(DLT645Proto::MqttConfig *out) {
-  mskdsp::detail::ProtoFileStore<DLT645Proto::MqttConfig> store(mqttPath_, validateMqttConfig);
+  mskdsp::detail::ProtoSqliteStore<DLT645Proto::MqttConfig> store(
+      configDbPath_, "DLT645", "mqtt", "DLT645Proto.MqttConfig", validateMqttConfig);
   return store.Load(out);
 }
 
-std::filesystem::path DLT645MqttStore::mqttPath() const {
-  return mqttPath_;
-}
-
-std::filesystem::path DLT645MqttStore::backupPath() const {
-  mskdsp::detail::ProtoFileStore<DLT645Proto::MqttConfig> store(mqttPath_, validateMqttConfig);
-  return store.backupPath();
-}
-
-std::filesystem::path DLT645MqttStore::tmpPath() const {
-  mskdsp::detail::ProtoFileStore<DLT645Proto::MqttConfig> store(mqttPath_, validateMqttConfig);
-  return store.tmpPath();
+std::filesystem::path DLT645MqttStore::databasePath() const {
+  return configDbPath_;
 }
 }  // namespace DLT645

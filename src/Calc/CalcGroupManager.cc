@@ -373,8 +373,8 @@ std::vector<PublishAction> evaluateGroupLocked(const CalcProto::CalcGroupConfig 
 
 }  // namespace
 
-GroupManager::GroupManager(std::string moduleName, std::filesystem::path groupsPath) :
-  groupStore_(std::move(groupsPath)),
+GroupManager::GroupManager(std::string moduleName, std::filesystem::path configDbPath) :
+  groupStore_(std::move(configDbPath)),
   dataCenter_(std::move(moduleName)) {}
 
 void GroupManager::setDataCenterServerAddress(std::string address) {

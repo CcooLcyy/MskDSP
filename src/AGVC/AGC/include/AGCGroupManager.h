@@ -26,7 +26,7 @@ namespace AGC {
 
 class GroupManager {
 public:
-  explicit GroupManager(std::string moduleName, std::filesystem::path groupsPath = std::filesystem::path("./conf/AGC/groups.pb"));
+  explicit GroupManager(std::string moduleName, std::filesystem::path configDbPath = std::filesystem::path("./conf/config.db"));
 
   void setDataCenterServerAddress(std::string address);
   void setDataCenterStub(std::shared_ptr<DataCenterProto::DataCenterService::StubInterface> stub);

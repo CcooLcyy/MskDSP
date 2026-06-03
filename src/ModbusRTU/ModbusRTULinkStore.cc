@@ -3,7 +3,7 @@
 #include <unordered_set>
 #include <utility>
 
-#include "mskdsp/detail/ProtoFileStore.hpp"
+#include "mskdsp/detail/ProtoSqliteStore.hpp"
 
 namespace ModbusRTU {
 namespace {
@@ -31,30 +31,22 @@ grpc::Status validateLinksConfig(const ModbusRTUProto::LinksConfig& config) {
 }
 }  // namespace
 
-ModbusRTULinkStore::ModbusRTULinkStore(std::filesystem::path linksPath) :
-  linksPath_(std::move(linksPath)) {}
+ModbusRTULinkStore::ModbusRTULinkStore(std::filesystem::path configDbPath) :
+  configDbPath_(std::move(configDbPath)) {}
 
 grpc::Status ModbusRTULinkStore::Save(const ModbusRTUProto::LinksConfig& config) {
-  mskdsp::detail::ProtoFileStore<ModbusRTUProto::LinksConfig> store(linksPath_, validateLinksConfig);
+  mskdsp::detail::ProtoSqliteStore<ModbusRTUProto::LinksConfig> store(
+      configDbPath_, "ModbusRTU", "links", "ModbusRTUProto.LinksConfig", validateLinksConfig);
   return store.Save(config);
 }
 
 grpc::Status ModbusRTULinkStore::Load(ModbusRTUProto::LinksConfig* out) {
-  mskdsp::detail::ProtoFileStore<ModbusRTUProto::LinksConfig> store(linksPath_, validateLinksConfig);
+  mskdsp::detail::ProtoSqliteStore<ModbusRTUProto::LinksConfig> store(
+      configDbPath_, "ModbusRTU", "links", "ModbusRTUProto.LinksConfig", validateLinksConfig);
   return store.Load(out);
 }
 
-std::filesystem::path ModbusRTULinkStore::linksPath() const {
-  return linksPath_;
-}
-
-std::filesystem::path ModbusRTULinkStore::backupPath() const {
-  mskdsp::detail::ProtoFileStore<ModbusRTUProto::LinksConfig> store(linksPath_, validateLinksConfig);
-  return store.backupPath();
-}
-
-std::filesystem::path ModbusRTULinkStore::tmpPath() const {
-  mskdsp::detail::ProtoFileStore<ModbusRTUProto::LinksConfig> store(linksPath_, validateLinksConfig);
-  return store.tmpPath();
+std::filesystem::path ModbusRTULinkStore::databasePath() const {
+  return configDbPath_;
 }
 }  // namespace ModbusRTU

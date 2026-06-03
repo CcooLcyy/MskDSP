@@ -26,7 +26,7 @@ class IEC104PointTableStore;
 
 class LinkManager {
 public:
-  explicit LinkManager(std::string moduleName, std::filesystem::path linksPath = {}, std::filesystem::path pointTablesPath = {});
+  explicit LinkManager(std::string moduleName, std::filesystem::path configDbPath = {});
   ~LinkManager();
 
   void setDataCenterServerAddress(std::string address);

@@ -9,12 +9,14 @@
 
 #include "ModuleManager.h"
 #include "ModuleManagerGrpcService.h"
+#include "mskdsp/ConfigDatabase.h"
 
 namespace {
 namespace fs = std::filesystem;
 
 constexpr const char *kDummyModuleName = "Dummy";
 constexpr const char *kAvcModuleName = "AVC";
+constexpr const char *kDataCenterModuleName = "DataCenter";
 
 fs::path LibDir() {
   return fs::path("module");
@@ -39,6 +41,10 @@ std::string AvcLibPrefix() {
   return std::string("lib") + kAvcModuleName + ".so";
 }
 
+std::string DataCenterLibPrefix() {
+  return std::string("lib") + kDataCenterModuleName + ".so";
+}
+
 std::string FindDummyLibFileName() {
   const auto prefix = DummyLibPrefix();
   for (const auto &entry : fs::directory_iterator(LibDir())) {
@@ -54,7 +60,9 @@ std::string FindDummyLibFileName() {
 }
 
 bool IsTestModuleLibFile(const std::string &name) {
-  return name.rfind(DummyLibPrefix(), 0) == 0 || name.rfind(AvcLibPrefix(), 0) == 0;
+  return name.rfind(DummyLibPrefix(), 0) == 0 ||
+         name.rfind(AvcLibPrefix(), 0) == 0 ||
+         name.rfind(DataCenterLibPrefix(), 0) == 0;
 }
 
 void CleanTestEnvKeepDummyLib() {
@@ -118,38 +126,21 @@ bool HasUsableModuleInfo(const ModuleManagerProto::ModuleInfos &infos, const std
   return false;
 }
 
-struct TraceableModule {
-  std::string moduleName;
-  fs::path tracePath;
-};
-
-std::optional<TraceableModule> FindAvailableTraceableModule(const ModuleManagerProto::ModuleInfos &infos) {
-  const std::vector<TraceableModule> candidates = {
-      {"DataCenter", ConfDir() / "dataCenter" / "state.pb"},
-      {"IEC104", ConfDir() / "IEC104" / "links.pb"},
-      {"ModbusRTU", ConfDir() / "ModbusRTU" / "links.pb"},
-      {"DLT645", ConfDir() / "DLT645" / "links.pb"},
-      {"AGC", ConfDir() / "AGC" / "groups.pb"}};
+std::optional<std::pair<std::string, std::string>> FindAvailableSqliteTraceableModule(const ModuleManagerProto::ModuleInfos &infos) {
+  const std::vector<std::pair<std::string, std::string>> candidates = {
+      {"DataCenter", "state"},
+      {"IEC104", "links"},
+      {"ModbusRTU", "links"},
+      {"DLT645", "links"},
+      {"AGC", "groups"},
+      {"AVC", "groups"},
+      {"Calc", "groups"}};
   for (const auto &candidate : candidates) {
-    if (HasUsableModuleInfo(infos, candidate.moduleName)) {
+    if (HasUsableModuleInfo(infos, candidate.first)) {
       return candidate;
     }
   }
   return std::nullopt;
-}
-
-void TouchFile(const fs::path &path) {
-  fs::create_directories(path.parent_path());
-  std::ofstream ofs(path, std::ios::trunc);
-  ofs << "trace";
-}
-
-fs::path BackupPath(const fs::path &path) {
-  return fs::path(path.string() + ".bak");
-}
-
-fs::path TmpPath(const fs::path &path) {
-  return fs::path(path.string() + ".tmp");
 }
 
 int CountRunningModuleByName(const ModuleManagerProto::ModuleRunningInfos &infos, const std::string &name) {
@@ -271,16 +262,17 @@ TEST_F(ModuleManagerTest, AutoStartModulesFromJsonConfig) {
   EXPECT_EQ(mgr.getModuleRunningInfos().module_running_info_size(), 0);
 }
 
-// 验证：`CONFIG_PUSHER` 模式下即使存在持久化配置文件痕迹，也只按 jsonc 中的 auto_start_modules 启动模块。
-TEST_F(ModuleManagerTest, ConfigPusherModeIgnoresPersistentTraceAutoStart) {
+// 验证：`CONFIG_PUSHER` 模式下即使存在 SQLite 持久化配置痕迹，也只按 jsonc 中的 auto_start_modules 启动模块。
+TEST_F(ModuleManagerTest, ConfigPusherModeIgnoresSqlitePersistentTraceAutoStart) {
   ModuleManager::ModuleManager mgr;
   const auto &infos = mgr.getModuleInfos();
-  const auto candidate = FindAvailableTraceableModule(infos);
+  const auto candidate = FindAvailableSqliteTraceableModule(infos);
   if (!candidate.has_value()) {
-    GTEST_SKIP() << "当前测试环境未提供可验证持久化痕迹自动启动的真实模块";
+    GTEST_SKIP() << "当前测试环境未提供可验证 SQLite 持久化痕迹自动启动的真实模块";
   }
 
-  TouchFile(candidate->tracePath);
+  mskdsp::ConfigDatabase db(ConfDir() / "config.db");
+  ASSERT_TRUE(db.SaveBlob(candidate->first, candidate->second, "test.Payload", "payload").ok());
   WriteAutoStartConfig(R"jsonc(
 {
   "boot_config_mode": "CONFIG_PUSHER",
@@ -294,23 +286,18 @@ TEST_F(ModuleManagerTest, ConfigPusherModeIgnoresPersistentTraceAutoStart) {
 
   const auto running = mgr.getModuleRunningInfos();
   EXPECT_EQ(CountRunningModuleByName(running, kDummyModuleName), 1);
-  EXPECT_EQ(CountRunningModuleByName(running, candidate->moduleName), 0);
+  EXPECT_EQ(CountRunningModuleByName(running, candidate->first), 0);
 
   const auto dummyInfo = FindModuleInfoByName(mgr.getModuleInfos(), kDummyModuleName);
   mgr.unloadModule(dummyInfo);
   EXPECT_EQ(mgr.getModuleRunningInfos().module_running_info_size(), 0);
 }
 
-// 验证：`CONFIG_PUSHER` 模式会在启动任何模块前删除受管 `.pb/.bak/.tmp` 持久化文件，但不会误删无关文件。
-TEST_F(ModuleManagerTest, ConfigPusherModeCleansManagedPersistentFilesBeforeModuleStart) {
-  const auto managed = ConfDir() / "DLT645" / "links.pb";
-  const auto managedBak = BackupPath(managed);
-  const auto managedTmp = TmpPath(managed);
-  const auto unrelated = ConfDir() / "custom" / "keep.pb";
-  TouchFile(managed);
-  TouchFile(managedBak);
-  TouchFile(managedTmp);
-  TouchFile(unrelated);
+// 验证：`CONFIG_PUSHER` 模式会在启动任何模块前删除受管 SQLite 持久化配置，但不会误删无关 SQLite 配置。
+TEST_F(ModuleManagerTest, ConfigPusherModeCleansManagedSqliteBeforeModuleStart) {
+  mskdsp::ConfigDatabase db(ConfDir() / "config.db");
+  ASSERT_TRUE(db.SaveBlob("DataCenter", "state", "test.Payload", "payload").ok());
+  ASSERT_TRUE(db.SaveBlob("Custom", "keep", "test.Payload", "payload").ok());
 
   WriteAutoStartConfig(R"jsonc(
 {
@@ -324,10 +311,12 @@ TEST_F(ModuleManagerTest, ConfigPusherModeCleansManagedPersistentFilesBeforeModu
   stopSource.request_stop();
   mgr.start(stopSource.get_token());
 
-  EXPECT_FALSE(fs::exists(managed));
-  EXPECT_FALSE(fs::exists(managedBak));
-  EXPECT_FALSE(fs::exists(managedTmp));
-  EXPECT_TRUE(fs::exists(unrelated));
+  bool hasState = true;
+  ASSERT_TRUE(db.HasAnyBlob("DataCenter", {"state"}, &hasState).ok());
+  EXPECT_FALSE(hasState);
+  bool hasCustom = false;
+  ASSERT_TRUE(db.HasAnyBlob("Custom", {"keep"}, &hasCustom).ok());
+  EXPECT_TRUE(hasCustom);
 
   const auto running = mgr.getModuleRunningInfos();
   EXPECT_EQ(CountRunningModuleByName(running, kDummyModuleName), 1);
@@ -336,41 +325,17 @@ TEST_F(ModuleManagerTest, ConfigPusherModeCleansManagedPersistentFilesBeforeModu
   mgr.unloadModule(dummyInfo);
 }
 
-// 验证：`UPPER` 模式不会执行启动前中央清场，受管 `.tmp` 痕迹文件会被保留。
-TEST_F(ModuleManagerTest, UpperModeDoesNotCleanManagedTmpTraceFiles) {
-  const auto managedTmp = TmpPath(ConfDir() / "DLT645" / "links.pb");
-  TouchFile(managedTmp);
-
-  WriteAutoStartConfig(R"jsonc(
-{
-  "boot_config_mode": "UPPER",
-  "auto_start_modules": ["Dummy"]
-}
-)jsonc");
-
-  ModuleManager::ModuleManager mgr;
-  std::stop_source stopSource;
-  stopSource.request_stop();
-  mgr.start(stopSource.get_token());
-
-  EXPECT_TRUE(fs::exists(managedTmp));
-  const auto running = mgr.getModuleRunningInfos();
-  EXPECT_EQ(CountRunningModuleByName(running, kDummyModuleName), 1);
-
-  const auto dummyInfo = FindModuleInfoByName(mgr.getModuleInfos(), kDummyModuleName);
-  mgr.unloadModule(dummyInfo);
-}
-
-// 验证：`UPPER` 模式下发现持久化配置文件痕迹时，会自动启动对应模块。
-TEST_F(ModuleManagerTest, UpperModeAutoStartsModuleFromPersistentTrace) {
+// 验证：`UPPER` 模式下发现 SQLite 持久化配置痕迹时，会自动启动对应模块。
+TEST_F(ModuleManagerTest, UpperModeAutoStartsModuleFromSqlitePersistentTrace) {
   ModuleManager::ModuleManager mgr;
   const auto &infos = mgr.getModuleInfos();
-  const auto candidate = FindAvailableTraceableModule(infos);
+  const auto candidate = FindAvailableSqliteTraceableModule(infos);
   if (!candidate.has_value()) {
-    GTEST_SKIP() << "当前测试环境未提供可验证持久化痕迹自动启动的真实模块";
+    GTEST_SKIP() << "当前测试环境未提供可验证 SQLite 持久化痕迹自动启动的真实模块";
   }
 
-  TouchFile(candidate->tracePath);
+  mskdsp::ConfigDatabase db(ConfDir() / "config.db");
+  ASSERT_TRUE(db.SaveBlob(candidate->first, candidate->second, "test.Payload", "payload").ok());
   WriteAutoStartConfig(R"jsonc(
 {
   "boot_config_mode": "UPPER"
@@ -382,45 +347,25 @@ TEST_F(ModuleManagerTest, UpperModeAutoStartsModuleFromPersistentTrace) {
   mgr.start(stopSource.get_token());
 
   const auto running = mgr.getModuleRunningInfos();
-  EXPECT_EQ(CountRunningModuleByName(running, candidate->moduleName), 1);
+  EXPECT_EQ(CountRunningModuleByName(running, candidate->first), 1);
 }
 
-// 验证：`UPPER` 模式下 AVC 控制组持久化文件会触发 AVC 模块自动启动。
-TEST_F(ModuleManagerTest, UpperModeAutoStartsAvcFromGroupsPersistentTrace) {
+// 验证：`auto_start_modules` 与 SQLite 持久化配置痕迹同时命中时，重复启动会被安全跳过。
+TEST_F(ModuleManagerTest, UpperModeSqliteTraceAutoStartCoexistsWithAutoStartModules) {
   ModuleManager::ModuleManager mgr;
   const auto &infos = mgr.getModuleInfos();
-  ASSERT_TRUE(HasUsableModuleInfo(infos, kAvcModuleName));
-
-  TouchFile(ConfDir() / "AVC" / "groups.pb");
-  WriteAutoStartConfig(R"jsonc(
-{
-  "boot_config_mode": "UPPER"
-}
-)jsonc");
-
-  std::stop_source stopSource;
-  stopSource.request_stop();
-  mgr.start(stopSource.get_token());
-
-  const auto running = mgr.getModuleRunningInfos();
-  EXPECT_EQ(CountRunningModuleByName(running, kAvcModuleName), 1);
-}
-
-// 验证：`auto_start_modules` 与持久化文件痕迹同时命中时，重复启动会被安全跳过。
-TEST_F(ModuleManagerTest, UpperModeTraceAutoStartCoexistsWithAutoStartModules) {
-  ModuleManager::ModuleManager mgr;
-  const auto &infos = mgr.getModuleInfos();
-  const auto candidate = FindAvailableTraceableModule(infos);
+  const auto candidate = FindAvailableSqliteTraceableModule(infos);
   if (!candidate.has_value()) {
-    GTEST_SKIP() << "当前测试环境未提供可验证持久化痕迹自动启动的真实模块";
+    GTEST_SKIP() << "当前测试环境未提供可验证 SQLite 持久化痕迹自动启动的真实模块";
   }
 
-  TouchFile(candidate->tracePath);
+  mskdsp::ConfigDatabase db(ConfDir() / "config.db");
+  ASSERT_TRUE(db.SaveBlob(candidate->first, candidate->second, "test.Payload", "payload").ok());
   WriteAutoStartConfig(std::string(R"jsonc(
 {
   "boot_config_mode": "UPPER",
   "auto_start_modules": [")jsonc") +
-                       candidate->moduleName + R"jsonc("]
+                       candidate->first + R"jsonc("]
 }
 )jsonc");
 
@@ -429,19 +374,20 @@ TEST_F(ModuleManagerTest, UpperModeTraceAutoStartCoexistsWithAutoStartModules) {
   mgr.start(stopSource.get_token());
 
   const auto running = mgr.getModuleRunningInfos();
-  EXPECT_EQ(CountRunningModuleByName(running, candidate->moduleName), 1);
+  EXPECT_EQ(CountRunningModuleByName(running, candidate->first), 1);
 }
 
-// 验证：自动启动配置读取或解析失败时，会按安全模式回退为 `UPPER` 并继续按持久化文件痕迹自动启动模块。
-TEST_F(ModuleManagerTest, InvalidAutoStartConfigFallsBackToUpperTraceAutoStart) {
+// 验证：自动启动配置读取或解析失败时，会按安全模式回退为 `UPPER` 并继续按 SQLite 持久化配置痕迹自动启动模块。
+TEST_F(ModuleManagerTest, InvalidAutoStartConfigFallsBackToUpperSqliteTraceAutoStart) {
   ModuleManager::ModuleManager mgr;
   const auto &infos = mgr.getModuleInfos();
-  const auto candidate = FindAvailableTraceableModule(infos);
+  const auto candidate = FindAvailableSqliteTraceableModule(infos);
   if (!candidate.has_value()) {
-    GTEST_SKIP() << "当前测试环境未提供可验证持久化痕迹自动启动的真实模块";
+    GTEST_SKIP() << "当前测试环境未提供可验证 SQLite 持久化痕迹自动启动的真实模块";
   }
 
-  TouchFile(candidate->tracePath);
+  mskdsp::ConfigDatabase db(ConfDir() / "config.db");
+  ASSERT_TRUE(db.SaveBlob(candidate->first, candidate->second, "test.Payload", "payload").ok());
   WriteAutoStartConfig(R"jsonc(
 {
   "boot_config_mode":
@@ -452,11 +398,11 @@ TEST_F(ModuleManagerTest, InvalidAutoStartConfigFallsBackToUpperTraceAutoStart) 
   mgr.start(stopSource.get_token());
 
   const auto running = mgr.getModuleRunningInfos();
-  EXPECT_EQ(CountRunningModuleByName(running, candidate->moduleName), 1);
+  EXPECT_EQ(CountRunningModuleByName(running, candidate->first), 1);
 }
 
-// 验证：saveModuleStartConfig 会写入 ./conf/modConf.bin，且可反序列化回原数据。
-TEST_F(ModuleManagerTest, SaveModuleStartConfigWritesConfigBin) {
+// 验证：saveModuleStartConfig 会写入 SQLite，且可反序列化回原数据。
+TEST_F(ModuleManagerTest, SaveModuleStartConfigWritesSqlite) {
   ModuleManager::ModuleManager mgr;
   const auto &infos = mgr.getModuleInfos();
   const auto dummyInfo = FindModuleInfoByName(infos, kDummyModuleName);
@@ -466,14 +412,14 @@ TEST_F(ModuleManagerTest, SaveModuleStartConfigWritesConfigBin) {
 
   mgr.saveModuleStartConfig(config);
 
-  const auto bin = ConfDir() / "modConf.bin";
-  ASSERT_TRUE(fs::exists(bin));
-
-  std::ifstream ifs(bin, std::ios::binary);
-  ASSERT_TRUE(ifs.is_open());
+  mskdsp::ConfigDatabase db(ConfDir() / "config.db");
+  std::string payload;
+  bool found = false;
+  ASSERT_TRUE(db.LoadBlob("ModuleManager", "module_start_config", &payload, &found).ok());
+  ASSERT_TRUE(found);
 
   ModuleManagerProto::ModuleInfos loaded;
-  ASSERT_TRUE(loaded.ParseFromIstream(&ifs));
+  ASSERT_TRUE(loaded.ParseFromString(payload));
   EXPECT_EQ(loaded.SerializeAsString(), config.SerializeAsString());
 }
 
@@ -499,7 +445,10 @@ TEST_F(ModuleManagerTest, GrpcServiceDelegatesToModuleManager) {
   EXPECT_EQ(running.module_running_info_size(), 1);
 
   ASSERT_TRUE(service.SaveModuleStartConfig(&context, &infos, &out).ok());
-  EXPECT_TRUE(fs::exists(ConfDir() / "modConf.bin"));
+  mskdsp::ConfigDatabase db(ConfDir() / "config.db");
+  bool found = false;
+  ASSERT_TRUE(db.HasAnyBlob("ModuleManager", {"module_start_config"}, &found).ok());
+  EXPECT_TRUE(found);
 
   ASSERT_TRUE(service.StopModule(&context, &dummyInfo, &out).ok());
   EXPECT_EQ(mgr.getModuleRunningInfos().module_running_info_size(), 0);

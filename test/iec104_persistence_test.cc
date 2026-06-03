@@ -8,8 +8,6 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
-#include <fstream>
-#include <iterator>
 #include <string>
 #include <vector>
 
@@ -88,28 +86,12 @@ IEC104Proto::Point MakePoint(const char* tag, uint32_t ioa) {
   return point;
 }
 
-bool LoadLinksConfigFromFile(const std::filesystem::path& path, IEC104Proto::LinksConfig* out) {
-  if (out == nullptr) {
-    return false;
-  }
-  std::ifstream ifs(path, std::ios::binary);
-  if (!ifs.is_open()) {
-    return false;
-  }
-  std::string data((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-  if (!ifs.good() && !ifs.eof()) {
-    return false;
-  }
-  out->Clear();
-  return out->ParseFromString(data);
-}
 }  // 命名空间结束
 
 // 验证：链路配置与点表在落盘后可被新 LinkManager 实例恢复，且恢复后会自动启动链路功能。
 TEST(IEC104PersistenceTest, LoadsPersistedLinkAndPointTableAfterRestart) {
   ScopedTempDir dir;
-  const auto linksPath = dir.path() / "links.pb";
-  const auto pointTablesPath = dir.path() / "point_tables.pb";
+  const auto configDbPath = dir.path() / "config.db";
   const auto port = AllocateFreeTcpPort();
 
   FakeDataCenterState state;
@@ -117,7 +99,7 @@ TEST(IEC104PersistenceTest, LoadsPersistedLinkAndPointTableAfterRestart) {
 
   uint32_t connId = 0;
   {
-    LinkManager mgr("IEC104", linksPath, pointTablesPath);
+    LinkManager mgr("IEC104", configDbPath);
     mgr.setDataCenterStub(stub);
 
     auto linkReq = MakeServerLinkReq("conn-persist", port);
@@ -133,7 +115,7 @@ TEST(IEC104PersistenceTest, LoadsPersistedLinkAndPointTableAfterRestart) {
   }
 
   {
-    LinkManager mgr("IEC104", linksPath, pointTablesPath);
+    LinkManager mgr("IEC104", configDbPath);
     mgr.setDataCenterStub(stub);
 
     IEC104Proto::LinkInfo info;
@@ -157,15 +139,14 @@ TEST(IEC104PersistenceTest, LoadsPersistedLinkAndPointTableAfterRestart) {
 // 验证：DeleteLink 进入 PENDING_DELETE 后会落盘，重启后仍阻止启动链路功能。
 TEST(IEC104PersistenceTest, LoadsPendingDeleteStateAfterRestart) {
   ScopedTempDir dir;
-  const auto linksPath = dir.path() / "links.pb";
-  const auto pointTablesPath = dir.path() / "point_tables.pb";
+  const auto configDbPath = dir.path() / "config.db";
 
   FakeDataCenterState state;
   state.FailDeleteForConnName("conn-pending");
   auto stub = MakeStub(&state);
 
   {
-    LinkManager mgr("IEC104", linksPath, pointTablesPath);
+    LinkManager mgr("IEC104", configDbPath);
     mgr.setDataCenterStub(stub);
 
     auto linkReq = MakeClientLinkReq("conn-pending");
@@ -177,7 +158,7 @@ TEST(IEC104PersistenceTest, LoadsPendingDeleteStateAfterRestart) {
   }
 
   {
-    LinkManager mgr("IEC104", linksPath, pointTablesPath);
+    LinkManager mgr("IEC104", configDbPath);
     mgr.setDataCenterStub(stub);
 
     IEC104Proto::LinkInfo info;
@@ -193,8 +174,7 @@ TEST(IEC104PersistenceTest, LoadsPendingDeleteStateAfterRestart) {
 // 验证：恢复过程中若单条链路获取 DataCenter 连接失败，不会中断其他链路恢复。
 TEST(IEC104PersistenceTest, ContinuesRestoringOtherLinksWhenSingleLinkFails) {
   ScopedTempDir dir;
-  const auto linksPath = dir.path() / "links.pb";
-  const auto pointTablesPath = dir.path() / "point_tables.pb";
+  const auto configDbPath = dir.path() / "config.db";
   const auto goodPort = AllocateFreeTcpPort();
   const auto badPort = AllocateFreeTcpPort();
 
@@ -202,7 +182,7 @@ TEST(IEC104PersistenceTest, ContinuesRestoringOtherLinksWhenSingleLinkFails) {
   auto initialStub = MakeStub(&initialState);
 
   {
-    LinkManager mgr("IEC104", linksPath, pointTablesPath);
+    LinkManager mgr("IEC104", configDbPath);
     mgr.setDataCenterStub(initialStub);
 
     IEC104Proto::LinkInfo info;
@@ -230,7 +210,7 @@ TEST(IEC104PersistenceTest, ContinuesRestoringOtherLinksWhenSingleLinkFails) {
       }));
 
   {
-    LinkManager mgr("IEC104", linksPath, pointTablesPath);
+    LinkManager mgr("IEC104", configDbPath);
     mgr.setDataCenterStub(recoveredStub);
 
     IEC104Proto::LinkInfo good;
@@ -250,11 +230,10 @@ TEST(IEC104PersistenceTest, ContinuesRestoringOtherLinksWhenSingleLinkFails) {
   }
 }
 
-// 验证：当 DataCenter 重新分配 conn_id 时，恢复后的链路会改用新 conn_id，并回写链路持久化配置。
+// 验证：当 DataCenter 重新分配 conn_id 时，恢复后的链路会改用新 conn_id，并回写 SQLite 链路配置。
 TEST(IEC104PersistenceTest, ReloadsWithReassignedConnIdFromDataCenter) {
   ScopedTempDir dir;
-  const auto linksPath = dir.path() / "links.pb";
-  const auto pointTablesPath = dir.path() / "point_tables.pb";
+  const auto configDbPath = dir.path() / "config.db";
   const auto port = AllocateFreeTcpPort();
 
   FakeDataCenterState initialState;
@@ -262,7 +241,7 @@ TEST(IEC104PersistenceTest, ReloadsWithReassignedConnIdFromDataCenter) {
 
   uint32_t oldConnId = 0;
   {
-    LinkManager mgr("IEC104", linksPath, pointTablesPath);
+    LinkManager mgr("IEC104", configDbPath);
     mgr.setDataCenterStub(initialStub);
 
     auto linkReq = MakeServerLinkReq("conn-reassigned", port);
@@ -300,7 +279,7 @@ TEST(IEC104PersistenceTest, ReloadsWithReassignedConnIdFromDataCenter) {
 
   uint32_t newConnId = 0;
   {
-    LinkManager mgr("IEC104", linksPath, pointTablesPath);
+    LinkManager mgr("IEC104", configDbPath);
     mgr.setDataCenterStub(recoveredStub);
 
     IEC104Proto::LinkInfo info;
@@ -323,9 +302,13 @@ TEST(IEC104PersistenceTest, ReloadsWithReassignedConnIdFromDataCenter) {
     EXPECT_EQ(syncedConnIds.back(), newConnId);
   }
 
-  IEC104Proto::LinksConfig persisted;
-  ASSERT_TRUE(LoadLinksConfigFromFile(linksPath, &persisted));
-  ASSERT_EQ(persisted.links_size(), 1);
-  EXPECT_EQ(persisted.links(0).config().conn_name(), "conn-reassigned");
-  EXPECT_EQ(persisted.links(0).conn_id(), newConnId);
+  {
+    LinkManager mgr("IEC104", configDbPath);
+    mgr.setDataCenterStub(recoveredStub);
+
+    IEC104Proto::LinkInfo info;
+    ASSERT_TRUE(mgr.GetLink("conn-reassigned", &info).ok());
+    EXPECT_EQ(info.conn_id(), newConnId);
+    ASSERT_TRUE(mgr.StopLink("conn-reassigned").ok());
+  }
 }

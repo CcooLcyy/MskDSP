@@ -66,18 +66,14 @@ void renamePersistedPointTableConfig(IEC104Proto::PointTablesConfig *config,
 }
 }  // namespace
 
-LinkManager::LinkManager(std::string moduleName, std::filesystem::path linksPath, std::filesystem::path pointTablesPath) :
+LinkManager::LinkManager(std::string moduleName, std::filesystem::path configDbPath) :
   dataCenter_(std::move(moduleName)) {
-  if (linksPath.empty() != pointTablesPath.empty()) {
-    LOG_WARNING("IEC104 持久化路径配置不完整，已禁用本地配置落盘: links_path={}, point_tables_path={}", linksPath.string(), pointTablesPath.string());
-    return;
-  }
-  if (linksPath.empty()) {
+  if (configDbPath.empty()) {
     return;
   }
 
-  linkStore_ = std::make_unique<IEC104LinkStore>(std::move(linksPath));
-  pointTableStore_ = std::make_unique<IEC104PointTableStore>(std::move(pointTablesPath));
+  linkStore_ = std::make_unique<IEC104LinkStore>(configDbPath);
+  pointTableStore_ = std::make_unique<IEC104PointTableStore>(std::move(configDbPath));
   loadPersistedConfig("构造阶段");
 }
 

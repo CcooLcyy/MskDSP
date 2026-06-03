@@ -268,14 +268,12 @@ grpc::Status encodeWriteRegisters(const PointTable::Point& point, double engValu
 }  // namespace
 
 LinkManager::LinkManager(std::string moduleName,
-                         std::filesystem::path mqttPath,
-                         std::filesystem::path linksPath,
-                         std::filesystem::path pointTablesPath) :
+                         std::filesystem::path configDbPath) :
   dataCenter_(moduleName),
   mqttClient_(std::move(moduleName)),
-  mqttStore_(std::move(mqttPath)),
-  linkStore_(std::move(linksPath)),
-  pointTableStore_(std::move(pointTablesPath)) {}
+  mqttStore_(configDbPath),
+  linkStore_(configDbPath),
+  pointTableStore_(std::move(configDbPath)) {}
 
 void LinkManager::LoadPersistedConfig() {
   LOG_INFO("ModbusRTU 开始加载本地持久化配置");
@@ -447,10 +445,15 @@ void LinkManager::LoadPersistedConfig() {
   for (const auto& [connName, _] : pointTablesByConn) {
     auto tableIt = pointTablesByConn.find(connName);
     const size_t pointCount = tableIt == pointTablesByConn.end() ? 0u : static_cast<size_t>(tableIt->second.points_size());
+    const bool leftByDataCenterFailure = pointTablesLeftByDataCenterFailure.contains(connName);
     LOG_WARNING("ModbusRTU 点表持久化配置未进入本次恢复快照: conn_name={}, 点数={}, 原因={}",
                 connName,
                 pointCount,
-                pointTablesLeftByDataCenterFailure.contains(connName) ? "链路恢复阶段获取 DataCenter 连接失败" : "未找到对应链路");
+                leftByDataCenterFailure ? "链路恢复阶段获取 DataCenter 连接失败" : "未找到对应链路");
+    if (leftByDataCenterFailure) {
+      LOG_WARNING("ModbusRTU 因 DataCenter 未就绪保留点表目标配置，禁止本次恢复回写空快照: conn_name={}", connName);
+      continue;
+    }
     needResavePointTables = true;
   }
 

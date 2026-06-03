@@ -516,8 +516,7 @@ TEST(IEC104LinkManagerTest, RenameLinkRejectsWhenLinkRunning) {
 // 验证：链路配置与点表落盘后，新实例恢复时仍会自动恢复链路连接功能。
 TEST(IEC104LinkManagerTest, LoadPersistedConfigAutoStartsRestoredReadyLink) {
   ScopedTempDir dir;
-  const auto linksPath = dir.path() / "links.pb";
-  const auto pointTablesPath = dir.path() / "point_tables.pb";
+  const auto configDbPath = dir.path() / "config.db";
 
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
@@ -525,7 +524,7 @@ TEST(IEC104LinkManagerTest, LoadPersistedConfigAutoStartsRestoredReadyLink) {
   const auto port = AllocateFreeTcpPort();
   uint32_t connId = 0;
   {
-    LinkManager mgr("IEC104", linksPath, pointTablesPath);
+    LinkManager mgr("IEC104", configDbPath);
     mgr.setDataCenterStub(stub);
 
     auto req = MakeServerLinkReq("conn-persist", "0.0.0.0", port);
@@ -542,7 +541,7 @@ TEST(IEC104LinkManagerTest, LoadPersistedConfigAutoStartsRestoredReadyLink) {
   }
 
   {
-    LinkManager mgr("IEC104", linksPath, pointTablesPath);
+    LinkManager mgr("IEC104", configDbPath);
     mgr.setDataCenterStub(stub);
     mgr.LoadPersistedConfig();
 
@@ -564,15 +563,14 @@ TEST(IEC104LinkManagerTest, LoadPersistedConfigAutoStartsRestoredReadyLink) {
 // 验证：RenameLink 落盘后，新实例恢复时仅保留新名字且点表仍可读取。
 TEST(IEC104LinkManagerTest, LoadPersistedConfigKeepsRenamedLink) {
   ScopedTempDir dir;
-  const auto linksPath = dir.path() / "links.pb";
-  const auto pointTablesPath = dir.path() / "point_tables.pb";
+  const auto configDbPath = dir.path() / "config.db";
 
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
   uint32_t connId = 0;
   {
-    LinkManager mgr("IEC104", linksPath, pointTablesPath);
+    LinkManager mgr("IEC104", configDbPath);
     mgr.setDataCenterStub(stub);
 
     auto req = MakeServerLinkReq("conn-old-persist", "0.0.0.0", AllocateFreeTcpPort());
@@ -590,7 +588,7 @@ TEST(IEC104LinkManagerTest, LoadPersistedConfigKeepsRenamedLink) {
   }
 
   {
-    LinkManager mgr("IEC104", linksPath, pointTablesPath);
+    LinkManager mgr("IEC104", configDbPath);
     mgr.setDataCenterStub(stub);
     mgr.LoadPersistedConfig();
 

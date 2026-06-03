@@ -7,6 +7,7 @@
 #include <boost/json.hpp>
 #include <condition_variable>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -30,7 +31,7 @@ namespace DLT645 {
 
 class LinkManager {
 public:
-  explicit LinkManager(std::string moduleName);
+  explicit LinkManager(std::string moduleName, std::filesystem::path configDbPath = std::filesystem::path("./conf/config.db"));
   ~LinkManager() noexcept;
 
   grpc::Status UpdateConfig(const DLT645Proto::UpdateConfigRequest &request, DLT645Proto::UpdateConfigResponse *response);

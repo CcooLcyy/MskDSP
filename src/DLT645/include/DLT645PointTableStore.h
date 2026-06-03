@@ -9,16 +9,14 @@
 namespace DLT645 {
 class DLT645PointTableStore {
 public:
-  explicit DLT645PointTableStore(std::filesystem::path pointTablesPath = std::filesystem::path("./conf/DLT645/point_tables.pb"));
+  explicit DLT645PointTableStore(std::filesystem::path configDbPath = std::filesystem::path("./conf/config.db"));
 
   grpc::Status Save(const DLT645Proto::PointTablesConfig &config);
   grpc::Status Load(DLT645Proto::PointTablesConfig *out);
 
-  std::filesystem::path pointTablesPath() const;
-  std::filesystem::path backupPath() const;
-  std::filesystem::path tmpPath() const;
+  std::filesystem::path databasePath() const;
 
 private:
-  std::filesystem::path pointTablesPath_;
+  std::filesystem::path configDbPath_;
 };
 }  // namespace DLT645

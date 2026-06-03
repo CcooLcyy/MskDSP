@@ -10,6 +10,7 @@ find_package(gRPC CONFIG REQUIRED)
 find_package(Protobuf CONFIG REQUIRED)
 find_package(Boost REQUIRED COMPONENTS asio dll iostreams json log log_setup)
 find_package(ZLIB REQUIRED)
+find_package(unofficial-sqlite3 CONFIG REQUIRED)
 
 set(MSKDSP_BUILD_TESTS_DEFAULT OFF)
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")

@@ -16,6 +16,10 @@ package/debug
 
 package/conf/**/*.pb
 package/conf/**/*.pb.bak
+package/conf/config.db
+conf/config.db
+*.db-wal
+*.db-shm
 
 # 屏蔽所有版本文件
 **/*LibInfo.h

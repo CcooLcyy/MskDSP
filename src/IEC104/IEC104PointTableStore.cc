@@ -5,35 +5,27 @@
 #include <utility>
 
 #include "IEC104PointTable.h"
-#include "mskdsp/detail/ProtoFileStore.hpp"
+#include "mskdsp/detail/ProtoSqliteStore.hpp"
 
 namespace IEC104 {
 
-IEC104PointTableStore::IEC104PointTableStore(std::filesystem::path pointTablesPath) :
-  pointTablesPath_(std::move(pointTablesPath)) {}
+IEC104PointTableStore::IEC104PointTableStore(std::filesystem::path configDbPath) :
+  configDbPath_(std::move(configDbPath)) {}
 
 grpc::Status IEC104PointTableStore::Save(const IEC104Proto::PointTablesConfig& config) {
-  mskdsp::detail::ProtoFileStore<IEC104Proto::PointTablesConfig> store(pointTablesPath_, ValidatePointTablesConfig);
+  mskdsp::detail::ProtoSqliteStore<IEC104Proto::PointTablesConfig> store(
+      configDbPath_, "IEC104", "point_tables", "IEC104Proto.PointTablesConfig", ValidatePointTablesConfig);
   return store.Save(config);
 }
 
 grpc::Status IEC104PointTableStore::Load(IEC104Proto::PointTablesConfig* out) {
-  mskdsp::detail::ProtoFileStore<IEC104Proto::PointTablesConfig> store(pointTablesPath_, ValidatePointTablesConfig);
+  mskdsp::detail::ProtoSqliteStore<IEC104Proto::PointTablesConfig> store(
+      configDbPath_, "IEC104", "point_tables", "IEC104Proto.PointTablesConfig", ValidatePointTablesConfig);
   return store.Load(out);
 }
 
-std::filesystem::path IEC104PointTableStore::pointTablesPath() const {
-  return pointTablesPath_;
-}
-
-std::filesystem::path IEC104PointTableStore::backupPath() const {
-  mskdsp::detail::ProtoFileStore<IEC104Proto::PointTablesConfig> store(pointTablesPath_, ValidatePointTablesConfig);
-  return store.backupPath();
-}
-
-std::filesystem::path IEC104PointTableStore::tmpPath() const {
-  mskdsp::detail::ProtoFileStore<IEC104Proto::PointTablesConfig> store(pointTablesPath_, ValidatePointTablesConfig);
-  return store.tmpPath();
+std::filesystem::path IEC104PointTableStore::databasePath() const {
+  return configDbPath_;
 }
 
 grpc::Status IEC104PointTableStore::ValidatePointTablesConfig(const IEC104Proto::PointTablesConfig& config) {

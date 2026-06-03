@@ -5,35 +5,27 @@
 #include <utility>
 
 #include "IEC104LinkManager.h"
-#include "mskdsp/detail/ProtoFileStore.hpp"
+#include "mskdsp/detail/ProtoSqliteStore.hpp"
 
 namespace IEC104 {
 
-IEC104LinkStore::IEC104LinkStore(std::filesystem::path linksPath) :
-  linksPath_(std::move(linksPath)) {}
+IEC104LinkStore::IEC104LinkStore(std::filesystem::path configDbPath) :
+  configDbPath_(std::move(configDbPath)) {}
 
 grpc::Status IEC104LinkStore::Save(const IEC104Proto::LinksConfig& config) {
-  mskdsp::detail::ProtoFileStore<IEC104Proto::LinksConfig> store(linksPath_, ValidateLinksConfig);
+  mskdsp::detail::ProtoSqliteStore<IEC104Proto::LinksConfig> store(
+      configDbPath_, "IEC104", "links", "IEC104Proto.LinksConfig", ValidateLinksConfig);
   return store.Save(config);
 }
 
 grpc::Status IEC104LinkStore::Load(IEC104Proto::LinksConfig* out) {
-  mskdsp::detail::ProtoFileStore<IEC104Proto::LinksConfig> store(linksPath_, ValidateLinksConfig);
+  mskdsp::detail::ProtoSqliteStore<IEC104Proto::LinksConfig> store(
+      configDbPath_, "IEC104", "links", "IEC104Proto.LinksConfig", ValidateLinksConfig);
   return store.Load(out);
 }
 
-std::filesystem::path IEC104LinkStore::linksPath() const {
-  return linksPath_;
-}
-
-std::filesystem::path IEC104LinkStore::backupPath() const {
-  mskdsp::detail::ProtoFileStore<IEC104Proto::LinksConfig> store(linksPath_, ValidateLinksConfig);
-  return store.backupPath();
-}
-
-std::filesystem::path IEC104LinkStore::tmpPath() const {
-  mskdsp::detail::ProtoFileStore<IEC104Proto::LinksConfig> store(linksPath_, ValidateLinksConfig);
-  return store.tmpPath();
+std::filesystem::path IEC104LinkStore::databasePath() const {
+  return configDbPath_;
 }
 
 grpc::Status IEC104LinkStore::ValidateLinksConfig(const IEC104Proto::LinksConfig& config) {

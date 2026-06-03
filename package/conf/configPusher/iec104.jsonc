@@ -523,6 +523,7 @@
             }
           ]
         },
+        // start 仅用于兼容旧模板与日志说明；当前版本不额外调用 StartLink。
         "start": true
       }
     ]

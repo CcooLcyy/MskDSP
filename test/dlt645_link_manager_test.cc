@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <functional>
 #include <future>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <string>
@@ -800,6 +801,51 @@ TEST(Dlt645LinkManagerTest, LoadPersistedConfigAutoStartsRestoredReadyLink) {
     EXPECT_EQ(pointTable.points(0).tag(), "P1");
 
     ASSERT_TRUE(mgr.StopLink("conn-persist").ok());
+  }
+}
+
+// 验证：持久化恢复时 DataCenter 不可用，不会把已有点表配置回写为空。
+TEST(Dlt645LinkManagerTest, LoadPersistedConfigKeepsPointTablesWhenDataCenterUnavailable) {
+  ScopedTempDir dir;
+  ScopedCwd cwd(dir.path());
+  std::filesystem::create_directories("conf/DLT645");
+
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  {
+    LinkManager mgr("DLT645");
+    mgr.setDataCenterStub(stub);
+
+    DLT645Proto::UpsertLinkRequest req;
+    *req.mutable_config() = MakeValidLinkConfig("conn-dc-down", DLT645Proto::COMM_MODE_LORA);
+    DLT645Proto::LinkInfo info;
+    ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+
+    DLT645Proto::UpsertPointTableRequest ptReq;
+    ptReq.set_conn_name("conn-dc-down");
+    ptReq.set_replace(true);
+    *ptReq.add_points() = MakePointProto("P-keep", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16);
+    ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+  }
+
+  auto failingStub = std::make_shared<DataCenterProto::MockDataCenterServiceStub>();
+  EXPECT_CALL(*failingStub, GetOrCreateConnection(_, _, _))
+      .WillRepeatedly(Return(grpc::Status(grpc::StatusCode::INTERNAL, "DataCenter 未就绪")));
+  {
+    LinkManager mgr("DLT645");
+    mgr.setDataCenterStub(failingStub);
+    mgr.LoadPersistedConfig();
+  }
+
+  {
+    LinkManager mgr("DLT645");
+    mgr.setDataCenterStub(stub);
+    mgr.LoadPersistedConfig();
+
+    DLT645Proto::PointTable pointTable;
+    ASSERT_TRUE(mgr.GetPointTable("conn-dc-down", &pointTable).ok());
+    ASSERT_EQ(pointTable.points_size(), 1);
+    EXPECT_EQ(pointTable.points(0).tag(), "P-keep");
   }
 }
 

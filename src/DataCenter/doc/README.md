@@ -9,7 +9,7 @@ DataCenter 是进程内的“数据总线/转发枢纽”，用于在不同协�
 - 点位对齐：通过 `tag`（逻辑点名，可中文）对齐跨协议的同一业务量
 - 有向路由：按点位维度配置 `src -> dst` 的转发规则，支持一对一与一对多
 - 最新值缓存：支持 `GetLatest` / `Subscribe(snapshot=true)` 获取目的连接内的最新值（best-effort）
-- 完整状态持久化：将连接注册表、连接标签注册表、路由配置合并落盘到 `./conf/dataCenter/state.pb`，重启后按同一份快照恢复
+- 完整状态持久化：将连接注册表、连接标签注册表、路由配置合并落盘到 `./conf/config.db`，重启后按同一份快照恢复
 
 ## 暂未实现功能
 - 历史数据存储/查询
@@ -112,14 +112,13 @@ DataCenter 对外提供一组面向“连接/连接标签注册表/路由/转发
 - 订阅为 best-effort：消费过慢时服务端会丢弃过旧消息以限制队列增长；如需强一致或历史回放，需要引入独立的历史存储或 ACK/重传机制（不在 DataCenter 当前范围内）。
 
 ## 完整状态持久化（当前实现）
-DataCenter 会将连接注册表、连接标签注册表与路由配置作为同一份完整状态落盘到工作目录下的 `./conf/dataCenter/state.pb`。这样重启恢复时三类配置来自同一代快照，避免 `connections/conn_tags/routes` 分文件落盘导致连接、tag、路由对不齐。
+DataCenter 会将连接注册表、连接标签注册表与路由配置作为同一份完整状态落盘到工作目录下的 `./conf/config.db`。这样重启恢复时三类配置来自同一代快照，避免 `connections/conn_tags/routes` 分文件落盘导致连接、tag、路由对不齐。
 
 ### 文件与策略
-- 主文件：`./conf/dataCenter/state.pb`
-- 备份文件：`./conf/dataCenter/state.pb.bak`（上一份“可解析且校验通过”的完整状态）
-- 临时文件：`./conf/dataCenter/state.pb.tmp`（用于安全写入，避免写坏主文件）
-- 隔离文件：`./conf/dataCenter/state.pb.corrupt.<timestamp>`（当发现主文件损坏时保留原件，便于排查）
-- 状态版本：`DataCenterState.schema_version=1`，保存时自动写入；0 字节主文件不会被当作合法空状态。
+- SQLite 配置项：`DataCenter/state`
+- 兼容策略：不再读取旧状态文件；SQLite 中没有 `DataCenter/state` 时返回空状态，等待上位机或 ConfigPusher 重新下发。
+- 正常保存：只写 `./conf/config.db`。
+- 状态版本：`DataCenterState.schema_version=1`，保存时自动写入，用于校验 SQLite payload 格式。
 
 ### 保存时机与语义
 - 每次 `GetOrCreateConnection` / `RenameConnection` / `DeleteConnection` / `UpsertConnection` / `UpsertConnTags` / `UpsertRoutes` / `DeleteRoutes` 成功后自动落盘完整状态。
@@ -128,10 +127,8 @@ DataCenter 会将连接注册表、连接标签注册表与路由配置作为同
 - 落盘失败会返回 `INTERNAL`，但内存中的状态不会回滚（配置端可重试）。
 
 ### 启动恢复
-- 若主文件存在且可用：加载主文件中的完整状态。
-- 若主文件损坏：尝试使用备份文件启动；若备份可用，会将损坏主文件隔离，并用备份内容恢复出新的主文件（best-effort）。
-- 若主文件为 0 字节且备份可用：主文件会因缺少状态版本被视为不可用，并回退到备份。
-- 若主/备均不可用：以空状态启动，等待重新下发。
+- 若 SQLite 中存在 `DataCenter/state` 且 payload 可解析、可校验：加载其中的完整状态。
+- 若 SQLite 中没有 `DataCenter/state`：以空状态启动，等待重新下发。
 - 若完整状态可解析但内部校验失败：记录日志并不应用该状态。
 
 ## 线程与日志

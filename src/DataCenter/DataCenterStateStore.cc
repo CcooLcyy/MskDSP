@@ -8,7 +8,7 @@
 #include <unordered_set>
 #include <utility>
 
-#include "mskdsp/detail/ProtoFileStore.hpp"
+#include "mskdsp/detail/ProtoSqliteStore.hpp"
 
 namespace DataCenter {
 namespace {
@@ -157,37 +157,22 @@ DataCenterProto::DataCenterState normalizeState(DataCenterProto::DataCenterState
 }
 }  // namespace
 
-DataCenterStateStore::DataCenterStateStore(std::filesystem::path statePath) :
-  statePath_(std::move(statePath)) {}
+DataCenterStateStore::DataCenterStateStore(std::filesystem::path configDbPath) :
+  configDbPath_(std::move(configDbPath)) {}
 
 grpc::Status DataCenterStateStore::Save(const DataCenterProto::DataCenterState& state, TraceFn trace) {
-  auto normalized = normalizeState(state);
-  mskdsp::detail::ProtoFileStore<DataCenterProto::DataCenterState> store(statePath_,
-                                                                         validateState,
-                                                                         std::move(trace));
-  return store.Save(normalized);
+  mskdsp::detail::ProtoSqliteStore<DataCenterProto::DataCenterState> store(
+      configDbPath_, "DataCenter", "state", "DataCenterProto.DataCenterState", validateState, std::move(trace), normalizeState);
+  return store.Save(state);
 }
 
 grpc::Status DataCenterStateStore::Load(DataCenterProto::DataCenterState* out, TraceFn trace) {
-  mskdsp::detail::ProtoFileStore<DataCenterProto::DataCenterState> store(statePath_,
-                                                                         validateState,
-                                                                         std::move(trace));
+  mskdsp::detail::ProtoSqliteStore<DataCenterProto::DataCenterState> store(
+      configDbPath_, "DataCenter", "state", "DataCenterProto.DataCenterState", validateState, std::move(trace), normalizeState);
   return store.Load(out);
 }
 
-std::filesystem::path DataCenterStateStore::statePath() const {
-  return statePath_;
-}
-
-std::filesystem::path DataCenterStateStore::backupPath() const {
-  mskdsp::detail::ProtoFileStore<DataCenterProto::DataCenterState> store(statePath_,
-                                                                         validateState);
-  return store.backupPath();
-}
-
-std::filesystem::path DataCenterStateStore::tmpPath() const {
-  mskdsp::detail::ProtoFileStore<DataCenterProto::DataCenterState> store(statePath_,
-                                                                         validateState);
-  return store.tmpPath();
+std::filesystem::path DataCenterStateStore::databasePath() const {
+  return configDbPath_;
 }
 }  // namespace DataCenter

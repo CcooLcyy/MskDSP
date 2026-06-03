@@ -151,11 +151,11 @@ docker run --network host --rm --log-driver none \
 - 关键字段：
   - `boot_config_mode`
     - `CONFIG_PUSHER`：允许 `ConfigPusher` 在启动后读取 JSONC 并执行配置下发
-    - `UPPER`：`ModuleManager` 会按持久化配置文件痕迹自动启动对应模块，`ConfigPusher` 若被手动启动则仅提供服务、不执行配置下发
+    - `UPPER`：`ModuleManager` 会按 SQLite 持久化配置痕迹自动启动对应模块，`ConfigPusher` 若被手动启动则仅提供服务、不执行配置下发
   - `auto_start_modules`：显式自动加载模块列表
 - 模板：`package/conf/module_manager.jsonc`
 - 建议：使用 `CONFIG_PUSHER` 时，自启动列表仅填写 `ConfigPusher`
-- 更完整的模式说明、回退语义与 `UPPER` 文件痕迹清单，见 `src/core/ModuleManager/doc/README.md`
+- 更完整的模式说明、回退语义与 `UPPER` SQLite 配置痕迹清单，见 `src/core/ModuleManager/doc/README.md`
 
 示例：
 ```jsonc
@@ -196,7 +196,7 @@ cmake --build build-cov --target coverage
 - `package/MskDSP`：主程序（Windows 下可能为 `MskDSP.exe`）
 - `package/module/`：模块共享库
 - `package/lib/`：运行时依赖共享库
-- `package/conf/`：配置与生成文件（如运行时保存的 `modConf.bin`）
+- `package/conf/`：配置模板与运行时配置数据库（如 `config.db`）
 
 ## 开发约定
 统一规范见 `AGENTS.md`（项目结构、编码风格、开发方式、测试与提交/PR 约定等）。

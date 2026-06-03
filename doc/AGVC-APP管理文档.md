@@ -87,8 +87,7 @@ mskdsp mskdsp:1.2.3
 
 - `module_manager.jsonc`：程序启动相关配置文件。
 - `configPusher/*.jsonc`：各类业务配置文件。
-- `dataCenter/*.pb`：程序运行过程中生成的数据文件。
-- `dataCenter/*.pb.bak`：对应数据文件的备份文件。
+- `config.db`：程序运行过程中生成的 SQLite 配置数据库。
 
 `/data/mskdsp/module/` 为程序运行文件目录，常见内容如下：
 

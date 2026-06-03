@@ -1,3 +1,4 @@
+add_subdirectory(common)
 add_subdirectory(core)
 add_subdirectory(DataCenter)
 add_subdirectory(IEC104)

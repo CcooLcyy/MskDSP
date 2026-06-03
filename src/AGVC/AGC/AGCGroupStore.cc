@@ -3,39 +3,27 @@
 #include <utility>
 
 #include "AGCGroupValidation.h"
-#include "mskdsp/detail/ProtoFileStore.hpp"
+#include "mskdsp/detail/ProtoSqliteStore.hpp"
 
 namespace AGC {
 
-AGCGroupStore::AGCGroupStore(std::filesystem::path groupsPath) :
-  groupsPath_(std::move(groupsPath)) {}
+AGCGroupStore::AGCGroupStore(std::filesystem::path configDbPath) :
+  configDbPath_(std::move(configDbPath)) {}
 
 grpc::Status AGCGroupStore::Save(const AGCProto::GroupsConfig& config) {
-  mskdsp::detail::ProtoFileStore<AGCProto::GroupsConfig> store(groupsPath_,
-                                                               ValidateGroupsConfig);
+  mskdsp::detail::ProtoSqliteStore<AGCProto::GroupsConfig> store(
+      configDbPath_, "AGC", "groups", "AGCProto.GroupsConfig", ValidateGroupsConfig);
   return store.Save(config);
 }
 
 grpc::Status AGCGroupStore::Load(AGCProto::GroupsConfig* out) {
-  mskdsp::detail::ProtoFileStore<AGCProto::GroupsConfig> store(groupsPath_,
-                                                               ValidateGroupsConfig);
+  mskdsp::detail::ProtoSqliteStore<AGCProto::GroupsConfig> store(
+      configDbPath_, "AGC", "groups", "AGCProto.GroupsConfig", ValidateGroupsConfig);
   return store.Load(out);
 }
 
-std::filesystem::path AGCGroupStore::groupsPath() const {
-  return groupsPath_;
-}
-
-std::filesystem::path AGCGroupStore::backupPath() const {
-  mskdsp::detail::ProtoFileStore<AGCProto::GroupsConfig> store(groupsPath_,
-                                                               ValidateGroupsConfig);
-  return store.backupPath();
-}
-
-std::filesystem::path AGCGroupStore::tmpPath() const {
-  mskdsp::detail::ProtoFileStore<AGCProto::GroupsConfig> store(groupsPath_,
-                                                               ValidateGroupsConfig);
-  return store.tmpPath();
+std::filesystem::path AGCGroupStore::databasePath() const {
+  return configDbPath_;
 }
 
 }  // namespace AGC

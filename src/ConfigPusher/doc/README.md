@@ -3,7 +3,7 @@
 ## 简介
 ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRTU/DLT645/AGC/AVC/Calc，并按配置调用对应 gRPC 接口完成 IEC104/ModbusRTU/DLT645 连接与点表下发、AGC/AVC 控制组下发、Calc 计算分组下发，以及 DataCenter 连接标签注册表/路由下发。链路、控制组或计算分组的模块内功能是否进入运行态，由各模块在配置达到可运行条件后自动判定。
 
-在 `CONFIG_PUSHER` 模式下，ConfigPusher 将 `jsonc` 视为当前进程的目标态与最终真相源，而不是增量补丁：若旧 `pb` 中存在 `jsonc` 未声明的链路、控制组、计算分组、点表、连接标签注册表或路由，ConfigPusher 会在本次编排时将其收敛删除或覆盖，避免旧持久化内容继续生效。
+在 `CONFIG_PUSHER` 模式下，ConfigPusher 将 `jsonc` 视为当前进程的目标态与最终真相源，而不是增量补丁：若 SQLite 持久化配置或当前内存态中存在 `jsonc` 未声明的链路、控制组、计算分组、点表、连接标签注册表或路由，ConfigPusher 会在本次编排时将其收敛删除或覆盖，避免旧持久化内容继续生效。
 
 ConfigPusher 更适合作为初始化配置导入与批量编排执行器，不作为上位机日常在线操作的统一入口。
 
@@ -45,14 +45,14 @@ README 这里只保留模块说明、启动方式、配置入口与基础语义�
 - 建议：自启动列表仅填写 `ConfigPusher`，其余模块由 ConfigPusher 按配置按需启动。
 - `ConfigPusher` 是否在启动后立即执行配置下发，受 `./conf/module_manager.jsonc` 的 `boot_config_mode` 控制：
   - `CONFIG_PUSHER`：启动后读取 JSONC 并执行配置下发
-  - `UPPER`：启动后仅提供 gRPC 服务与日志，不执行配置下发；即使 `ModuleManager` 因持久化配置文件痕迹自动启动了其他模块，`ConfigPusher` 也不会自动触发配置下发
+  - `UPPER`：启动后仅提供 gRPC 服务与日志，不执行配置下发；即使 `ModuleManager` 因 SQLite 持久化配置痕迹自动启动了其他模块，`ConfigPusher` 也不会自动触发配置下发
 - `boot_config_mode` 仅在 `MskDSP` 进程启动时读取一次；运行中修改配置文件不会立即生效，需重启后生效。
 
 ### CONFIG_PUSHER 目标态语义
-- `jsonc` 是目标态快照，不是增量补丁；当前模块内存或持久化 `pb` 中未在 `jsonc` 声明的旧对象，不应继续保留为有效配置。
+- `jsonc` 是目标态快照，不是增量补丁；当前模块内存或 SQLite 持久化配置中未在 `jsonc` 声明的旧对象，不应继续保留为有效配置。
 - ConfigPusher 在下发前会先查询模块当前对象集合；对 `jsonc` 未声明的旧链路/旧控制组/旧计算分组，会先执行清理，再继续下发目标配置。
 - 对 `jsonc` 中仍保留的同名对象，若其模块内功能已在运行，ConfigPusher 会先停止模块内功能，再按 `jsonc` 覆盖目标配置，避免旧运行态阻塞收敛。
-- 点表、DataCenter 连接标签注册表与路由按目标态覆盖，避免旧 `pb` 或旧内存态中的残留条目继续生效。
+- 点表、DataCenter 连接标签注册表与路由按目标态覆盖，避免 SQLite 旧配置或旧内存态中的残留条目继续生效。
 - `start` 字段仍仅用于兼容旧模板与日志说明；ConfigPusher 不会因该字段额外调用 `StartLink/StartGroup`，模块会在配置收敛完成后依据当前目标态自动判定是否启动模块内功能。
 
 ## 配置与数据
@@ -101,10 +101,10 @@ README 这里只保留模块说明、启动方式、配置入口与基础语义�
 - `iec104.links[].start`、`modbus_rtu.links[].start`、`dlt645.links[].start`、`agc.groups[].start`、`avc.groups[].start` 与 `calc.groups[].start` 当前均为兼容保留字段：ConfigPusher 仅输出兼容日志，模块会在配置达到可运行条件后自动启动模块内功能
 
 ### 设计与验收要点
-- 若旧 `pb` 中存在两条 DLT645/IEC104/ModbusRTU 链路，而本次 `jsonc` 只声明一条，则本次下发完成后最终有效链路应仅剩 `jsonc` 声明的那一条。
-- 若旧 `pb` 中存在 `jsonc` 未声明的 AGC 控制组，则该旧控制组不应继续保留为有效配置，也不应继续运行控制组功能。
-- 若旧 `pb` 中存在 `jsonc` 未声明的 AVC 控制组，则该旧控制组不应继续保留为有效配置，也不应继续运行控制组功能。
-- 若旧 `pb` 中存在 `jsonc` 未声明的 Calc 计算分组，则该旧分组不应继续保留为有效配置，也不应继续运行分组运算功能。
+- 若 SQLite 持久化配置或当前内存态中存在两条 DLT645/IEC104/ModbusRTU 链路，而本次 `jsonc` 只声明一条，则本次下发完成后最终有效链路应仅剩 `jsonc` 声明的那一条。
+- 若 SQLite 持久化配置或当前内存态中存在 `jsonc` 未声明的 AGC 控制组，则该旧控制组不应继续保留为有效配置，也不应继续运行控制组功能。
+- 若 SQLite 持久化配置或当前内存态中存在 `jsonc` 未声明的 AVC 控制组，则该旧控制组不应继续保留为有效配置，也不应继续运行控制组功能。
+- 若 SQLite 持久化配置或当前内存态中存在 `jsonc` 未声明的 Calc 计算分组，则该旧分组不应继续保留为有效配置，也不应继续运行分组运算功能。
 - 若同名链路/控制组/计算分组仍被 `jsonc` 保留，但其点表、标签、路由或分组配置内容发生变化，则最终以 `jsonc` 内容为准，旧条目不应残留。
 
 涉及上位机页面结构、模板建模、交互校验与导入流程的统一说明，见 `doc/上位机设计指导.md`。本节以下内容仅保留 ConfigPusher 的字段语义、展开规则与校验约束。

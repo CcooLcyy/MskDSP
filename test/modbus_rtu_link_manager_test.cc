@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fcntl.h>
+#include <memory>
 #include <stdlib.h>
 #include <string>
 #include <unordered_set>
@@ -179,7 +180,7 @@ private:
 class LinkManagerTestEnv {
 public:
   LinkManagerTestEnv() :
-    mgr("ModbusRTU", dir.path() / "mqtt.pb", dir.path() / "links.pb", dir.path() / "point_tables.pb") {}
+    mgr("ModbusRTU", dir.path() / "config.db") {}
 
 private:
   ScopedTempDir dir;
@@ -764,29 +765,70 @@ TEST(ModbusRtuLinkManagerTest, UpsertPointTableKeepsLocalOnDataCenterFailure) {
   EXPECT_EQ(out.points_size(), 0);
 }
 
-// 验证：UpdateConfig 成功后会将 MQTT 配置落盘到本地文件。
-TEST(ModbusRtuLinkManagerTest, UpdateConfigPersistsMqttConfigToFile) {
+// 验证：UpdateConfig 成功后会将 MQTT 配置落盘到 SQLite。
+TEST(ModbusRtuLinkManagerTest, UpdateConfigPersistsMqttConfigToSqliteOnly) {
   ScopedTempDir dir;
-  const auto mqttPath = dir.path() / "mqtt.pb";
-  const auto linksPath = dir.path() / "links.pb";
-  const auto pointTablesPath = dir.path() / "point_tables.pb";
+  const auto configDbPath = dir.path() / "config.db";
 
-  LinkManager mgr("ModbusRTU", mqttPath, linksPath, pointTablesPath);
+  LinkManager mgr("ModbusRTU", configDbPath);
 
   auto req = MakeMqttUpdateRequest("127.0.0.1", 1883, "modbus-rtu-persist");
   ModbusRTUProto::UpdateConfigResponse resp;
   ASSERT_TRUE(mgr.UpdateConfig(req, &resp).ok());
   EXPECT_TRUE(resp.ok());
-  EXPECT_TRUE(std::filesystem::exists(mqttPath));
+  EXPECT_TRUE(std::filesystem::exists(configDbPath));
+
+  LinkManager reloaded("ModbusRTU", configDbPath);
+  reloaded.LoadPersistedConfig();
+}
+
+// 验证：持久化恢复时 DataCenter 不可用，不会把已有点表配置回写为空。
+TEST(ModbusRtuLinkManagerTest, LoadPersistedConfigKeepsPointTablesWhenDataCenterUnavailable) {
+  ScopedTempDir dir;
+  const auto configDbPath = dir.path() / "config.db";
+
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  {
+    LinkManager mgr("ModbusRTU", configDbPath);
+    mgr.setDataCenterStub(stub);
+
+    ModbusRTUProto::LinkInfo info;
+    ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("conn-dc-down", "/dev/ttyFAKE", 1), &info).ok());
+
+    ModbusRTUProto::UpsertPointTableRequest ptReq;
+    ptReq.set_conn_name("conn-dc-down");
+    ptReq.set_replace(true);
+    *ptReq.add_points() = MakeCoilPoint("coil-keep", 1);
+    ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+  }
+
+  auto failingStub = std::make_shared<DataCenterProto::MockDataCenterServiceStub>();
+  EXPECT_CALL(*failingStub, GetOrCreateConnection(_, _, _))
+      .WillRepeatedly(Return(grpc::Status(grpc::StatusCode::INTERNAL, "DataCenter 未就绪")));
+  {
+    LinkManager mgr("ModbusRTU", configDbPath);
+    mgr.setDataCenterStub(failingStub);
+    mgr.LoadPersistedConfig();
+  }
+
+  {
+    LinkManager mgr("ModbusRTU", configDbPath);
+    mgr.setDataCenterStub(stub);
+    mgr.LoadPersistedConfig();
+
+    ModbusRTUProto::PointTable pointTable;
+    ASSERT_TRUE(mgr.GetPointTable("conn-dc-down", &pointTable).ok());
+    ASSERT_EQ(pointTable.points_size(), 1);
+    EXPECT_EQ(pointTable.points(0).tag(), "coil-keep");
+  }
 }
 
 // 验证：链路配置与点表在落盘后可被新 LinkManager 实例恢复，且恢复后会自动启动模块内连接功能。
 TEST(ModbusRtuLinkManagerTest, LoadsPersistedLinkAndPointTableAfterRestart) {
   ScopedTempDir dir;
   ScopedPseudoTty pty;
-  const auto mqttPath = dir.path() / "mqtt.pb";
-  const auto linksPath = dir.path() / "links.pb";
-  const auto pointTablesPath = dir.path() / "point_tables.pb";
+  const auto configDbPath = dir.path() / "config.db";
   ASSERT_TRUE(pty.ok()) << pty.error();
 
   FakeDataCenterState state;
@@ -794,7 +836,7 @@ TEST(ModbusRtuLinkManagerTest, LoadsPersistedLinkAndPointTableAfterRestart) {
 
   uint32_t connId = 0;
   {
-    LinkManager mgr("ModbusRTU", mqttPath, linksPath, pointTablesPath);
+    LinkManager mgr("ModbusRTU", configDbPath);
     mgr.setDataCenterStub(stub);
 
     ModbusRTUProto::LinkInfo info;
@@ -810,7 +852,7 @@ TEST(ModbusRtuLinkManagerTest, LoadsPersistedLinkAndPointTableAfterRestart) {
   }
 
   {
-    LinkManager mgr("ModbusRTU", mqttPath, linksPath, pointTablesPath);
+    LinkManager mgr("ModbusRTU", configDbPath);
     mgr.setDataCenterStub(stub);
     mgr.LoadPersistedConfig();
 
@@ -834,9 +876,7 @@ TEST(ModbusRtuLinkManagerTest, LoadsPersistedLinkAndPointTableAfterRestart) {
 TEST(ModbusRtuLinkManagerTest, LoadsRenamedLinkAfterRestart) {
   ScopedTempDir dir;
   ScopedPseudoTty pty;
-  const auto mqttPath = dir.path() / "mqtt.pb";
-  const auto linksPath = dir.path() / "links.pb";
-  const auto pointTablesPath = dir.path() / "point_tables.pb";
+  const auto configDbPath = dir.path() / "config.db";
   ASSERT_TRUE(pty.ok()) << pty.error();
 
   FakeDataCenterState state;
@@ -844,7 +884,7 @@ TEST(ModbusRtuLinkManagerTest, LoadsRenamedLinkAfterRestart) {
 
   uint32_t connId = 0;
   {
-    LinkManager mgr("ModbusRTU", mqttPath, linksPath, pointTablesPath);
+    LinkManager mgr("ModbusRTU", configDbPath);
     mgr.setDataCenterStub(stub);
 
     ModbusRTUProto::LinkInfo info;
@@ -861,7 +901,7 @@ TEST(ModbusRtuLinkManagerTest, LoadsRenamedLinkAfterRestart) {
   }
 
   {
-    LinkManager mgr("ModbusRTU", mqttPath, linksPath, pointTablesPath);
+    LinkManager mgr("ModbusRTU", configDbPath);
     mgr.setDataCenterStub(stub);
     mgr.LoadPersistedConfig();
 
@@ -884,16 +924,14 @@ TEST(ModbusRtuLinkManagerTest, LoadsRenamedLinkAfterRestart) {
 // 验证：DeleteLink 进入 PENDING_DELETE 后会落盘，重启后仍阻止启动链路功能，并在 last_error 中反映阻塞原因。
 TEST(ModbusRtuLinkManagerTest, LoadsPendingDeleteStateAfterRestart) {
   ScopedTempDir dir;
-  const auto mqttPath = dir.path() / "mqtt.pb";
-  const auto linksPath = dir.path() / "links.pb";
-  const auto pointTablesPath = dir.path() / "point_tables.pb";
+  const auto configDbPath = dir.path() / "config.db";
 
   FakeDataCenterState state;
   state.FailDeleteForConnName("conn-pending-persist");
   auto stub = MakeStub(&state);
 
   {
-    LinkManager mgr("ModbusRTU", mqttPath, linksPath, pointTablesPath);
+    LinkManager mgr("ModbusRTU", configDbPath);
     mgr.setDataCenterStub(stub);
 
     ModbusRTUProto::LinkInfo info;
@@ -904,7 +942,7 @@ TEST(ModbusRtuLinkManagerTest, LoadsPendingDeleteStateAfterRestart) {
   }
 
   {
-    LinkManager mgr("ModbusRTU", mqttPath, linksPath, pointTablesPath);
+    LinkManager mgr("ModbusRTU", configDbPath);
     mgr.setDataCenterStub(stub);
     mgr.LoadPersistedConfig();
 

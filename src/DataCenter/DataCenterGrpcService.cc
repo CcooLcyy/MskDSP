@@ -283,10 +283,6 @@ bool isExistingFileWithSize(const RouteFileState& state, std::uintmax_t size) {
   return state.existsValue && state.sizeKnown && state.sizeValue == size;
 }
 
-bool isExistingNonEmptyFile(const RouteFileState& state) {
-  return state.existsValue && state.sizeKnown && state.sizeValue > 0;
-}
-
 bool containsTraceWarning(const std::string& message) {
   return message.rfind("告警:", 0) == 0;
 }
@@ -302,19 +298,10 @@ void logStateStoreTrace(const std::string& source, const RouteSummary& summary, 
 }
 
 void logStateStoreFiles(const char* phase, const DataCenterStateStore& stateStore, const RouteSummary& summary, const std::string& source = {}) {
-  const auto mainFile = inspectRouteFileState(stateStore.statePath());
-  const auto backupFile = inspectRouteFileState(stateStore.backupPath());
-  const auto tmpFile = inspectRouteFileState(stateStore.tmpPath());
-  LOG_INFO("DataCenter 状态持久化文件状态: 阶段={}, 来源={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 主文件路径={}, 主文件存在={}, 主文件大小={}, 主文件修改时间ticks={}, 主文件hash={}, 主文件状态错误={}, 备份文件路径={}, 备份文件存在={}, 备份文件大小={}, 备份文件修改时间ticks={}, 备份文件hash={}, 备份文件状态错误={}, 临时文件路径={}, 临时文件存在={}, 临时文件大小={}, 临时文件修改时间ticks={}, 临时文件hash={}, 临时文件状态错误={}",
+  const auto databaseFile = inspectRouteFileState(stateStore.databasePath());
+  LOG_INFO("DataCenter 状态持久化数据库状态: 阶段={}, 来源={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 数据库路径={}, 数据库存在={}, 数据库大小={}, 数据库修改时间ticks={}, 数据库hash={}, 数据库状态错误={}",
            phase, source, summary.total, summary.shadow, summary.business, summary.hash,
-           mainFile.path, mainFile.exists, mainFile.size, mainFile.writeTimeTicks, mainFile.hash, mainFile.error,
-           backupFile.path, backupFile.exists, backupFile.size, backupFile.writeTimeTicks, backupFile.hash, backupFile.error,
-           tmpFile.path, tmpFile.exists, tmpFile.size, tmpFile.writeTimeTicks, tmpFile.hash, tmpFile.error);
-  if (isExistingFileWithSize(mainFile, 0) && isExistingNonEmptyFile(backupFile)) {
-    LOG_WARNING("DataCenter 检测到状态主文件为空但备份非空: 阶段={}, 来源={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 主文件路径={}, 主文件大小={}, 主文件hash={}, 备份文件路径={}, 备份文件大小={}, 备份文件hash={}",
-                phase, source, summary.total, summary.shadow, summary.business, summary.hash,
-                mainFile.path, mainFile.size, mainFile.hash, backupFile.path, backupFile.size, backupFile.hash);
-  }
+           databaseFile.path, databaseFile.exists, databaseFile.size, databaseFile.writeTimeTicks, databaseFile.hash, databaseFile.error);
 }
 
 RouteSummary unknownRouteSummary() {
@@ -475,11 +462,11 @@ struct DataCenterGrpcServiceImpl::Impl {
       logStateStoreFiles("状态落盘失败后", stateStore, summary, source);
     } else {
       logStateStoreFiles("状态落盘后", stateStore, summary, source);
-      const auto mainFile = inspectRouteFileState(stateStore.statePath());
-      if (isExistingFileWithSize(mainFile, 0)) {
-        LOG_WARNING("DataCenter 完整状态落盘后主文件大小为0: 来源={}, connections={}, conn_tags={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 主文件路径={}",
+      const auto databaseFile = inspectRouteFileState(stateStore.databasePath());
+      if (isExistingFileWithSize(databaseFile, 0)) {
+        LOG_WARNING("DataCenter 完整状态落盘后数据库文件大小为0: 来源={}, connections={}, conn_tags={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 数据库路径={}",
                     source, state.connections().conns_size(), state.conn_tags().conn_tags_size(),
-                    summary.total, summary.shadow, summary.business, summary.hash, mainFile.path);
+                    summary.total, summary.shadow, summary.business, summary.hash, databaseFile.path);
       }
     }
     return status;

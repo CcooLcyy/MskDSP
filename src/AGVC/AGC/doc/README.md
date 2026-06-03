@@ -104,13 +104,15 @@ AGC 为每个控制组固定生成以下 5 个默认点，并自动注册到该�
 > 路由与点表的具体 `tag`/单位由集成侧配置决定；AGC 本身不关心 IEC104/ModbusRTU 的地址映射。
 
 ### 配置持久化（当前实现）
-AGC 会将控制组配置落盘到工作目录下的 `./conf/AGC/groups.pb`，用于进程重启后的自动恢复。
+AGC 会将控制组配置作为 protobuf payload 写入 `./conf/config.db`，用于进程重启后的自动恢复。
 
-### 文件与策略
-- 主文件：`./conf/AGC/groups.pb`
-- 备份文件：`./conf/AGC/groups.pb.bak`
-- 临时文件：`./conf/AGC/groups.pb.tmp`
-- 隔离文件：`./conf/AGC/groups.pb.corrupt.<timestamp>`
+### SQLite 项
+- 数据库：`./conf/config.db`
+- 表：`config_blobs`
+- 模块：`AGC`
+- 配置项：`groups`
+- protobuf 类型：`AGCProto.GroupsConfig`
+- 兼容策略：不再读取旧 `./conf/AGC/groups.pb/.bak/.tmp`；SQLite 中没有 `AGC/groups` 时返回空配置，等待上位机或 ConfigPusher 重新下发。
 
 ### 保存时机与语义
 - 每次 `UpsertGroup` / `DeleteGroup` 完成本地配置变更后自动落盘。
@@ -119,12 +121,12 @@ AGC 会将控制组配置落盘到工作目录下的 `./conf/AGC/groups.pb`，�
 - 订阅线程、事件控制线程与控制缓存不落盘。
 
 ### 启动恢复
-- AGC 启动时会自动加载 `groups.pb`，并按 `group_name` 重新向 DataCenter 调用 `GetOrCreateConnection` 取回稳定 `conn_id`。
+- AGC 启动时会自动加载 SQLite 中的 `AGC/groups`，并按 `group_name` 重新向 DataCenter 调用 `GetOrCreateConnection` 取回稳定 `conn_id`。
 - 恢复后会重新向 DataCenter 注册 AGC 自身连接标签注册表（`replace=true`），用于路由校验、展示与自愈。
 - AGC 当前采用的“可运行最小条件”为：控制组配置通过现有 `ValidateGroupConfig` 校验、对象状态不是 `PENDING_DELETE`、并且已经成功恢复出带有效 `conn_id` 的内存对象。
 - 恢复出的控制组若满足上述最小条件，会在模块启动阶段自动启动控制组内事件触发控制功能；`PENDING_DELETE` 控制组不会自动启动。
 - 模块已经启动后，若上位机重新下发或修正控制组配置，且对象达到上述最小条件，AGC 也会自动启动对应控制组功能。
-- 若 `groups.pb` 解析失败、控制组恢复失败或自动启动失败，AGC 只记录中文日志并保持模块服务在线，等待上位机后续修正配置。
+- 若 SQLite payload 解析失败、控制组恢复失败或自动启动失败，AGC 只记录中文日志并保持模块服务在线，等待上位机后续修正配置。
 - `StartGroup` RPC 仍保留用于兼容，但已改为幂等语义：控制组已在运行时直接返回成功，不再要求正常主流程额外单独调用。
 - 因为 DataCenter 已持久化连接/连接标签注册表/路由，正常情况下重启后无需重新下发 AGC 路由。
 

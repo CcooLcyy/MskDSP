@@ -4,7 +4,7 @@
 #include <utility>
 
 #include "DLT645PointTable.h"
-#include "mskdsp/detail/ProtoFileStore.hpp"
+#include "mskdsp/detail/ProtoSqliteStore.hpp"
 
 namespace DLT645 {
 namespace {
@@ -28,30 +28,22 @@ grpc::Status validatePointTablesConfig(const DLT645Proto::PointTablesConfig &con
 }
 }  // namespace
 
-DLT645PointTableStore::DLT645PointTableStore(std::filesystem::path pointTablesPath) :
-  pointTablesPath_(std::move(pointTablesPath)) {}
+DLT645PointTableStore::DLT645PointTableStore(std::filesystem::path configDbPath) :
+  configDbPath_(std::move(configDbPath)) {}
 
 grpc::Status DLT645PointTableStore::Save(const DLT645Proto::PointTablesConfig &config) {
-  mskdsp::detail::ProtoFileStore<DLT645Proto::PointTablesConfig> store(pointTablesPath_, validatePointTablesConfig);
+  mskdsp::detail::ProtoSqliteStore<DLT645Proto::PointTablesConfig> store(
+      configDbPath_, "DLT645", "point_tables", "DLT645Proto.PointTablesConfig", validatePointTablesConfig);
   return store.Save(config);
 }
 
 grpc::Status DLT645PointTableStore::Load(DLT645Proto::PointTablesConfig *out) {
-  mskdsp::detail::ProtoFileStore<DLT645Proto::PointTablesConfig> store(pointTablesPath_, validatePointTablesConfig);
+  mskdsp::detail::ProtoSqliteStore<DLT645Proto::PointTablesConfig> store(
+      configDbPath_, "DLT645", "point_tables", "DLT645Proto.PointTablesConfig", validatePointTablesConfig);
   return store.Load(out);
 }
 
-std::filesystem::path DLT645PointTableStore::pointTablesPath() const {
-  return pointTablesPath_;
-}
-
-std::filesystem::path DLT645PointTableStore::backupPath() const {
-  mskdsp::detail::ProtoFileStore<DLT645Proto::PointTablesConfig> store(pointTablesPath_, validatePointTablesConfig);
-  return store.backupPath();
-}
-
-std::filesystem::path DLT645PointTableStore::tmpPath() const {
-  mskdsp::detail::ProtoFileStore<DLT645Proto::PointTablesConfig> store(pointTablesPath_, validatePointTablesConfig);
-  return store.tmpPath();
+std::filesystem::path DLT645PointTableStore::databasePath() const {
+  return configDbPath_;
 }
 }  // namespace DLT645
