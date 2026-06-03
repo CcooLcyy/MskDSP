@@ -60,7 +60,7 @@ TEST(ConfigPusherApplyCalcTest, UpsertGroupSuccessWhenStartFlagIsTrue) {
                           const CalcProto::UpsertGroupRequest &req,
                           CalcProto::CalcGroupInfo *resp) {
         EXPECT_EQ(req.config().group_name(), "calc-1");
-        ASSERT_EQ(req.config().items_size(), 1);
+        EXPECT_EQ(req.config().items_size(), 1);
         EXPECT_EQ(req.config().items(0).operator_kind(), CalcProto::OPERATOR_KIND_ADD);
         EXPECT_EQ(req.config().items(0).right_operand().source_kind(), CalcProto::OPERAND_SOURCE_CONSTANT);
         resp->mutable_config()->set_group_name(req.config().group_name());
@@ -149,7 +149,7 @@ TEST(ConfigPusherApplyCalcTest, ReconcilesStaleAndRunningGroupsToJsoncTargetStat
                           const CalcProto::UpsertGroupRequest &req,
                           CalcProto::CalcGroupInfo *resp) {
         EXPECT_EQ(req.config().group_name(), "calc-1");
-        ASSERT_EQ(req.config().items_size(), 1);
+        EXPECT_EQ(req.config().items_size(), 1);
         EXPECT_EQ(req.config().items(0).item_name(), "sum");
         resp->mutable_config()->set_group_name(req.config().group_name());
         resp->set_conn_id(302);
