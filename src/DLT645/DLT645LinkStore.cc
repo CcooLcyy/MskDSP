@@ -3,10 +3,15 @@
 #include <unordered_set>
 #include <utility>
 
+#include "Logger.h"
 #include "mskdsp/detail/ProtoSqliteStore.hpp"
 
 namespace DLT645 {
 namespace {
+void logConfigStoreTrace(const std::string& message) {
+  LOG_INFO("{}", message);
+}
+
 grpc::Status validateLinksConfig(const DLT645Proto::LinksConfig &config) {
   std::unordered_set<std::string> names;
   std::unordered_set<uint32_t> connIds;
@@ -36,13 +41,13 @@ DLT645LinkStore::DLT645LinkStore(std::filesystem::path configDbPath) :
 
 grpc::Status DLT645LinkStore::Save(const DLT645Proto::LinksConfig &config) {
   mskdsp::detail::ProtoSqliteStore<DLT645Proto::LinksConfig> store(
-      configDbPath_, "DLT645", "links", "DLT645Proto.LinksConfig", validateLinksConfig);
+      configDbPath_, "DLT645", "links", "DLT645Proto.LinksConfig", validateLinksConfig, logConfigStoreTrace);
   return store.Save(config);
 }
 
 grpc::Status DLT645LinkStore::Load(DLT645Proto::LinksConfig *out) {
   mskdsp::detail::ProtoSqliteStore<DLT645Proto::LinksConfig> store(
-      configDbPath_, "DLT645", "links", "DLT645Proto.LinksConfig", validateLinksConfig);
+      configDbPath_, "DLT645", "links", "DLT645Proto.LinksConfig", validateLinksConfig, logConfigStoreTrace);
   return store.Load(out);
 }
 

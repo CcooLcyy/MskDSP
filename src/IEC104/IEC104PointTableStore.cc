@@ -5,22 +5,28 @@
 #include <utility>
 
 #include "IEC104PointTable.h"
+#include "Logger.h"
 #include "mskdsp/detail/ProtoSqliteStore.hpp"
 
 namespace IEC104 {
+namespace {
+void logConfigStoreTrace(const std::string& message) {
+  LOG_INFO("{}", message);
+}
+}  // namespace
 
 IEC104PointTableStore::IEC104PointTableStore(std::filesystem::path configDbPath) :
   configDbPath_(std::move(configDbPath)) {}
 
 grpc::Status IEC104PointTableStore::Save(const IEC104Proto::PointTablesConfig& config) {
   mskdsp::detail::ProtoSqliteStore<IEC104Proto::PointTablesConfig> store(
-      configDbPath_, "IEC104", "point_tables", "IEC104Proto.PointTablesConfig", ValidatePointTablesConfig);
+      configDbPath_, "IEC104", "point_tables", "IEC104Proto.PointTablesConfig", ValidatePointTablesConfig, logConfigStoreTrace);
   return store.Save(config);
 }
 
 grpc::Status IEC104PointTableStore::Load(IEC104Proto::PointTablesConfig* out) {
   mskdsp::detail::ProtoSqliteStore<IEC104Proto::PointTablesConfig> store(
-      configDbPath_, "IEC104", "point_tables", "IEC104Proto.PointTablesConfig", ValidatePointTablesConfig);
+      configDbPath_, "IEC104", "point_tables", "IEC104Proto.PointTablesConfig", ValidatePointTablesConfig, logConfigStoreTrace);
   return store.Load(out);
 }
 

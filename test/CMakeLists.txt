@@ -213,11 +213,13 @@ add_executable(dataCenterStateStore_test
 target_include_directories(dataCenterStateStore_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/DataCenter/include
   ${MSKDSP_COMMON_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
 )
 
 target_link_libraries(dataCenterStateStore_test PRIVATE
   GTest::gtest_main
   dspProto
+  moduleManager
   mskdspConfigStore
 )
 
@@ -685,11 +687,13 @@ add_executable(agcGroupStore_test
 target_include_directories(agcGroupStore_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/include
   ${MSKDSP_COMMON_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
 )
 
 target_link_libraries(agcGroupStore_test PRIVATE
   GTest::gtest_main
   dspProto
+  moduleManager
   mskdspConfigStore
 )
 
@@ -746,11 +750,13 @@ add_executable(avcGroupStore_test
 target_include_directories(avcGroupStore_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/AGVC/AVC/include
   ${MSKDSP_COMMON_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
 )
 
 target_link_libraries(avcGroupStore_test PRIVATE
   GTest::gtest_main
   dspProto
+  moduleManager
   mskdspConfigStore
 )
 

@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <functional>
 #include <string>
+#include <system_error>
 #include <utility>
 
 #include <grpcpp/support/status.h>
@@ -10,6 +11,18 @@
 #include "mskdsp/ConfigDatabase.h"
 
 namespace mskdsp::detail {
+inline std::string ConfigStorePathFields(const std::filesystem::path& path) {
+  std::error_code ec;
+  const auto absPath = std::filesystem::absolute(path, ec);
+  std::string out = "db_path=" + path.string();
+  if (ec) {
+    out += ", abs_db_path=<解析失败:" + ec.message() + ">";
+  } else {
+    out += ", abs_db_path=" + absPath.string();
+  }
+  return out;
+}
+
 template <typename ProtoT>
 class ProtoSqliteStore {
 public:
@@ -36,12 +49,13 @@ public:
     auto normalized = normalize(config);
     auto status = validate_(normalized);
     if (!status.ok()) {
-      trace("SQLite 保存前配置校验失败: 模块=" + moduleName_ + ", 配置项=" + configKey_ +
+      trace("SQLite 保存前配置校验失败: " + identityFields() +
             ", 原因=" + status.error_message());
       return status;
     }
     std::string data;
     if (!normalized.SerializeToString(&data)) {
+      trace("SQLite 配置 protobuf 序列化失败: " + identityFields());
       return grpc::Status(grpc::StatusCode::INTERNAL, "序列化 protobuf 失败");
     }
     ConfigDatabase db(dbPath_);
@@ -62,11 +76,16 @@ public:
     if (found) {
       ProtoT parsed;
       if (!parsed.ParseFromString(data)) {
+        trace("SQLite 配置 protobuf 解析失败: " + identityFields() +
+              ", found=true, payload_size=" + std::to_string(data.size()));
         return grpc::Status(grpc::StatusCode::INTERNAL, "SQLite 配置 protobuf 解析失败");
       }
       parsed = normalize(std::move(parsed));
       status = validate_(parsed);
       if (!status.ok()) {
+        trace("SQLite 加载后配置校验失败: " + identityFields() +
+              ", found=true, payload_size=" + std::to_string(data.size()) +
+              ", 原因=" + status.error_message());
         return status;
       }
       *out = std::move(parsed);
@@ -74,7 +93,8 @@ public:
     }
 
     out->Clear();
-    trace("SQLite 配置项不存在，返回空配置: 模块=" + moduleName_ + ", 配置项=" + configKey_);
+    trace("SQLite 配置项不存在，返回空配置: " + identityFields() +
+          ", found=false, payload_size=0");
     return grpc::Status::OK;
   }
 
@@ -85,6 +105,10 @@ private:
     if (trace_) {
       trace_(message);
     }
+  }
+
+  std::string identityFields() const {
+    return ConfigStorePathFields(dbPath_) + ", module_name=" + moduleName_ + ", config_key=" + configKey_;
   }
 
   ProtoT normalize(ProtoT config) const {

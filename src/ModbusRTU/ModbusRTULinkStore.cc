@@ -3,10 +3,15 @@
 #include <unordered_set>
 #include <utility>
 
+#include "Logger.h"
 #include "mskdsp/detail/ProtoSqliteStore.hpp"
 
 namespace ModbusRTU {
 namespace {
+void logConfigStoreTrace(const std::string& message) {
+  LOG_INFO("{}", message);
+}
+
 grpc::Status validateLinksConfig(const ModbusRTUProto::LinksConfig& config) {
   std::unordered_set<std::string> connNames;
   std::unordered_set<uint32_t> connIds;
@@ -36,13 +41,13 @@ ModbusRTULinkStore::ModbusRTULinkStore(std::filesystem::path configDbPath) :
 
 grpc::Status ModbusRTULinkStore::Save(const ModbusRTUProto::LinksConfig& config) {
   mskdsp::detail::ProtoSqliteStore<ModbusRTUProto::LinksConfig> store(
-      configDbPath_, "ModbusRTU", "links", "ModbusRTUProto.LinksConfig", validateLinksConfig);
+      configDbPath_, "ModbusRTU", "links", "ModbusRTUProto.LinksConfig", validateLinksConfig, logConfigStoreTrace);
   return store.Save(config);
 }
 
 grpc::Status ModbusRTULinkStore::Load(ModbusRTUProto::LinksConfig* out) {
   mskdsp::detail::ProtoSqliteStore<ModbusRTUProto::LinksConfig> store(
-      configDbPath_, "ModbusRTU", "links", "ModbusRTUProto.LinksConfig", validateLinksConfig);
+      configDbPath_, "ModbusRTU", "links", "ModbusRTUProto.LinksConfig", validateLinksConfig, logConfigStoreTrace);
   return store.Load(out);
 }
 

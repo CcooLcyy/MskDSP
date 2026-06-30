@@ -3,11 +3,16 @@
 #include <unordered_set>
 #include <utility>
 
+#include "Logger.h"
 #include "ModbusRTUPointTable.h"
 #include "mskdsp/detail/ProtoSqliteStore.hpp"
 
 namespace ModbusRTU {
 namespace {
+void logConfigStoreTrace(const std::string& message) {
+  LOG_INFO("{}", message);
+}
+
 grpc::Status validatePointTablesConfig(const ModbusRTUProto::PointTablesConfig& config) {
   std::unordered_set<std::string> connNames;
   for (const auto& table : config.point_tables()) {
@@ -33,13 +38,13 @@ ModbusRTUPointTableStore::ModbusRTUPointTableStore(std::filesystem::path configD
 
 grpc::Status ModbusRTUPointTableStore::Save(const ModbusRTUProto::PointTablesConfig& config) {
   mskdsp::detail::ProtoSqliteStore<ModbusRTUProto::PointTablesConfig> store(
-      configDbPath_, "ModbusRTU", "point_tables", "ModbusRTUProto.PointTablesConfig", validatePointTablesConfig);
+      configDbPath_, "ModbusRTU", "point_tables", "ModbusRTUProto.PointTablesConfig", validatePointTablesConfig, logConfigStoreTrace);
   return store.Save(config);
 }
 
 grpc::Status ModbusRTUPointTableStore::Load(ModbusRTUProto::PointTablesConfig* out) {
   mskdsp::detail::ProtoSqliteStore<ModbusRTUProto::PointTablesConfig> store(
-      configDbPath_, "ModbusRTU", "point_tables", "ModbusRTUProto.PointTablesConfig", validatePointTablesConfig);
+      configDbPath_, "ModbusRTU", "point_tables", "ModbusRTUProto.PointTablesConfig", validatePointTablesConfig, logConfigStoreTrace);
   return store.Load(out);
 }
 

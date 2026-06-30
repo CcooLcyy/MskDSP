@@ -3,6 +3,8 @@
 #include <chrono>
 #include <filesystem>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include "DataCenter.pb.h"
 #include "mskdsp/ConfigDatabase.h"
@@ -51,6 +53,15 @@ DataCenterProto::ConnectionsConfig MakeConnections(uint32_t nextConnId) {
   conn->set_conn_name("104主站");
   return cfg;
 }
+
+bool TraceContains(const std::vector<std::string>& traces, std::string_view text) {
+  for (const auto& trace : traces) {
+    if (trace.find(text) != std::string::npos) {
+      return true;
+    }
+  }
+  return false;
+}
 }  // namespace
 
 // 验证：SQLite 配置库可以保存并读取二进制 payload，且能按模块和配置项查询痕迹。
@@ -76,14 +87,27 @@ TEST(ConfigDatabaseTest, SaveLoadAndDetectBlob) {
 TEST(ConfigDatabaseTest, ProtoSqliteStoreReturnsEmptyWhenSqliteRowMissing) {
   ScopedTempDir dir;
   const auto configDbPath = dir.path() / "conf" / "config.db";
+  std::vector<std::string> traces;
 
   mskdsp::detail::ProtoSqliteStore<DataCenterProto::ConnectionsConfig> store(
-      configDbPath, "DataCenter", "connections", "DataCenterProto.ConnectionsConfig", ValidateConnectionsConfig);
+      configDbPath,
+      "DataCenter",
+      "connections",
+      "DataCenterProto.ConnectionsConfig",
+      ValidateConnectionsConfig,
+      [&traces](const std::string& message) { traces.push_back(message); });
 
   DataCenterProto::ConnectionsConfig loaded;
   ASSERT_TRUE(store.Load(&loaded).ok());
   EXPECT_EQ(loaded.next_conn_id(), 0u);
   EXPECT_EQ(loaded.conns_size(), 0);
+  EXPECT_TRUE(TraceContains(traces, "SQLite 配置数据库不存在"));
+  EXPECT_TRUE(TraceContains(traces, "SQLite 配置项不存在，返回空配置"));
+  EXPECT_TRUE(TraceContains(traces, "db_path=" + configDbPath.string()));
+  EXPECT_TRUE(TraceContains(traces, "module_name=DataCenter"));
+  EXPECT_TRUE(TraceContains(traces, "config_key=connections"));
+  EXPECT_TRUE(TraceContains(traces, "found=false"));
+  EXPECT_TRUE(TraceContains(traces, "payload_size=0"));
 }
 
 // 验证：protobuf SQLite Store 保存和读取都只通过 SQLite，不创建旧 pb 文件。
@@ -91,8 +115,14 @@ TEST(ConfigDatabaseTest, ProtoSqliteStoreSavesAndLoadsFromSqliteOnly) {
   ScopedTempDir dir;
   const auto configDbPath = dir.path() / "conf" / "config.db";
   const auto oldPbPath = dir.path() / "conf" / "IEC104" / "links.pb";
+  std::vector<std::string> traces;
   mskdsp::detail::ProtoSqliteStore<DataCenterProto::ConnectionsConfig> store(
-      configDbPath, "DataCenter", "connections", "DataCenterProto.ConnectionsConfig", ValidateConnectionsConfig);
+      configDbPath,
+      "DataCenter",
+      "connections",
+      "DataCenterProto.ConnectionsConfig",
+      ValidateConnectionsConfig,
+      [&traces](const std::string& message) { traces.push_back(message); });
   auto updated = MakeConnections(20);
   ASSERT_TRUE(store.Save(updated).ok());
   EXPECT_FALSE(std::filesystem::exists(oldPbPath));
@@ -101,4 +131,10 @@ TEST(ConfigDatabaseTest, ProtoSqliteStoreSavesAndLoadsFromSqliteOnly) {
   DataCenterProto::ConnectionsConfig reloaded;
   ASSERT_TRUE(store.Load(&reloaded).ok());
   EXPECT_EQ(reloaded.next_conn_id(), 20u);
+  EXPECT_TRUE(TraceContains(traces, "SQLite 配置保存完成"));
+  EXPECT_TRUE(TraceContains(traces, "SQLite 配置加载完成"));
+  EXPECT_TRUE(TraceContains(traces, "db_path=" + configDbPath.string()));
+  EXPECT_TRUE(TraceContains(traces, "module_name=DataCenter"));
+  EXPECT_TRUE(TraceContains(traces, "config_key=connections"));
+  EXPECT_TRUE(TraceContains(traces, "found=true"));
 }

@@ -5,22 +5,28 @@
 #include <utility>
 
 #include "IEC104LinkManager.h"
+#include "Logger.h"
 #include "mskdsp/detail/ProtoSqliteStore.hpp"
 
 namespace IEC104 {
+namespace {
+void logConfigStoreTrace(const std::string& message) {
+  LOG_INFO("{}", message);
+}
+}  // namespace
 
 IEC104LinkStore::IEC104LinkStore(std::filesystem::path configDbPath) :
   configDbPath_(std::move(configDbPath)) {}
 
 grpc::Status IEC104LinkStore::Save(const IEC104Proto::LinksConfig& config) {
   mskdsp::detail::ProtoSqliteStore<IEC104Proto::LinksConfig> store(
-      configDbPath_, "IEC104", "links", "IEC104Proto.LinksConfig", ValidateLinksConfig);
+      configDbPath_, "IEC104", "links", "IEC104Proto.LinksConfig", ValidateLinksConfig, logConfigStoreTrace);
   return store.Save(config);
 }
 
 grpc::Status IEC104LinkStore::Load(IEC104Proto::LinksConfig* out) {
   mskdsp::detail::ProtoSqliteStore<IEC104Proto::LinksConfig> store(
-      configDbPath_, "IEC104", "links", "IEC104Proto.LinksConfig", ValidateLinksConfig);
+      configDbPath_, "IEC104", "links", "IEC104Proto.LinksConfig", ValidateLinksConfig, logConfigStoreTrace);
   return store.Load(out);
 }
 

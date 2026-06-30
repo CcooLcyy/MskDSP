@@ -4,10 +4,15 @@
 #include <utility>
 
 #include "DLT645PointTable.h"
+#include "Logger.h"
 #include "mskdsp/detail/ProtoSqliteStore.hpp"
 
 namespace DLT645 {
 namespace {
+void logConfigStoreTrace(const std::string& message) {
+  LOG_INFO("{}", message);
+}
+
 grpc::Status validatePointTablesConfig(const DLT645Proto::PointTablesConfig &config) {
   std::unordered_set<std::string> connNames;
   for (const auto &table : config.point_tables()) {
@@ -33,13 +38,13 @@ DLT645PointTableStore::DLT645PointTableStore(std::filesystem::path configDbPath)
 
 grpc::Status DLT645PointTableStore::Save(const DLT645Proto::PointTablesConfig &config) {
   mskdsp::detail::ProtoSqliteStore<DLT645Proto::PointTablesConfig> store(
-      configDbPath_, "DLT645", "point_tables", "DLT645Proto.PointTablesConfig", validatePointTablesConfig);
+      configDbPath_, "DLT645", "point_tables", "DLT645Proto.PointTablesConfig", validatePointTablesConfig, logConfigStoreTrace);
   return store.Save(config);
 }
 
 grpc::Status DLT645PointTableStore::Load(DLT645Proto::PointTablesConfig *out) {
   mskdsp::detail::ProtoSqliteStore<DLT645Proto::PointTablesConfig> store(
-      configDbPath_, "DLT645", "point_tables", "DLT645Proto.PointTablesConfig", validatePointTablesConfig);
+      configDbPath_, "DLT645", "point_tables", "DLT645Proto.PointTablesConfig", validatePointTablesConfig, logConfigStoreTrace);
   return store.Load(out);
 }
 

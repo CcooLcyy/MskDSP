@@ -8,6 +8,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "Logger.h"
 #include "mskdsp/detail/ProtoSqliteStore.hpp"
 
 namespace DataCenter {
@@ -155,6 +156,15 @@ DataCenterProto::DataCenterState normalizeState(DataCenterProto::DataCenterState
   }
   return state;
 }
+
+DataCenterStateStore::TraceFn ensureTrace(DataCenterStateStore::TraceFn trace) {
+  if (trace) {
+    return trace;
+  }
+  return [](const std::string& message) {
+    LOG_INFO("{}", message);
+  };
+}
 }  // namespace
 
 DataCenterStateStore::DataCenterStateStore(std::filesystem::path configDbPath) :
@@ -162,13 +172,25 @@ DataCenterStateStore::DataCenterStateStore(std::filesystem::path configDbPath) :
 
 grpc::Status DataCenterStateStore::Save(const DataCenterProto::DataCenterState& state, TraceFn trace) {
   mskdsp::detail::ProtoSqliteStore<DataCenterProto::DataCenterState> store(
-      configDbPath_, "DataCenter", "state", "DataCenterProto.DataCenterState", validateState, std::move(trace), normalizeState);
+      configDbPath_,
+      "DataCenter",
+      "state",
+      "DataCenterProto.DataCenterState",
+      validateState,
+      ensureTrace(std::move(trace)),
+      normalizeState);
   return store.Save(state);
 }
 
 grpc::Status DataCenterStateStore::Load(DataCenterProto::DataCenterState* out, TraceFn trace) {
   mskdsp::detail::ProtoSqliteStore<DataCenterProto::DataCenterState> store(
-      configDbPath_, "DataCenter", "state", "DataCenterProto.DataCenterState", validateState, std::move(trace), normalizeState);
+      configDbPath_,
+      "DataCenter",
+      "state",
+      "DataCenterProto.DataCenterState",
+      validateState,
+      ensureTrace(std::move(trace)),
+      normalizeState);
   return store.Load(out);
 }
 

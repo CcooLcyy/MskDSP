@@ -1,12 +1,15 @@
 #include "mskdsp/ConfigDatabase.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <format>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
+#include <vector>
 
 #include <sqlite3.h>
 
@@ -20,6 +23,34 @@ void trace(const ConfigDatabase::TraceFn& fn, const std::string& message) {
   if (fn) {
     fn(message);
   }
+}
+
+std::string pathFields(const std::filesystem::path& path) {
+  std::error_code ec;
+  const auto absPath = std::filesystem::absolute(path, ec);
+  std::string out = "db_path=" + path.string();
+  if (ec) {
+    out += ", abs_db_path=<解析失败:" + ec.message() + ">";
+  } else {
+    out += ", abs_db_path=" + absPath.string();
+  }
+  return out;
+}
+
+std::string identityFields(const std::filesystem::path& path, std::string_view moduleName, std::string_view configKey) {
+  return pathFields(path) + ", module_name=" + std::string(moduleName) + ", config_key=" + std::string(configKey);
+}
+
+std::string keysField(const std::vector<std::string>& configKeys) {
+  std::string out = "config_keys=[";
+  for (size_t i = 0; i < configKeys.size(); ++i) {
+    if (i != 0) {
+      out += ",";
+    }
+    out += configKeys[i];
+  }
+  out += "]";
+  return out;
 }
 
 std::string sqliteError(sqlite3* db) {
@@ -197,16 +228,18 @@ grpc::Status ConfigDatabase::SaveBlob(std::string_view moduleName,
   SqliteDb db;
   status = db.Open(dbPath_);
   if (!status.ok()) {
-    trace(traceFn, "打开配置数据库失败: " + status.error_message());
+    trace(traceFn, "打开配置数据库失败: " + pathFields(dbPath_) + ", 原因=" + status.error_message());
     return status;
   }
   status = ensureSchema(&db);
   if (!status.ok()) {
-    trace(traceFn, "初始化配置数据库失败: " + status.error_message());
+    trace(traceFn, "初始化配置数据库失败: " + pathFields(dbPath_) + ", 原因=" + status.error_message());
     return status;
   }
   status = db.Exec("BEGIN IMMEDIATE");
   if (!status.ok()) {
+    trace(traceFn, "SQLite 配置保存事务启动失败: " + identityFields(dbPath_, moduleName, configKey) +
+                       ", payload_size=" + std::to_string(payload.size()) + ", 原因=" + status.error_message());
     return status;
   }
 
@@ -254,18 +287,18 @@ ON CONFLICT(module_name, config_key) DO UPDATE SET
 
   if (!status.ok()) {
     (void)db.Exec("ROLLBACK");
-    trace(traceFn, "SQLite 配置保存失败: 模块=" + std::string(moduleName) +
-                       ", 配置项=" + std::string(configKey) + ", 原因=" + status.error_message());
+    trace(traceFn, "SQLite 配置保存失败: " + identityFields(dbPath_, moduleName, configKey) +
+                       ", payload_size=" + std::to_string(payload.size()) + ", 原因=" + status.error_message());
     return status;
   }
   status = db.Exec("COMMIT");
   if (!status.ok()) {
-    trace(traceFn, "SQLite 配置提交失败: " + status.error_message());
+    trace(traceFn, "SQLite 配置提交失败: " + identityFields(dbPath_, moduleName, configKey) +
+                       ", payload_size=" + std::to_string(payload.size()) + ", 原因=" + status.error_message());
     return status;
   }
-  trace(traceFn, "SQLite 配置保存完成: 模块=" + std::string(moduleName) +
-                     ", 配置项=" + std::string(configKey) +
-                     ", 字节数=" + std::to_string(payload.size()));
+  trace(traceFn, "SQLite 配置保存完成: " + identityFields(dbPath_, moduleName, configKey) +
+                     ", payload_size=" + std::to_string(payload.size()));
   return grpc::Status::OK;
 }
 
@@ -285,18 +318,28 @@ grpc::Status ConfigDatabase::LoadBlob(std::string_view moduleName,
   }
 
   std::error_code ec;
-  if (!std::filesystem::exists(dbPath_, ec)) {
-    trace(traceFn, "SQLite 配置数据库不存在: " + dbPath_.string());
+  const bool dbExists = std::filesystem::exists(dbPath_, ec);
+  if (ec) {
+    trace(traceFn, "检查 SQLite 配置数据库是否存在失败: " + identityFields(dbPath_, moduleName, configKey) +
+                       ", found=false, payload_size=0, 原因=" + ec.message());
+  }
+  if (!dbExists) {
+    trace(traceFn, "SQLite 配置数据库不存在: " + identityFields(dbPath_, moduleName, configKey) +
+                       ", found=false, payload_size=0");
     return grpc::Status::OK;
   }
 
   SqliteDb db;
   status = db.Open(dbPath_);
   if (!status.ok()) {
+    trace(traceFn, "打开配置数据库失败: " + identityFields(dbPath_, moduleName, configKey) +
+                       ", found=false, payload_size=0, 原因=" + status.error_message());
     return status;
   }
   status = ensureSchema(&db);
   if (!status.ok()) {
+    trace(traceFn, "初始化配置数据库失败: " + identityFields(dbPath_, moduleName, configKey) +
+                       ", found=false, payload_size=0, 原因=" + status.error_message());
     return status;
   }
 
@@ -311,23 +354,30 @@ SELECT payload, checksum FROM config_blobs WHERE module_name=? AND config_key=?
     status = bindText(db.get(), stmt.get(), 2, configKey);
   }
   if (!status.ok()) {
+    trace(traceFn, "查询 SQLite 配置项失败: " + identityFields(dbPath_, moduleName, configKey) +
+                       ", found=false, payload_size=0, 原因=" + status.error_message());
     return status;
   }
 
   const int rc = sqlite3_step(stmt.get());
   if (rc == SQLITE_DONE) {
-    trace(traceFn, "SQLite 配置项不存在: 模块=" + std::string(moduleName) +
-                       ", 配置项=" + std::string(configKey));
+    trace(traceFn, "SQLite 配置项不存在: " + identityFields(dbPath_, moduleName, configKey) +
+                       ", found=false, payload_size=0");
     return grpc::Status::OK;
   }
   if (rc != SQLITE_ROW) {
-    return internalError(db.get(), "加载配置 payload 失败");
+    auto errorStatus = internalError(db.get(), "加载配置 payload 失败");
+    trace(traceFn, "加载 SQLite 配置项失败: " + identityFields(dbPath_, moduleName, configKey) +
+                       ", found=false, payload_size=0, 原因=" + errorStatus.error_message());
+    return errorStatus;
   }
   const auto* blob = static_cast<const char*>(sqlite3_column_blob(stmt.get(), 0));
   const int blobSize = sqlite3_column_bytes(stmt.get(), 0);
   const auto* sumText = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 1));
   const int sumSize = sqlite3_column_bytes(stmt.get(), 1);
   if (blobSize > 0 && blob == nullptr) {
+    trace(traceFn, "SQLite 配置 payload 为空指针: " + identityFields(dbPath_, moduleName, configKey) +
+                       ", found=true, payload_size=" + std::to_string(blobSize));
     return grpc::Status(grpc::StatusCode::INTERNAL, "SQLite 配置 payload 为空指针");
   }
   payload->assign(blob == nullptr ? "" : blob, static_cast<size_t>(blobSize));
@@ -335,12 +385,13 @@ SELECT payload, checksum FROM config_blobs WHERE module_name=? AND config_key=?
   const auto actualChecksum = checksumHex(*payload);
   if (storedChecksum != actualChecksum) {
     payload->clear();
+    trace(traceFn, "SQLite 配置 checksum 校验失败: " + identityFields(dbPath_, moduleName, configKey) +
+                       ", found=true, payload_size=" + std::to_string(blobSize));
     return grpc::Status(grpc::StatusCode::INTERNAL, "SQLite 配置 checksum 校验失败");
   }
   *found = true;
-  trace(traceFn, "SQLite 配置加载完成: 模块=" + std::string(moduleName) +
-                     ", 配置项=" + std::string(configKey) +
-                     ", 字节数=" + std::to_string(payload->size()));
+  trace(traceFn, "SQLite 配置加载完成: " + identityFields(dbPath_, moduleName, configKey) +
+                     ", found=true, payload_size=" + std::to_string(payload->size()));
   return grpc::Status::OK;
 }
 
@@ -356,19 +407,37 @@ grpc::Status ConfigDatabase::HasAnyBlob(std::string_view moduleName,
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "module_name 不能为空");
   }
   if (configKeys.empty()) {
+    trace(traceFn, "SQLite 模块配置查询跳过: " + pathFields(dbPath_) +
+                       ", module_name=" + std::string(moduleName) +
+                       ", config_keys=[], found=false");
     return grpc::Status::OK;
   }
   std::error_code ec;
-  if (!std::filesystem::exists(dbPath_, ec)) {
+  const bool dbExists = std::filesystem::exists(dbPath_, ec);
+  if (ec) {
+    trace(traceFn, "检查 SQLite 配置数据库是否存在失败: " + pathFields(dbPath_) +
+                       ", module_name=" + std::string(moduleName) + ", " + keysField(configKeys) +
+                       ", found=false, 原因=" + ec.message());
+  }
+  if (!dbExists) {
+    trace(traceFn, "SQLite 配置数据库不存在: " + pathFields(dbPath_) +
+                       ", module_name=" + std::string(moduleName) + ", " + keysField(configKeys) +
+                       ", found=false");
     return grpc::Status::OK;
   }
   SqliteDb db;
   auto status = db.Open(dbPath_);
   if (!status.ok()) {
+    trace(traceFn, "打开配置数据库失败: " + pathFields(dbPath_) +
+                       ", module_name=" + std::string(moduleName) + ", " + keysField(configKeys) +
+                       ", found=false, 原因=" + status.error_message());
     return status;
   }
   status = ensureSchema(&db);
   if (!status.ok()) {
+    trace(traceFn, "初始化配置数据库失败: " + pathFields(dbPath_) +
+                       ", module_name=" + std::string(moduleName) + ", " + keysField(configKeys) +
+                       ", found=false, 原因=" + status.error_message());
     return status;
   }
   for (const auto& key : configKeys) {
@@ -381,18 +450,26 @@ grpc::Status ConfigDatabase::HasAnyBlob(std::string_view moduleName,
       status = bindText(db.get(), stmt.get(), 2, key);
     }
     if (!status.ok()) {
+      trace(traceFn, "查询 SQLite 模块配置失败: " + identityFields(dbPath_, moduleName, key) +
+                         ", found=false, 原因=" + status.error_message());
       return status;
     }
     const int rc = sqlite3_step(stmt.get());
     if (rc == SQLITE_ROW) {
       *found = true;
-      trace(traceFn, "SQLite 发现模块配置: 模块=" + std::string(moduleName) + ", 配置项=" + key);
+      trace(traceFn, "SQLite 发现模块配置: " + identityFields(dbPath_, moduleName, key) + ", found=true");
       return grpc::Status::OK;
     }
     if (rc != SQLITE_DONE) {
-      return internalError(db.get(), "查询模块配置痕迹失败");
+      auto errorStatus = internalError(db.get(), "查询模块配置痕迹失败");
+      trace(traceFn, "查询 SQLite 模块配置失败: " + identityFields(dbPath_, moduleName, key) +
+                         ", found=false, 原因=" + errorStatus.error_message());
+      return errorStatus;
     }
   }
+  trace(traceFn, "SQLite 未发现模块配置: " + pathFields(dbPath_) +
+                     ", module_name=" + std::string(moduleName) + ", " + keysField(configKeys) +
+                     ", found=false");
   return grpc::Status::OK;
 }
 
@@ -403,23 +480,44 @@ grpc::Status ConfigDatabase::DeleteBlobs(std::string_view moduleName,
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "module_name 不能为空");
   }
   if (configKeys.empty()) {
+    trace(traceFn, "SQLite 配置清理跳过: " + pathFields(dbPath_) +
+                       ", module_name=" + std::string(moduleName) +
+                       ", config_keys=[], 删除记录数=0");
     return grpc::Status::OK;
   }
   std::error_code ec;
-  if (!std::filesystem::exists(dbPath_, ec)) {
+  const bool dbExists = std::filesystem::exists(dbPath_, ec);
+  if (ec) {
+    trace(traceFn, "检查 SQLite 配置数据库是否存在失败: " + pathFields(dbPath_) +
+                       ", module_name=" + std::string(moduleName) + ", " + keysField(configKeys) +
+                       ", 删除记录数=0, 原因=" + ec.message());
+  }
+  if (!dbExists) {
+    trace(traceFn, "SQLite 配置数据库不存在，清理跳过: " + pathFields(dbPath_) +
+                       ", module_name=" + std::string(moduleName) + ", " + keysField(configKeys) +
+                       ", 删除记录数=0");
     return grpc::Status::OK;
   }
   SqliteDb db;
   auto status = db.Open(dbPath_);
   if (!status.ok()) {
+    trace(traceFn, "打开配置数据库失败: " + pathFields(dbPath_) +
+                       ", module_name=" + std::string(moduleName) + ", " + keysField(configKeys) +
+                       ", 原因=" + status.error_message());
     return status;
   }
   status = ensureSchema(&db);
   if (!status.ok()) {
+    trace(traceFn, "初始化配置数据库失败: " + pathFields(dbPath_) +
+                       ", module_name=" + std::string(moduleName) + ", " + keysField(configKeys) +
+                       ", 原因=" + status.error_message());
     return status;
   }
   status = db.Exec("BEGIN IMMEDIATE");
   if (!status.ok()) {
+    trace(traceFn, "SQLite 配置清理事务启动失败: " + pathFields(dbPath_) +
+                       ", module_name=" + std::string(moduleName) + ", " + keysField(configKeys) +
+                       ", 原因=" + status.error_message());
     return status;
   }
   int deleted = 0;
@@ -444,14 +542,21 @@ grpc::Status ConfigDatabase::DeleteBlobs(std::string_view moduleName,
     }
     if (!status.ok()) {
       (void)db.Exec("ROLLBACK");
+      trace(traceFn, "SQLite 配置清理失败: " + identityFields(dbPath_, moduleName, key) +
+                         ", 原因=" + status.error_message());
       return status;
     }
   }
   status = db.Exec("COMMIT");
   if (!status.ok()) {
+    trace(traceFn, "SQLite 配置清理提交失败: " + pathFields(dbPath_) +
+                       ", module_name=" + std::string(moduleName) + ", " + keysField(configKeys) +
+                       ", 删除记录数=" + std::to_string(deleted) +
+                       ", 原因=" + status.error_message());
     return status;
   }
-  trace(traceFn, "SQLite 配置清理完成: 模块=" + std::string(moduleName) +
+  trace(traceFn, "SQLite 配置清理完成: " + pathFields(dbPath_) +
+                     ", module_name=" + std::string(moduleName) + ", " + keysField(configKeys) +
                      ", 删除记录数=" + std::to_string(deleted));
   return grpc::Status::OK;
 }
