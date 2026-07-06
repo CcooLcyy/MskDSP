@@ -14,10 +14,10 @@ concurrency:
 
 env:
   STATIC_UPDATE_BASE_URL: ${{ vars.LOWER_UPDATE_STATIC_BASE_URL || vars.UPDATE_STATIC_BASE_URL || 'https://update.clsclear.top/mskdsp-lower' }}
-  STATIC_UPDATE_SSH_HOST: ${{ vars.LOWER_UPDATE_STATIC_SSH_HOST || vars.UPDATE_STATIC_SSH_HOST }}
-  STATIC_UPDATE_SSH_PORT: ${{ vars.LOWER_UPDATE_STATIC_SSH_PORT || vars.UPDATE_STATIC_SSH_PORT || '22' }}
-  STATIC_UPDATE_SSH_USER: ${{ vars.LOWER_UPDATE_STATIC_SSH_USER || vars.UPDATE_STATIC_SSH_USER }}
-  STATIC_UPDATE_REMOTE_ROOT: ${{ vars.LOWER_UPDATE_STATIC_REMOTE_ROOT || vars.UPDATE_STATIC_REMOTE_ROOT }}
+  STATIC_UPDATE_SSH_HOST: ${{ vars.LOWER_UPDATE_STATIC_SSH_HOST || vars.UPDATE_STATIC_SSH_HOST || 'clsclear.top' }}
+  STATIC_UPDATE_SSH_PORT: ${{ vars.LOWER_UPDATE_STATIC_SSH_PORT || vars.UPDATE_STATIC_SSH_PORT || '32118' }}
+  STATIC_UPDATE_SSH_USER: ${{ vars.LOWER_UPDATE_STATIC_SSH_USER || vars.UPDATE_STATIC_SSH_USER || 'daniel' }}
+  STATIC_UPDATE_REMOTE_ROOT: ${{ vars.LOWER_UPDATE_STATIC_REMOTE_ROOT || vars.UPDATE_STATIC_REMOTE_ROOT || '/home/daniel/update-server/www/mskdsp-lower' }}
 
 jobs:
   arm64-nightly:
@@ -266,7 +266,7 @@ jobs:
           STATIC_UPDATE_SSH_KEY: ${{ secrets.LOWER_UPDATE_STATIC_SSH_KEY || secrets.UPDATE_STATIC_SSH_KEY }}
         run: |
           set -euo pipefail
-          bash script/workflow/sync_static_lower_update.sh \
+          bash script/workflow/sync_static_lower_update_if_configured.sh \
             --package-file "images/${{ steps.meta.outputs.archive_name }}" \
             --checksum-file SHA256SUMS \
             --manifest-file latest.json \
