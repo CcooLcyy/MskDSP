@@ -86,6 +86,33 @@ MSKDSP_VERSION=<version> bash script/make_image.sh
 - 依赖容器 `x64` 与 `VCPKG_ROOT` 等环境（脚本内默认 `/data/3rdlibs/vcpkg`）。
 - 输出 tar 可用于 `make_exe.sh` 生成自解压脚本。
 
+## workflow 静态更新发布脚本
+
+### 用途
+`script/workflow/write_lower_update_manifest.py` 用于生成下位机静态更新清单 `latest.json`；`script/workflow/sync_static_lower_update.sh` 用于把自解压安装包、`SHA256SUMS` 和 `latest.json` 同步到静态文件服务器。
+
+静态发布链路面向上位机使用：下位机不直接访问静态文件服务器，上位机读取 `latest.json` 后下载安装包，再下发到下位机执行安装。
+
+### 清单结构
+`latest.json` 使用下位机专用格式，不复用 Tauri updater 格式。核心字段包括：
+- `product`：固定为 `mskdsp-lower`
+- `channel`：发布通道，例如 `stable`、`beta`、`nightly`、`ci`
+- `platform`：当前为 `linux-arm64`
+- `version`：界面展示版本
+- `package_version`：完整包版本，通常与镜像 tag 一致
+- `asset`：安装包名称、下载地址、SHA256 与字节大小
+- `checksum`：`SHA256SUMS` 下载地址
+
+### 静态目录约定
+默认 URL 结构：
+```
+https://update.clsclear.top/mskdsp-lower/<channel>/latest.json
+https://update.clsclear.top/mskdsp-lower/<channel>/linux-arm64/<package>
+https://update.clsclear.top/mskdsp-lower/<channel>/linux-arm64/SHA256SUMS
+```
+
+同步脚本会先上传安装包和 `SHA256SUMS`，最后上传 `latest.json`，避免上位机读到已更新但资产尚未上传完成的清单。
+
 ## new_module.sh（模块脚手架）
 
 ### 用途

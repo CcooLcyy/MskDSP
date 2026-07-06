@@ -15,6 +15,13 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  STATIC_UPDATE_BASE_URL: ${{ vars.LOWER_UPDATE_STATIC_BASE_URL || vars.UPDATE_STATIC_BASE_URL || 'https://update.clsclear.top/mskdsp-lower' }}
+  STATIC_UPDATE_SSH_HOST: ${{ vars.LOWER_UPDATE_STATIC_SSH_HOST || vars.UPDATE_STATIC_SSH_HOST }}
+  STATIC_UPDATE_SSH_PORT: ${{ vars.LOWER_UPDATE_STATIC_SSH_PORT || vars.UPDATE_STATIC_SSH_PORT || '22' }}
+  STATIC_UPDATE_SSH_USER: ${{ vars.LOWER_UPDATE_STATIC_SSH_USER || vars.UPDATE_STATIC_SSH_USER }}
+  STATIC_UPDATE_REMOTE_ROOT: ${{ vars.LOWER_UPDATE_STATIC_REMOTE_ROOT || vars.UPDATE_STATIC_REMOTE_ROOT }}
+
 jobs:
   x64-debug-test:
     name: x64 Debug 编译与单测
@@ -423,6 +430,41 @@ jobs:
           fi
           sha256sum "${ASSETS[@]}" > SHA256SUMS
 
+      - name: 生成静态更新清单
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE_SHA="$(git rev-parse HEAD)"
+          python3 script/workflow/write_lower_update_manifest.py \
+            --channel ci \
+            --platform linux-arm64 \
+            --version "${{ steps.meta.outputs.image_version }}" \
+            --artifact "images/${{ steps.meta.outputs.archive_name }}" \
+            --checksums SHA256SUMS \
+            --output latest.json \
+            --base-url "${STATIC_UPDATE_BASE_URL}" \
+            --repository "${{ github.repository }}" \
+            --source-ref "${{ github.ref_name }}" \
+            --source-sha "${SOURCE_SHA}"
+
+      - name: 同步 CI 静态更新源
+        shell: bash
+        env:
+          STATIC_UPDATE_SSH_KEY: ${{ secrets.LOWER_UPDATE_STATIC_SSH_KEY || secrets.UPDATE_STATIC_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          bash script/workflow/sync_static_lower_update.sh \
+            --package-file "images/${{ steps.meta.outputs.archive_name }}" \
+            --checksum-file SHA256SUMS \
+            --manifest-file latest.json \
+            --channel ci \
+            --platform linux-arm64 \
+            --base-url "${STATIC_UPDATE_BASE_URL}" \
+            --ssh-host "${STATIC_UPDATE_SSH_HOST}" \
+            --ssh-port "${STATIC_UPDATE_SSH_PORT}" \
+            --ssh-user "${STATIC_UPDATE_SSH_USER}" \
+            --remote-root "${STATIC_UPDATE_REMOTE_ROOT}"
+
       - name: 上传 arm64 测试安装包
         uses: actions/upload-artifact@v4
         with:
@@ -431,4 +473,5 @@ jobs:
             images/${{ steps.meta.outputs.archive_name }}
             ${{ steps.meta.outputs.debug_archive_name }}.tar.gz
             SHA256SUMS
+            latest.json
           if-no-files-found: ignore
