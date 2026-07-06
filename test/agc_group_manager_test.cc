@@ -624,6 +624,7 @@ TEST(AgcGroupManagerTest, MeasurementUpdatesPublishRealtimeTotalWithoutCommand) 
   PublishDoublePoint(&state, info.conn_id(), "INV2_P_MEAS", 20.0);
 
   ASSERT_TRUE(mgr.StartGroup("g-meas-only-total").ok());
+  ASSERT_TRUE(WaitForSubscriptionCount(state, info.conn_id(), 1u));
   EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "P_TOTAL", 30.0));
   EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV1_P_SET"), 0u);
   EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV2_P_SET"), 0u);

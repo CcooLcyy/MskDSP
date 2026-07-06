@@ -74,9 +74,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-${{ runner.os }}-gcc14-x64-linux-dynamic-v1-${{ hashFiles('CMakeLists.txt', 'protobuf/CMakeLists.txt', 'CMakePresets.json') }}
+          key: ccache-${{ runner.os }}-gcc14-x64-linux-dynamic-v2-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            ccache-${{ runner.os }}-gcc14-x64-linux-dynamic-v1-
+            ccache-${{ runner.os }}-gcc14-x64-linux-dynamic-v2-
 
       - name: 准备 vcpkg 二进制缓存环境
         shell: bash
@@ -129,8 +129,7 @@ jobs:
             ninja-build \
             gcc-14 \
             g++-14 \
-            ccache \
-            gcovr
+            ccache
 
       - name: 安装 vcpkg
         id: vcpkg
@@ -166,8 +165,7 @@ jobs:
             -DMSKDSP_ENABLE_SANITIZERS=OFF \
             -DMSKDSP_ENABLE_TSAN=OFF \
             -DCMAKE_CXX_SCAN_FOR_MODULES=OFF \
-            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-            -DGCOV_EXECUTABLE=/usr/bin/gcov-14
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
       - name: 清零 ccache 统计
         shell: bash
@@ -244,9 +242,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-${{ runner.os }}-gcc14-arm64-linux-dynamic-v1-${{ hashFiles('CMakeLists.txt', 'protobuf/CMakeLists.txt', 'CMakePresets.json') }}
+          key: ccache-${{ runner.os }}-gcc14-arm64-linux-dynamic-v2-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            ccache-${{ runner.os }}-gcc14-arm64-linux-dynamic-v1-
+            ccache-${{ runner.os }}-gcc14-arm64-linux-dynamic-v2-
 
       - name: 准备 vcpkg 二进制缓存环境
         shell: bash

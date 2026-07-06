@@ -57,9 +57,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-${{ runner.os }}-gcc14-arm64-linux-dynamic-v1-${{ hashFiles('CMakeLists.txt', 'protobuf/CMakeLists.txt', 'CMakePresets.json') }}
+          key: ccache-${{ runner.os }}-gcc14-arm64-linux-dynamic-v2-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            ccache-${{ runner.os }}-gcc14-arm64-linux-dynamic-v1-
+            ccache-${{ runner.os }}-gcc14-arm64-linux-dynamic-v2-
 
       - name: 准备 vcpkg 二进制缓存环境
         shell: bash

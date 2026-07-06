@@ -174,11 +174,12 @@ ctest --test-dir build --output-on-failure
 如未开启测试构建（`MSKDSP_BUILD_TESTS=OFF`），则不会生成/执行任何测试用例。
 
 ### 测试覆盖率
-开启 `MSKDSP_BUILD_TESTS` 后会构建测试并启用覆盖率编译选项（要求使用 GCC/Clang 编译，并安装 `gcovr`）。默认值：`Debug=ON`，其他构建类型为 `OFF`。覆盖率报告需要显式构建 `coverage` 目标生成；普通 `cmake --build ...` 不会自动生成覆盖率报告。报告默认仅统计本项目 `src/` 下的实现文件与模板实现（`.cc/.cpp/.c/.hpp`），不包含纯声明头文件（`.h`）。
+`MSKDSP_BUILD_TESTS` 只负责构建测试；覆盖率需要额外开启 `MSKDSP_ENABLE_COVERAGE=ON`（要求使用 GCC/Clang 编译，并安装 `gcovr`）。覆盖率报告需要显式构建 `coverage` 目标生成；普通 `cmake --build ...` 不会自动生成覆盖率报告。报告默认仅统计本项目 `src/` 下的实现文件与模板实现（`.cc/.cpp/.c/.hpp`），不包含纯声明头文件（`.h`）。
 ```bash
 cmake -S . -B build-cov -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake \
-  -DMSKDSP_BUILD_TESTS=ON
+  -DMSKDSP_BUILD_TESTS=ON \
+  -DMSKDSP_ENABLE_COVERAGE=ON
 cmake --build build-cov --parallel
 cmake --build build-cov --target coverage
 ```
@@ -186,7 +187,7 @@ cmake --build build-cov --target coverage
 如本机存在多个 GCC 版本，可通过 `-DGCOV_EXECUTABLE=/usr/bin/gcov-<版本>` 指定与编译器匹配的 `gcov`；`gcovr` 路径可用 `-DGCOVR_EXECUTABLE=/path/to/gcovr` 指定。
 
 #### 常见问题
-- `MSKDSP_BUILD_TESTS=ON` 只会构建测试并启用覆盖率编译选项；如需生成覆盖率报告，请显式执行 `cmake --build <build-dir> --target coverage`。
+- `MSKDSP_BUILD_TESTS=ON` 只会构建测试；如需生成覆盖率报告，请同时设置 `MSKDSP_ENABLE_COVERAGE=ON` 并显式执行 `cmake --build <build-dir> --target coverage`。
 - 若遇到 `GCOV returncode was 3`，通常是 `gcov` 版本与编译器不匹配；用 `-DGCOV_EXECUTABLE=/usr/bin/gcov-<gcc主版本>` 指定即可。
 - 若遇到 `AssertionError: Got function ... on multiple lines`，通常是同一源文件被多个 target 编译（例如库 + 测试）；需要在 gcovr 使用函数合并策略（当前工程已在 coverage 目标中内置）。
 - 若遇到 `Cannot open source file ...` 且路径指向已不存在的源码（例如模块目录改名后），说明 build 目录残留旧对象文件；建议清理 build 目录后重新配置/编译。

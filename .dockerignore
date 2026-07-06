@@ -1,0 +1,12 @@
+*
+
+!Dockerfile
+!.dockerignore
+!package/
+!package/MskDSP
+!package/module/
+!package/module/**
+!package/lib/
+!package/lib/**
+!package/conf/
+!package/conf/**

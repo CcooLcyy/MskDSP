@@ -52,6 +52,7 @@ PY
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PACKAGE_DIR="${PROJECT_ROOT}/package"
 
 INPUT_ARG=""
 if [[ $# -eq 0 ]]; then
@@ -81,13 +82,13 @@ else
   usage
 fi
 
-rm -rf ../package/module
-rm -rf ../package/lib
+rm -rf "${PACKAGE_DIR}/module"
+rm -rf "${PACKAGE_DIR}/lib"
 echo "清理旧的 package/module 和 package/lib 目录"
-rm -rf ../package/log
-rm -rf ../package/socket
+rm -rf "${PACKAGE_DIR}/log"
+rm -rf "${PACKAGE_DIR}/socket"
 echo "清理旧的 package/log 和 package/socket 目录"
-rm -rf ../package/debug
+rm -rf "${PACKAGE_DIR}/debug"
 echo "清理旧的 package/debug 目录"
 
 INPUT_TAR=""
