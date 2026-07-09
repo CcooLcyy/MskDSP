@@ -48,6 +48,19 @@ bool sameValue(double lhs, double rhs) {
   return std::fabs(lhs - rhs) <= kValueChangeEps;
 }
 
+double effectiveScale(const AVCProto::SignalSpec& signal) {
+  return signal.scale() == 0.0 ? 1.0 : signal.scale();
+}
+
+double commandEchoEngineeringValue(
+    const AVCProto::SignalSpec& signal, AVCProto::ValueMode mode, double value) {
+  const auto scale = effectiveScale(signal);
+  if (mode == AVCProto::VALUE_MODE_DELTA) {
+    return value * scale;
+  }
+  return value * scale + signal.offset();
+}
+
 std::string_view defaultPointTag(AVCProto::DefaultPointKind kind) {
   for (const auto& point : DefaultPointDefinitions()) {
     if (point.kind == kind) {
@@ -593,6 +606,8 @@ void GroupManager::startThreadsLocked(const std::string& groupName, GroupRuntime
         while (reader->Read(&update)) {
           bool publishCommandEcho = false;
           uint32_t commandEchoConnId = 0;
+          AVCProto::SignalSpec commandEchoSignal;
+          auto commandEchoMode = AVCProto::VALUE_MODE_ABSOLUTE;
           {
             std::lock_guard<std::mutex> lock(mu_);
             auto it = groupsByName_.find(groupName);
@@ -602,13 +617,20 @@ void GroupManager::startThreadsLocked(const std::string& groupName, GroupRuntime
             if (!it->second.commandTag.empty() && update.dst_tag() == it->second.commandTag) {
               publishCommandEcho = true;
               commandEchoConnId = it->second.connId;
+              if (it->second.voltageMode) {
+                commandEchoSignal = it->second.config.voltage_cmd();
+                commandEchoMode = AVCProto::VALUE_MODE_ABSOLUTE;
+              } else {
+                commandEchoSignal = it->second.config.q_total_cmd().signal();
+                commandEchoMode = it->second.config.q_total_cmd().mode();
+              }
             }
             if (handleUpdateLocked(&it->second, update)) {
               requestControlLocked(groupName, &it->second, "订阅输入点更新", update.dst_tag());
             }
           }
           if (publishCommandEcho && commandEchoConnId != 0) {
-            publishCommandEchoPoint(commandEchoConnId, update);
+            publishCommandEchoPoint(commandEchoConnId, commandEchoSignal, commandEchoMode, update);
           }
         }
 
@@ -1069,15 +1091,28 @@ void GroupManager::publishDefaultLimitPoints(const std::string& groupName, std::
       defaultOutput.missingUncontrollableMemberCount);
 }
 
-void GroupManager::publishCommandEchoPoint(uint32_t connId, const DataCenterProto::PointUpdate& update) {
+void GroupManager::publishCommandEchoPoint(
+    uint32_t connId,
+    const AVCProto::SignalSpec& commandSignal,
+    AVCProto::ValueMode commandMode,
+    const DataCenterProto::PointUpdate& update) {
   const auto commandEchoTag = defaultPointTag(AVCProto::DEFAULT_POINT_KIND_COMMAND_ECHO);
-  auto status = dataCenter_.PublishValue(connId, std::string(commandEchoTag), update.value(), update.quality(), update.ts_ms());
+  double value = 0.0;
+  if (!pointValueToDouble(update.value(), &value)) {
+    LOG_WARNING("AVC 发布调节返回值跳过: conn_id={}, tag={}, 原因=命令点值类型不支持", connId, commandEchoTag);
+    return;
+  }
+
+  const auto echoValue = commandEchoEngineeringValue(commandSignal, commandMode, value);
+  auto status = dataCenter_.PublishDouble(connId, std::string(commandEchoTag), echoValue, update.quality(), update.ts_ms());
   if (!status.ok()) {
     LOG_ERROR("AVC 发布调节返回值失败: conn_id={}, tag={}, 原因={}", connId, commandEchoTag, status.error_message());
   } else {
-    LOG_DEBUG("AVC 已发布调节返回值: conn_id={}, tag={}, 质量={}, ts_ms={}",
+    LOG_DEBUG("AVC 已发布调节返回值: conn_id={}, tag={}, value={}, echo_value={}, 质量={}, ts_ms={}",
               connId,
               commandEchoTag,
+              value,
+              echoValue,
               static_cast<int>(update.quality()),
               update.ts_ms());
   }
@@ -1177,7 +1212,7 @@ void GroupManager::controlTick(const std::string& groupName) {
     }
   }
 
-  for (size_t i = 0; i < output.memberPublish.size() && i < output.memberPublishRaw.size(); ++i) {
+  for (size_t i = 0; i < output.memberPublish.size() && i < output.memberPublishKvar.size(); ++i) {
     if (!output.memberPublish[i]) {
       continue;
     }
@@ -1185,13 +1220,13 @@ void GroupManager::controlTick(const std::string& groupName) {
     if (!member.has_q_set() || !member.q_set().has_signal() || member.q_set().signal().tag().empty()) {
       continue;
     }
-    status = dataCenter_.PublishDouble(connId, member.q_set().signal().tag(), output.memberPublishRaw[i], quality, 0);
+    status = dataCenter_.PublishDouble(connId, member.q_set().signal().tag(), output.memberPublishKvar[i], quality, 0);
     if (!status.ok()) {
-      LOG_ERROR("AVC 下发成员无功设定失败: group_name={}, member_name={}, tag={}, raw={}, 原因={}",
+      LOG_ERROR("AVC 下发成员无功设定失败: group_name={}, member_name={}, tag={}, publish_kvar={}, 原因={}",
                 groupName,
                 member.member_name(),
                 member.q_set().signal().tag(),
-                output.memberPublishRaw[i],
+                output.memberPublishKvar[i],
                 status.error_message());
     }
   }

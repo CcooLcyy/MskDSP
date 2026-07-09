@@ -70,7 +70,7 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
   去掉该符号位后其余 BCD 位按十进制数值解析；例如 `80031` 表示 `-31`。
 - `access`：读写属性（`ACCESS_READ_ONLY/ACCESS_WRITE_ONLY/ACCESS_READ_WRITE`）。
 - `scale/offset`：工程量换算 `value = raw * scale + offset`（`scale=0` 视为 1）。
-- `deadband`：工程量单位，`<=0` 不过滤；BOOL 忽略 `scale/offset/deadband`。
+- `deadband`：工程量单位，`<=0` 不过滤；当 `>0` 时，`|delta| < deadband` 过滤，`|delta| >= deadband` 上报；BOOL 忽略 `scale/offset/deadband`。
 
 ### 数据块字段说明
 - `block_di`：数据块 DI，8 位十六进制字符串；配置为人读顺序（高字节在前），模块发送时按字节逆序（低字节在前）。

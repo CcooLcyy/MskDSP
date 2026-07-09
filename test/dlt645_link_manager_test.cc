@@ -2438,7 +2438,7 @@ TEST(Dlt645LinkManagerTest, DecodeAndPublishAllFF) {
   EXPECT_EQ(resp.updates(0).quality(), DataCenterProto::QUALITY_BAD);
 }
 
-// 验证：decodeAndPublish 支持字符串裁剪与数值死区过滤。
+// 验证：decodeAndPublish 支持字符串裁剪与数值死区边界发布。
 TEST(Dlt645LinkManagerTest, DecodeAndPublishStringTrimAndDeadband) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
@@ -2471,14 +2471,34 @@ TEST(Dlt645LinkManagerTest, DecodeAndPublishStringTrimAndDeadband) {
   std::vector<uint8_t> floatPayload = {static_cast<uint8_t>(u1 & 0xFF), static_cast<uint8_t>((u1 >> 8) & 0xFF), static_cast<uint8_t>((u1 >> 16) & 0xFF), static_cast<uint8_t>((u1 >> 24) & 0xFF)};
   st = DLT645LinkManagerTestPeer::DecodeAndPublish(mgr, "conn-str", floatPoint, floatPayload, 2, false);
   EXPECT_TRUE(st.ok());
+  const auto connId = DLT645LinkManagerTestPeer::GetConnId(mgr, "conn-str");
+  EXPECT_EQ(state.GetPublishCount(connId, "F"), 1u);
 
   float f2 = 10.5f;
   uint32_t u2 = 0;
   std::memcpy(&u2, &f2, sizeof(float));
   std::vector<uint8_t> floatPayload2 = {static_cast<uint8_t>(u2 & 0xFF), static_cast<uint8_t>((u2 >> 8) & 0xFF), static_cast<uint8_t>((u2 >> 16) & 0xFF), static_cast<uint8_t>((u2 >> 24) & 0xFF)};
-  // 死区过滤：差值小于 deadband 时直接返回 OK。
+  // 死区过滤：差值小于 deadband 时过滤，刚好等于 deadband 时应上报。
   st = DLT645LinkManagerTestPeer::DecodeAndPublish(mgr, "conn-str", floatPoint, floatPayload2, 3, false);
   EXPECT_TRUE(st.ok());
+  EXPECT_EQ(state.GetPublishCount(connId, "F"), 1u);
+
+  float f3 = 11.0f;
+  uint32_t u3 = 0;
+  std::memcpy(&u3, &f3, sizeof(float));
+  std::vector<uint8_t> floatPayload3 = {static_cast<uint8_t>(u3 & 0xFF), static_cast<uint8_t>((u3 >> 8) & 0xFF), static_cast<uint8_t>((u3 >> 16) & 0xFF), static_cast<uint8_t>((u3 >> 24) & 0xFF)};
+  // 差值刚好等于 deadband，应发布。
+  st = DLT645LinkManagerTestPeer::DecodeAndPublish(mgr, "conn-str", floatPoint, floatPayload3, 4, false);
+  EXPECT_TRUE(st.ok());
+  EXPECT_EQ(state.GetPublishCount(connId, "F"), 2u);
+
+  DataCenterProto::GetLatestRequest latestReq;
+  latestReq.set_conn_id(connId);
+  latestReq.add_tags("F");
+  DataCenterProto::GetLatestResponse latestResp;
+  ASSERT_TRUE(state.GetLatest(latestReq, &latestResp).ok());
+  ASSERT_EQ(latestResp.updates_size(), 1);
+  EXPECT_DOUBLE_EQ(latestResp.updates(0).value().double_value(), 11.0);
 }
 
 // 验证：decodeAndPublish 支持数值与 BCD 错误分支。

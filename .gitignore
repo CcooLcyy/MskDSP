@@ -1,6 +1,7 @@
 # cmake
 build
 build-arm64
+build-check
 
 # clangd
 .cache

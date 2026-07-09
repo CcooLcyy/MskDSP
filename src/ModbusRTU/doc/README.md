@@ -104,7 +104,7 @@ ModbusRTU 模块负责管理 ModbusRTU 链路与点表，当前同时支持两�
 - 读寄存器点位按 `value = raw * scale + offset` 做工程量换算；写寄存器点位按 `raw = (value - offset) / scale` 反向换算。
 - `deadband` 仅对读寄存器上报生效；写寄存器点位忽略。
 - `scale=0` 视为 `1`，计算公式为 `value = raw * scale + offset`。
-- `deadband <= 0` 表示不过滤。
+- `deadband <= 0` 表示不过滤；当 `>0` 时，`|delta| < deadband` 过滤，`|delta| >= deadband` 上报。
 
 ## 主站写寄存器闭环
 - 触发方式：上位机或其他模块先把命令写入 DataCenter 源端点，再通过 `Route` 路由到 ModbusRTU 的稳定端点；ModbusRTU 运行期仍按当前 `conn_id + tag` 订阅命令。

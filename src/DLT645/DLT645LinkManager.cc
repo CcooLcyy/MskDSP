@@ -2979,7 +2979,7 @@ grpc::Status LinkManager::decodeAndPublish(LinkRuntime *link, const PointTable::
   if (point.deadband > 0) {
     auto lastIt = link->lastReportedByTag.find(point.tag);
     if (lastIt != link->lastReportedByTag.end()) {
-      if (std::abs(value - lastIt->second) <= point.deadband) {
+      if (std::abs(value - lastIt->second) < point.deadband) {
         LOG_DEBUG("DLT645 死区过滤: tag={}, value={}, last={}, deadband={}", point.tag, value, lastIt->second, point.deadband);
         return grpc::Status::OK;
       }

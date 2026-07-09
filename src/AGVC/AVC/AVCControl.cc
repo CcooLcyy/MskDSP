@@ -22,16 +22,6 @@ double toPhysicalDelta(const AVCProto::SignalSpec& s, double rawDelta) {
   return rawDelta * scale;
 }
 
-double toRawAbs(const AVCProto::SignalSpec& s, double physical) {
-  const auto scale = effectiveScale(s);
-  return (physical - s.offset()) / scale;
-}
-
-double toRawDelta(const AVCProto::SignalSpec& s, double physicalDelta) {
-  const auto scale = effectiveScale(s);
-  return physicalDelta / scale;
-}
-
 bool isVoltageMode(const AVCProto::GroupConfig& config) {
   return config.command_case() == AVCProto::GroupConfig::kVoltageCmd;
 }
@@ -102,7 +92,7 @@ std::optional<ControlOutput> ComputeControlOutput(
   }
   out.memberTargetQKvar.assign(memberCount, 0.0);
   out.memberPublish.assign(memberCount, false);
-  out.memberPublishRaw.assign(memberCount, 0.0);
+  out.memberPublishKvar.assign(memberCount, 0.0);
 
   std::vector<double> memberQMeasKvar(memberCount, 0.0);
   for (size_t i = 0; i < memberCount; ++i) {
@@ -228,7 +218,7 @@ std::optional<ControlOutput> ComputeControlOutput(
     }
 
     const auto& outSpec = member.q_set();
-    double publishRaw = 0.0;
+    double publishKvar = 0.0;
     if (outSpec.mode() == AVCProto::VALUE_MODE_DELTA) {
       double baseQKvar = 0.0;
       switch (outSpec.delta_base()) {
@@ -255,13 +245,13 @@ std::optional<ControlOutput> ComputeControlOutput(
         baseQKvar = memberQMeasKvar[i];
         break;
       }
-      publishRaw = toRawDelta(outSpec.signal(), out.memberTargetQKvar[i] - baseQKvar);
+      publishKvar = out.memberTargetQKvar[i] - baseQKvar;
     } else {
-      publishRaw = toRawAbs(outSpec.signal(), out.memberTargetQKvar[i]);
+      publishKvar = out.memberTargetQKvar[i];
     }
 
     out.memberPublish[i] = true;
-    out.memberPublishRaw[i] = publishRaw;
+    out.memberPublishKvar[i] = publishKvar;
   }
 
   out.hasLastDesiredTotalQKvar = true;

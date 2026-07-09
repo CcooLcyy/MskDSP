@@ -47,6 +47,18 @@ bool sameValue(double lhs, double rhs) {
   return std::fabs(lhs - rhs) <= kValueChangeEps;
 }
 
+double effectiveScale(const AGCProto::SignalSpec &signal) {
+  return signal.scale() == 0.0 ? 1.0 : signal.scale();
+}
+
+double commandEchoEngineeringValue(const AGCProto::ValueSpec &spec, double value) {
+  const auto scale = effectiveScale(spec.signal());
+  if (spec.mode() == AGCProto::VALUE_MODE_DELTA) {
+    return value * scale;
+  }
+  return value * scale + spec.signal().offset();
+}
+
 std::string_view defaultPointTag(AGCProto::DefaultPointKind kind) {
   for (const auto &point : DefaultPointDefinitions()) {
     if (point.kind == kind) {
@@ -486,6 +498,7 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
         while (reader->Read(&update)) {
           bool publishCommandEcho = false;
           uint32_t commandEchoConnId = 0;
+          AGCProto::ValueSpec commandEchoSpec;
           {
             std::lock_guard<std::mutex> lock(mu_);
             auto it = groupsByName_.find(groupName);
@@ -495,13 +508,14 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
             if (!it->second.cmdTag.empty() && update.dst_tag() == it->second.cmdTag) {
               publishCommandEcho = true;
               commandEchoConnId = it->second.connId;
+              commandEchoSpec = it->second.config.p_cmd();
             }
             if (handleUpdateLocked(&it->second, update)) {
               requestControlLocked(groupName, &it->second, "订阅输入点更新", update.dst_tag());
             }
           }
           if (publishCommandEcho && commandEchoConnId != 0) {
-            publishCommandEchoPoint(commandEchoConnId, update);
+            publishCommandEchoPoint(commandEchoConnId, commandEchoSpec, update);
           }
         }
 
@@ -899,13 +913,28 @@ void GroupManager::publishDefaultLimitPoints(const std::string &groupName, std::
       defaultOutput.missingUncontrollableMemberCount);
 }
 
-void GroupManager::publishCommandEchoPoint(uint32_t connId, const DataCenterProto::PointUpdate &update) {
+void GroupManager::publishCommandEchoPoint(
+    uint32_t connId, const AGCProto::ValueSpec &commandSpec, const DataCenterProto::PointUpdate &update) {
   const auto commandEchoTag = defaultPointTag(AGCProto::DEFAULT_POINT_KIND_COMMAND_ECHO);
-  auto status = dataCenter_.PublishValue(connId, std::string(commandEchoTag), update.value(), update.quality(), update.ts_ms());
+  double value = 0.0;
+  if (!pointValueToDouble(update.value(), &value)) {
+    LOG_WARNING("AGC 发布调节返回值跳过: conn_id={}, tag={}, 原因=命令点值类型不支持", connId, commandEchoTag);
+    return;
+  }
+
+  const auto echoValue = commandEchoEngineeringValue(commandSpec, value);
+  auto status = dataCenter_.PublishDouble(connId, std::string(commandEchoTag), echoValue, update.quality(), update.ts_ms());
   if (!status.ok()) {
     LOG_ERROR("AGC 发布调节返回值失败: conn_id={}, tag={}, 原因={}", connId, commandEchoTag, status.error_message());
   } else {
-    LOG_DEBUG("AGC 已发布调节返回值: conn_id={}, tag={}, 质量={}, ts_ms={}", connId, commandEchoTag, static_cast<int>(update.quality()), update.ts_ms());
+    LOG_DEBUG(
+        "AGC 已发布调节返回值: conn_id={}, tag={}, value={}, echo_kw={}, 质量={}, ts_ms={}",
+        connId,
+        commandEchoTag,
+        value,
+        echoValue,
+        static_cast<int>(update.quality()),
+        update.ts_ms());
   }
 }
 
@@ -942,8 +971,8 @@ void GroupManager::controlTick(const std::string &groupName) {
   }
   const auto quality = DataCenterProto::QUALITY_GOOD;
   double totalMeasKw = 0.0;
-  if (const auto totalMeasRaw = ComputeTotalMeasRaw(config, input, &totalMeasKw)) {
-    auto status = dataCenter_.PublishDouble(connId, config.outputs().p_total_meas().tag(), *totalMeasRaw, quality, 0);
+  if (const auto totalMeasPublishKw = ComputeTotalMeasKw(config, input, &totalMeasKw)) {
+    auto status = dataCenter_.PublishDouble(connId, config.outputs().p_total_meas().tag(), *totalMeasPublishKw, quality, 0);
     if (!status.ok()) {
       LOG_ERROR(
           "AGC 发布总实时测量值失败: group_name={}, conn_id={}, tag={}, total_meas_kw={}, 原因={}",
@@ -954,12 +983,12 @@ void GroupManager::controlTick(const std::string &groupName) {
           status.error_message());
     } else {
       LOG_DEBUG(
-          "AGC 已发布总实时测量值: group_name={}, conn_id={}, tag={}, total_meas_kw={}, raw={}",
+          "AGC 已发布总实时测量值: group_name={}, conn_id={}, tag={}, total_meas_kw={}, publish_kw={}",
           groupName,
           connId,
           config.outputs().p_total_meas().tag(),
           totalMeasKw,
-          *totalMeasRaw);
+          *totalMeasPublishKw);
     }
   }
   publishDefaultLimitPoints(groupName, "事件触发控制");
@@ -973,16 +1002,16 @@ void GroupManager::controlTick(const std::string &groupName) {
   if (config.has_outputs()) {
     const auto &o = config.outputs();
     if (output.publishTotalTarget) {
-      (void)dataCenter_.PublishDouble(connId, o.p_total_target().tag(), output.totalTargetRaw, quality, 0);
+      (void)dataCenter_.PublishDouble(connId, o.p_total_target().tag(), output.actualTargetKw, quality, 0);
     }
     if (output.publishTotalError) {
-      (void)dataCenter_.PublishDouble(connId, o.p_total_error().tag(), output.totalErrorRaw, quality, 0);
+      (void)dataCenter_.PublishDouble(connId, o.p_total_error().tag(), output.totalErrorKw, quality, 0);
     }
   }
 
   // 下发成员设定值。
   const auto memberCount = static_cast<size_t>(config.members_size());
-  for (size_t i = 0; i < memberCount && i < output.memberPublish.size() && i < output.memberPublishRaw.size(); ++i) {
+  for (size_t i = 0; i < memberCount && i < output.memberPublish.size() && i < output.memberPublishKw.size(); ++i) {
     if (!output.memberPublish[i]) {
       continue;
     }
@@ -990,7 +1019,7 @@ void GroupManager::controlTick(const std::string &groupName) {
     if (!m.has_p_set() || !m.p_set().has_signal() || m.p_set().signal().tag().empty()) {
       continue;
     }
-    (void)dataCenter_.PublishDouble(connId, m.p_set().signal().tag(), output.memberPublishRaw[i], quality, 0);
+    (void)dataCenter_.PublishDouble(connId, m.p_set().signal().tag(), output.memberPublishKw[i], quality, 0);
   }
 
   // 下发后更新状态（尽力而为）。

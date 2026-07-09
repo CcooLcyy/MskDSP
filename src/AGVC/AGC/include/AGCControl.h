@@ -37,15 +37,12 @@ struct ControlOutput {
   double unallocatedKw{0.0};
 
   bool publishTotalMeas{false};
-  double totalMeasRaw{0.0};
   bool publishTotalTarget{false};
-  double totalTargetRaw{0.0};
   bool publishTotalError{false};
-  double totalErrorRaw{0.0};
 
   std::vector<double> memberTargetKw;
   std::vector<bool> memberPublish;
-  std::vector<double> memberPublishRaw;
+  std::vector<double> memberPublishKw;
 
   bool hasLastDesiredTotalKw{false};
   double nextLastDesiredTotalKw{0.0};
@@ -64,7 +61,7 @@ struct DefaultPointOutput {
   size_t missingUncontrollableMemberCount{0};
 };
 
-std::optional<double> ComputeTotalMeasRaw(
+std::optional<double> ComputeTotalMeasKw(
     const AGCProto::GroupConfig& config,
     const ControlInput& input,
     double* totalMeasKwOut = nullptr);

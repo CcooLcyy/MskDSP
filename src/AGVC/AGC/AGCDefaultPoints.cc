@@ -34,7 +34,7 @@ constexpr std::array<DefaultPointDefinition, 5> kDefaultPoints{{
         .kind = AGCProto::DEFAULT_POINT_KIND_COMMAND_ECHO,
         .tag = "调节返回值",
         .name = "调节返回值",
-        .description = "对主站下发到 AGC 总设定点的原始值、质量与时间戳做原样回显",
+        .description = "对主站下发到 AGC 总设定点的工程量、质量与时间戳做回显",
     },
 }};
 

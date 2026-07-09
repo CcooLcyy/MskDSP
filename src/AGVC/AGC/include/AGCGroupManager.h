@@ -92,7 +92,7 @@ private:
   void primeControlInputs(const std::string &groupName);
   void requestControlLocked(const std::string &groupName, GroupRuntime *g, std::string_view reason, std::string_view tag);
   void publishDefaultLimitPoints(const std::string &groupName, std::string_view trigger);
-  void publishCommandEchoPoint(uint32_t connId, const DataCenterProto::PointUpdate &update);
+  void publishCommandEchoPoint(uint32_t connId, const AGCProto::ValueSpec &commandSpec, const DataCenterProto::PointUpdate &update);
 
   bool handleUpdateLocked(GroupRuntime *g, const DataCenterProto::PointUpdate &update);
   void controlTick(const std::string &groupName);

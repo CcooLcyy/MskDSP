@@ -18,16 +18,6 @@ double toPhysicalDelta(const AGCProto::SignalSpec& s, double rawDelta) {
   return rawDelta * scale;
 }
 
-double toRawAbs(const AGCProto::SignalSpec& s, double physical) {
-  const auto scale = effectiveScale(s);
-  return (physical - s.offset()) / scale;
-}
-
-double toRawDelta(const AGCProto::SignalSpec& s, double physicalDelta) {
-  const auto scale = effectiveScale(s);
-  return physicalDelta / scale;
-}
-
 double effectiveMemberMaxKw(const AGCProto::MemberConfig& member) {
   if (member.max_kw() != 0.0) {
     return member.max_kw();
@@ -50,7 +40,7 @@ double computeTotalMeasKw(const AGCProto::GroupConfig& config, const ControlInpu
 }
 }  // namespace
 
-std::optional<double> ComputeTotalMeasRaw(const AGCProto::GroupConfig& config, const ControlInput& input, double* totalMeasKwOut) {
+std::optional<double> ComputeTotalMeasKw(const AGCProto::GroupConfig& config, const ControlInput& input, double* totalMeasKwOut) {
   if (!config.has_outputs()) {
     return std::nullopt;
   }
@@ -63,7 +53,7 @@ std::optional<double> ComputeTotalMeasRaw(const AGCProto::GroupConfig& config, c
   if (totalMeasKwOut != nullptr) {
     *totalMeasKwOut = totalMeasKw;
   }
-  return toRawAbs(outputs.p_total_meas(), totalMeasKw);
+  return totalMeasKw;
 }
 
 DefaultPointOutput ComputeDefaultPointOutput(const AGCProto::GroupConfig& config, const ControlInput& input) {
@@ -116,7 +106,7 @@ std::optional<ControlOutput> ComputeControlOutput(
   ControlOutput out;
   out.memberTargetKw.assign(memberCount, 0.0);
   out.memberPublish.assign(memberCount, false);
-  out.memberPublishRaw.assign(memberCount, 0.0);
+  out.memberPublishKw.assign(memberCount, 0.0);
 
   std::vector<double> measKw(memberCount, 0.0);
   for (size_t i = 0; i < memberCount; ++i) {
@@ -165,7 +155,6 @@ std::optional<ControlOutput> ComputeControlOutput(
     const auto& outputs = config.outputs();
     if (outputs.has_p_total_meas() && !outputs.p_total_meas().tag().empty()) {
       out.publishTotalMeas = true;
-      out.totalMeasRaw = toRawAbs(outputs.p_total_meas(), out.totalMeasKw);
     }
   }
 
@@ -230,11 +219,9 @@ std::optional<ControlOutput> ComputeControlOutput(
     const auto& o = config.outputs();
     if (o.has_p_total_target() && !o.p_total_target().tag().empty()) {
       out.publishTotalTarget = true;
-      out.totalTargetRaw = toRawAbs(o.p_total_target(), actualTargetKw);
     }
     if (o.has_p_total_error() && !o.p_total_error().tag().empty()) {
       out.publishTotalError = true;
-      out.totalErrorRaw = toRawAbs(o.p_total_error(), out.totalErrorKw);
     }
   }
 
@@ -248,7 +235,7 @@ std::optional<ControlOutput> ComputeControlOutput(
     }
 
     const auto& outSpec = m.p_set();
-    double publishRaw = 0.0;
+    double publishKw = 0.0;
     if (outSpec.mode() == AGCProto::VALUE_MODE_DELTA) {
       double baseKw = 0.0;
       switch (outSpec.delta_base()) {
@@ -274,13 +261,13 @@ std::optional<ControlOutput> ComputeControlOutput(
         baseKw = measKw[i];
         break;
       }
-      publishRaw = toRawDelta(outSpec.signal(), out.memberTargetKw[i] - baseKw);
+      publishKw = out.memberTargetKw[i] - baseKw;
     } else {
-      publishRaw = toRawAbs(outSpec.signal(), out.memberTargetKw[i]);
+      publishKw = out.memberTargetKw[i];
     }
 
     out.memberPublish[i] = true;
-    out.memberPublishRaw[i] = publishRaw;
+    out.memberPublishKw[i] = publishKw;
   }
 
   out.hasLastDesiredTotalKw = true;

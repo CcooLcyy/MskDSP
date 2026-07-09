@@ -72,9 +72,9 @@ TEST(AgcControlTest, AbsoluteCommandAllocatesByWeight) {
   EXPECT_TRUE(out->publishTotalMeas);
   EXPECT_TRUE(out->publishTotalTarget);
   EXPECT_TRUE(out->publishTotalError);
-  ASSERT_EQ(out->memberPublishRaw.size(), 2u);
-  EXPECT_NEAR(out->memberPublishRaw[0], 20.0, 1e-6);
-  EXPECT_NEAR(out->memberPublishRaw[1], 40.0, 1e-6);
+  ASSERT_EQ(out->memberPublishKw.size(), 2u);
+  EXPECT_NEAR(out->memberPublishKw[0], 20.0, 1e-6);
+  EXPECT_NEAR(out->memberPublishKw[1], 40.0, 1e-6);
   EXPECT_TRUE(out->hasLastDesiredTotalKw);
   EXPECT_NEAR(out->nextLastDesiredTotalKw, 60.0, 1e-6);
 }
@@ -96,7 +96,7 @@ TEST(AgcControlTest, DeltaBaseLastTargetUsesDesiredTotal) {
   EXPECT_NEAR(out->actualTargetKw, 55.0, 1e-6);
 }
 
-// 验证：成员设定为 DELTA/LAST_TARGET 时发布增量值。
+// 验证：成员设定为 DELTA/LAST_TARGET 时发布工程量增量值。
 TEST(AgcControlTest, MemberDeltaBaseLastTargetPublishesDelta) {
   auto cfg = MakeBaseConfig();
   cfg.mutable_p_cmd()->set_mode(AGCProto::VALUE_MODE_ABSOLUTE);
@@ -114,9 +114,9 @@ TEST(AgcControlTest, MemberDeltaBaseLastTargetPublishesDelta) {
 
   auto out = AGC::ComputeControlOutput(cfg, input, strategy);
   ASSERT_TRUE(out.has_value());
-  ASSERT_EQ(out->memberPublishRaw.size(), 2u);
-  EXPECT_NEAR(out->memberPublishRaw[0], 5.0, 1e-6);
-  EXPECT_NEAR(out->memberPublishRaw[1], 5.0, 1e-6);
+  ASSERT_EQ(out->memberPublishKw.size(), 2u);
+  EXPECT_NEAR(out->memberPublishKw[0], 5.0, 1e-6);
+  EXPECT_NEAR(out->memberPublishKw[1], 5.0, 1e-6);
 }
 
 // 验证：成员上限受限时返回 unallocated。
@@ -223,8 +223,43 @@ TEST(AgcControlTest, MemberDeltaBaseLastTargetKeepsMemberTargetCache) {
   EXPECT_TRUE(out->hasLastMemberTargetKw[1]);
   EXPECT_NEAR(out->nextLastMemberTargetKw[0], 20.0, 1e-6);
   EXPECT_NEAR(out->nextLastMemberTargetKw[1], 20.0, 1e-6);
-  EXPECT_NEAR(out->memberPublishRaw[0], 5.0, 1e-6);
-  EXPECT_NEAR(out->memberPublishRaw[1], 5.0, 1e-6);
+  EXPECT_NEAR(out->memberPublishKw[0], 5.0, 1e-6);
+  EXPECT_NEAR(out->memberPublishKw[1], 5.0, 1e-6);
+}
+
+// 验证：成员设定发布值使用工程量口径，不因输出 SignalSpec 的 scale/offset 被反向换算。
+TEST(AgcControlTest, MemberSetpointPublishesEngineeringValueWithoutReverseScale) {
+  auto cfg = MakeBaseConfig();
+  cfg.mutable_members(0)->set_weight(1);
+  cfg.mutable_members(1)->set_weight(1);
+  cfg.mutable_members(0)->mutable_p_set()->mutable_signal()->set_scale(2.0);
+  cfg.mutable_members(0)->mutable_p_set()->mutable_signal()->set_offset(5.0);
+  cfg.mutable_members(1)->mutable_p_set()->mutable_signal()->set_scale(2.0);
+  cfg.mutable_members(1)->mutable_p_set()->mutable_signal()->set_offset(5.0);
+
+  AGVC::WeightedStrategy strategy;
+  auto input = MakeBaseInput(40.0, {0.0, 0.0});
+
+  auto out = AGC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(out.has_value());
+  ASSERT_EQ(out->memberPublishKw.size(), 2u);
+  EXPECT_NEAR(out->memberPublishKw[0], 20.0, 1e-6);
+  EXPECT_NEAR(out->memberPublishKw[1], 20.0, 1e-6);
+}
+
+// 验证：总实时输出发布工程量，不因 outputs.p_total_meas 的 scale/offset 被反向换算。
+TEST(AgcControlTest, TotalMeasurementPublishesEngineeringValueWithoutReverseScale) {
+  auto cfg = MakeBaseConfig();
+  cfg.mutable_outputs()->mutable_p_total_meas()->set_scale(2.0);
+  cfg.mutable_outputs()->mutable_p_total_meas()->set_offset(5.0);
+
+  auto input = MakeBaseInput(0.0, {10.0, 20.0});
+
+  double totalMeasKw = 0.0;
+  const auto publishValue = AGC::ComputeTotalMeasKw(cfg, input, &totalMeasKw);
+  ASSERT_TRUE(publishValue.has_value());
+  EXPECT_NEAR(totalMeasKw, 30.0, 1e-6);
+  EXPECT_NEAR(*publishValue, 30.0, 1e-6);
 }
 
 // 验证：不可控成员作为被动出力，从总目标中扣除后再分配。

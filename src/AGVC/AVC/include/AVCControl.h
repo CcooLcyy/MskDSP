@@ -50,7 +50,7 @@ struct ControlOutput {
 
   std::vector<double> memberTargetQKvar;
   std::vector<bool> memberPublish;
-  std::vector<double> memberPublishRaw;
+  std::vector<double> memberPublishKvar;
 
   bool hasLastDesiredTotalQKvar{false};
   double nextLastDesiredTotalQKvar{0.0};

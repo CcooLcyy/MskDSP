@@ -82,6 +82,24 @@ TEST(AvcControlTest, VoltageModeComputesReactiveTargetFromVoltageError) {
   EXPECT_NEAR(out->memberTargetQKvar[1], 5.0, 1e-6);
 }
 
+// 验证：目标电压模式的电压输入按 value*scale+offset 换算为工程量。
+TEST(AvcControlTest, VoltageModeUsesScaledVoltageInputs) {
+  auto cfg = MakeBaseConfig();
+  cfg.mutable_voltage_cmd()->set_scale(0.1);
+  cfg.mutable_voltage_cmd()->set_offset(0.8);
+  cfg.mutable_voltage_meas()->set_scale(0.1);
+  cfg.mutable_voltage_meas()->set_offset(0.8);
+
+  AGVC::WeightedStrategy strategy;
+  auto input = MakeVoltageInput(2.0, 1.0, {0.0, 0.0});
+
+  auto out = AVC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(out.has_value());
+  EXPECT_NEAR(out->voltageError, 0.1, 1e-6);
+  EXPECT_NEAR(out->desiredTotalQKvar, 10.0, 1e-6);
+  EXPECT_NEAR(out->actualTargetQKvar, 10.0, 1e-6);
+}
+
 // 验证：目标电压模式在死区内保持当前总无功实测，不继续推动总无功目标变化。
 TEST(AvcControlTest, VoltageModeKeepsCurrentReactiveWhenInsideDeadband) {
   auto cfg = MakeBaseConfig();
@@ -150,6 +168,26 @@ TEST(AvcControlTest, QTotalDeltaBaseCurrentMeasUsesMeasuredTotal) {
   EXPECT_NEAR(out->actualTargetQKvar, 25.0, 1e-6);
 }
 
+// 验证：总无功增量命令只按 value*scale 换算，不叠加 offset。
+TEST(AvcControlTest, QTotalDeltaCommandUsesScaleWithoutOffset) {
+  auto cfg = MakeBaseConfig();
+  cfg.mutable_q_total_cmd()->mutable_signal()->set_tag("Q_CMD");
+  cfg.mutable_q_total_cmd()->mutable_signal()->set_unit("kVar");
+  cfg.mutable_q_total_cmd()->mutable_signal()->set_scale(2.0);
+  cfg.mutable_q_total_cmd()->mutable_signal()->set_offset(5.0);
+  cfg.mutable_q_total_cmd()->set_mode(AVCProto::VALUE_MODE_DELTA);
+  cfg.mutable_q_total_cmd()->set_delta_base(AVCProto::DELTA_BASE_CURRENT_MEAS);
+
+  AGVC::WeightedStrategy strategy;
+  auto input = MakeQTotalInput(3.0, {10.0, 10.0});
+
+  auto out = AVC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(out.has_value());
+  EXPECT_NEAR(out->totalQMeasKvar, 20.0, 1e-6);
+  EXPECT_NEAR(out->desiredTotalQKvar, 26.0, 1e-6);
+  EXPECT_NEAR(out->actualTargetQKvar, 26.0, 1e-6);
+}
+
 // 验证：DELTA_BASE_BASE_TAG 使用同组 conn_id 下的 base_tag 当前值作为总无功增量基准。
 TEST(AvcControlTest, QTotalDeltaBaseBaseTagUsesBaseTag) {
   auto cfg = MakeBaseConfig();
@@ -169,7 +207,7 @@ TEST(AvcControlTest, QTotalDeltaBaseBaseTagUsesBaseTag) {
   EXPECT_NEAR(out->actualTargetQKvar, 35.0, 1e-6);
 }
 
-// 验证：成员设定为 DELTA/LAST_TARGET 时发布增量值。
+// 验证：成员设定为 DELTA/LAST_TARGET 时发布工程量增量值。
 TEST(AvcControlTest, MemberDeltaBaseLastTargetPublishesDelta) {
   auto cfg = MakeBaseConfig();
   cfg.mutable_q_total_cmd()->mutable_signal()->set_tag("Q_CMD");
@@ -187,9 +225,9 @@ TEST(AvcControlTest, MemberDeltaBaseLastTargetPublishesDelta) {
 
   auto out = AVC::ComputeControlOutput(cfg, input, strategy);
   ASSERT_TRUE(out.has_value());
-  ASSERT_EQ(out->memberPublishRaw.size(), 2u);
-  EXPECT_NEAR(out->memberPublishRaw[0], 5.0, 1e-6);
-  EXPECT_NEAR(out->memberPublishRaw[1], 5.0, 1e-6);
+  ASSERT_EQ(out->memberPublishKvar.size(), 2u);
+  EXPECT_NEAR(out->memberPublishKvar[0], 5.0, 1e-6);
+  EXPECT_NEAR(out->memberPublishKvar[1], 5.0, 1e-6);
 }
 
 // 验证：成员设定为 DELTA/CURRENT_MEAS 时，以该成员当前无功实测作为增量基准。
@@ -208,15 +246,36 @@ TEST(AvcControlTest, MemberDeltaBaseCurrentMeasPublishesDeltaAgainstMemberMeas) 
 
   auto out = AVC::ComputeControlOutput(cfg, input, strategy);
   ASSERT_TRUE(out.has_value());
-  ASSERT_EQ(out->memberPublishRaw.size(), 2u);
+  ASSERT_EQ(out->memberPublishKvar.size(), 2u);
   EXPECT_NEAR(out->memberTargetQKvar[0], 20.0, 1e-6);
   EXPECT_NEAR(out->memberTargetQKvar[1], 20.0, 1e-6);
-  EXPECT_NEAR(out->memberPublishRaw[0], 10.0, 1e-6);
-  EXPECT_NEAR(out->memberPublishRaw[1], 10.0, 1e-6);
+  EXPECT_NEAR(out->memberPublishKvar[0], 10.0, 1e-6);
+  EXPECT_NEAR(out->memberPublishKvar[1], 10.0, 1e-6);
 }
 
-// 验证：成员总无功能力受限时返回 unallocated，并把总无功目标钳制在当前能力范围内。
-TEST(AvcControlTest, AllocationReturnsUnallocatedWhenMembersSaturated) {
+// 验证：成员无功设定发布值使用工程量口径，不因输出 SignalSpec 的 scale/offset 被反向换算。
+TEST(AvcControlTest, MemberSetpointPublishesEngineeringValueWithoutReverseScale) {
+  auto cfg = MakeBaseConfig();
+  cfg.mutable_q_total_cmd()->mutable_signal()->set_tag("Q_CMD");
+  cfg.mutable_q_total_cmd()->mutable_signal()->set_unit("kVar");
+  cfg.mutable_q_total_cmd()->set_mode(AVCProto::VALUE_MODE_ABSOLUTE);
+  cfg.mutable_members(0)->mutable_q_set()->mutable_signal()->set_scale(2.0);
+  cfg.mutable_members(0)->mutable_q_set()->mutable_signal()->set_offset(5.0);
+  cfg.mutable_members(1)->mutable_q_set()->mutable_signal()->set_scale(2.0);
+  cfg.mutable_members(1)->mutable_q_set()->mutable_signal()->set_offset(5.0);
+
+  AGVC::WeightedStrategy strategy;
+  auto input = MakeQTotalInput(40.0, {0.0, 0.0});
+
+  auto out = AVC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(out.has_value());
+  ASSERT_EQ(out->memberPublishKvar.size(), 2u);
+  EXPECT_NEAR(out->memberPublishKvar[0], 20.0, 1e-6);
+  EXPECT_NEAR(out->memberPublishKvar[1], 20.0, 1e-6);
+}
+
+// 验证：成员总无功能力受限时先把总无功目标钳制在当前能力范围内。
+TEST(AvcControlTest, AllocationClampsDesiredTargetWhenMembersSaturated) {
   auto cfg = MakeBaseConfig();
   cfg.mutable_q_total_cmd()->mutable_signal()->set_tag("Q_CMD");
   cfg.mutable_q_total_cmd()->mutable_signal()->set_unit("kVar");

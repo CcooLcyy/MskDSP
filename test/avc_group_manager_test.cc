@@ -137,16 +137,17 @@ bool WaitForLatestDoubleWithQuality(
   return false;
 }
 
-bool WaitForLatestIntWithQualityAndTs(
-    const FakeDataCenterState& state, uint32_t connId, const char* tag, int64_t expected, DataCenterProto::Quality quality, int64_t tsMs) {
+bool WaitForLatestDoubleWithQualityAndTs(
+    const FakeDataCenterState& state, uint32_t connId, const char* tag, double expected, DataCenterProto::Quality quality, int64_t tsMs) {
   for (int i = 0; i < 50; ++i) {
     DataCenterProto::GetLatestRequest req;
     req.set_conn_id(connId);
     req.add_tags(tag);
 
     DataCenterProto::GetLatestResponse resp;
-    if (state.GetLatest(req, &resp).ok() && resp.updates_size() == 1 && resp.updates(0).value().has_int_value()) {
-      if (resp.updates(0).value().int_value() == expected && resp.updates(0).quality() == quality && resp.updates(0).ts_ms() == tsMs) {
+    if (state.GetLatest(req, &resp).ok() && resp.updates_size() == 1 && resp.updates(0).value().has_double_value()) {
+      if (std::fabs(resp.updates(0).value().double_value() - expected) <= 1e-6 && resp.updates(0).quality() == quality &&
+          resp.updates(0).ts_ms() == tsMs) {
         return true;
       }
     }
@@ -258,7 +259,7 @@ TEST(AvcGroupManagerTest, UpsertGroupRegistersAndPublishesDefaultLimitPoints) {
   ASSERT_TRUE(mgr.StopGroup("g-default-limit").ok());
 }
 
-// 验证：目标电压模式在输入点更新后会发布当前电压、总无功结果点和成员无功设定。
+// 验证：目标电压模式在输入点更新后会发布当前电压、总无功结果点和工程量口径的成员无功设定。
 TEST(AvcGroupManagerTest, VoltageModePublishesTelemetryAndMemberSetpoints) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
@@ -266,8 +267,14 @@ TEST(AvcGroupManagerTest, VoltageModePublishesTelemetryAndMemberSetpoints) {
   GroupManager mgr("AVC");
   mgr.setDataCenterStub(stub);
 
+  auto groupReq = MakeVoltageGroupReq("g-voltage");
+  groupReq.mutable_config()->mutable_members(0)->mutable_q_set()->mutable_signal()->set_scale(2.0);
+  groupReq.mutable_config()->mutable_members(0)->mutable_q_set()->mutable_signal()->set_offset(5.0);
+  groupReq.mutable_config()->mutable_members(1)->mutable_q_set()->mutable_signal()->set_scale(2.0);
+  groupReq.mutable_config()->mutable_members(1)->mutable_q_set()->mutable_signal()->set_offset(5.0);
+
   AVCProto::GroupInfo info;
-  ASSERT_TRUE(mgr.UpsertGroup(MakeVoltageGroupReq("g-voltage"), &info).ok());
+  ASSERT_TRUE(mgr.UpsertGroup(groupReq, &info).ok());
   ASSERT_TRUE(WaitForSubscriptionCount(state, info.conn_id(), 1));
 
   PublishDoublePoint(&state, info.conn_id(), "V_CMD", 1.0);
@@ -313,16 +320,21 @@ TEST(AvcGroupManagerTest, QTotalModePublishesReactiveTelemetryWithoutVoltageErro
   ASSERT_TRUE(mgr.StopGroup("g-q").ok());
 }
 
-// 验证：命令点更新会回显到“调节返回值”默认点，并保留质量与时间戳。
-TEST(AvcGroupManagerTest, CommandEchoPublishesRawValueQualityAndTimestamp) {
+// 验证：命令点更新会将工程量回显到“调节返回值”默认点，并保留质量与时间戳。
+TEST(AvcGroupManagerTest, CommandEchoPublishesEngineeringValueQualityAndTimestamp) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
   GroupManager mgr("AVC");
   mgr.setDataCenterStub(stub);
 
+  auto groupReq = MakeQTotalGroupReq("g-echo");
+  groupReq.mutable_config()->mutable_q_total_cmd()->mutable_signal()->set_scale(2.0);
+  groupReq.mutable_config()->mutable_q_total_cmd()->mutable_signal()->set_offset(5.0);
+
   AVCProto::GroupInfo info;
-  ASSERT_TRUE(mgr.UpsertGroup(MakeQTotalGroupReq("g-echo"), &info).ok());
+  ASSERT_TRUE(mgr.UpsertGroup(groupReq, &info).ok());
+  ASSERT_TRUE(WaitForSubscriptionCount(state, info.conn_id(), 1));
 
   DataCenterProto::PublishRequest req;
   req.set_conn_id(info.conn_id());
@@ -332,8 +344,8 @@ TEST(AvcGroupManagerTest, CommandEchoPublishesRawValueQualityAndTimestamp) {
   req.set_ts_ms(123456);
   ASSERT_TRUE(state.Publish(req).ok());
 
-  EXPECT_TRUE(WaitForLatestIntWithQualityAndTs(
-      state, info.conn_id(), "调节返回值", 12, DataCenterProto::QUALITY_BAD, 123456));
+  EXPECT_TRUE(WaitForLatestDoubleWithQualityAndTs(
+      state, info.conn_id(), "调节返回值", 29.0, DataCenterProto::QUALITY_BAD, 123456));
 
   ASSERT_TRUE(mgr.StopGroup("g-echo").ok());
 }

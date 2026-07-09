@@ -127,16 +127,17 @@ bool WaitForLatestDoubleWithQuality(
   return false;
 }
 
-bool WaitForLatestIntWithQualityAndTs(
-    const FakeDataCenterState &state, uint32_t connId, const char *tag, int64_t expected, DataCenterProto::Quality quality, int64_t tsMs) {
+bool WaitForLatestDoubleWithQualityAndTs(
+    const FakeDataCenterState &state, uint32_t connId, const char *tag, double expected, DataCenterProto::Quality quality, int64_t tsMs) {
   for (int i = 0; i < 50; ++i) {
     DataCenterProto::GetLatestRequest req;
     req.set_conn_id(connId);
     req.add_tags(tag);
 
     DataCenterProto::GetLatestResponse resp;
-    if (state.GetLatest(req, &resp).ok() && resp.updates_size() == 1 && resp.updates(0).value().has_int_value()) {
-      if (resp.updates(0).value().int_value() == expected && resp.updates(0).quality() == quality && resp.updates(0).ts_ms() == tsMs) {
+    if (state.GetLatest(req, &resp).ok() && resp.updates_size() == 1 && resp.updates(0).value().has_double_value()) {
+      if (std::fabs(resp.updates(0).value().double_value() - expected) <= 1e-6 && resp.updates(0).quality() == quality &&
+          resp.updates(0).ts_ms() == tsMs) {
         return true;
       }
     }
@@ -376,14 +377,16 @@ TEST(AgcGroupManagerTest, UpsertGroupRejectsReservedDefaultPointTag) {
   EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
 }
 
-// 验证：实时命令输入会将原始值、质量与时间戳原样回显到调节返回值默认点。
-TEST(AgcGroupManagerTest, RealtimeCommandPublishesCommandEchoVerbatim) {
+// 验证：实时命令输入会将工程量、质量与时间戳回显到调节返回值默认点。
+TEST(AgcGroupManagerTest, RealtimeCommandPublishesEngineeringCommandEcho) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
   GroupManager mgr("AGC");
   mgr.setDataCenterStub(stub);
   auto req = MakeGroupReq("g-cmd-echo");
+  req.mutable_config()->mutable_p_cmd()->mutable_signal()->set_scale(2.0);
+  req.mutable_config()->mutable_p_cmd()->mutable_signal()->set_offset(5.0);
 
   AGCProto::GroupInfo info;
   ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
@@ -397,8 +400,8 @@ TEST(AgcGroupManagerTest, RealtimeCommandPublishesCommandEchoVerbatim) {
   publishReq.set_quality(DataCenterProto::QUALITY_BAD);
   ASSERT_TRUE(state.Publish(publishReq).ok());
 
-  EXPECT_TRUE(WaitForLatestIntWithQualityAndTs(
-      state, info.conn_id(), "调节返回值", 500, DataCenterProto::QUALITY_BAD, 123456));
+  EXPECT_TRUE(WaitForLatestDoubleWithQualityAndTs(
+      state, info.conn_id(), "调节返回值", 1005.0, DataCenterProto::QUALITY_BAD, 123456));
 
   ASSERT_TRUE(mgr.StopGroup("g-cmd-echo").ok());
 }
@@ -581,7 +584,7 @@ TEST(AgcGroupManagerTest, RestartGroupReusesInitialSnapshotWithoutWaitingForNewI
   ASSERT_TRUE(mgr.StopGroup("g-restart-snapshot").ok());
 }
 
-// 验证：控制组启动后，运行中收到新的总设定输入会触发一次控制发布。
+// 验证：控制组启动后，运行中收到新的总设定输入会触发一次控制发布，输出点按工程量写入 DataCenter。
 TEST(AgcGroupManagerTest, RuntimeCommandUpdateTriggersControlAfterStart) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
@@ -589,6 +592,12 @@ TEST(AgcGroupManagerTest, RuntimeCommandUpdateTriggersControlAfterStart) {
   GroupManager mgr("AGC");
   mgr.setDataCenterStub(stub);
   auto req = MakeGroupReq("g-runtime-cmd");
+  req.mutable_config()->mutable_outputs()->mutable_p_total_meas()->set_scale(2.0);
+  req.mutable_config()->mutable_outputs()->mutable_p_total_meas()->set_offset(5.0);
+  req.mutable_config()->mutable_members(0)->mutable_p_set()->mutable_signal()->set_scale(2.0);
+  req.mutable_config()->mutable_members(0)->mutable_p_set()->mutable_signal()->set_offset(5.0);
+  req.mutable_config()->mutable_members(1)->mutable_p_set()->mutable_signal()->set_scale(2.0);
+  req.mutable_config()->mutable_members(1)->mutable_p_set()->mutable_signal()->set_offset(5.0);
 
   AGCProto::GroupInfo info;
   ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
