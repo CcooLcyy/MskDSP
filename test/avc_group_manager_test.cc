@@ -293,7 +293,7 @@ TEST(AvcGroupManagerTest, VoltageModePublishesTelemetryAndMemberSetpoints) {
   ASSERT_TRUE(mgr.StopGroup("g-voltage").ok());
 }
 
-// 验证：重复下发相同目标电压命令时仍应触发目标电压控制分配。
+// 验证：重复下发相同目标电压命令时仍应重新触发目标电压控制分配。
 TEST(AvcGroupManagerTest, VoltageModeRepeatedSameCommandRetriggersMemberSetpointPublish) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);

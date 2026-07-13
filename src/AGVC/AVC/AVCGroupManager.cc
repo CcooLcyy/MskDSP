@@ -1192,15 +1192,15 @@ bool GroupManager::handleUpdateLocked(GroupRuntime* group, const DataCenterProto
 
   if (!group->commandTag.empty() && tag == group->commandTag) {
     if (group->voltageMode) {
-      const auto changed = !group->hasVoltageCmdRaw || !sameValue(group->voltageCmdRaw, raw);
+      // 命令点即使重复下发同值，也要重新触发一次控制计算。
       group->voltageCmdRaw = raw;
       group->hasVoltageCmdRaw = true;
-      return changed;
+      return true;
     }
-    const auto changed = !group->hasQTotalCmdRaw || !sameValue(group->qTotalCmdRaw, raw);
+    // 总无功命令点即使重复下发同值，也要重新触发一次控制计算。
     group->qTotalCmdRaw = raw;
     group->hasQTotalCmdRaw = true;
-    return changed;
+    return true;
   }
 
   if (group->baseTags.contains(tag)) {
