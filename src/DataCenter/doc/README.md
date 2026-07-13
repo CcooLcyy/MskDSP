@@ -8,6 +8,7 @@ DataCenter 是进程内的“数据总线/转发枢纽”，用于在不同协�
 - connId 分配器：按 `(module_name, conn_name)` 分配/查询 `connId`（全局唯一、可持久化）
 - 点位对齐：通过 `tag`（逻辑点名，可中文）对齐跨协议的同一业务量
 - 有向路由：按点位维度配置 `src -> dst` 的转发规则，支持一对一与一对多
+- 同步命令执行：按唯一路由把协议控制命令转交目标模块，用于 IEC104 等协议形成正/负确认
 - 最新值缓存：支持 `GetLatest` / `Subscribe(snapshot=true)` 获取目的连接内的最新值（best-effort）
 - 完整状态持久化：将连接注册表、连接标签注册表、路由配置合并落盘到 `./conf/config.db`，重启后按同一份快照恢复
 
@@ -83,6 +84,10 @@ DataCenter 对外提供一组面向“连接/连接标签注册表/路由/转发
   - `ts_ms<=0` 时由 DataCenter 填充当前毫秒时间戳。
 - `BatchPublish(BatchPublishRequest) -> Empty`
   - 批量发布（减少 RPC 次数）；原子语义：会先校验全部点，若任一参数错误则整批失败且不产生任何更新（不更新最新值缓存/不推送订阅更新）。
+- `ExecuteCommand(ExecuteCommandRequest) -> ExecuteCommandResponse`
+  - 同步执行命令：DataCenter 按源端点路由解析出唯一目的端点，并调用目标模块实现的 `CommandExecutor.ExecuteCommand`。
+  - 该接口仅用于需要协议级正/负确认的控制命令，不替代 `Publish/Subscribe` 数据转发；没有路由、多路由、目标模块不可达、目标拒绝或超时时，会通过 `status/reject_code/reason` 返回失败原因。
+  - 目标模块返回 `COMMAND_ACCEPTED` 时，DataCenter 更新目的命令点最新值缓存；返回 `COMMAND_REJECTED` 时不更新该命令点缓存。
 - `GetLatest(GetLatestRequest) -> GetLatestResponse`
   - 拉取目的连接内的最新值（best-effort，仅最新值，不含历史）；`tags` 为空表示拉取该连接全部已缓存点。
 - `Subscribe(SubscribeRequest) -> stream PointUpdate`

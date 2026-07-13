@@ -113,6 +113,35 @@ bool pointValueToBool(const DataCenterProto::PointValue& v, bool* out) {
 grpc::Status makeNotFound(const std::string& connName) {
   return grpc::Status(grpc::StatusCode::NOT_FOUND, std::format("未找到链路: {}", connName));
 }
+
+const char* commandStatusToString(DataCenterProto::CommandStatus status) {
+  switch (status) {
+  case DataCenterProto::COMMAND_ACCEPTED:
+    return "已接受";
+  case DataCenterProto::COMMAND_REJECTED:
+    return "已拒绝";
+  case DataCenterProto::COMMAND_NO_ROUTE:
+    return "无路由";
+  case DataCenterProto::COMMAND_AMBIGUOUS_ROUTE:
+    return "多路由";
+  case DataCenterProto::COMMAND_TARGET_UNAVAILABLE:
+    return "目标不可用";
+  case DataCenterProto::COMMAND_TIMEOUT:
+    return "超时";
+  case DataCenterProto::COMMAND_INTERNAL_ERROR:
+    return "内部错误";
+  case DataCenterProto::COMMAND_STATUS_UNSPECIFIED:
+  default:
+    return "未指定";
+  }
+}
+
+CommandResult rejectCommand(std::string reason) {
+  CommandResult result;
+  result.accepted = false;
+  result.reason = std::move(reason);
+  return result;
+}
 }  // namespace
 
 void LinkManager::stopDataCenterSubscribeLocked(LinkRuntime* link) {
@@ -522,7 +551,7 @@ grpc::Status LinkManager::handleClientPointValue(const std::string& connName, co
   return grpc::Status::OK;
 }
 
-grpc::Status LinkManager::handleCommandValue(const std::string& connName, const CommandValue& cv) {
+CommandResult LinkManager::handleCommandValue(const std::string& connName, const CommandValue& cv) {
   uint32_t connId = 0;
   std::string tag;
   IEC104Proto::PointType type = IEC104Proto::POINT_TYPE_UNSPECIFIED;
@@ -532,16 +561,16 @@ grpc::Status LinkManager::handleCommandValue(const std::string& connName, const 
     std::lock_guard<std::mutex> lock(mu_);
     auto it = linksByName_.find(connName);
     if (it == linksByName_.end()) {
-      return makeNotFound(connName);
+      return rejectCommand(std::format("未找到链路: {}", connName));
     }
     if (!isSlaveStation(it->second.config)) {
       LOG_INFO("IEC104 非从站收到命令，忽略发布: conn_name={}", connName);
-      return grpc::Status::OK;
+      return CommandResult{};
     }
     connId = it->second.connId;
     auto p = it->second.pointTable.FindByIoa(cv.ioa);
     if (!p) {
-      return grpc::Status::OK;
+      return rejectCommand(std::format("点表未找到 IOA: {}", cv.ioa));
     }
     tag = p->tag;
     type = p->type;
@@ -555,42 +584,75 @@ grpc::Status LinkManager::handleCommandValue(const std::string& connName, const 
                 tag,
                 static_cast<int>(type),
                 static_cast<int>(cv.type));
-    return grpc::Status::OK;
+    return rejectCommand("IEC104 命令点类型不一致");
   }
+
+  DataCenterProto::ExecuteCommandRequest req;
+  req.mutable_src()->set_conn_id(connId);
+  req.mutable_src()->set_tag(tag);
+  req.set_quality(DataCenterProto::QUALITY_GOOD);
+  req.set_timeout_ms(1500);
+  req.set_request_id(std::format("IEC104:{}:{}", connName, cv.ioa));
 
   if (type == IEC104Proto::POINT_TYPE_FLOAT) {
     const double engValue = applyScale(cv.doubleValue, scale, offset);
-    auto st = dataCenter_.PublishDouble(connId, tag, engValue, DataCenterProto::QUALITY_GOOD, 0);
+    req.mutable_value()->set_double_value(engValue);
+    DataCenterProto::ExecuteCommandResponse resp;
+    auto st = dataCenter_.ExecuteCommand(req, &resp);
     if (!st.ok()) {
-      LOG_WARNING("IEC104 发布设点失败: conn_name={}, tag={}, 错误={}", connName, tag, st.error_message());
+      LOG_WARNING("IEC104 同步执行设点失败: conn_name={}, tag={}, 错误={}", connName, tag, st.error_message());
       std::lock_guard<std::mutex> lock(mu_);
       auto it = linksByName_.find(connName);
       if (it != linksByName_.end()) {
         it->second.lastError = st.error_message();
       }
-    } else {
-      LOG_INFO("IEC104 已发布设点: conn_name={}, tag={}, value={}", connName, tag, engValue);
+      return rejectCommand(st.error_message());
     }
-    return st;
+    if (resp.status() != DataCenterProto::COMMAND_ACCEPTED) {
+      auto reason = resp.reason().empty() ? commandStatusToString(resp.status()) : resp.reason();
+      LOG_WARNING("IEC104 设点被同步命令链路拒绝: conn_name={}, tag={}, value={}, status={}, reject_code={}, 原因={}",
+                  connName,
+                  tag,
+                  engValue,
+                  static_cast<int>(resp.status()),
+                  static_cast<int>(resp.reject_code()),
+                  reason);
+      return rejectCommand(reason);
+    }
+    LOG_INFO("IEC104 设点同步执行成功: conn_name={}, tag={}, value={}", connName, tag, engValue);
+    return CommandResult{};
   }
 
   if (type == IEC104Proto::POINT_TYPE_SINGLE) {
-    auto st = dataCenter_.PublishBool(connId, tag, cv.boolValue, DataCenterProto::QUALITY_GOOD, 0);
+    req.mutable_value()->set_bool_value(cv.boolValue);
+    DataCenterProto::ExecuteCommandResponse resp;
+    auto st = dataCenter_.ExecuteCommand(req, &resp);
     if (!st.ok()) {
-      LOG_WARNING("IEC104 发布遥控失败: conn_name={}, tag={}, 错误={}", connName, tag, st.error_message());
+      LOG_WARNING("IEC104 同步执行遥控失败: conn_name={}, tag={}, 错误={}", connName, tag, st.error_message());
       std::lock_guard<std::mutex> lock(mu_);
       auto it = linksByName_.find(connName);
       if (it != linksByName_.end()) {
         it->second.lastError = st.error_message();
       }
-    } else {
-      LOG_INFO("IEC104 已发布遥控: conn_name={}, tag={}, value={}", connName, tag, cv.boolValue);
+      return rejectCommand(st.error_message());
     }
-    return st;
+    if (resp.status() != DataCenterProto::COMMAND_ACCEPTED) {
+      auto reason = resp.reason().empty() ? commandStatusToString(resp.status()) : resp.reason();
+      LOG_WARNING("IEC104 遥控被同步命令链路拒绝: conn_name={}, tag={}, value={}, status={}, reject_code={}, 原因={}",
+                  connName,
+                  tag,
+                  cv.boolValue,
+                  static_cast<int>(resp.status()),
+                  static_cast<int>(resp.reject_code()),
+                  reason);
+      return rejectCommand(reason);
+    }
+    LOG_INFO("IEC104 遥控同步执行成功: conn_name={}, tag={}, value={}", connName, tag, cv.boolValue);
+    return CommandResult{};
   }
 
   LOG_WARNING("IEC104 命令点类型不匹配: conn_name={}, tag={}, type={}", connName, tag, static_cast<int>(type));
-  return grpc::Status::OK;
+  return rejectCommand("IEC104 点类型不支持命令执行");
 }
 
 grpc::Status LinkManager::handleTimeSyncCommand(const std::string& connName, int64_t tsMs) {

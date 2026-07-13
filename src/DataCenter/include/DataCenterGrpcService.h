@@ -28,6 +28,7 @@ public:
   grpc::Status ListRoutes(grpc::ServerContext* context, const DataCenterProto::ListRoutesRequest* request, DataCenterProto::ListRoutesResponse* response) override;
 
   grpc::Status Publish(grpc::ServerContext* context, const DataCenterProto::PublishRequest* request, DataCenterProto::Empty* response) override;
+  grpc::Status ExecuteCommand(grpc::ServerContext* context, const DataCenterProto::ExecuteCommandRequest* request, DataCenterProto::ExecuteCommandResponse* response) override;
   grpc::Status BatchPublish(grpc::ServerContext* context, const DataCenterProto::BatchPublishRequest* request, DataCenterProto::Empty* response) override;
 
   grpc::Status GetLatest(grpc::ServerContext* context, const DataCenterProto::GetLatestRequest* request, DataCenterProto::GetLatestResponse* response) override;

@@ -226,11 +226,29 @@ void ModuleInterface::initLibInfo(LibInfo libInfo) {
   metaData_.outerGRPCServer = std::format("0.0.0.0:{}", port);
 }
 void ModuleInterface::grpcServerBuilder(std::shared_ptr<grpc::Service> service) {
+  std::vector<std::shared_ptr<grpc::Service>> services;
+  if (service) {
+    services.emplace_back(std::move(service));
+  }
+  grpcServerBuilder(services);
+}
+
+void ModuleInterface::grpcServerBuilder(const std::vector<std::shared_ptr<grpc::Service>>& services) {
   selfCheckGrpcConfig("gRPC 构建前", metaData_.name, true);
+  if (services.empty()) {
+    LOG_ERROR("gRPC 服务启动失败，未提供任何服务对象");
+    return;
+  }
   grpc::ServerBuilder serverBuilder;
-  serverBuilder.RegisterService(service.get());
+  for (const auto& service : services) {
+    if (!service) {
+      LOG_WARNING("gRPC 服务列表中存在空服务对象，已跳过");
+      continue;
+    }
+    serverBuilder.RegisterService(service.get());
+  }
   LOG_INFO("gRPC 反射已移除，跳过反射初始化");
-  LOG_INFO("gRPC 使用单一服务监听内外端口");
+  LOG_INFO("gRPC 使用服务数量={} 监听内外端口", services.size());
   serverBuilder.experimental().SetInterceptorCreators(createInterceptorCreators(metaData_.name));
   int innerPort = 0;
   int outerPort = 0;

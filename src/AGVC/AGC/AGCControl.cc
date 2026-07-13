@@ -19,8 +19,12 @@ double toPhysicalDelta(const AGCProto::SignalSpec& s, double rawDelta) {
 }
 
 double effectiveMemberMaxKw(const AGCProto::MemberConfig& member) {
-  if (member.max_kw() != 0.0) {
-    return member.max_kw();
+  const auto maxKw = member.max_kw();
+  if (maxKw != 0.0) {
+    if (member.capacity_kw() > 0.0 && maxKw > member.capacity_kw()) {
+      return member.capacity_kw();
+    }
+    return maxKw;
   }
   if (member.capacity_kw() > 0.0) {
     return member.capacity_kw();
@@ -183,10 +187,7 @@ std::optional<ControlOutput> ComputeControlOutput(
     AGVC::AllocationMember a;
     a.weight = m.weight() > 0.0 ? m.weight() : (m.capacity_kw() > 0.0 ? m.capacity_kw() : 1.0);
     a.min = m.min_kw();
-    a.max = m.max_kw();
-    if (a.max == 0.0 && m.capacity_kw() > 0.0) {
-      a.max = m.capacity_kw();
-    }
+    a.max = effectiveMemberMaxKw(m);
     allocMembers.emplace_back(a);
   }
 

@@ -11,6 +11,7 @@ AVC（Automatic Voltage Control）自动电压控制模块：从 DataCenter 订�
 - 总无功分配：将一个总无功目标值按策略（当前实现为 weighted）分解为多个成员设定点
 - 默认点：AVC 会自动生成并注册一组内建点（理论/当前无功上下限、调节返回值、当前电压、总无功目标/实测/偏差、电压偏差），无需手工建点即可直接通过 DataCenter 路由
 - 不可控成员支持：不可控成员只参与无功量测汇总与动态上下限计算，不参与分配
+- 同步命令拒绝：当 IEC104 等协议控制命令经 `DataCenter.ExecuteCommand` 进入 AVC 时，若总无功目标超过当前可调上下限或目标电压模式缺少必要量测，AVC 返回拒绝结果，由协议模块形成负确认
 
 ## 接口与协议
 - Protobuf：`protobuf/AVC.proto`
@@ -74,6 +75,7 @@ AVC 为每个控制组固定生成以下 10 个默认点，并自动注册到该
   - 按 `ABSOLUTE/DELTA` 与 `DELTA_BASE_*` 语义将 `q_total_cmd` 转成 `desired_total_q`
 - 上述 `desired_total_q` 会统一钳制到当前总无功能力范围，再按 weighted 策略分配给可控成员
 - 输入进入 AVC 内部计算时，绝对量按 `value * scale + offset` 换算，增量量按 `value * scale` 换算；AVC 输出到 DataCenter 时直接发布工程量，不再按 `scale/offset` 反向换算。成员设定配置为 `DELTA` 时发布的是工程量增量值。
+- 若该轮来自 `DataCenter.ExecuteCommand` 同步命令，AVC 会先用未钳制的原始总无功目标与当前可调上下限比较；超限时返回 `COMMAND_REJECTED`，不更新组内命令缓存，也不下发成员设定。
 
 ### 配置持久化（当前实现）
 AVC 会将控制组配置作为 protobuf payload 写入 `./conf/config.db`，用于进程重启后的自动恢复。

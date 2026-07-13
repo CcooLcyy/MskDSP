@@ -6,6 +6,7 @@
 #include <memory>
 #include <stop_token>
 #include <thread>
+#include <vector>
 
 #include "AGCGrpcService.h"
 #include "AGCLibInfo.h"
@@ -45,6 +46,7 @@ namespace AGC {
 AGC::AGC() :
   ModuleInterface(),
   agcService_(std::make_shared<AGCGrpcServiceImpl>()),
+  commandService_(std::make_shared<AGCCommandExecutorServiceImpl>()),
   groupManager_(AGCLibInfo.LIB_NAME) {
   initLibInfo(AGCLibInfo);
 }
@@ -53,7 +55,9 @@ void AGC::start(std::stop_token stopToken) {
   LOG_INFO("AGC 模块启动");
   LOG_INFO("AGC 依赖模块: DataCenter, IEC104, ModbusRTU");
   agcService_->getAGC(this);
-  grpcServerBuilder(agcService_);
+  commandService_->getAGC(this);
+  std::vector<std::shared_ptr<grpc::Service>> services{agcService_, commandService_};
+  grpcServerBuilder(services);
   LOG_INFO("AGC 开始在模块启动阶段恢复本地控制组配置");
   auto restoreStatus = groupManager_.LoadPersistedConfig();
   if (!restoreStatus.ok()) {

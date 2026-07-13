@@ -36,6 +36,8 @@ public:
 
   grpc::Status Publish(const DataCenterProto::PublishRequest &request, std::vector<DataCenterProto::PointUpdate> *outUpdates);
   grpc::Status BatchPublish(const DataCenterProto::BatchPublishRequest &request, std::vector<DataCenterProto::PointUpdate> *outUpdates);
+  grpc::Status ResolveCommandRoute(const DataCenterProto::ExecuteCommandRequest &request, DataCenterProto::ExecuteCommandResponse *out);
+  grpc::Status StoreAcceptedCommand(const DataCenterProto::ExecuteCommandRequest &request, const DataCenterProto::Endpoint &dst);
 
   grpc::Status GetLatest(const DataCenterProto::GetLatestRequest &request, DataCenterProto::GetLatestResponse *out) const;
 

@@ -872,12 +872,19 @@ void TcpSession::handleSingleCommand(const std::vector<uint8_t> &asdu) {
     }
 
     LOG_INFO("IEC104 收到遥控执行: conn_name={}, ioa={}, value={}", config_.conn_name(), ioa, value);
+    CommandResult commandResult;
     if (onCommand_) {
       CommandValue cv;
       cv.ioa = ioa;
       cv.type = IEC104Proto::POINT_TYPE_SINGLE;
       cv.boolValue = value;
-      onCommand_(cv);
+      commandResult = onCommand_(cv);
+    }
+    if (!commandResult.accepted) {
+      LOG_WARNING("IEC104 遥控执行被业务拒绝: conn_name={}, ioa={}, value={}, 原因={}",
+                  config_.conn_name(), ioa, value, commandResult.reason);
+      sendConfirm(kCotActivationCon, false);
+      continue;
     }
     sendConfirm(kCotActivationCon, true);
     sendConfirm(kCotActivationTermination, true);
@@ -967,12 +974,19 @@ void TcpSession::handleSetpointCommand(const std::vector<uint8_t> &asdu) {
     }
 
     LOG_INFO("IEC104 收到设点执行: conn_name={}, ioa={}, value={}", config_.conn_name(), ioa, value);
+    CommandResult commandResult;
     if (onCommand_) {
       CommandValue cv;
       cv.ioa = ioa;
       cv.type = IEC104Proto::POINT_TYPE_FLOAT;
       cv.doubleValue = value;
-      onCommand_(cv);
+      commandResult = onCommand_(cv);
+    }
+    if (!commandResult.accepted) {
+      LOG_WARNING("IEC104 设点执行被业务拒绝: conn_name={}, ioa={}, value={}, 原因={}",
+                  config_.conn_name(), ioa, value, commandResult.reason);
+      sendConfirm(kCotActivationCon, false);
+      continue;
     }
     sendConfirm(kCotActivationCon, true);
     sendConfirm(kCotActivationTermination, true);

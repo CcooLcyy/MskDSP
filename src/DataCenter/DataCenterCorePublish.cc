@@ -139,6 +139,110 @@ grpc::Status DataCenterCore::BatchPublish(const DataCenterProto::BatchPublishReq
   return grpc::Status::OK;
 }
 
+grpc::Status DataCenterCore::ResolveCommandRoute(
+    const DataCenterProto::ExecuteCommandRequest &request,
+    DataCenterProto::ExecuteCommandResponse *out) {
+  if (out == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
+  }
+  out->Clear();
+  if (!request.has_src()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "src 不能为空");
+  }
+  if (request.value().kind_case() == DataCenterProto::PointValue::KIND_NOT_SET) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "value 不能为空");
+  }
+
+  StableEndpointKey src;
+  uint32_t srcConnId = 0;
+  auto status = resolveEndpoint(request.src(), &src, &srcConnId);
+  if (!status.ok()) {
+    return status;
+  }
+
+  auto it = routes_.find(src);
+  if (it == routes_.end() || it->second.empty()) {
+    out->set_status(DataCenterProto::COMMAND_NO_ROUTE);
+    out->set_reason("命令源端点未匹配到路由");
+    return grpc::Status::OK;
+  }
+  if (it->second.size() != 1) {
+    out->set_status(DataCenterProto::COMMAND_AMBIGUOUS_ROUTE);
+    out->set_reason("命令源端点匹配到多条路由，无法形成单一协议确认");
+    return grpc::Status::OK;
+  }
+
+  const auto &dst = *it->second.begin();
+  uint32_t dstConnId = 0;
+  if (!tryResolveConnId(dst, &dstConnId)) {
+    out->set_status(DataCenterProto::COMMAND_TARGET_UNAVAILABLE);
+    out->set_reason("目的连接未在连接注册表中找到");
+    return grpc::Status::OK;
+  }
+
+  auto *respDst = out->mutable_dst();
+  respDst->set_module_name(dst.moduleName);
+  respDst->set_conn_name(dst.connName);
+  respDst->set_conn_id(dstConnId);
+  respDst->set_tag(dst.tag);
+  out->set_status(DataCenterProto::COMMAND_STATUS_UNSPECIFIED);
+
+  switch (request.value().kind_case()) {
+    case DataCenterProto::PointValue::kDoubleValue:
+      out->set_requested_value(request.value().double_value());
+      break;
+    case DataCenterProto::PointValue::kIntValue:
+      out->set_requested_value(static_cast<double>(request.value().int_value()));
+      break;
+    case DataCenterProto::PointValue::kBoolValue:
+      out->set_requested_value(request.value().bool_value() ? 1.0 : 0.0);
+      break;
+    case DataCenterProto::PointValue::kStringValue:
+    case DataCenterProto::PointValue::kBytesValue:
+    case DataCenterProto::PointValue::KIND_NOT_SET:
+    default:
+      break;
+  }
+  (void)srcConnId;
+  return grpc::Status::OK;
+}
+
+grpc::Status DataCenterCore::StoreAcceptedCommand(
+    const DataCenterProto::ExecuteCommandRequest &request,
+    const DataCenterProto::Endpoint &dst) {
+  if (!request.has_src()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "src 不能为空");
+  }
+  if (request.value().kind_case() == DataCenterProto::PointValue::KIND_NOT_SET) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "value 不能为空");
+  }
+  if (dst.conn_id() == 0 || dst.tag().empty()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "dst 不能为空");
+  }
+
+  StableEndpointKey src;
+  uint32_t srcConnId = 0;
+  auto status = resolveEndpoint(request.src(), &src, &srcConnId);
+  if (!status.ok()) {
+    return status;
+  }
+  int64_t tsMs = request.ts_ms();
+  if (tsMs <= 0) {
+    tsMs = nowMs();
+  }
+
+  DataCenterProto::PointUpdate update;
+  update.set_src_conn_id(srcConnId);
+  update.set_src_tag(src.tag);
+  update.set_dst_conn_id(dst.conn_id());
+  update.set_dst_tag(dst.tag());
+  update.mutable_value()->CopyFrom(request.value());
+  update.set_ts_ms(tsMs);
+  update.set_quality(request.quality());
+  latestByDst_[EndpointKey{dst.conn_id(), dst.tag()}] = std::move(update);
+  return grpc::Status::OK;
+}
+
 grpc::Status DataCenterCore::GetLatest(const DataCenterProto::GetLatestRequest &request, DataCenterProto::GetLatestResponse *out) const {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");

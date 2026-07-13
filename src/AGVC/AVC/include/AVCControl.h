@@ -35,6 +35,7 @@ struct ControlInput {
 
 struct ControlOutput {
   double totalQMeasKvar{0.0};
+  double rawDesiredTotalQKvar{0.0};
   double desiredTotalQKvar{0.0};
   double actualTargetQKvar{0.0};
   double totalQErrorKvar{0.0};

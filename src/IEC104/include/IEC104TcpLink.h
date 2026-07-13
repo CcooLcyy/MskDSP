@@ -36,12 +36,17 @@ struct CommandValue {
   double doubleValue = 0.0;
 };
 
+struct CommandResult {
+  bool accepted = true;
+  std::string reason;
+};
+
 class TcpLink {
 public:
   using PointValueCallback = std::function<void(const PointValue&)>;
   using SnapshotProvider = std::function<std::vector<PointValue>()>;
   using TimeSyncCallback = std::function<void(int64_t)>;
-  using CommandCallback = std::function<void(const CommandValue&)>;
+  using CommandCallback = std::function<CommandResult(const CommandValue&)>;
 
   explicit TcpLink(IEC104Proto::LinkConfig config);
   ~TcpLink();

@@ -8,6 +8,7 @@
 
 namespace AVC {
 class AVCGrpcServiceImpl;
+class AVCCommandExecutorServiceImpl;
 class AVC : public ModuleInterface::ModuleInterface {
 public:
   explicit AVC();
@@ -20,6 +21,7 @@ public:
 
 private:
   std::shared_ptr<AVCGrpcServiceImpl> avcService_;
+  std::shared_ptr<AVCCommandExecutorServiceImpl> commandService_;
   GroupManager groupManager_;
 };
 }  // namespace AVC

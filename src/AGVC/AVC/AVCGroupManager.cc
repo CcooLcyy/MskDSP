@@ -765,6 +765,193 @@ grpc::Status GroupManager::DeleteGroup(const std::string& groupName) {
   return grpc::Status::OK;
 }
 
+grpc::Status GroupManager::ExecuteCommand(
+    const DataCenterProto::ExecuteCommandRequest& request,
+    DataCenterProto::ExecuteCommandResponse* response) {
+  if (response == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "response 为空");
+  }
+  response->Clear();
+  if (!request.has_dst()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "dst 不能为空");
+  }
+  if (request.value().kind_case() == DataCenterProto::PointValue::KIND_NOT_SET) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "value 不能为空");
+  }
+  *response->mutable_dst() = request.dst();
+
+  double raw = 0.0;
+  if (!pointValueToDouble(request.value(), &raw)) {
+    response->set_status(DataCenterProto::COMMAND_REJECTED);
+    response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSUPPORTED_POINT);
+    response->set_reason("命令点值类型不支持");
+    return grpc::Status::OK;
+  }
+
+  const auto groupName = request.dst().conn_name();
+  AVCProto::GroupConfig config;
+  uint32_t connId = 0;
+  bool voltageMode = false;
+  AVCProto::SignalSpec commandSignal;
+  auto commandMode = AVCProto::VALUE_MODE_ABSOLUTE;
+  ControlInput input;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end()) {
+      response->set_status(DataCenterProto::COMMAND_REJECTED);
+      response->set_reject_code(DataCenterProto::COMMAND_REJECT_BAD_CONFIG);
+      response->set_reason("未找到 AVC 控制组");
+      return grpc::Status::OK;
+    }
+    if (it->second.state != AVCProto::GROUP_STATE_RUNNING) {
+      response->set_status(DataCenterProto::COMMAND_REJECTED);
+      response->set_reject_code(DataCenterProto::COMMAND_REJECT_GROUP_NOT_RUNNING);
+      response->set_reason("AVC 控制组未运行");
+      return grpc::Status::OK;
+    }
+    if (it->second.commandTag.empty() || request.dst().tag() != it->second.commandTag) {
+      response->set_status(DataCenterProto::COMMAND_REJECTED);
+      response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSUPPORTED_POINT);
+      response->set_reason("目的点不是 AVC 命令点");
+      return grpc::Status::OK;
+    }
+
+    config = it->second.config;
+    connId = it->second.connId;
+    voltageMode = it->second.voltageMode;
+    input.hasVoltageMeasRaw = it->second.hasVoltageMeasRaw;
+    input.voltageMeasRaw = it->second.voltageMeasRaw;
+    input.hasVoltageCmdRaw = it->second.hasVoltageCmdRaw;
+    input.voltageCmdRaw = it->second.voltageCmdRaw;
+    input.hasQTotalCmdRaw = it->second.hasQTotalCmdRaw;
+    input.qTotalCmdRaw = it->second.qTotalCmdRaw;
+    input.baseRawByTag = it->second.baseRawByTag;
+    input.hasMemberQMeasRaw = it->second.hasMemberQMeasRaw;
+    input.memberQMeasRaw = it->second.memberQMeasRaw;
+    input.hasLastMemberTargetQKvar = it->second.hasLastMemberTargetQKvar;
+    input.lastMemberTargetQKvar = it->second.lastMemberTargetQKvar;
+    input.hasLastDesiredTotalQKvar = it->second.hasLastDesiredTotalQKvar;
+    input.lastDesiredTotalQKvar = it->second.lastDesiredTotalQKvar;
+
+    if (voltageMode) {
+      input.hasVoltageCmdRaw = true;
+      input.voltageCmdRaw = raw;
+      commandSignal = config.voltage_cmd();
+      commandMode = AVCProto::VALUE_MODE_ABSOLUTE;
+    } else {
+      input.hasQTotalCmdRaw = true;
+      input.qTotalCmdRaw = raw;
+      commandSignal = config.q_total_cmd().signal();
+      commandMode = config.q_total_cmd().mode();
+    }
+  }
+
+  const auto defaultOutput = ComputeDefaultPointOutput(config, input);
+  response->set_lower_limit(defaultOutput.dynamicLowerQKvar);
+  response->set_upper_limit(defaultOutput.dynamicUpperQKvar);
+
+  auto outputOpt = ComputeControlOutput(config, input, weightedStrategy_);
+  if (!outputOpt) {
+    response->set_status(DataCenterProto::COMMAND_REJECTED);
+    response->set_reject_code(voltageMode ? DataCenterProto::COMMAND_REJECT_MISSING_MEASUREMENT
+                                          : DataCenterProto::COMMAND_REJECT_BAD_CONFIG);
+    response->set_reason(voltageMode ? "AVC 缺少目标电压模式所需量测，无法校验命令"
+                                     : "AVC 控制计算无法生成输出");
+    return grpc::Status::OK;
+  }
+  const auto& output = *outputOpt;
+  response->set_requested_value(output.rawDesiredTotalQKvar);
+  response->set_accepted_value(output.actualTargetQKvar);
+
+  constexpr double kEps = 1e-6;
+  if (output.rawDesiredTotalQKvar > defaultOutput.dynamicUpperQKvar + kEps ||
+      output.rawDesiredTotalQKvar < defaultOutput.dynamicLowerQKvar - kEps) {
+    response->set_status(DataCenterProto::COMMAND_REJECTED);
+    if (output.rawDesiredTotalQKvar > defaultOutput.dynamicUpperQKvar + kEps) {
+      response->set_reject_code(DataCenterProto::COMMAND_REJECT_OVER_UPPER_LIMIT);
+      response->set_reason("总无功目标超过当前可调上限");
+    } else {
+      response->set_reject_code(DataCenterProto::COMMAND_REJECT_BELOW_LOWER_LIMIT);
+      response->set_reason("总无功目标低于当前可调下限");
+    }
+    LOG_WARNING("AVC 拒绝同步命令: group_name={}, raw_desired_q_kvar={}, lower_q_kvar={}, upper_q_kvar={}, clamped_target_q_kvar={}",
+                groupName,
+                output.rawDesiredTotalQKvar,
+                defaultOutput.dynamicLowerQKvar,
+                defaultOutput.dynamicUpperQKvar,
+                output.actualTargetQKvar);
+    return grpc::Status::OK;
+  }
+
+  DataCenterProto::PointUpdate commandUpdate;
+  commandUpdate.set_src_conn_id(request.src().conn_id());
+  commandUpdate.set_src_tag(request.src().tag());
+  commandUpdate.set_dst_conn_id(connId);
+  commandUpdate.set_dst_tag(request.dst().tag());
+  commandUpdate.mutable_value()->CopyFrom(request.value());
+  commandUpdate.set_ts_ms(request.ts_ms());
+  commandUpdate.set_quality(request.quality());
+
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end() || it->second.state != AVCProto::GROUP_STATE_RUNNING) {
+      response->set_status(DataCenterProto::COMMAND_REJECTED);
+      response->set_reject_code(DataCenterProto::COMMAND_REJECT_GROUP_NOT_RUNNING);
+      response->set_reason("AVC 控制组状态已变化，命令未执行");
+      return grpc::Status::OK;
+    }
+    if (voltageMode) {
+      it->second.voltageCmdRaw = raw;
+      it->second.hasVoltageCmdRaw = true;
+    } else {
+      it->second.qTotalCmdRaw = raw;
+      it->second.hasQTotalCmdRaw = true;
+    }
+    it->second.hasLastDesiredTotalQKvar = output.hasLastDesiredTotalQKvar;
+    it->second.lastDesiredTotalQKvar = output.nextLastDesiredTotalQKvar;
+    it->second.hasLastMemberTargetQKvar = output.hasLastMemberTargetQKvar;
+    it->second.lastMemberTargetQKvar = output.nextLastMemberTargetQKvar;
+    it->second.hasLastUnallocatedQKvar = false;
+    it->second.lastUnallocatedQKvar = 0.0;
+  }
+
+  publishCommandEchoPoint(connId, commandSignal, commandMode, commandUpdate);
+  publishDefaultLimitPoints(groupName, "同步命令执行");
+
+  const auto quality = DataCenterProto::QUALITY_GOOD;
+  if (output.hasVoltageMeas) {
+    (void)dataCenter_.PublishDouble(connId, std::string(defaultPointTag(AVCProto::DEFAULT_POINT_KIND_CURRENT_VOLTAGE)), output.voltageMeas, quality, 0);
+  }
+  (void)dataCenter_.PublishDouble(connId, std::string(defaultPointTag(AVCProto::DEFAULT_POINT_KIND_TOTAL_Q_MEAS)), output.totalQMeasKvar, quality, 0);
+  (void)dataCenter_.PublishDouble(connId, std::string(defaultPointTag(AVCProto::DEFAULT_POINT_KIND_TOTAL_Q_TARGET)), output.actualTargetQKvar, quality, 0);
+  (void)dataCenter_.PublishDouble(connId, std::string(defaultPointTag(AVCProto::DEFAULT_POINT_KIND_TOTAL_Q_ERROR)), output.totalQErrorKvar, quality, 0);
+  if (output.hasVoltageError) {
+    (void)dataCenter_.PublishDouble(connId, std::string(defaultPointTag(AVCProto::DEFAULT_POINT_KIND_VOLTAGE_ERROR)), output.voltageError, quality, 0);
+  }
+
+  for (size_t i = 0; i < output.memberPublish.size() && i < output.memberPublishKvar.size(); ++i) {
+    if (!output.memberPublish[i]) {
+      continue;
+    }
+    const auto& member = config.members(static_cast<int>(i));
+    if (!member.has_q_set() || !member.q_set().has_signal() || member.q_set().signal().tag().empty()) {
+      continue;
+    }
+    (void)dataCenter_.PublishDouble(connId, member.q_set().signal().tag(), output.memberPublishKvar[i], quality, 0);
+  }
+
+  response->set_status(DataCenterProto::COMMAND_ACCEPTED);
+  response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSPECIFIED);
+  response->set_reason("AVC 同步命令已接受并执行");
+  LOG_INFO("AVC 已执行同步命令: group_name={}, raw_desired_q_kvar={}, actual_target_q_kvar={}",
+           groupName,
+           output.rawDesiredTotalQKvar,
+           output.actualTargetQKvar);
+  return grpc::Status::OK;
+}
+
 bool GroupManager::pointValueToDouble(const DataCenterProto::PointValue& value, double* out) {
   if (out == nullptr) {
     return false;

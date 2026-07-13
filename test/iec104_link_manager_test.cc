@@ -108,7 +108,7 @@ public:
     return mgr.handleClientPointValue(connName, pv);
   }
 
-  static grpc::Status HandleCommandValue(LinkManager& mgr, const std::string& connName, const CommandValue& cv) {
+  static CommandResult HandleCommandValue(LinkManager& mgr, const std::string& connName, const CommandValue& cv) {
     return mgr.handleCommandValue(connName, cv);
   }
 
@@ -772,8 +772,8 @@ TEST(IEC104LinkManagerTest, HandleClientPointValuePublishesBool) {
   EXPECT_EQ(resp.updates(0).quality(), DataCenterProto::QUALITY_BAD);
 }
 
-// 验证：handleCommandValue 在从站时可发布设点/遥控。
-TEST(IEC104LinkManagerTest, HandleCommandValuePublishesWhenSlave) {
+// 验证：handleCommandValue 在从站时可同步执行设点/遥控。
+TEST(IEC104LinkManagerTest, HandleCommandValueExecutesWhenSlave) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
@@ -794,14 +794,16 @@ TEST(IEC104LinkManagerTest, HandleCommandValuePublishesWhenSlave) {
   cv.ioa = 12;
   cv.type = IEC104Proto::POINT_TYPE_FLOAT;
   cv.doubleValue = 3.5;
-  auto st = IEC104LinkManagerTestPeer::HandleCommandValue(mgr, "conn-cmd", cv);
-  EXPECT_TRUE(st.ok());
+  auto result = IEC104LinkManagerTestPeer::HandleCommandValue(mgr, "conn-cmd", cv);
+  EXPECT_TRUE(result.accepted);
+  EXPECT_EQ(state.GetCommandCount(info.conn_id(), "F"), 1u);
 
   cv.ioa = 13;
   cv.type = IEC104Proto::POINT_TYPE_SINGLE;
   cv.boolValue = true;
-  st = IEC104LinkManagerTestPeer::HandleCommandValue(mgr, "conn-cmd", cv);
-  EXPECT_TRUE(st.ok());
+  result = IEC104LinkManagerTestPeer::HandleCommandValue(mgr, "conn-cmd", cv);
+  EXPECT_TRUE(result.accepted);
+  EXPECT_EQ(state.GetCommandCount(info.conn_id(), "C"), 1u);
 }
 
 // 验证：handleCommandValue 在非从站时忽略命令。
@@ -825,8 +827,9 @@ TEST(IEC104LinkManagerTest, HandleCommandValueIgnoredWhenMaster) {
   cv.ioa = 12;
   cv.type = IEC104Proto::POINT_TYPE_FLOAT;
   cv.doubleValue = 3.5;
-  auto st = IEC104LinkManagerTestPeer::HandleCommandValue(mgr, "conn-master", cv);
-  EXPECT_TRUE(st.ok());
+  auto result = IEC104LinkManagerTestPeer::HandleCommandValue(mgr, "conn-master", cv);
+  EXPECT_TRUE(result.accepted);
+  EXPECT_EQ(state.GetCommandCount(info.conn_id(), "F"), 0u);
 }
 
 // 验证：handleTimeSyncCommand 处理非法时间戳与正常发布。

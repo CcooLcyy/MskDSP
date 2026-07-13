@@ -293,6 +293,37 @@ TEST(AvcGroupManagerTest, VoltageModePublishesTelemetryAndMemberSetpoints) {
   ASSERT_TRUE(mgr.StopGroup("g-voltage").ok());
 }
 
+// 验证：重复下发相同目标电压命令时仍应触发目标电压控制分配。
+TEST(AvcGroupManagerTest, VoltageModeRepeatedSameCommandRetriggersMemberSetpointPublish) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AVC");
+  mgr.setDataCenterStub(stub);
+
+  AVCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(MakeVoltageGroupReq("g-voltage-repeat"), &info).ok());
+  ASSERT_TRUE(WaitForSubscriptionCount(state, info.conn_id(), 1));
+
+  PublishDoublePoint(&state, info.conn_id(), "V_CMD", 1.0);
+  PublishDoublePoint(&state, info.conn_id(), "V_MEAS", 0.9);
+  PublishDoublePoint(&state, info.conn_id(), "INV1_Q_MEAS", 0.0);
+  PublishDoublePoint(&state, info.conn_id(), "INV2_Q_MEAS", 0.0);
+
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV1_Q_SET", 5.0));
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV2_Q_SET", 5.0));
+
+  const auto inv1PublishCount = state.GetPublishCount(info.conn_id(), "INV1_Q_SET");
+  const auto inv2PublishCount = state.GetPublishCount(info.conn_id(), "INV2_Q_SET");
+
+  PublishDoublePoint(&state, info.conn_id(), "V_CMD", 1.0);
+
+  EXPECT_TRUE(WaitForPublishCount(state, info.conn_id(), "INV1_Q_SET", inv1PublishCount + 1));
+  EXPECT_TRUE(WaitForPublishCount(state, info.conn_id(), "INV2_Q_SET", inv2PublishCount + 1));
+
+  ASSERT_TRUE(mgr.StopGroup("g-voltage-repeat").ok());
+}
+
 // 验证：总无功模式在命令更新后会发布总无功结果点，但不会发布电压偏差点。
 TEST(AvcGroupManagerTest, QTotalModePublishesReactiveTelemetryWithoutVoltageError) {
   FakeDataCenterState state;

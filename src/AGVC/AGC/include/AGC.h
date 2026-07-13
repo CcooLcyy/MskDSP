@@ -8,6 +8,7 @@
 
 namespace AGC {
 class AGCGrpcServiceImpl;
+class AGCCommandExecutorServiceImpl;
 class AGC : public ModuleInterface::ModuleInterface {
 public:
   explicit AGC();
@@ -20,6 +21,7 @@ public:
 
 private:
   std::shared_ptr<AGCGrpcServiceImpl> agcService_;
+  std::shared_ptr<AGCCommandExecutorServiceImpl> commandService_;
   GroupManager groupManager_;
 };
 }  // namespace AGC

@@ -6,6 +6,7 @@
 #include <memory>
 #include <stop_token>
 #include <thread>
+#include <vector>
 
 #include "AVCGrpcService.h"
 #include "AVCLibInfo.h"
@@ -37,6 +38,7 @@ namespace AVC {
 AVC::AVC() :
   ModuleInterface(),
   avcService_(std::make_shared<AVCGrpcServiceImpl>()),
+  commandService_(std::make_shared<AVCCommandExecutorServiceImpl>()),
   groupManager_(AVCLibInfo.LIB_NAME) {
   initLibInfo(AVCLibInfo);
 }
@@ -45,7 +47,9 @@ void AVC::start(std::stop_token stopToken) {
   LOG_INFO("AVC 模块启动");
   LOG_INFO("AVC 依赖模块: DataCenter");
   avcService_->getAVC(this);
-  grpcServerBuilder(avcService_);
+  commandService_->getAVC(this);
+  std::vector<std::shared_ptr<grpc::Service>> services{avcService_, commandService_};
+  grpcServerBuilder(services);
   LOG_INFO("AVC 开始在模块启动阶段恢复本地控制组配置");
   auto restoreStatus = groupManager_.LoadPersistedConfig();
   if (!restoreStatus.ok()) {

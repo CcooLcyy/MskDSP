@@ -7,6 +7,7 @@
 #include "AGC.grpc.pb.h"
 #include "AGC.h"
 #include "AGC.pb.h"
+#include "DataCenter.grpc.pb.h"
 
 namespace AGC {
 class AGCGrpcServiceImpl : public AGCProto::AGCService::Service {
@@ -19,6 +20,19 @@ public:
   grpc::Status DeleteGroup(grpc::ServerContext* context, const AGCProto::DeleteGroupRequest* request, AGCProto::Empty* response) override;
   grpc::Status StartGroup(grpc::ServerContext* context, const AGCProto::StartGroupRequest* request, AGCProto::Empty* response) override;
   grpc::Status StopGroup(grpc::ServerContext* context, const AGCProto::StopGroupRequest* request, AGCProto::Empty* response) override;
+
+private:
+  AGC* module_{nullptr};
+};
+
+class AGCCommandExecutorServiceImpl : public DataCenterProto::CommandExecutor::Service {
+public:
+  void getAGC(AGC* module);
+
+  grpc::Status ExecuteCommand(
+      grpc::ServerContext* context,
+      const DataCenterProto::ExecuteCommandRequest* request,
+      DataCenterProto::ExecuteCommandResponse* response) override;
 
 private:
   AGC* module_{nullptr};

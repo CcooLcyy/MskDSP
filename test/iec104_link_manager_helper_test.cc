@@ -224,7 +224,7 @@ TEST(IEC104LinkManagerHelperTest, HandleClientPointValuePublishesFloatAndSingle)
   EXPECT_EQ(resp.updates_size(), 2);
 }
 
-// 验证：handleCommandValue 在非从站时忽略发布。
+// 验证：handleCommandValue 在非从站时忽略同步执行。
 TEST(IEC104LinkManagerHelperTest, HandleCommandValueSkipsWhenNotSlave) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
@@ -234,6 +234,7 @@ TEST(IEC104LinkManagerHelperTest, HandleCommandValueSkipsWhenNotSlave) {
 
   LinkManager::LinkRuntime runtime;
   runtime.connId = 4;
+  const auto connId = runtime.connId;
   runtime.config = MakeClientConfig("conn", IEC104Proto::STATION_ROLE_MASTER);
   runtime.pointTable = MakePointTable();
   mgr.linksByName_.emplace("conn", std::move(runtime));
@@ -242,12 +243,13 @@ TEST(IEC104LinkManagerHelperTest, HandleCommandValueSkipsWhenNotSlave) {
   cv.ioa = 100;
   cv.type = IEC104Proto::POINT_TYPE_FLOAT;
   cv.doubleValue = 12.0;
-  auto st = mgr.handleCommandValue("conn", cv);
-  EXPECT_TRUE(st.ok());
+  auto result = mgr.handleCommandValue("conn", cv);
+  EXPECT_TRUE(result.accepted);
+  EXPECT_EQ(state.GetCommandCount(connId, "float-tag"), 0u);
 }
 
-// 验证：handleCommandValue 在从站下发布设点/遥控。
-TEST(IEC104LinkManagerHelperTest, HandleCommandValuePublishesOnSlave) {
+// 验证：handleCommandValue 在从站下同步执行设点/遥控。
+TEST(IEC104LinkManagerHelperTest, HandleCommandValueExecutesOnSlave) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
@@ -256,6 +258,7 @@ TEST(IEC104LinkManagerHelperTest, HandleCommandValuePublishesOnSlave) {
 
   LinkManager::LinkRuntime runtime;
   runtime.connId = 5;
+  const auto connId = runtime.connId;
   runtime.config = MakeClientConfig("conn", IEC104Proto::STATION_ROLE_SLAVE);
   runtime.pointTable = MakePointTable();
   mgr.linksByName_.emplace("conn", std::move(runtime));
@@ -264,14 +267,40 @@ TEST(IEC104LinkManagerHelperTest, HandleCommandValuePublishesOnSlave) {
   cv.ioa = 100;
   cv.type = IEC104Proto::POINT_TYPE_FLOAT;
   cv.doubleValue = 8.0;
-  auto st = mgr.handleCommandValue("conn", cv);
-  EXPECT_TRUE(st.ok());
+  auto result = mgr.handleCommandValue("conn", cv);
+  EXPECT_TRUE(result.accepted);
+  EXPECT_EQ(state.GetCommandCount(connId, "float-tag"), 1u);
 
   cv.ioa = 200;
   cv.type = IEC104Proto::POINT_TYPE_SINGLE;
   cv.boolValue = true;
-  st = mgr.handleCommandValue("conn", cv);
-  EXPECT_TRUE(st.ok());
+  result = mgr.handleCommandValue("conn", cv);
+  EXPECT_TRUE(result.accepted);
+  EXPECT_EQ(state.GetCommandCount(connId, "single-tag"), 1u);
+}
+
+// 验证：handleCommandValue 会把 DataCenter 同步命令拒绝转换为业务拒绝结果。
+TEST(IEC104LinkManagerHelperTest, HandleCommandValueReturnsRejectedWhenDataCenterRejects) {
+  FakeDataCenterState state;
+  state.RejectCommandForTag("float-tag", "总量超过上限");
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+
+  LinkManager::LinkRuntime runtime;
+  runtime.connId = 6;
+  runtime.config = MakeClientConfig("conn", IEC104Proto::STATION_ROLE_SLAVE);
+  runtime.pointTable = MakePointTable();
+  mgr.linksByName_.emplace("conn", std::move(runtime));
+
+  CommandValue cv;
+  cv.ioa = 100;
+  cv.type = IEC104Proto::POINT_TYPE_FLOAT;
+  cv.doubleValue = 8.0;
+  auto result = mgr.handleCommandValue("conn", cv);
+  EXPECT_FALSE(result.accepted);
+  EXPECT_EQ(result.reason, "总量超过上限");
 }
 
 // 验证：handleTimeSyncCommand 在 tsMs<=0 时直接返回。

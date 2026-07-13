@@ -1112,7 +1112,7 @@ void LinkManager::configureTransportCallbacksLocked(const std::string &connName,
     (void)handleTimeSyncCommand(connName, tsMs);
   });
   link->transport->SetCommandCallback([this, connName](const CommandValue &cv) {
-    (void)handleCommandValue(connName, cv);
+    return handleCommandValue(connName, cv);
   });
 }
 

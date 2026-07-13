@@ -213,6 +213,31 @@ grpc::Status DataCenterClient::PublishInt64(
   return stub->Publish(&ctx, req, &resp);
 }
 
+grpc::Status DataCenterClient::ExecuteCommand(
+    const DataCenterProto::ExecuteCommandRequest& request,
+    DataCenterProto::ExecuteCommandResponse* response) {
+  if (response == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "response 为空");
+  }
+  if (!request.has_src()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "src 不能为空");
+  }
+  if (request.src().conn_id() == 0 && (request.src().module_name().empty() || request.src().conn_name().empty())) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "src 连接不能为空");
+  }
+  if (request.src().tag().empty()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "src.tag 不能为空");
+  }
+  if (request.value().kind_case() == DataCenterProto::PointValue::KIND_NOT_SET) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "value 不能为空");
+  }
+  auto stub = getStub();
+
+  grpc::ClientContext ctx;
+  response->Clear();
+  return stub->ExecuteCommand(&ctx, request, response);
+}
+
 grpc::Status DataCenterClient::GetLatest(
     uint32_t connId, const std::vector<std::string>& tags, DataCenterProto::GetLatestResponse* out) {
   if (out == nullptr) {

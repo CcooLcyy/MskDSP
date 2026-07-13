@@ -141,6 +141,11 @@ public:
     failGetLatestConnIds_.emplace(connId);
   }
 
+  void RejectCommandForTag(std::string tag, std::string reason = "强制命令拒绝") {
+    std::lock_guard<std::mutex> lock(mu_);
+    rejectCommandReasonsByTag_[std::move(tag)] = std::move(reason);
+  }
+
   bool HasConnection(const std::string& module, const std::string& conn) const {
     std::lock_guard<std::mutex> lock(mu_);
     return conns_.contains(ConnKey{module, conn});
@@ -150,6 +155,19 @@ public:
     std::lock_guard<std::mutex> lock(mu_);
     auto connIt = publishCountByConnId_.find(connId);
     if (connIt == publishCountByConnId_.end()) {
+      return 0;
+    }
+    auto tagIt = connIt->second.find(tag);
+    if (tagIt == connIt->second.end()) {
+      return 0;
+    }
+    return tagIt->second;
+  }
+
+  size_t GetCommandCount(uint32_t connId, const std::string& tag) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto connIt = commandCountByConnId_.find(connId);
+    if (connIt == commandCountByConnId_.end()) {
       return 0;
     }
     auto tagIt = connIt->second.find(tag);
@@ -372,6 +390,60 @@ public:
     return grpc::Status::OK;
   }
 
+  grpc::Status ExecuteCommand(const DataCenterProto::ExecuteCommandRequest& request,
+                              DataCenterProto::ExecuteCommandResponse* response) {
+    if (response == nullptr) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "response 为空");
+    }
+    response->Clear();
+    if (!request.has_src() || request.src().conn_id() == 0 || request.src().tag().empty()) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "src 不能为空");
+    }
+    if (request.value().kind_case() == DataCenterProto::PointValue::KIND_NOT_SET) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "value 不能为空");
+    }
+
+    std::string rejectReason;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      commandCountByConnId_[request.src().conn_id()][request.src().tag()] += 1;
+      auto rejectIt = rejectCommandReasonsByTag_.find(request.src().tag());
+      if (rejectIt != rejectCommandReasonsByTag_.end()) {
+        rejectReason = rejectIt->second;
+      }
+    }
+
+    if (request.has_dst()) {
+      response->mutable_dst()->CopyFrom(request.dst());
+    }
+    switch (request.value().kind_case()) {
+    case DataCenterProto::PointValue::kDoubleValue:
+      response->set_requested_value(request.value().double_value());
+      response->set_accepted_value(request.value().double_value());
+      break;
+    case DataCenterProto::PointValue::kIntValue:
+      response->set_requested_value(static_cast<double>(request.value().int_value()));
+      response->set_accepted_value(static_cast<double>(request.value().int_value()));
+      break;
+    case DataCenterProto::PointValue::kBoolValue:
+      response->set_requested_value(request.value().bool_value() ? 1.0 : 0.0);
+      response->set_accepted_value(request.value().bool_value() ? 1.0 : 0.0);
+      break;
+    default:
+      break;
+    }
+    if (!rejectReason.empty()) {
+      response->set_status(DataCenterProto::COMMAND_REJECTED);
+      response->set_reject_code(DataCenterProto::COMMAND_REJECT_BAD_CONFIG);
+      response->set_reason(rejectReason);
+      return grpc::Status::OK;
+    }
+    response->set_status(DataCenterProto::COMMAND_ACCEPTED);
+    response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSPECIFIED);
+    response->set_reason("测试同步命令已接受");
+    return grpc::Status::OK;
+  }
+
   grpc::Status GetLatest(const DataCenterProto::GetLatestRequest& request,
                          DataCenterProto::GetLatestResponse* response) const {
     if (response == nullptr) {
@@ -448,8 +520,10 @@ private:
   std::unordered_set<std::string> failDeleteConnNames_;
   std::unordered_set<std::string> failPublishTags_;
   std::unordered_set<uint32_t> failGetLatestConnIds_;
+  std::unordered_map<std::string, std::string> rejectCommandReasonsByTag_;
   std::unordered_map<uint32_t, std::unordered_map<std::string, DataCenterProto::PointUpdate>> latestByConnId_;
   std::unordered_map<uint32_t, std::unordered_map<std::string, size_t>> publishCountByConnId_;
+  std::unordered_map<uint32_t, std::unordered_map<std::string, size_t>> commandCountByConnId_;
   mutable std::unordered_map<uint32_t, std::vector<std::weak_ptr<SubscriptionState>>> subscriptionsByConnId_;
 };
 
@@ -499,6 +573,13 @@ inline std::shared_ptr<DataCenterProto::MockDataCenterServiceStub> MakeStub(Fake
   ON_CALL(*stub, Publish(::testing::_, ::testing::_, ::testing::_))
       .WillByDefault(::testing::Invoke([state](grpc::ClientContext*, const DataCenterProto::PublishRequest& req, DataCenterProto::Empty*) {
         return state->Publish(req);
+      }));
+
+  ON_CALL(*stub, ExecuteCommand(::testing::_, ::testing::_, ::testing::_))
+      .WillByDefault(::testing::Invoke([state](grpc::ClientContext*,
+                                               const DataCenterProto::ExecuteCommandRequest& req,
+                                               DataCenterProto::ExecuteCommandResponse* resp) {
+        return state->ExecuteCommand(req, resp);
       }));
 
   ON_CALL(*stub, GetLatest(::testing::_, ::testing::_, ::testing::_))

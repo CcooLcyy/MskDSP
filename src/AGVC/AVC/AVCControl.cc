@@ -161,6 +161,7 @@ std::optional<ControlOutput> ComputeControlOutput(
   }
 
   const auto defaultOutput = ComputeDefaultPointOutput(config, input);
+  out.rawDesiredTotalQKvar = desiredTotalQKvar;
   desiredTotalQKvar = std::clamp(desiredTotalQKvar,
                                  defaultOutput.dynamicLowerQKvar,
                                  defaultOutput.dynamicUpperQKvar);

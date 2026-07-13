@@ -7,6 +7,7 @@
 #include "AVC.grpc.pb.h"
 #include "AVC.h"
 #include "AVC.pb.h"
+#include "DataCenter.grpc.pb.h"
 
 namespace AVC {
 class AVCGrpcServiceImpl : public AVCProto::AVCService::Service {
@@ -20,6 +21,19 @@ public:
   grpc::Status DeleteGroup(grpc::ServerContext* context, const AVCProto::DeleteGroupRequest* request, AVCProto::Empty* response) override;
   grpc::Status StartGroup(grpc::ServerContext* context, const AVCProto::StartGroupRequest* request, AVCProto::Empty* response) override;
   grpc::Status StopGroup(grpc::ServerContext* context, const AVCProto::StopGroupRequest* request, AVCProto::Empty* response) override;
+
+private:
+  AVC* module_{nullptr};
+};
+
+class AVCCommandExecutorServiceImpl : public DataCenterProto::CommandExecutor::Service {
+public:
+  void getAVC(AVC* module);
+
+  grpc::Status ExecuteCommand(
+      grpc::ServerContext* context,
+      const DataCenterProto::ExecuteCommandRequest* request,
+      DataCenterProto::ExecuteCommandResponse* response) override;
 
 private:
   AVC* module_{nullptr};

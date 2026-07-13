@@ -11,6 +11,7 @@ AGC（Automatic Generation Control）自动功率控制模块：从 DataCenter �
 - 派生点：台区总实时有功可按成员量测实时汇总发布，总目标/偏差等由 AGC 控制计算发布，可转发给主站或其他模块
 - 默认点：AGC 会自动生成并注册一组内建点（理论/当前可调上下限、调节返回值），无需手工建点即可直接通过 DataCenter 路由
 - 不可控成员支持：不可控成员只参与量测汇总，作为“被动出力”从总目标中扣除后再分配给可控成员
+- 同步命令拒绝：当 IEC104 等协议控制命令经 `DataCenter.ExecuteCommand` 进入 AGC 时，若总有功目标超过当前可调上下限，AGC 返回拒绝结果，由协议模块形成负确认
 
 ## 接口与协议
 - Protobuf：`protobuf/AGC.proto`
@@ -81,7 +82,8 @@ AGC 为每个控制组固定生成以下 5 个默认点，并自动注册到该�
 - 按 `ABSOLUTE/DELTA` 与 `DELTA_BASE_*` 语义计算 `desiredTotalKw`
 - 直接以 `desiredTotalKw` 作为本轮组总目标，不再应用 `kp`、`max_step_kw`、`deadband_kw` 之类的渐进推进参数
 - 先扣减不可控成员的被动出力，再把剩余目标按 weighted 策略和成员 `min_kw/max_kw` 约束分配给可控成员
-- 若成员约束导致无法完全分配，记录 `unallocated` 并输出告警日志；`outputs.p_total_target` 发布的是本轮实际可下发的总目标值
+- 若成员约束导致无法完全分配，常规订阅输入会记录 `unallocated` 并输出告警日志；`outputs.p_total_target` 发布的是本轮实际可下发的总目标值
+- 若该轮来自 `DataCenter.ExecuteCommand` 同步命令，存在 `unallocated` 时会直接返回 `COMMAND_REJECTED`，不更新组内命令缓存，也不下发成员设定
 
 #### 计算示例
 - total_meas=30, desired_total=60 → target=60 → 按权重 1:2 分配为 [20, 40]

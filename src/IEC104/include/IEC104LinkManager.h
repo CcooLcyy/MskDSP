@@ -111,7 +111,7 @@ private:
   void stopCommandSubscribeLocked(LinkRuntime *link);
 
   grpc::Status handleClientPointValue(const std::string &connName, const PointValue &pv);
-  grpc::Status handleCommandValue(const std::string &connName, const CommandValue &cv);
+  CommandResult handleCommandValue(const std::string &connName, const CommandValue &cv);
   grpc::Status handleTimeSyncCommand(const std::string &connName, int64_t tsMs);
   std::vector<PointValue> buildInterrogationSnapshot(const std::string &connName);
 

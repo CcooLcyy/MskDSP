@@ -38,6 +38,7 @@ public:
   grpc::Status StartGroup(const std::string &groupName);
   grpc::Status StopGroup(const std::string &groupName);
   grpc::Status DeleteGroup(const std::string &groupName);
+  grpc::Status ExecuteCommand(const DataCenterProto::ExecuteCommandRequest &request, DataCenterProto::ExecuteCommandResponse *response);
   void TryAutoStartReadyGroups(std::string_view trigger);
 
 private:

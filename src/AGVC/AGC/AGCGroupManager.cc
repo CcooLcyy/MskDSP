@@ -650,6 +650,170 @@ grpc::Status GroupManager::DeleteGroup(const std::string &groupName) {
   return grpc::Status::OK;
 }
 
+grpc::Status GroupManager::ExecuteCommand(
+    const DataCenterProto::ExecuteCommandRequest &request,
+    DataCenterProto::ExecuteCommandResponse *response) {
+  if (response == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "response 为空");
+  }
+  response->Clear();
+  if (!request.has_dst()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "dst 不能为空");
+  }
+  if (request.value().kind_case() == DataCenterProto::PointValue::KIND_NOT_SET) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "value 不能为空");
+  }
+  *response->mutable_dst() = request.dst();
+
+  double raw = 0.0;
+  if (!pointValueToDouble(request.value(), &raw)) {
+    response->set_status(DataCenterProto::COMMAND_REJECTED);
+    response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSUPPORTED_POINT);
+    response->set_reason("命令点值类型不支持");
+    return grpc::Status::OK;
+  }
+
+  const auto groupName = request.dst().conn_name();
+  AGCProto::GroupConfig config;
+  uint32_t connId = 0;
+  ControlInput input;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end()) {
+      response->set_status(DataCenterProto::COMMAND_REJECTED);
+      response->set_reject_code(DataCenterProto::COMMAND_REJECT_BAD_CONFIG);
+      response->set_reason("未找到 AGC 控制组");
+      return grpc::Status::OK;
+    }
+    if (it->second.state != AGCProto::GROUP_STATE_RUNNING) {
+      response->set_status(DataCenterProto::COMMAND_REJECTED);
+      response->set_reject_code(DataCenterProto::COMMAND_REJECT_GROUP_NOT_RUNNING);
+      response->set_reason("AGC 控制组未运行");
+      return grpc::Status::OK;
+    }
+    if (it->second.cmdTag.empty() || request.dst().tag() != it->second.cmdTag) {
+      response->set_status(DataCenterProto::COMMAND_REJECTED);
+      response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSUPPORTED_POINT);
+      response->set_reason("目的点不是 AGC 总有功命令点");
+      return grpc::Status::OK;
+    }
+
+    config = it->second.config;
+    connId = it->second.connId;
+    input.hasCmdRaw = true;
+    input.cmdRaw = raw;
+    input.baseRawByTag = it->second.baseRawByTag;
+    input.hasMemberMeasRaw = it->second.hasMemberMeasRaw;
+    input.memberMeasRaw = it->second.memberMeasRaw;
+    input.hasLastMemberTargetKw = it->second.hasLastMemberTargetKw;
+    input.lastMemberTargetKw = it->second.lastMemberTargetKw;
+    input.hasLastDesiredTotalKw = it->second.hasLastDesiredTotalKw;
+    input.lastDesiredTotalKw = it->second.lastDesiredTotalKw;
+  }
+
+  const auto defaultOutput = ComputeDefaultPointOutput(config, input);
+  response->set_lower_limit(defaultOutput.dynamicLowerKw);
+  response->set_upper_limit(defaultOutput.dynamicUpperKw);
+
+  auto outputOpt = ComputeControlOutput(config, input, weightedStrategy_);
+  if (!outputOpt) {
+    response->set_status(DataCenterProto::COMMAND_REJECTED);
+    response->set_reject_code(DataCenterProto::COMMAND_REJECT_BAD_CONFIG);
+    response->set_reason("AGC 控制计算无法生成输出");
+    return grpc::Status::OK;
+  }
+  const auto &output = *outputOpt;
+  response->set_requested_value(output.desiredTotalKw);
+  response->set_accepted_value(output.actualTargetKw);
+
+  constexpr double kEps = 1e-6;
+  if (std::fabs(output.unallocatedKw) > kEps) {
+    response->set_status(DataCenterProto::COMMAND_REJECTED);
+    if (output.unallocatedKw > 0.0) {
+      response->set_reject_code(DataCenterProto::COMMAND_REJECT_OVER_UPPER_LIMIT);
+      response->set_reason("总有功目标超过当前可调上限");
+    } else {
+      response->set_reject_code(DataCenterProto::COMMAND_REJECT_BELOW_LOWER_LIMIT);
+      response->set_reason("总有功目标低于当前可调下限");
+    }
+    LOG_WARNING("AGC 拒绝同步总有功命令: group_name={}, requested_kw={}, lower_kw={}, upper_kw={}, actual_target_kw={}, unallocated_kw={}",
+                groupName,
+                output.desiredTotalKw,
+                defaultOutput.dynamicLowerKw,
+                defaultOutput.dynamicUpperKw,
+                output.actualTargetKw,
+                output.unallocatedKw);
+    return grpc::Status::OK;
+  }
+
+  DataCenterProto::PointUpdate commandUpdate;
+  commandUpdate.set_src_conn_id(request.src().conn_id());
+  commandUpdate.set_src_tag(request.src().tag());
+  commandUpdate.set_dst_conn_id(connId);
+  commandUpdate.set_dst_tag(request.dst().tag());
+  commandUpdate.mutable_value()->CopyFrom(request.value());
+  commandUpdate.set_ts_ms(request.ts_ms());
+  commandUpdate.set_quality(request.quality());
+
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end() || it->second.state != AGCProto::GROUP_STATE_RUNNING) {
+      response->set_status(DataCenterProto::COMMAND_REJECTED);
+      response->set_reject_code(DataCenterProto::COMMAND_REJECT_GROUP_NOT_RUNNING);
+      response->set_reason("AGC 控制组状态已变化，命令未执行");
+      return grpc::Status::OK;
+    }
+    it->second.cmdRaw = raw;
+    it->second.hasCmdRaw = true;
+    it->second.hasLastDesiredTotalKw = output.hasLastDesiredTotalKw;
+    it->second.lastDesiredTotalKw = output.nextLastDesiredTotalKw;
+    it->second.hasLastMemberTargetKw = output.hasLastMemberTargetKw;
+    it->second.lastMemberTargetKw = output.nextLastMemberTargetKw;
+    it->second.hasLastUnallocatedKw = false;
+    it->second.lastUnallocatedKw = 0.0;
+  }
+
+  publishCommandEchoPoint(connId, config.p_cmd(), commandUpdate);
+  publishDefaultLimitPoints(groupName, "同步命令执行");
+
+  const auto quality = DataCenterProto::QUALITY_GOOD;
+  if (config.has_outputs()) {
+    const auto &outputs = config.outputs();
+    if (output.publishTotalMeas) {
+      (void)dataCenter_.PublishDouble(connId, outputs.p_total_meas().tag(), output.totalMeasKw, quality, 0);
+    }
+    if (output.publishTotalTarget) {
+      (void)dataCenter_.PublishDouble(connId, outputs.p_total_target().tag(), output.actualTargetKw, quality, 0);
+    }
+    if (output.publishTotalError) {
+      (void)dataCenter_.PublishDouble(connId, outputs.p_total_error().tag(), output.totalErrorKw, quality, 0);
+    }
+  }
+
+  const auto memberCount = static_cast<size_t>(config.members_size());
+  for (size_t i = 0; i < memberCount && i < output.memberPublish.size() && i < output.memberPublishKw.size(); ++i) {
+    if (!output.memberPublish[i]) {
+      continue;
+    }
+    const auto &member = config.members(static_cast<int>(i));
+    if (!member.has_p_set() || !member.p_set().has_signal() || member.p_set().signal().tag().empty()) {
+      continue;
+    }
+    (void)dataCenter_.PublishDouble(connId, member.p_set().signal().tag(), output.memberPublishKw[i], quality, 0);
+  }
+
+  response->set_status(DataCenterProto::COMMAND_ACCEPTED);
+  response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSPECIFIED);
+  response->set_reason("AGC 同步总有功命令已接受并执行");
+  LOG_INFO("AGC 已执行同步总有功命令: group_name={}, requested_kw={}, actual_target_kw={}",
+           groupName,
+           output.desiredTotalKw,
+           output.actualTargetKw);
+  return grpc::Status::OK;
+}
+
 bool GroupManager::pointValueToDouble(const DataCenterProto::PointValue &v, double *out) {
   if (out == nullptr) {
     return false;

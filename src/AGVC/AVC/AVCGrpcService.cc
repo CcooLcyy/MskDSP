@@ -156,4 +156,27 @@ grpc::Status AVCGrpcServiceImpl::StopGroup(
   LOG_INFO("AVC 已停止控制组: group_name={}", request->group_name());
   return grpc::Status::OK;
 }
+
+void AVCCommandExecutorServiceImpl::getAVC(AVC* module) {
+  module_ = module;
+}
+
+grpc::Status AVCCommandExecutorServiceImpl::ExecuteCommand(
+    grpc::ServerContext*,
+    const DataCenterProto::ExecuteCommandRequest* request,
+    DataCenterProto::ExecuteCommandResponse* response) {
+  if (module_ == nullptr) {
+    LOG_ERROR("AVC 同步命令服务未就绪");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
+  }
+  if (request == nullptr || response == nullptr) {
+    LOG_ERROR("AVC 同步命令请求/响应为空");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
+  }
+  auto status = module_->groupManager().ExecuteCommand(*request, response);
+  if (!status.ok()) {
+    LOG_ERROR("AVC 同步命令执行失败: dst_tag={}, 原因={}", request->dst().tag(), status.error_message());
+  }
+  return status;
+}
 }  // namespace AVC

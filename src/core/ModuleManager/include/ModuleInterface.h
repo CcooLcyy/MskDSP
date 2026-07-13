@@ -9,6 +9,7 @@
 #include <set>
 #include <stop_token>
 #include <string>
+#include <vector>
 
 #include "LibInfoTemp.h"
 
@@ -40,6 +41,7 @@ public:
 protected:
   void initLibInfo(LibInfo libInfo);
   void grpcServerBuilder(std::shared_ptr<grpc::Service> service);
+  void grpcServerBuilder(const std::vector<std::shared_ptr<grpc::Service>>& services);
   void releasePort(std::string addr);
   void reservePort(std::string addr);
   MetaData metaData_;

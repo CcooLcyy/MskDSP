@@ -19,6 +19,9 @@
 #include <utility>
 #include <vector>
 
+#include <grpcpp/create_channel.h>
+#include <grpcpp/security/credentials.h>
+
 #include "DataCenterCore.h"
 #include "DataCenterStateStore.h"
 #include "Logger.h"
@@ -93,6 +96,17 @@ std::string contextPeer(grpc::ServerContext* context) {
     return "未知调用方";
   }
   return peer;
+}
+
+std::string buildModuleUnixSocketAddress(const std::string& moduleName) {
+  auto dir = std::filesystem::path("./socket");
+  std::error_code ec;
+  auto absDir = std::filesystem::absolute(dir, ec);
+  if (ec) {
+    absDir = dir;
+  }
+  auto sockPath = absDir / (moduleName + ".sock");
+  return "unix:" + sockPath.string();
 }
 
 bool isProtocolShadowEndpoint(const DataCenterProto::Endpoint& endpoint) {
@@ -845,6 +859,107 @@ grpc::Status DataCenterGrpcServiceImpl::Publish(grpc::ServerContext*, const Data
   }
   LOG_DEBUG("DataCenter 发布: conn_id={}, tag={}, 更新数={}, 投递数={}",
             request->conn_id(), request->tag(), updateCount, deliveries.size());
+  return grpc::Status::OK;
+}
+
+grpc::Status DataCenterGrpcServiceImpl::ExecuteCommand(
+    grpc::ServerContext*,
+    const DataCenterProto::ExecuteCommandRequest* request,
+    DataCenterProto::ExecuteCommandResponse* response) {
+  if (request == nullptr || response == nullptr) {
+    LOG_ERROR("DataCenter ExecuteCommand 请求/响应为空");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
+  }
+
+  LOG_INFO("DataCenter 收到同步命令: src={}, {}, 质量={}({}), 请求时间戳={}, request_id={}, timeout_ms={}",
+           formatEndpointForLog(request->src()),
+           formatPointValue(request->value()),
+           static_cast<int>(request->quality()),
+           qualityToString(request->quality()),
+           request->ts_ms(),
+           request->request_id(),
+           request->timeout_ms());
+
+  DataCenterProto::ExecuteCommandResponse routeResp;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    auto status = impl_->core.ResolveCommandRoute(*request, &routeResp);
+    if (!status.ok()) {
+      LOG_ERROR("DataCenter 同步命令路由解析失败: src={}, 原因={}", formatEndpointForLog(request->src()), status.error_message());
+      return status;
+    }
+  }
+
+  if (routeResp.status() != DataCenterProto::COMMAND_STATUS_UNSPECIFIED) {
+    *response = routeResp;
+    LOG_WARNING("DataCenter 同步命令未进入目标模块: src={}, status={}, reason={}",
+                formatEndpointForLog(request->src()),
+                static_cast<int>(response->status()),
+                response->reason());
+    return grpc::Status::OK;
+  }
+
+  auto targetReq = *request;
+  *targetReq.mutable_dst() = routeResp.dst();
+  auto address = buildModuleUnixSocketAddress(routeResp.dst().module_name());
+  auto channel = grpc::CreateChannel(address, grpc::InsecureChannelCredentials());
+  auto stub = DataCenterProto::CommandExecutor::NewStub(channel);
+
+  grpc::ClientContext ctx;
+  auto timeoutMs = request->timeout_ms() == 0 ? 1500u : request->timeout_ms();
+  ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(timeoutMs));
+
+  DataCenterProto::ExecuteCommandResponse targetResp;
+  auto status = stub->ExecuteCommand(&ctx, targetReq, &targetResp);
+  if (!status.ok()) {
+    response->Clear();
+    *response->mutable_dst() = routeResp.dst();
+    if (status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
+      response->set_status(DataCenterProto::COMMAND_TIMEOUT);
+      response->set_reason("目标模块同步命令执行超时");
+    } else if (status.error_code() == grpc::StatusCode::UNIMPLEMENTED ||
+               status.error_code() == grpc::StatusCode::UNAVAILABLE) {
+      response->set_status(DataCenterProto::COMMAND_TARGET_UNAVAILABLE);
+      response->set_reason("目标模块同步命令服务不可用: " + status.error_message());
+    } else {
+      response->set_status(DataCenterProto::COMMAND_INTERNAL_ERROR);
+      response->set_reason("目标模块同步命令执行失败: " + status.error_message());
+    }
+    LOG_ERROR("DataCenter 同步命令调用目标模块失败: dst={}, 地址={}, grpc_code={}, 原因={}",
+              formatEndpointForLog(routeResp.dst()),
+              address,
+              static_cast<int>(status.error_code()),
+              status.error_message());
+    return grpc::Status::OK;
+  }
+
+  if (!targetResp.has_dst()) {
+    *targetResp.mutable_dst() = routeResp.dst();
+  }
+  if (targetResp.status() == DataCenterProto::COMMAND_STATUS_UNSPECIFIED) {
+    targetResp.set_status(DataCenterProto::COMMAND_INTERNAL_ERROR);
+    targetResp.set_reason("目标模块返回空命令状态");
+  }
+
+  if (targetResp.status() == DataCenterProto::COMMAND_ACCEPTED) {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    auto storeStatus = impl_->core.StoreAcceptedCommand(targetReq, routeResp.dst());
+    if (!storeStatus.ok()) {
+      targetResp.set_status(DataCenterProto::COMMAND_INTERNAL_ERROR);
+      targetResp.set_reason("同步命令已执行但写入最新值缓存失败: " + storeStatus.error_message());
+      LOG_ERROR("DataCenter 同步命令写入最新值缓存失败: dst={}, 原因={}",
+                formatEndpointForLog(routeResp.dst()),
+                storeStatus.error_message());
+    }
+  }
+
+  *response = targetResp;
+  LOG_INFO("DataCenter 同步命令完成: src={}, dst={}, status={}, reject_code={}, reason={}",
+           formatEndpointForLog(request->src()),
+           formatEndpointForLog(response->dst()),
+           static_cast<int>(response->status()),
+           static_cast<int>(response->reject_code()),
+           response->reason());
   return grpc::Status::OK;
 }
 

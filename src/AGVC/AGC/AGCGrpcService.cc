@@ -116,4 +116,27 @@ grpc::Status AGCGrpcServiceImpl::StopGroup(grpc::ServerContext*, const AGCProto:
   }
   return status;
 }
+
+void AGCCommandExecutorServiceImpl::getAGC(AGC* module) {
+  module_ = module;
+}
+
+grpc::Status AGCCommandExecutorServiceImpl::ExecuteCommand(
+    grpc::ServerContext*,
+    const DataCenterProto::ExecuteCommandRequest* request,
+    DataCenterProto::ExecuteCommandResponse* response) {
+  if (module_ == nullptr) {
+    LOG_ERROR("AGC 同步命令服务未就绪");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
+  }
+  if (request == nullptr || response == nullptr) {
+    LOG_ERROR("AGC 同步命令请求/响应为空");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
+  }
+  auto status = module_->groupManager().ExecuteCommand(*request, response);
+  if (!status.ok()) {
+    LOG_ERROR("AGC 同步命令执行失败: dst_tag={}, 原因={}", request->dst().tag(), status.error_message());
+  }
+  return status;
+}
 }  // namespace AGC
