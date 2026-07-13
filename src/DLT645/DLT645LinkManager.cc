@@ -2914,7 +2914,23 @@ grpc::Status LinkManager::decodeAndPublish(LinkRuntime *link, const PointTable::
   }
 
   if (point.type == DLT645Proto::DATA_TYPE_BOOL) {
-    const bool value = payload[0] != 0;
+    bool value = false;
+    if (point.bitIndex.has_value()) {
+      const uint32_t byteIndex = point.byteIndex.value_or(0);
+      if (byteIndex >= point.dataLen || point.bitIndex.value() >= 8) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "BOOL bit 位置超出数据域范围");
+      }
+      value = ((payload[byteIndex] >> point.bitIndex.value()) & 0x01u) != 0;
+      LOG_DEBUG("DLT645 解析bit遥信: conn_name={}, tag={}, byte_index={}, bit_index={}, byte=0x{:02X}, value={}",
+                link->config.conn_name(),
+                point.tag,
+                byteIndex,
+                point.bitIndex.value(),
+                static_cast<int>(payload[byteIndex]),
+                value);
+    } else {
+      value = payload[0] != 0;
+    }
     return dataCenter_.PublishBool(link->connId, point.tag, value, DataCenterProto::QUALITY_GOOD, tsMs);
   }
 
@@ -3160,6 +3176,12 @@ std::vector<uint8_t> LinkManager::encodeData(const PointTable::Point &point, con
   out.reserve(point.dataLen);
 
   if (point.type == DLT645Proto::DATA_TYPE_BOOL) {
+    if (point.bitIndex.has_value()) {
+      if (error != nullptr) {
+        *error = "BOOL bit 点位不支持写入";
+      }
+      return {};
+    }
     bool v = false;
     if (!pointValueToBool(value, &v)) {
       if (error != nullptr) {

@@ -26,6 +26,18 @@ bool requireDataLen(uint32_t dataLen, uint32_t expected) {
   return dataLen == expected;
 }
 
+bool isBitBool(const DLT645Proto::Point& point) {
+  return point.type() == DLT645Proto::DATA_TYPE_BOOL && point.has_bit_index();
+}
+
+bool isBitBool(const DLT645Proto::BlockItem& item) {
+  return item.type() == DLT645Proto::DATA_TYPE_BOOL && item.has_bit_index();
+}
+
+bool validateBitPosition(uint32_t dataLen, uint32_t byteIndex, uint32_t bitIndex) {
+  return byteIndex < dataLen && bitIndex < 8;
+}
+
 std::string formatHex(const std::array<uint8_t, 4>& data) {
   std::ostringstream oss;
   oss << std::hex << std::setfill('0');
@@ -43,7 +55,7 @@ grpc::Status PointTable::Upsert(const google::protobuf::RepeatedPtrField<DLT645P
                                 bool replace) {
   if (replace) {
     byTag_.clear();
-    tagByDi_.clear();
+    tagsByDi_.clear();
     blocks_.clear();
     blockDiSet_.clear();
     blockItemByTag_.clear();
@@ -140,6 +152,12 @@ void PointTable::ToProto(const std::string& connName, DLT645Proto::PointTable* o
     outPoint->set_scale(point.scale);
     outPoint->set_offset(point.offset);
     outPoint->set_deadband(point.deadband);
+    if (point.byteIndex.has_value()) {
+      outPoint->set_byte_index(point.byteIndex.value());
+    }
+    if (point.bitIndex.has_value()) {
+      outPoint->set_bit_index(point.bitIndex.value());
+    }
   }
   for (const auto& block : blocks_) {
     auto* outBlock = out->add_blocks();
@@ -156,6 +174,12 @@ void PointTable::ToProto(const std::string& connName, DLT645Proto::PointTable* o
       outItem->set_offset(point.offset);
       outItem->set_deadband(point.deadband);
       outItem->set_trim_right_space(item.trimRightSpace);
+      if (point.byteIndex.has_value()) {
+        outItem->set_byte_index(point.byteIndex.value());
+      }
+      if (point.bitIndex.has_value()) {
+        outItem->set_bit_index(point.bitIndex.value());
+      }
     }
   }
 }
@@ -165,7 +189,9 @@ bool PointTable::isSameDefinition(const Point& lhs, const Point& rhs) {
       lhs.type == rhs.type &&
       lhs.scale == rhs.scale &&
       lhs.offset == rhs.offset &&
-      lhs.deadband == rhs.deadband;
+      lhs.deadband == rhs.deadband &&
+      lhs.byteIndex == rhs.byteIndex &&
+      lhs.bitIndex == rhs.bitIndex;
 }
 
 grpc::Status PointTable::validatePoint(const DLT645Proto::Point& point) {
@@ -195,7 +221,17 @@ grpc::Status PointTable::validatePoint(const DLT645Proto::Point& point) {
   if (point.deadband() < 0) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "deadband 不能为负数");
   }
-  if (point.type() == DLT645Proto::DATA_TYPE_BOOL && !requireDataLen(point.data_len(), 1)) {
+  if (isBitBool(point)) {
+    const uint32_t byteIndex = point.has_byte_index() ? point.byte_index() : 0;
+    if (!validateBitPosition(point.data_len(), byteIndex, point.bit_index())) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "BOOL 点位 bit 位置超出 data_len 范围");
+    }
+    if (point.access() != DLT645Proto::ACCESS_READ_ONLY) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "BOOL bit 点位仅支持只读遥信");
+    }
+  } else if (point.type() == DLT645Proto::DATA_TYPE_BOOL && point.has_byte_index()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "byte_index 需要和 bit_index 同时配置");
+  } else if (point.type() == DLT645Proto::DATA_TYPE_BOOL && !requireDataLen(point.data_len(), 1)) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "BOOL 点位 data_len 必须为 1");
   }
   if (point.type() == DLT645Proto::DATA_TYPE_UINT16 && !requireDataLen(point.data_len(), 2)) {
@@ -226,7 +262,17 @@ grpc::Status PointTable::validateBlockItem(const DLT645Proto::BlockItem& item) {
   if (item.deadband() < 0) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "数据块子项 deadband 不能为负数");
   }
-  if (item.type() == DLT645Proto::DATA_TYPE_BOOL && !requireDataLen(item.data_len(), 1)) {
+  if (isBitBool(item)) {
+    const uint32_t byteIndex = item.has_byte_index() ? item.byte_index() : 0;
+    if (!validateBitPosition(item.data_len(), byteIndex, item.bit_index())) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "数据块 BOOL 子项 bit 位置超出 data_len 范围");
+    }
+    if (item.access() != DLT645Proto::ACCESS_READ_ONLY) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "数据块 BOOL bit 子项仅支持只读遥信");
+    }
+  } else if (item.type() == DLT645Proto::DATA_TYPE_BOOL && item.has_byte_index()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "数据块 BOOL 子项 byte_index 需要和 bit_index 同时配置");
+  } else if (item.type() == DLT645Proto::DATA_TYPE_BOOL && !requireDataLen(item.data_len(), 1)) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "数据块 BOOL 子项 data_len 必须为 1");
   }
   if (item.type() == DLT645Proto::DATA_TYPE_UINT16 && !requireDataLen(item.data_len(), 2)) {
@@ -315,9 +361,30 @@ grpc::Status PointTable::insertOrUpdatePoint(const DLT645Proto::Point& point) {
       return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "tag 已映射到其他 di");
     }
   }
-  auto existingDi = tagByDi_.find(point.di());
-  if (existingDi != tagByDi_.end() && existingDi->second != point.tag()) {
-    return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "di 已映射到其他 tag");
+  auto existingDi = tagsByDi_.find(point.di());
+  if (existingDi != tagsByDi_.end()) {
+    const bool nextBitPoint = point.has_bit_index();
+    for (const auto& tag : existingDi->second) {
+      if (tag == point.tag()) {
+        continue;
+      }
+      auto tagIt = byTag_.find(tag);
+      if (tagIt == byTag_.end()) {
+        continue;
+      }
+      const auto& existingPoint = tagIt->second;
+      if (!nextBitPoint || !existingPoint.bitIndex.has_value()) {
+        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "di 已映射到非 bit 点位");
+      }
+      const uint32_t nextByteIndex = point.has_byte_index() ? point.byte_index() : 0;
+      if (existingPoint.byteIndex.value_or(0) == nextByteIndex &&
+          existingPoint.bitIndex.value() == point.bit_index()) {
+        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "di 的同一 bit 已映射到其他 tag");
+      }
+      if (existingPoint.dataLen != point.data_len()) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "同 DI bit 点位 data_len 必须一致");
+      }
+    }
   }
 
   Point p;
@@ -333,6 +400,10 @@ grpc::Status PointTable::insertOrUpdatePoint(const DLT645Proto::Point& point) {
   }
   p.offset = point.offset();
   p.deadband = point.deadband();
+  if (point.has_bit_index()) {
+    p.byteIndex = point.has_byte_index() ? point.byte_index() : 0;
+    p.bitIndex = point.bit_index();
+  }
 
   auto blockIt = blockItemByTag_.find(p.tag);
   if (blockIt != blockItemByTag_.end()) {
@@ -343,9 +414,17 @@ grpc::Status PointTable::insertOrUpdatePoint(const DLT645Proto::Point& point) {
   }
 
   byTag_[p.tag] = p;
-  tagByDi_[p.diText] = p.tag;
-  LOG_DEBUG("DLT645 点表写入点位: tag={}, 配置DI={}, 发送DI={}, data_len={}", p.tag, p.diText, formatHex(p.diBytes),
-            p.dataLen);
+  auto& tags = tagsByDi_[p.diText];
+  if (std::find(tags.begin(), tags.end(), p.tag) == tags.end()) {
+    tags.push_back(p.tag);
+  }
+  LOG_DEBUG("DLT645 点表写入点位: tag={}, 配置DI={}, 发送DI={}, data_len={}, byte_index={}, bit_index={}",
+            p.tag,
+            p.diText,
+            formatHex(p.diBytes),
+            p.dataLen,
+            p.byteIndex.has_value() ? std::to_string(p.byteIndex.value()) : "-",
+            p.bitIndex.has_value() ? std::to_string(p.bitIndex.value()) : "-");
   return grpc::Status::OK;
 }
 
@@ -390,6 +469,10 @@ grpc::Status PointTable::insertOrUpdateBlock(const DLT645Proto::Block& block) {
     }
     p.offset = item.offset();
     p.deadband = item.deadband();
+    if (item.has_bit_index()) {
+      p.byteIndex = item.has_byte_index() ? item.byte_index() : 0;
+      p.bitIndex = item.bit_index();
+    }
 
     auto pointIt = byTag_.find(p.tag);
     if (pointIt != byTag_.end()) {

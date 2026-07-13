@@ -27,6 +27,8 @@ public:
     double scale = 1.0;
     double offset = 0.0;
     double deadband = 0.0;
+    std::optional<uint32_t> byteIndex;
+    std::optional<uint32_t> bitIndex;
   };
 
   struct BlockItem {
@@ -63,7 +65,7 @@ private:
   grpc::Status insertOrUpdateBlock(const DLT645Proto::Block& block);
 
   std::unordered_map<std::string, Point> byTag_;
-  std::unordered_map<std::string, std::string> tagByDi_;
+  std::unordered_map<std::string, std::vector<std::string>> tagsByDi_;
   std::vector<Block> blocks_;
   std::unordered_set<std::string> blockDiSet_;
   std::unordered_map<std::string, BlockItem> blockItemByTag_;
