@@ -25,6 +25,7 @@ public:
     double scale = 1.0;
     double offset = 0.0;
     double deadband = 0.0;
+    std::optional<uint32_t> bitIndex;
   };
 
   struct RegisterLookup {
@@ -51,6 +52,23 @@ private:
     }
   };
 
+  struct BitPointKey {
+    ModbusRTUProto::FunctionCode function = ModbusRTUProto::FUNCTION_UNSPECIFIED;
+    uint32_t address = 0;
+    uint32_t bitIndex = 0;
+
+    bool operator==(const BitPointKey& other) const {
+      return function == other.function && address == other.address && bitIndex == other.bitIndex;
+    }
+  };
+
+  struct BitPointKeyHash {
+    size_t operator()(const BitPointKey& key) const {
+      const auto func = static_cast<uint32_t>(key.function);
+      return (static_cast<size_t>(func) << 32) ^ (static_cast<size_t>(key.address) << 8) ^ static_cast<size_t>(key.bitIndex);
+    }
+  };
+
   struct PointKeyHash {
     size_t operator()(const PointKey& key) const {
       const auto func = static_cast<uint32_t>(key.function);
@@ -68,6 +86,7 @@ private:
 
   std::unordered_map<std::string, Point> byTag_;
   std::unordered_map<PointKey, AddressEntry, PointKeyHash> tagByKey_;
+  std::unordered_map<BitPointKey, std::string, BitPointKeyHash> tagByBitKey_;
 };
 
 }  // namespace ModbusRTU

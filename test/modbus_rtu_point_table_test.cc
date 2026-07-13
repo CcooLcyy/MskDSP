@@ -312,6 +312,72 @@ TEST(ModbusRtuPointTableTest, AcceptsInputRegisterPoints) {
   EXPECT_EQ(p32Second->wordIndex, 1u);
 }
 
+// 验证：寄存器 BOOL 点位支持配置 bit_index，同一寄存器不同 bit 可映射为多个遥信。
+TEST(ModbusRtuPointTableTest, AcceptsRegisterBoolBitPoints) {
+  PointTable table;
+
+  ModbusRTUProto::UpsertPointTableRequest req;
+  auto bit0 = MakePoint("DI0", ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS, 100, ModbusRTUProto::DATA_TYPE_BOOL);
+  bit0.set_bit_index(0);
+  *req.add_points() = bit0;
+
+  auto bit7 = MakePoint("DI7", ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS, 100, ModbusRTUProto::DATA_TYPE_BOOL);
+  bit7.set_bit_index(7);
+  *req.add_points() = bit7;
+
+  auto bit20 = MakePoint("DI20", ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS, 200, ModbusRTUProto::DATA_TYPE_BOOL);
+  bit20.set_reg_count(2);
+  bit20.set_bit_index(20);
+  bit20.set_word_order(ModbusRTUProto::WORD_ORDER_LH);
+  *req.add_points() = bit20;
+  req.set_replace(true);
+
+  ASSERT_TRUE(table.Upsert(req.points(), req.replace()).ok());
+
+  auto stored = table.FindByTag("DI20");
+  ASSERT_TRUE(stored.has_value());
+  ASSERT_TRUE(stored->bitIndex.has_value());
+  EXPECT_EQ(stored->bitIndex.value(), 20u);
+  EXPECT_EQ(stored->regCount, 2u);
+
+  ModbusRTUProto::PointTable out;
+  table.ToProto("conn-bit", &out);
+  ASSERT_EQ(out.points_size(), 3);
+  EXPECT_TRUE(out.points(0).has_bit_index());
+  EXPECT_TRUE(out.points(1).has_bit_index());
+  EXPECT_TRUE(out.points(2).has_bit_index());
+}
+
+// 验证：寄存器 BOOL 点位拒绝缺少 bit_index、越界 bit_index 与同一 bit 重复映射。
+TEST(ModbusRtuPointTableTest, RejectsInvalidRegisterBoolBitPoints) {
+  PointTable table;
+
+  ModbusRTUProto::UpsertPointTableRequest missingBit;
+  *missingBit.add_points() = MakePoint("A", ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS, 1, ModbusRTUProto::DATA_TYPE_BOOL);
+  missingBit.set_replace(true);
+  auto st = table.Upsert(missingBit.points(), missingBit.replace());
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+
+  ModbusRTUProto::UpsertPointTableRequest outOfRange;
+  auto p = MakePoint("B", ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS, 1, ModbusRTUProto::DATA_TYPE_BOOL);
+  p.set_bit_index(16);
+  *outOfRange.add_points() = p;
+  outOfRange.set_replace(true);
+  st = table.Upsert(outOfRange.points(), outOfRange.replace());
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+
+  ModbusRTUProto::UpsertPointTableRequest duplicate;
+  auto bit0 = MakePoint("C", ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS, 5, ModbusRTUProto::DATA_TYPE_BOOL);
+  bit0.set_bit_index(0);
+  *duplicate.add_points() = bit0;
+  auto bit0Again = MakePoint("D", ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS, 5, ModbusRTUProto::DATA_TYPE_BOOL);
+  bit0Again.set_bit_index(0);
+  *duplicate.add_points() = bit0Again;
+  duplicate.set_replace(true);
+  st = table.Upsert(duplicate.points(), duplicate.replace());
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::ALREADY_EXISTS);
+}
+
 // 验证：寄存器点位支持 INT16/INT32，并保留寄存器配置参数。
 TEST(ModbusRtuPointTableTest, AcceptsSignedRegisterPoints) {
   PointTable table;

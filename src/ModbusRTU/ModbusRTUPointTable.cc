@@ -34,6 +34,10 @@ uint32_t defaultRegCount(ModbusRTUProto::DataType type) {
   return is32BitRegisterType(type) ? 2u : 1u;
 }
 
+bool isRegisterBitPoint(const ModbusRTUProto::Point &point) {
+  return point.type() == ModbusRTUProto::DATA_TYPE_BOOL && isReadRegisterFunction(point.function()) && point.has_bit_index();
+}
+
 bool isValidWordOrder(ModbusRTUProto::WordOrder order) {
   return order == ModbusRTUProto::WORD_ORDER_UNSPECIFIED ||
       order == ModbusRTUProto::WORD_ORDER_HL ||
@@ -61,6 +65,7 @@ grpc::Status PointTable::Upsert(const google::protobuf::RepeatedPtrField<ModbusR
   if (replace) {
     byTag_.clear();
     tagByKey_.clear();
+    tagByBitKey_.clear();
   }
 
   for (const auto &point : points) {
@@ -111,10 +116,23 @@ grpc::Status PointTable::validatePoint(const ModbusRTUProto::Point &point) const
   if (point.function() == ModbusRTUProto::FUNCTION_READ_COILS && point.type() != ModbusRTUProto::DATA_TYPE_BOOL) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "线圈点位需要 BOOL 类型");
   }
+  if (point.function() == ModbusRTUProto::FUNCTION_READ_COILS && point.has_bit_index()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "线圈点位不需要 bit_index");
+  }
   if (point.function() == ModbusRTUProto::FUNCTION_READ_COILS && regCount != 1) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "线圈点位 reg_count 只能为 1");
   }
+  if (point.type() == ModbusRTUProto::DATA_TYPE_BOOL && isReadRegisterFunction(point.function()) && !point.has_bit_index()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "寄存器 BOOL 点位必须配置 bit_index");
+  }
+  if (point.type() == ModbusRTUProto::DATA_TYPE_BOOL && point.has_bit_index() && !isReadRegisterFunction(point.function())) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "bit_index 仅支持 0x03/0x04 寄存器 BOOL 点位");
+  }
+  if (isRegisterBitPoint(point) && point.bit_index() >= regCount * 16u) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "bit_index 超出 reg_count 可用位范围");
+  }
   if ((isReadRegisterFunction(point.function()) || isWriteRegisterFunction(point.function())) &&
+      !(point.type() == ModbusRTUProto::DATA_TYPE_BOOL && isReadRegisterFunction(point.function())) &&
       !is16BitRegisterType(point.type()) &&
       !is32BitRegisterType(point.type())) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "寄存器点位需要 UINT16、UINT32、INT16 或 INT32 类型");
@@ -156,6 +174,9 @@ grpc::Status PointTable::insertOrUpdatePoint(const ModbusRTUProto::Point &point)
   }
   p.offset = point.offset();
   p.deadband = point.deadband();
+  if (point.has_bit_index()) {
+    p.bitIndex = point.bit_index();
+  }
 
   std::vector<PointKey> keys;
   keys.reserve(p.regCount);
@@ -175,6 +196,22 @@ grpc::Status PointTable::insertOrUpdatePoint(const ModbusRTUProto::Point &point)
       return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "地址已映射到其他 tag");
     }
   }
+  if (p.bitIndex.has_value()) {
+    BitPointKey bitKey{p.function, p.address, p.bitIndex.value()};
+    auto existingBitKey = tagByBitKey_.find(bitKey);
+    if (existingBitKey != tagByBitKey_.end() && existingBitKey->second != p.tag) {
+      return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "地址 bit 已映射到其他 tag");
+    }
+  } else {
+    for (const auto &[bitKey, tag] : tagByBitKey_) {
+      if (tag == p.tag || bitKey.function != p.function) {
+        continue;
+      }
+      if (bitKey.address >= p.address && bitKey.address < p.address + p.regCount) {
+        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "地址已映射到 bit 点位");
+      }
+    }
+  }
 
   if (existingTag != byTag_.end()) {
     const auto oldRegCount = existingTag->second.regCount;
@@ -185,17 +222,29 @@ grpc::Status PointTable::insertOrUpdatePoint(const ModbusRTUProto::Point &point)
         tagByKey_.erase(it);
       }
     }
+    if (existingTag->second.bitIndex.has_value()) {
+      BitPointKey oldBitKey{existingTag->second.function, existingTag->second.address, existingTag->second.bitIndex.value()};
+      auto bitIt = tagByBitKey_.find(oldBitKey);
+      if (bitIt != tagByBitKey_.end() && bitIt->second == p.tag) {
+        tagByBitKey_.erase(bitIt);
+      }
+    }
   }
 
   byTag_[p.tag] = p;
-  for (uint32_t i = 0; i < p.regCount; ++i) {
-    tagByKey_[keys[i]] = AddressEntry{p.tag, i};
+  if (p.bitIndex.has_value()) {
+    tagByBitKey_[BitPointKey{p.function, p.address, p.bitIndex.value()}] = p.tag;
+  } else {
+    for (uint32_t i = 0; i < p.regCount; ++i) {
+      tagByKey_[keys[i]] = AddressEntry{p.tag, i};
+    }
   }
-  LOG_DEBUG("ModbusRTU 点表写入点位: tag={}, function={}, address={}, reg_count={}",
+  LOG_DEBUG("ModbusRTU 点表写入点位: tag={}, function={}, address={}, reg_count={}, bit_index={}",
             p.tag,
             static_cast<int>(p.function),
             p.address,
-            p.regCount);
+            p.regCount,
+            p.bitIndex.has_value() ? std::to_string(p.bitIndex.value()) : "-");
   return grpc::Status::OK;
 }
 
@@ -273,6 +322,11 @@ void PointTable::ToProto(const std::string &connName, ModbusRTUProto::PointTable
       dst->set_reg_count(point.regCount);
       dst->set_word_order(point.wordOrder);
       dst->set_byte_order(point.byteOrder);
+    } else if (point.type == ModbusRTUProto::DATA_TYPE_BOOL && point.bitIndex.has_value()) {
+      dst->set_reg_count(point.regCount);
+      dst->set_word_order(point.wordOrder);
+      dst->set_byte_order(point.byteOrder);
+      dst->set_bit_index(point.bitIndex.value());
     }
     dst->set_scale(point.scale);
     dst->set_offset(point.offset);

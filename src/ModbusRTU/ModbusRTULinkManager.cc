@@ -59,6 +59,10 @@ bool isWriteRegisterFunction(ModbusRTUProto::FunctionCode function) {
   return isWriteSingleRegisterFunction(function) || isWriteMultipleRegistersFunction(function);
 }
 
+bool isRegisterBitPoint(const PointTable::Point& point) {
+  return point.type == ModbusRTUProto::DATA_TYPE_BOOL && isReadRegisterFunction(point.function) && point.bitIndex.has_value();
+}
+
 uint16_t swapWordBytes(uint16_t value) {
   return static_cast<uint16_t>((value << 8) | (value >> 8));
 }
@@ -1908,7 +1912,60 @@ void LinkManager::pollLoop(std::string connName,
                    point.function == ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS) {
           const bool isInputRegisters = point.function == ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS;
           std::optional<double> engValue;
-          if (is16BitRegisterType(point.type)) {
+          if (isRegisterBitPoint(point)) {
+            uint32_t raw = 0;
+            if (point.regCount == 1) {
+              uint16_t value = 0;
+              status = isInputRegisters
+                  ? bus->ReadInputRegister(static_cast<uint8_t>(config.device_id()),
+                                           static_cast<uint16_t>(address),
+                                           &value)
+                  : bus->ReadHoldingRegister(static_cast<uint8_t>(config.device_id()),
+                                             static_cast<uint16_t>(address),
+                                             &value);
+              if (status.ok()) {
+                if (point.byteOrder == ModbusRTUProto::BYTE_ORDER_BA) {
+                  value = swapWordBytes(value);
+                }
+                raw = value;
+              }
+            } else if (point.regCount == 2) {
+              std::vector<uint16_t> values;
+              status = isInputRegisters
+                  ? bus->ReadInputRegisters(static_cast<uint8_t>(config.device_id()),
+                                            static_cast<uint16_t>(address),
+                                            2,
+                                            &values)
+                  : bus->ReadHoldingRegisters(static_cast<uint8_t>(config.device_id()),
+                                              static_cast<uint16_t>(address),
+                                              2,
+                                              &values);
+              if (status.ok()) {
+                if (values.size() != 2) {
+                  status = grpc::Status(grpc::StatusCode::UNAVAILABLE,
+                                        isInputRegisters ? "输入寄存器响应数量异常" : "保持寄存器响应数量异常");
+                } else {
+                  raw = decodeUint32(values[0], values[1], point.wordOrder, point.byteOrder);
+                }
+              }
+            } else {
+              status = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "寄存器 BOOL 点位 reg_count 不支持");
+            }
+            if (status.ok()) {
+              const bool bitValue = ((raw >> point.bitIndex.value()) & 0x01u) != 0;
+              LOG_DEBUG("ModbusRTU 读取寄存器bit遥信: conn_name={}, tag={}, raw={}, bit_index={}, value={}",
+                        connName,
+                        point.tag,
+                        raw,
+                        point.bitIndex.value(),
+                        bitValue);
+              auto dc = dataCenter_.PublishBool(connId, point.tag, bitValue, DataCenterProto::QUALITY_GOOD, 0);
+              if (!dc.ok()) {
+                updateLastError(connName, dc.error_message());
+                LOG_ERROR("ModbusRTU 发布点值失败: conn_name={}, tag={}, 原因={}", connName, point.tag, dc.error_message());
+              }
+            }
+          } else if (is16BitRegisterType(point.type)) {
             uint16_t value = 0;
             status = isInputRegisters
                 ? bus->ReadInputRegister(static_cast<uint8_t>(config.device_id()),
@@ -2036,6 +2093,7 @@ void LinkManager::pollLoop(std::string connName,
     double scale = 1.0;
     double offset = 0.0;
     double deadband = 0.0;
+    std::optional<uint32_t> bitIndex;
   };
 
   std::vector<NormalizedPoint> registerPoints;
@@ -2065,6 +2123,7 @@ void LinkManager::pollLoop(std::string connName,
     normalized.scale = point.scale;
     normalized.offset = point.offset;
     normalized.deadband = point.deadband;
+    normalized.bitIndex = point.bitIndex;
 
         if (isReadRegisterFunction(point.function)) {
           registerPoints.push_back(std::move(normalized));
@@ -2206,6 +2265,52 @@ void LinkManager::pollLoop(std::string connName,
         }
         const size_t offset = static_cast<size_t>(point.address - start);
         double engValue = 0.0;
+        if (point.type == ModbusRTUProto::DATA_TYPE_BOOL && point.bitIndex.has_value()) {
+          uint32_t raw = 0;
+          if (point.regCount == 1) {
+            if (offset >= values.size()) {
+              updateLastError(connName, std::string(registerName) + "地址溢出");
+              LOG_WARNING("ModbusRTU 轮询区间解码越界: conn_name={}, tag={}, offset={}",
+                          connName,
+                          point.tag,
+                          offset);
+              continue;
+            }
+            uint16_t value = values[offset];
+            if (point.byteOrder == ModbusRTUProto::BYTE_ORDER_BA) {
+              value = swapWordBytes(value);
+            }
+            raw = value;
+          } else if (point.regCount == 2) {
+            if (offset + 1 >= values.size()) {
+              updateLastError(connName, std::string(registerName) + "地址溢出");
+              LOG_WARNING("ModbusRTU 轮询区间解码越界: conn_name={}, tag={}, offset={}",
+                          connName,
+                          point.tag,
+                          offset);
+              continue;
+            }
+            raw = decodeUint32(values[offset], values[offset + 1], point.wordOrder, point.byteOrder);
+          } else {
+            updateLastError(connName, "寄存器 BOOL 点位 reg_count 不支持");
+            LOG_WARNING("ModbusRTU 轮询区间寄存器BOOL点位 reg_count 不支持: conn_name={}, tag={}", connName, point.tag);
+            continue;
+          }
+          const bool bitValue = ((raw >> point.bitIndex.value()) & 0x01u) != 0;
+          LOG_DEBUG("ModbusRTU 读取寄存器bit遥信: conn_name={}, tag={}, raw={}, bit_index={}, value={}",
+                    connName,
+                    point.tag,
+                    raw,
+                    point.bitIndex.value(),
+                    bitValue);
+          auto dc = dataCenter_.PublishBool(connId, point.tag, bitValue, DataCenterProto::QUALITY_GOOD, 0);
+          if (!dc.ok()) {
+            updateLastError(connName, dc.error_message());
+            LOG_ERROR("ModbusRTU 发布点值失败: conn_name={}, tag={}, 原因={}", connName, point.tag, dc.error_message());
+          }
+          matchedPoints += 1;
+          continue;
+        }
         if (point.type == ModbusRTUProto::DATA_TYPE_UINT16) {
           if (offset >= values.size()) {
             updateLastError(connName, std::string(registerName) + "地址溢出");
