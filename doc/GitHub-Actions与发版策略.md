@@ -45,6 +45,7 @@
   - `gcc-14/g++-14`
   - `Ninja`
   - `MSKDSP_BUILD_TESTS=ON`
+- `x64` 校验通过后会执行 `cmake --install build`，清理 `package/` 根目录下的测试可执行文件，打包并上传可运行的 x64 Debug artifact。
 - `arm64` 打包链路统一使用交叉编译：
   - `RelWithDebInfo`
   - `aarch64-linux-gnu-gcc/g++`
@@ -105,6 +106,7 @@
   - 配置 `x64 Debug`
   - 编译全部目标
   - 执行 `ctest --test-dir build --output-on-failure --parallel "$(nproc)"`
+  - 测试通过后安装并上传 `mskdsp-x64-debug-<run_id>.tar.gz`，内容为可直接运行的 `package/` 目录
   - 失败时上传 `CMakeCache.txt`、`CMakeConfigureLog.yaml` 与 `build/Testing`
 - `arm64-master-package`
   - 仅在 `push` 到 `master/main` 时运行
@@ -114,6 +116,7 @@
 
 ### 5.3 产物命名
 
+- x64 Debug 运行包：`mskdsp-x64-debug-<run_id>.tar.gz`
 - 测试安装包：`mskdsp-<VERSION>-<branch>-ci-<YYYYMMDD>-<sha>-linux-arm64`
 - 调试符号包：`mskdsp-<VERSION>-<branch>-ci-<YYYYMMDD>-<sha>-debugsymbols-linux-arm64.tar.gz`
 
@@ -168,6 +171,7 @@
 ### 7.3 当前行为
 
 - 先执行 `x64 Debug` 校验
+- 校验通过后上传 x64 Debug 运行包 artifact
 - 校验通过后再执行 `arm64` 交付链路
 - 上传 Beta 包 artifact
 - 删除当前 Beta 线旧的 GitHub prerelease
@@ -275,6 +279,7 @@
 ### 9.3 当前行为
 
 - 先执行 `x64 Debug` 发布前校验
+- 校验通过后上传 x64 Debug 运行包 artifact
 - 校验通过后交叉编译 `arm64 RelWithDebInfo`
 - 生成正式自解压安装包、调试符号包与 `SHA256SUMS`
 - 若 GitHub Release 已存在，则执行 `gh release upload --clobber`
@@ -292,7 +297,7 @@
 当前各渠道的产物去向如下：
 
 - `CI`
-  - 上传 GitHub Actions artifact
+  - 上传 x64 Debug 运行包和 arm64 测试安装包等 GitHub Actions artifact
   - 不创建 Release 页面
 - `Nightly`
   - 上传 GitHub Actions artifact
@@ -304,6 +309,10 @@
   - 创建或更新 GitHub Release
 
 ## 11. 当前命名与交付清单
+
+当前 x64 校验默认包含以下资产：
+
+- x64 Debug 运行包 artifact（解压后从 `package/` 目录启动）
 
 当前 `arm64` 交付默认包含以下资产：
 

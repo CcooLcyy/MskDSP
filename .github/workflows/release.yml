@@ -187,6 +187,27 @@ jobs:
           set -euo pipefail
           ctest --test-dir build --output-on-failure --parallel "$(nproc)"
 
+      - name: 安装 x64 运行产物
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --install build
+          find package -maxdepth 1 -type f -name '*_test' -delete
+          test -x package/MskDSP
+
+      - name: 打包 x64 运行产物
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -czf "mskdsp-x64-debug-${GITHUB_RUN_ID}.tar.gz" package
+
+      - name: 上传 x64 运行产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: mskdsp-x64-debug-${{ github.run_id }}
+          if-no-files-found: error
+          path: mskdsp-x64-debug-${{ github.run_id }}.tar.gz
+
   arm64-release:
     name: 构建 arm64 正式包并发布
     runs-on: ubuntu-24.04
