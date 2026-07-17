@@ -1177,6 +1177,170 @@ grpc::Status LinkManager::executeWriteCommand(const std::string& connName,
   return status;
 }
 
+grpc::Status LinkManager::ExecuteCommand(
+    const DataCenterProto::ExecuteCommandRequest& request,
+    DataCenterProto::ExecuteCommandResponse* response) {
+  if (response == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "response 为空");
+  }
+  response->Clear();
+  if (!request.has_dst()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "dst 不能为空");
+  }
+  if (request.dst().conn_id() == 0 && request.dst().conn_name().empty()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "dst.conn_id 和 dst.conn_name 不能同时为空");
+  }
+  if (request.dst().tag().empty()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "dst.tag 不能为空");
+  }
+  if (!request.dst().module_name().empty() && request.dst().module_name() != ModbusRTULibInfo.LIB_NAME) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "dst.module_name 不是 ModbusRTU");
+  }
+  if (request.value().kind_case() == DataCenterProto::PointValue::KIND_NOT_SET) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "value 不能为空");
+  }
+  *response->mutable_dst() = request.dst();
+
+  double requestedValue = 0.0;
+  if (!pointValueToDouble(request.value(), &requestedValue)) {
+    response->set_status(DataCenterProto::COMMAND_REJECTED);
+    response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSUPPORTED_POINT);
+    response->set_reason("命令点值类型不支持");
+    return grpc::Status::OK;
+  }
+  response->set_requested_value(requestedValue);
+
+  std::string connName;
+  ModbusRTUProto::LinkConfig config;
+  PointTable::Point point;
+  std::shared_ptr<Bus> bus;
+  std::shared_ptr<CommandGate> commandGate;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto linkIt = linksByName_.end();
+    if (!request.dst().conn_name().empty()) {
+      linkIt = linksByName_.find(request.dst().conn_name());
+    } else {
+      linkIt = std::find_if(linksByName_.begin(), linksByName_.end(), [&](const auto& entry) {
+        return entry.second.connId == request.dst().conn_id();
+      });
+    }
+    if (linkIt == linksByName_.end()) {
+      response->set_status(DataCenterProto::COMMAND_TARGET_UNAVAILABLE);
+      response->set_reason("未找到目的 ModbusRTU 链路");
+      return grpc::Status::OK;
+    }
+
+    auto& link = linkIt->second;
+    connName = linkIt->first;
+    if (request.dst().conn_id() != 0 && request.dst().conn_id() != link.connId) {
+      response->set_status(DataCenterProto::COMMAND_REJECTED);
+      response->set_reject_code(DataCenterProto::COMMAND_REJECT_BAD_CONFIG);
+      response->set_reason("目的连接名称与 conn_id 不一致");
+      return grpc::Status::OK;
+    }
+    response->mutable_dst()->set_conn_id(link.connId);
+    response->mutable_dst()->set_conn_name(connName);
+    response->mutable_dst()->set_module_name("ModbusRTU");
+    if (link.state != ModbusRTUProto::LINK_STATE_RUNNING || !link.bus) {
+      response->set_status(DataCenterProto::COMMAND_TARGET_UNAVAILABLE);
+      response->set_reason("ModbusRTU 链路未运行");
+      return grpc::Status::OK;
+    }
+
+    auto pointOpt = link.pointTable.FindByTag(request.dst().tag());
+    if (!pointOpt.has_value() || !isWriteRegisterFunction(pointOpt->function)) {
+      response->set_status(DataCenterProto::COMMAND_REJECTED);
+      response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSUPPORTED_POINT);
+      response->set_reason("目的点不存在或不是 ModbusRTU 写寄存器点");
+      return grpc::Status::OK;
+    }
+    config = link.config;
+    point = *pointOpt;
+    bus = link.bus;
+    std::lock_guard<std::mutex> gateLock(link.commandGate->mu);
+    if (!link.commandGate->accepting) {
+      response->set_status(DataCenterProto::COMMAND_TARGET_UNAVAILABLE);
+      response->set_reason("ModbusRTU 链路正在停止");
+      return grpc::Status::OK;
+    }
+    link.commandGate->active += 1;
+    commandGate = link.commandGate;
+  }
+
+  struct CommandCompletion {
+    std::shared_ptr<CommandGate> gate;
+    ~CommandCompletion() {
+      if (!gate) {
+        return;
+      }
+      std::lock_guard<std::mutex> lock(gate->mu);
+      if (gate->active > 0) {
+        gate->active -= 1;
+      }
+      if (gate->active == 0) {
+        gate->cv.notify_all();
+      }
+    }
+  } completion{commandGate};
+
+  DataCenterProto::PointUpdate update;
+  update.set_src_conn_id(request.src().conn_id());
+  update.set_src_tag(request.src().tag());
+  update.set_dst_conn_id(response->dst().conn_id());
+  update.set_dst_tag(request.dst().tag());
+  update.mutable_value()->CopyFrom(request.value());
+  update.set_ts_ms(request.ts_ms());
+  update.set_quality(request.quality());
+
+  LOG_INFO("ModbusRTU 收到同步写命令: conn_name={}, conn_id={}, tag={}, value={}, request_id={}",
+           connName,
+           response->dst().conn_id(),
+           point.tag,
+           requestedValue,
+           request.request_id());
+  auto status = executeWriteCommand(connName, config, point, bus, update);
+  if (!status.ok()) {
+    updateLastError(connName, status.error_message());
+    if (status.error_code() == grpc::StatusCode::INVALID_ARGUMENT ||
+        status.error_code() == grpc::StatusCode::OUT_OF_RANGE) {
+      response->set_status(DataCenterProto::COMMAND_REJECTED);
+      response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSUPPORTED_POINT);
+      response->set_reason("ModbusRTU 写命令参数非法: " + status.error_message());
+    } else if (status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
+      response->set_status(DataCenterProto::COMMAND_TIMEOUT);
+      response->set_reason("ModbusRTU 写命令执行超时: " + status.error_message());
+    } else if (status.error_code() == grpc::StatusCode::UNAVAILABLE) {
+      response->set_status(DataCenterProto::COMMAND_TARGET_UNAVAILABLE);
+      response->set_reason("ModbusRTU 写命令通信失败: " + status.error_message());
+    } else if (status.error_code() == grpc::StatusCode::FAILED_PRECONDITION) {
+      response->set_status(DataCenterProto::COMMAND_REJECTED);
+      response->set_reject_code(DataCenterProto::COMMAND_REJECT_BAD_CONFIG);
+      response->set_reason("ModbusRTU 从站拒绝写命令: " + status.error_message());
+    } else {
+      response->set_status(DataCenterProto::COMMAND_INTERNAL_ERROR);
+      response->set_reason("ModbusRTU 写命令执行失败: " + status.error_message());
+    }
+    LOG_WARNING("ModbusRTU 同步写命令失败: conn_name={}, tag={}, status={}, 原因={}",
+                connName,
+                point.tag,
+                static_cast<int>(response->status()),
+                status.error_message());
+    return grpc::Status::OK;
+  }
+
+  response->set_status(DataCenterProto::COMMAND_ACCEPTED);
+  response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSPECIFIED);
+  response->set_reason("ModbusRTU 同步写命令已执行");
+  response->set_accepted_value(requestedValue);
+  LOG_INFO("ModbusRTU 同步写命令执行成功: conn_name={}, conn_id={}, tag={}, value={}",
+           connName,
+           response->dst().conn_id(),
+           point.tag,
+           requestedValue);
+  return grpc::Status::OK;
+}
+
 grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& request, ModbusRTUProto::LinkInfo* out) {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
@@ -1637,6 +1801,10 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
       LOG_INFO("ModbusRTU 启动链路功能跳过: conn_name={}, 原因=链路已在运行", connName);
       return grpc::Status::OK;
     }
+    {
+      std::lock_guard<std::mutex> gateLock(link.commandGate->mu);
+      link.commandGate->accepting = true;
+    }
     link.bus = bus;
     link.state = ModbusRTUProto::LINK_STATE_RUNNING;
     link.lastError.clear();
@@ -1674,6 +1842,7 @@ grpc::Status LinkManager::StopLink(const std::string& connName) {
   MqttKey mqttKey;
   std::shared_ptr<Bus> bus;
   std::shared_ptr<grpc::ClientContext> commandContext;
+  std::shared_ptr<CommandGate> commandGate;
   bool pendingDelete = false;
   ModbusRTUProto::LinkConfig config;
 
@@ -1691,6 +1860,11 @@ grpc::Status LinkManager::StopLink(const std::string& connName) {
     serialKey = it->second.serialKey;
     mqttKey = it->second.mqttKey;
     bus = it->second.bus;
+    commandGate = it->second.commandGate;
+    {
+      std::lock_guard<std::mutex> gateLock(commandGate->mu);
+      commandGate->accepting = false;
+    }
     it->second.bus.reset();
     it->second.state = pendingDelete ? ModbusRTUProto::LINK_STATE_PENDING_DELETE : ModbusRTUProto::LINK_STATE_STOPPED;
   }
@@ -1707,6 +1881,11 @@ grpc::Status LinkManager::StopLink(const std::string& connName) {
   if (pollThread.joinable()) {
     pollThread.request_stop();
     pollThread.join();
+  }
+
+  if (commandGate) {
+    std::unique_lock<std::mutex> gateLock(commandGate->mu);
+    commandGate->cv.wait(gateLock, [&commandGate]() { return commandGate->active == 0; });
   }
 
   if (bus) {

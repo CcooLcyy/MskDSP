@@ -776,6 +776,14 @@ TEST(IEC104LinkManagerTest, HandleClientPointValuePublishesBool) {
 TEST(IEC104LinkManagerTest, HandleCommandValueExecutesWhenSlave) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
+  EXPECT_CALL(*stub, ExecuteCommand(_, _, _))
+      .Times(2)
+      .WillRepeatedly(Invoke([&state](grpc::ClientContext*,
+                                     const DataCenterProto::ExecuteCommandRequest& request,
+                                     DataCenterProto::ExecuteCommandResponse* response) {
+        EXPECT_EQ(request.timeout_ms(), 8000u);
+        return state.ExecuteCommand(request, response);
+      }));
 
   LinkManager mgr("IEC104");
   mgr.setDataCenterStub(stub);

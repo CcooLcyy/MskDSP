@@ -1,5 +1,6 @@
 #pragma once
 
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -53,6 +54,8 @@ public:
 
   grpc::Status UpsertPointTable(const ModbusRTUProto::UpsertPointTableRequest& request);
   grpc::Status GetPointTable(const std::string& connName, ModbusRTUProto::PointTable* out) const;
+  grpc::Status ExecuteCommand(const DataCenterProto::ExecuteCommandRequest& request,
+                              DataCenterProto::ExecuteCommandResponse* response);
 
 private:
   struct SerialKey {
@@ -80,6 +83,13 @@ private:
   struct BusEntry {
     std::shared_ptr<Bus> bus;
     size_t refCount = 0;
+  };
+
+  struct CommandGate {
+    std::mutex mu;
+    std::condition_variable cv;
+    bool accepting = false;
+    size_t active = 0;
   };
 
   struct MqttKey {
@@ -120,6 +130,7 @@ private:
     PointTable pointTable;
     bool pointTableConfigured = false;
     std::shared_ptr<Bus> bus;
+    std::shared_ptr<CommandGate> commandGate = std::make_shared<CommandGate>();
     std::jthread pollThread;
     std::shared_ptr<grpc::ClientContext> dcCommandContext;
     std::jthread dcCommandThread;

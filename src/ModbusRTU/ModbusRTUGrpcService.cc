@@ -200,4 +200,30 @@ grpc::Status ModbusRTUGrpcServiceImpl::GetPointTable(
   }
   return status;
 }
+
+void ModbusRTUCommandExecutorServiceImpl::setModbusRTU(ModbusRTU* module) {
+  module_ = module;
+}
+
+grpc::Status ModbusRTUCommandExecutorServiceImpl::ExecuteCommand(
+    grpc::ServerContext*,
+    const DataCenterProto::ExecuteCommandRequest* request,
+    DataCenterProto::ExecuteCommandResponse* response) {
+  if (module_ == nullptr) {
+    LOG_ERROR("ModbusRTU 同步命令服务未就绪");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
+  }
+  if (request == nullptr || response == nullptr) {
+    LOG_ERROR("ModbusRTU 同步命令请求/响应为空");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
+  }
+  auto status = module_->linkManager().ExecuteCommand(*request, response);
+  if (!status.ok()) {
+    LOG_ERROR("ModbusRTU 同步命令调用失败: dst_conn_name={}, dst_tag={}, 原因={}",
+              request->dst().conn_name(),
+              request->dst().tag(),
+              status.error_message());
+  }
+  return status;
+}
 }  // namespace ModbusRTU

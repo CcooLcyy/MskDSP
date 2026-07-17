@@ -18,6 +18,7 @@ namespace IEC104 {
 namespace {
 constexpr uint8_t kIec104QualityGood = 0x00;
 constexpr uint8_t kIec104QualityInvalid = 0x80;
+constexpr uint32_t kSynchronousCommandTimeoutMs = 8000;
 
 constexpr uint8_t kCotSpontaneous = 3;
 
@@ -591,7 +592,7 @@ CommandResult LinkManager::handleCommandValue(const std::string& connName, const
   req.mutable_src()->set_conn_id(connId);
   req.mutable_src()->set_tag(tag);
   req.set_quality(DataCenterProto::QUALITY_GOOD);
-  req.set_timeout_ms(1500);
+  req.set_timeout_ms(kSynchronousCommandTimeoutMs);
   req.set_request_id(std::format("IEC104:{}:{}", connName, cv.ioa));
 
   if (type == IEC104Proto::POINT_TYPE_FLOAT) {

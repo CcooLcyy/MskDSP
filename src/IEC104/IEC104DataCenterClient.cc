@@ -1,5 +1,6 @@
 #include "IEC104DataCenterClient.h"
 
+#include <chrono>
 #include <filesystem>
 #include <format>
 #include <utility>
@@ -234,6 +235,9 @@ grpc::Status DataCenterClient::ExecuteCommand(
   auto stub = getStub();
 
   grpc::ClientContext ctx;
+  const auto timeoutMs = request.timeout_ms() == 0 ? 1500u : request.timeout_ms();
+  ctx.set_deadline(std::chrono::system_clock::now() +
+                   std::chrono::milliseconds(static_cast<int64_t>(timeoutMs) + 1000));
   response->Clear();
   return stub->ExecuteCommand(&ctx, request, response);
 }

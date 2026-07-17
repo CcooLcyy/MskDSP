@@ -107,8 +107,9 @@ ModbusRTU 模块负责管理 ModbusRTU 链路与点表，当前同时支持两�
 - `deadband <= 0` 表示不过滤；当 `>0` 时，`|delta| < deadband` 过滤，`|delta| >= deadband` 上报。
 
 ## 主站写寄存器闭环
-- 触发方式：上位机或其他模块先把命令写入 DataCenter 源端点，再通过 `Route` 路由到 ModbusRTU 的稳定端点；ModbusRTU 运行期仍按当前 `conn_id + tag` 订阅命令。
-- ModbusRTU 主站链路进入运行态后，会订阅本连接内所有写点 `tag`；收到更新后自动编码并发送 `0x06/0x10` RTU 报文。
+- 同步命令：IEC104 等需要协议级确认的模块调用 `DataCenter.ExecuteCommand` 后，DataCenter 按 `Route` 将命令同步转交给 ModbusRTU 的 `CommandExecutor.ExecuteCommand`。ModbusRTU 按目的端点的 `conn_id/conn_name + tag` 定位运行中的链路和写点，发送 `0x06/0x10` RTU 报文并等待从站响应。
+- 同步命令仅在收到并校验通过 Modbus 写响应后返回 `COMMAND_ACCEPTED`；链路未运行时返回目标不可用，目的点不存在或不是写点时返回业务拒绝，通信超时或总线异常时返回对应失败状态，供 IEC104 形成肯定或否定确认。
+- 异步命令：上位机或其他不需要同步确认的模块仍可将命令发布到 DataCenter 源端点，再通过 `Route` 路由到 ModbusRTU。ModbusRTU 主站链路进入运行态后，会按当前 `conn_id + tag` 订阅本连接内所有写点，收到更新后自动编码并发送 `0x06/0x10` RTU 报文。
 - `FUNCTION_WRITE_SINGLE_REGISTER` 适合单个 16 位设定值。
 - `FUNCTION_WRITE_MULTIPLE_REGISTERS` 适合 32 位设定值，或明确要求用 `0x10` 下发的 16 位设定值。
 - 命令值支持 DataCenter `double/int/bool`；`bool` 会按 `0/1` 处理。
@@ -159,7 +160,7 @@ ModbusRTU 模块负责管理 ModbusRTU 链路与点表，当前同时支持两�
 - `TRANSPORT_MQTT_UART` 模式下，顶层 `mqtt` 与链路级 `serial_port`/`serial.*` 必须成组提供。
 - 链路固定按主站方式运行，无需额外引入独立 `mode` 选项。
 - `FUNCTION_WRITE_SINGLE_REGISTER` 仅允许单个 16 位寄存器写入；`FUNCTION_WRITE_MULTIPLE_REGISTERS` 允许 16/32 位寄存器写入。
-- 控制命令通过 DataCenter 路由写入 ModbusRTU 的控制点 `tag`，不需要额外调用独立“写寄存器 gRPC”。
+- 控制命令通过 DataCenter 路由到 ModbusRTU 的控制点 `tag`；需要协议级同步确认时调用 DataCenter 的通用 `ExecuteCommand`，不需要上位机额外调用 ModbusRTU 私有的“写寄存器 gRPC”。
 
 ## 报文日志
 - 串口直连与 MQTT UART 两条路径都输出收发报文日志。

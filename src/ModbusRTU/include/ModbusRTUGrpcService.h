@@ -4,6 +4,7 @@
 #include <grpcpp/server_context.h>
 #include <grpcpp/support/status.h>
 
+#include "DataCenter.grpc.pb.h"
 #include "ModbusRTU.grpc.pb.h"
 #include "ModbusRTU.h"
 #include "ModbusRTU.pb.h"
@@ -26,6 +27,18 @@ public:
   grpc::Status GetPointTable(grpc::ServerContext* context, const ModbusRTUProto::GetPointTableRequest* request, ModbusRTUProto::PointTable* response) override;
 
 private:
-  ModbusRTU* module_;
+  ModbusRTU* module_{nullptr};
+};
+
+class ModbusRTUCommandExecutorServiceImpl : public DataCenterProto::CommandExecutor::Service {
+public:
+  void setModbusRTU(ModbusRTU* module);
+  grpc::Status ExecuteCommand(
+      grpc::ServerContext* context,
+      const DataCenterProto::ExecuteCommandRequest* request,
+      DataCenterProto::ExecuteCommandResponse* response) override;
+
+private:
+  ModbusRTU* module_{nullptr};
 };
 }  // namespace ModbusRTU

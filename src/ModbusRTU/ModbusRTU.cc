@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <stop_token>
+#include <vector>
 
 #include "Logger.h"
 #include "ModbusRTUGrpcService.h"
@@ -41,6 +42,7 @@ namespace ModbusRTU {
 ModbusRTU::ModbusRTU() :
   ModuleInterface(),
   modbusRTUService_(std::make_shared<ModbusRTUGrpcServiceImpl>()),
+  commandService_(std::make_shared<ModbusRTUCommandExecutorServiceImpl>()),
   linkManager_(ModbusRTULibInfo.LIB_NAME) {
   initLibInfo(ModbusRTULibInfo);
 }
@@ -49,8 +51,10 @@ void ModbusRTU::start(std::stop_token stopToken) {
   LOG_INFO("ModbusRTU 模块启动");
   LOG_INFO("ModbusRTU 依赖模块: DataCenter, MQTTManager");
   modbusRTUService_->setModbusRTU(this);
+  commandService_->setModbusRTU(this);
   LOG_INFO("ModbusRTU 服务实例绑定完成");
-  grpcServerBuilder(modbusRTUService_);
+  std::vector<std::shared_ptr<grpc::Service>> services{modbusRTUService_, commandService_};
+  grpcServerBuilder(services);
   LOG_INFO("ModbusRTU gRPC 服务已启动");
   linkManager_.LoadPersistedConfig();
 

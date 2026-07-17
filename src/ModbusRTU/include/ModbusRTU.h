@@ -8,6 +8,7 @@
 
 namespace ModbusRTU {
 class ModbusRTUGrpcServiceImpl;
+class ModbusRTUCommandExecutorServiceImpl;
 class ModbusRTU : public ModuleInterface::ModuleInterface {
 public:
   explicit ModbusRTU();
@@ -19,6 +20,7 @@ public:
 
 private:
   std::shared_ptr<ModbusRTUGrpcServiceImpl> modbusRTUService_;
+  std::shared_ptr<ModbusRTUCommandExecutorServiceImpl> commandService_;
   LinkManager linkManager_;
 };
 }  // namespace ModbusRTU

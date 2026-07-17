@@ -1,6 +1,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -8,10 +9,13 @@
 #include <filesystem>
 #include <fcntl.h>
 #include <memory>
+#include <poll.h>
 #include <stdlib.h>
 #include <string>
+#include <thread>
 #include <unordered_set>
 #include <unistd.h>
+#include <vector>
 
 #include "DataCenter_mock.grpc.pb.h"
 #include "ModbusRTULinkManager.h"
@@ -95,6 +99,15 @@ ModbusRTUProto::Point MakeWriteSingleRegisterPoint(const char* tag, uint32_t add
   return p;
 }
 
+ModbusRTUProto::Point MakeWriteMultipleRegistersPoint(const char* tag, uint32_t address) {
+  ModbusRTUProto::Point p;
+  p.set_tag(tag);
+  p.set_function(ModbusRTUProto::FUNCTION_WRITE_MULTIPLE_REGISTERS);
+  p.set_address(address);
+  p.set_type(ModbusRTUProto::DATA_TYPE_UINT16);
+  return p;
+}
+
 class ScopedTempDir {
 public:
   ScopedTempDir() {
@@ -158,6 +171,46 @@ public:
   bool ok() const { return !slavePath_.empty(); }
   const std::string& error() const { return error_; }
   const std::string& slavePath() const { return slavePath_; }
+
+  bool readExact(std::vector<uint8_t>* out, size_t size, int timeoutMs) const {
+    if (out == nullptr || masterFd_ < 0) {
+      return false;
+    }
+    out->clear();
+    out->reserve(size);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    while (out->size() < size) {
+      const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+          deadline - std::chrono::steady_clock::now());
+      if (remaining.count() <= 0) {
+        return false;
+      }
+      pollfd fd{.fd = masterFd_, .events = POLLIN, .revents = 0};
+      if (::poll(&fd, 1, static_cast<int>(remaining.count())) <= 0) {
+        return false;
+      }
+      uint8_t buffer[64] = {};
+      const auto toRead = std::min(size - out->size(), sizeof(buffer));
+      const auto count = ::read(masterFd_, buffer, toRead);
+      if (count <= 0) {
+        return false;
+      }
+      out->insert(out->end(), buffer, buffer + count);
+    }
+    return true;
+  }
+
+  bool writeAll(const std::vector<uint8_t>& data) const {
+    size_t offset = 0;
+    while (offset < data.size()) {
+      const auto count = ::write(masterFd_, data.data() + offset, data.size() - offset);
+      if (count <= 0) {
+        return false;
+      }
+      offset += static_cast<size_t>(count);
+    }
+    return true;
+  }
 
 private:
   void closeAll() {
@@ -503,6 +556,106 @@ TEST(ModbusRtuLinkManagerTest, UpdateConfigKeepsStoppedWhenReadyLinkExists) {
   ASSERT_TRUE(mgr.GetLink("conn-update-config", &got).ok());
   EXPECT_EQ(got.state(), ModbusRTUProto::LINK_STATE_STOPPED);
   EXPECT_TRUE(got.last_error().empty());
+}
+
+// 验证：同步命令会按目的连接与写点发送 0x10 报文，并在收到合法从站响应后返回已接受。
+TEST(ModbusRtuLinkManagerTest, ExecuteCommandWritesMultipleRegistersAndReturnsAccepted) {
+  ScopedPseudoTty pty;
+  ASSERT_TRUE(pty.ok()) << pty.error();
+
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManagerTestEnv env;
+  auto& mgr = env.mgr;
+  mgr.setDataCenterStub(stub);
+
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("conn-command", pty.slavePath().c_str(), 1), &info).ok());
+
+  ModbusRTUProto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-command");
+  *ptReq.add_points() = MakeWriteMultipleRegistersPoint("active-power-setpoint", 100);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+  ASSERT_TRUE(mgr.StartLink("conn-command").ok());
+
+  std::vector<uint8_t> requestFrame;
+  bool responseWritten = false;
+  std::jthread responder([&]() {
+    if (!pty.readExact(&requestFrame, 11, 3000)) {
+      return;
+    }
+    std::vector<uint8_t> responseFrame(requestFrame.begin(), requestFrame.begin() + 6);
+    ModbusRTU::SerialBus::appendCrc(&responseFrame);
+    responseWritten = pty.writeAll(responseFrame);
+  });
+
+  DataCenterProto::ExecuteCommandRequest request;
+  request.mutable_src()->set_conn_id(99);
+  request.mutable_src()->set_tag("iec104-setpoint");
+  request.mutable_dst()->set_conn_id(info.conn_id());
+  request.mutable_dst()->set_module_name("ModbusRTU");
+  request.mutable_dst()->set_conn_name("conn-command");
+  request.mutable_dst()->set_tag("active-power-setpoint");
+  request.mutable_value()->set_double_value(10.0);
+  request.set_quality(DataCenterProto::QUALITY_GOOD);
+
+  DataCenterProto::ExecuteCommandResponse response;
+  auto status = mgr.ExecuteCommand(request, &response);
+  responder.join();
+
+  EXPECT_TRUE(status.ok()) << status.error_message();
+  EXPECT_TRUE(responseWritten);
+  ASSERT_EQ(requestFrame.size(), 11u);
+  EXPECT_EQ(requestFrame[0], 0x01);
+  EXPECT_EQ(requestFrame[1], 0x10);
+  EXPECT_EQ(requestFrame[2], 0x00);
+  EXPECT_EQ(requestFrame[3], 0x64);
+  EXPECT_EQ(requestFrame[4], 0x00);
+  EXPECT_EQ(requestFrame[5], 0x01);
+  EXPECT_EQ(requestFrame[6], 0x02);
+  EXPECT_EQ(requestFrame[7], 0x00);
+  EXPECT_EQ(requestFrame[8], 0x0A);
+  EXPECT_EQ(response.status(), DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_EQ(response.dst().conn_id(), info.conn_id());
+  EXPECT_DOUBLE_EQ(response.requested_value(), 10.0);
+  EXPECT_DOUBLE_EQ(response.accepted_value(), 10.0);
+
+  ASSERT_TRUE(mgr.StopLink("conn-command").ok());
+}
+
+// 验证：目的 ModbusRTU 链路未运行时，同步命令返回目标不可用且不会尝试写串口。
+TEST(ModbusRtuLinkManagerTest, ExecuteCommandRejectsStoppedLink) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManagerTestEnv env;
+  auto& mgr = env.mgr;
+  mgr.setDataCenterStub(stub);
+
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("conn-stopped-command", "/dev/tty-not-opened", 1), &info).ok());
+
+  ModbusRTUProto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-stopped-command");
+  *ptReq.add_points() = MakeWriteSingleRegisterPoint("active-power-setpoint", 100);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  DataCenterProto::ExecuteCommandRequest request;
+  request.mutable_dst()->set_conn_id(info.conn_id());
+  request.mutable_dst()->set_module_name("ModbusRTU");
+  request.mutable_dst()->set_conn_name("conn-stopped-command");
+  request.mutable_dst()->set_tag("active-power-setpoint");
+  request.mutable_value()->set_double_value(10.0);
+
+  DataCenterProto::ExecuteCommandResponse response;
+  auto status = mgr.ExecuteCommand(request, &response);
+
+  EXPECT_TRUE(status.ok()) << status.error_message();
+  EXPECT_EQ(response.status(), DataCenterProto::COMMAND_TARGET_UNAVAILABLE);
+  EXPECT_THAT(response.reason(), HasSubstr("链路未运行"));
 }
 
 // 验证：串口 data_bits 越界时 UpsertLink 拒绝。

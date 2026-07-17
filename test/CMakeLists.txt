@@ -297,6 +297,22 @@ target_link_libraries(modbusRtuManifest_test PRIVATE
 
 mskdsp_add_isolated_test(modbusRtuManifest_test)
 
+add_executable(modbusRtuCommandService_test
+  modbus_rtu_command_service_test.cc
+)
+
+target_include_directories(modbusRtuCommandService_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/ModbusRTU/include
+)
+
+target_link_libraries(modbusRtuCommandService_test PRIVATE
+  GTest::gtest_main
+  dspProto
+  ModbusRTU
+)
+
+mskdsp_add_isolated_test(modbusRtuCommandService_test)
+
 add_executable(dlt645PointTable_test
   dlt645_point_table_test.cc
   ${CMAKE_SOURCE_DIR}/src/DLT645/DLT645PointTable.cc
@@ -846,6 +862,7 @@ set(MSKDSP_TEST_TARGETS
   iec104PointTable_test
   modbusRtuPointTable_test
   modbusRtuManifest_test
+  modbusRtuCommandService_test
   dlt645LinkManager_test
   dlt645MqttClient_test
   dlt645DataCenterClient_test

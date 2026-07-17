@@ -88,6 +88,7 @@ ConfigPusher 点表示例（含 scale/offset/deadband，字段可省略，默认
 - 单点遥控：`POINT_TYPE_SINGLE`，DataCenter value 使用 `bool`（或 int/double 非 0 视为 true）；IEC104 发送 `C_SC_NA_1`，先预置再执行。
 - 短浮点设点：`POINT_TYPE_FLOAT`，DataCenter value 使用 `double`（或 int 转换为 double）；IEC104 发送 `C_SE_NC_1`（执行）。
 - 设点工程量：DataCenter 侧提供工程量；IEC104 发送前按 `scale/offset` 反向换算为原始值；从站收到命令后按 `scale/offset` 正向换算再发布到 DataCenter。
+- 从站收到遥控/设点后，通过 DataCenter 同步等待目标模块执行结果，默认等待 `8000ms`，用于覆盖 ModbusRTU MQTT UART 默认 `3000ms` 请求、同总线在途轮询及内部转发开销；目标模块超时或拒绝时返回 IEC104 负确认。
 - 命令确认：IEC104 仅在 IEC104 协议内发送 ACT_CON/ACT_TERM，不向 DataCenter 发布确认结果点。
 
 ### 对时触发
