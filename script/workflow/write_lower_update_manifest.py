@@ -14,6 +14,7 @@ from urllib.parse import quote
 CHANNEL_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 PLATFORM_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
+IMAGE_ID_PATTERN = re.compile(r"^sha256:[0-9a-fA-F]{64}$")
 
 
 def parse_args() -> argparse.Namespace:
@@ -22,6 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--platform", default="linux-arm64", help="目标平台，默认 linux-arm64")
     parser.add_argument("--version", required=True, help="完整包版本，通常与镜像 tag 一致")
     parser.add_argument("--display-version", default="", help="界面展示版本，默认从 --version 去掉平台后缀")
+    parser.add_argument("--image-id", required=True, help="Docker 镜像 config ID，例如 sha256:<64位十六进制>")
     parser.add_argument("--artifact", required=True, help="自解压安装包路径")
     parser.add_argument("--checksums", default="SHA256SUMS", help="SHA256SUMS 文件路径")
     parser.add_argument("--output", default="latest.json", help="输出 latest.json 路径")
@@ -36,6 +38,13 @@ def parse_args() -> argparse.Namespace:
 def require_simple_path_part(name: str, value: str, pattern: re.Pattern[str]) -> None:
     if not value or not pattern.fullmatch(value):
         raise SystemExit(f"{name} 只能包含字母、数字、点、下划线和短横线: {value}")
+
+
+def normalize_image_id(value: str) -> str:
+    normalized = value.strip()
+    if not IMAGE_ID_PATTERN.fullmatch(normalized):
+        raise SystemExit(f"image_id 格式不合法，应为 sha256:<64位十六进制>: {value}")
+    return normalized.lower()
 
 
 def read_sha256(checksums_path: Path, artifact_name: str) -> str:
@@ -89,6 +98,7 @@ def main() -> None:
     output_path = Path(args.output)
     artifact_name = artifact_path.name
     checksums_name = checksums_path.name
+    image_id = normalize_image_id(args.image_id)
     sha256 = read_sha256(checksums_path, artifact_name)
     published_at = args.published_at or rfc3339_now()
     display_version = args.display_version or display_version_from_package_version(args.version, args.platform)
@@ -101,6 +111,7 @@ def main() -> None:
         "platform": args.platform,
         "version": display_version,
         "package_version": args.version,
+        "image_id": image_id,
         "published_at": published_at,
         "source": {
             "repository": args.repository,

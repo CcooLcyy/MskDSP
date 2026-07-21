@@ -100,8 +100,11 @@ MSKDSP_VERSION=<version> bash script/make_image.sh
 - `platform`：当前为 `linux-arm64`
 - `version`：界面展示版本
 - `package_version`：完整包版本，通常与镜像 tag 一致
+- `image_id`：发布包内 Docker 镜像的不可变 config ID，用于上位机校验目标机当前运行镜像
 - `asset`：安装包名称、下载地址、SHA256 与字节大小
 - `checksum`：`SHA256SUMS` 下载地址
+
+发布 workflow 在镜像构建完成后读取 Docker image ID，并将其写入 `latest.json`。上位机选择发布通道后，可通过 SSH 查询目标机 `mskdsp` 容器的运行状态与 image ID，将其与清单中的 `image_id` 比较。`asset.sha256` 只用于安装包传输完整性校验，不代表当前容器运行身份。
 
 ### 静态目录约定
 默认 URL 结构：

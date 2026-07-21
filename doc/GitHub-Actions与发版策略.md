@@ -55,9 +55,10 @@
   1. `cmake --install build-arm64` 将运行产物落到 `package/`
   2. 单独打包 `package/debug` 为调试符号包
   3. 使用 `Dockerfile` 构建 `arm64` 镜像
-  4. `docker save` 导出镜像 tar
-  5. 调用 `script/make_exe.sh` 生成自解压安装包
-  6. 生成 `SHA256SUMS`
+  4. 读取 Docker image config ID，写入下位机 `latest.json` 的 `image_id`
+  5. `docker save` 导出镜像 tar
+  6. 调用 `script/make_exe.sh` 生成自解压安装包
+  7. 生成 `SHA256SUMS`
 
 需要注意：
 
@@ -319,10 +320,12 @@
 - 自解压安装包
 - 调试符号包（如 `package/debug` 存在）
 - `SHA256SUMS`
+- `latest.json`（包含发布渠道、安装包信息和 Docker `image_id`）
 
 说明：
 
 - 交付主包不是直接上传 `package/` 目录，而是上传由 `script/make_exe.sh` 生成的自解压安装包
+- `latest.json` 同时记录 Docker `image_id`，供上位机校验目标机实际运行的镜像构建
 - 测试与发布流程都保留了独立调试符号包，便于问题定位
 
 ## 12. 维护建议

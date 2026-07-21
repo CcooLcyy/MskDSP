@@ -399,6 +399,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: 生成自解压正式包
+        id: lower_image
         shell: bash
         run: |
           set -euo pipefail
@@ -413,6 +414,8 @@ jobs:
             -t "${IMAGE_REF}" \
             -f "${CI_DOCKERFILE}" \
             .
+          IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${IMAGE_REF}")"
+          echo "image_id=${IMAGE_ID}" >> "${GITHUB_OUTPUT}"
           rm -f "${IMAGE_TAR}"
           docker save -o "${IMAGE_TAR}" "${IMAGE_REF}"
           (
@@ -444,6 +447,7 @@ jobs:
             --channel stable \
             --platform linux-arm64 \
             --version "${{ steps.meta.outputs.image_version }}" \
+            --image-id "${{ steps.lower_image.outputs.image_id }}" \
             --artifact "images/${{ steps.meta.outputs.archive_name }}" \
             --checksums SHA256SUMS \
             --output latest.json \

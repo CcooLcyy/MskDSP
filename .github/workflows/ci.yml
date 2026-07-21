@@ -36,6 +36,12 @@ jobs:
           fetch-depth: 0
           submodules: false
 
+      - name: 验证下位机更新清单生成器
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 script/workflow/test_write_lower_update_manifest.py
+
       - name: 计算 vcpkg 缓存作用域
         id: cache_scope
         shell: bash
@@ -417,6 +423,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: 生成自解压测试包
+        id: lower_image
         shell: bash
         run: |
           set -euo pipefail
@@ -431,6 +438,8 @@ jobs:
             -t "${IMAGE_REF}" \
             -f "${CI_DOCKERFILE}" \
             .
+          IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${IMAGE_REF}")"
+          echo "image_id=${IMAGE_ID}" >> "${GITHUB_OUTPUT}"
           rm -f "${IMAGE_TAR}"
           docker save -o "${IMAGE_TAR}" "${IMAGE_REF}"
           (
@@ -458,6 +467,7 @@ jobs:
             --channel ci \
             --platform linux-arm64 \
             --version "${{ steps.meta.outputs.image_version }}" \
+            --image-id "${{ steps.lower_image.outputs.image_id }}" \
             --artifact "images/${{ steps.meta.outputs.archive_name }}" \
             --checksums SHA256SUMS \
             --output latest.json \
