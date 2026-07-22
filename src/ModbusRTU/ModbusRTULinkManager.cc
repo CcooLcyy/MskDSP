@@ -673,40 +673,44 @@ grpc::Status LinkManager::normalizeLinkConfig(const ModbusRTUProto::LinkConfig& 
       if (plan->blocks_size() == 0) {
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "read_plan.blocks 不能为空");
       }
-      for (const auto &block : plan->blocks()) {
-        if (block.function() == ModbusRTUProto::FUNCTION_UNSPECIFIED) {
-          return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "read_plan.blocks.function 不能为空");
-        }
-        if (block.function() != ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS &&
-            block.function() != ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS) {
-          return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "read_plan 仅支持读保持寄存器(0x03)或输入寄存器(0x04)");
-        }
-        if (block.quantity() == 0) {
-          return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "read_plan.blocks.quantity 不能为空");
-        }
-        const auto maxQuantity =
-            block.function() == ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS ? kMaxReadInputRegistersQuantity
-                                                                              : kMaxReadHoldingRegistersQuantity;
-        if (block.quantity() > maxQuantity) {
-          return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "read_plan.blocks.quantity 超出上限(125)");
-        }
-        uint32_t start = block.start();
-        if (out->address_base() == ModbusRTUProto::ADDRESS_BASE_ONE) {
-          if (start == 0) {
-            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "read_plan.blocks.start 不能为 0（address_base=ONE）");
-          }
-          start -= 1;
-        }
-        if (start > 0xFFFFu || start + block.quantity() - 1 > 0xFFFFu) {
-          return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "read_plan.blocks 超出地址范围");
-        }
-      }
     } else if (plan->mode() == ModbusRTUProto::READ_PLAN_MODE_POINT) {
       if (plan->blocks_size() > 0) {
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "read_plan.mode=POINT 时 blocks 必须为空");
+        LOG_INFO("ModbusRTU 逐点抄读保留显式区间配置但不会使用: conn_name={}, blocks={}",
+                 out->conn_name(),
+                 plan->blocks_size());
       }
     } else {
       return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "read_plan.mode 非法");
+    }
+
+    // POINT 模式也校验并保留区间，避免切回 EXPLICIT 模式时才发现配置无效。
+    for (const auto &block : plan->blocks()) {
+      if (block.function() == ModbusRTUProto::FUNCTION_UNSPECIFIED) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "read_plan.blocks.function 不能为空");
+      }
+      if (block.function() != ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS &&
+          block.function() != ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "read_plan 仅支持读保持寄存器(0x03)或输入寄存器(0x04)");
+      }
+      if (block.quantity() == 0) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "read_plan.blocks.quantity 不能为空");
+      }
+      const auto maxQuantity =
+          block.function() == ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS ? kMaxReadInputRegistersQuantity
+                                                                            : kMaxReadHoldingRegistersQuantity;
+      if (block.quantity() > maxQuantity) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "read_plan.blocks.quantity 超出上限(125)");
+      }
+      uint32_t start = block.start();
+      if (out->address_base() == ModbusRTUProto::ADDRESS_BASE_ONE) {
+        if (start == 0) {
+          return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "read_plan.blocks.start 不能为 0（address_base=ONE）");
+        }
+        start -= 1;
+      }
+      if (start > 0xFFFFu || start + block.quantity() - 1 > 0xFFFFu) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "read_plan.blocks 超出地址范围");
+      }
     }
   }
   return grpc::Status::OK;

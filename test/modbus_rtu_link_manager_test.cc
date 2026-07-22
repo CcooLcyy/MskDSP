@@ -394,6 +394,66 @@ TEST(ModbusRtuLinkManagerTest, UpsertLinkNormalizesDefaults) {
   EXPECT_EQ(cfg.address_base(), ModbusRTUProto::ADDRESS_BASE_ZERO);
 }
 
+// 验证：逐点抄读模式可以保留合法显式区间配置，切换到区间模式时仍可复用。
+TEST(ModbusRtuLinkManagerTest, UpsertLinkPointModePreservesReadBlocks) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManagerTestEnv env;
+  auto& mgr = env.mgr;
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeMinimalLinkReq("conn-point-with-blocks", "/dev/ttyUSB0", 1);
+  auto* plan = req.mutable_config()->mutable_read_plan();
+  plan->set_mode(ModbusRTUProto::READ_PLAN_MODE_POINT);
+  auto* block = plan->add_blocks();
+  block->set_function(ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS);
+  block->set_start(100);
+  block->set_quantity(10);
+
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+  ASSERT_TRUE(info.config().has_read_plan());
+  EXPECT_EQ(info.config().read_plan().mode(), ModbusRTUProto::READ_PLAN_MODE_POINT);
+  ASSERT_EQ(info.config().read_plan().blocks_size(), 1);
+  EXPECT_EQ(info.config().read_plan().blocks(0).function(), ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS);
+  EXPECT_EQ(info.config().read_plan().blocks(0).start(), 100u);
+  EXPECT_EQ(info.config().read_plan().blocks(0).quantity(), 10u);
+
+  ModbusRTUProto::LinkInfo saved;
+  ASSERT_TRUE(mgr.GetLink("conn-point-with-blocks", &saved).ok());
+  EXPECT_EQ(saved.config().read_plan().mode(), ModbusRTUProto::READ_PLAN_MODE_POINT);
+  ASSERT_EQ(saved.config().read_plan().blocks_size(), 1);
+  EXPECT_EQ(saved.config().read_plan().blocks(0).start(), 100u);
+  EXPECT_EQ(saved.config().read_plan().blocks(0).quantity(), 10u);
+
+  req.mutable_config()->mutable_read_plan()->set_mode(ModbusRTUProto::READ_PLAN_MODE_EXPLICIT);
+  ModbusRTUProto::LinkInfo updated;
+  ASSERT_TRUE(mgr.UpsertLink(req, &updated).ok());
+  EXPECT_EQ(updated.config().read_plan().mode(), ModbusRTUProto::READ_PLAN_MODE_EXPLICIT);
+  ASSERT_EQ(updated.config().read_plan().blocks_size(), 1);
+  EXPECT_EQ(updated.config().read_plan().blocks(0).start(), 100u);
+  EXPECT_EQ(updated.config().read_plan().blocks(0).quantity(), 10u);
+}
+
+// 验证：逐点抄读模式仅保留合法区间，quantity=0 的无效区间仍会被拒绝。
+TEST(ModbusRtuLinkManagerTest, UpsertLinkPointModeRejectsInvalidReadBlock) {
+  LinkManagerTestEnv env;
+  auto& mgr = env.mgr;
+
+  auto req = MakeMinimalLinkReq("conn-point-with-invalid-block", "/dev/ttyUSB0", 1);
+  auto* plan = req.mutable_config()->mutable_read_plan();
+  plan->set_mode(ModbusRTUProto::READ_PLAN_MODE_POINT);
+  auto* block = plan->add_blocks();
+  block->set_function(ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS);
+  block->set_start(100);
+
+  ModbusRTUProto::LinkInfo info;
+  const auto status = mgr.UpsertLink(req, &info);
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  EXPECT_THAT(status.error_message(), HasSubstr("read_plan.blocks.quantity"));
+}
+
 // 验证：UpdateConfig 缺少 MQTT 配置时返回参数错误。
 TEST(ModbusRtuLinkManagerTest, UpdateConfigRejectsMissingMqtt) {
   LinkManagerTestEnv env;
