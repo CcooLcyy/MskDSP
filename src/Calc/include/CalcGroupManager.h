@@ -50,6 +50,7 @@ private:
 
     std::unordered_set<std::string> subscribeTags;
     std::unordered_map<std::string, DataCenterProto::PointUpdate> latestByTag;
+    std::unordered_map<std::string, std::string> itemLastErrors;
   };
 
   grpc::Status validateGroupName(const std::string &groupName) const;

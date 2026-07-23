@@ -1,6 +1,7 @@
 #include "CalcGroupManager.h"
 
 #include <algorithm>
+#include <cmath>
 #include <format>
 #include <optional>
 #include <string>
@@ -45,15 +46,30 @@ const char *groupStateToString(CalcProto::GroupState state) {
 struct ItemTags {
   std::string leftInputTag;
   std::string rightInputTag;
+  std::vector<std::string> inputTags;
   std::string resultTag;
 };
 
-ItemTags makeItemTags(const std::string &itemName) {
-  return ItemTags{
-      .leftInputTag = itemName + "/left_input",
-      .rightInputTag = itemName + "/right_input",
-      .resultTag = itemName + "/result",
-  };
+bool isAggregateOperator(CalcProto::OperatorKind op) {
+  return op == CalcProto::OPERATOR_KIND_SUM || op == CalcProto::OPERATOR_KIND_AVERAGE;
+}
+
+ItemTags makeItemTags(const CalcProto::CalcItemConfig &item) {
+  ItemTags tags;
+  tags.resultTag = item.item_name() + "/result";
+  if (isAggregateOperator(item.operator_kind())) {
+    tags.inputTags.reserve(static_cast<size_t>(item.operands_size()));
+    for (int index = 0; index < item.operands_size(); ++index) {
+      tags.inputTags.emplace_back(std::format("{}/input_{}", item.item_name(), index + 1));
+    }
+  } else {
+    tags.leftInputTag = item.item_name() + "/left_input";
+    tags.rightInputTag = item.item_name() + "/right_input";
+    tags.inputTags.push_back(tags.leftInputTag);
+    // 保留旧版本为 NOT 生成 right_input 标签的行为，但 NOT 不会订阅或计算该槽位。
+    tags.inputTags.push_back(tags.rightInputTag);
+  }
+  return tags;
 }
 
 struct RuntimeValue {
@@ -181,7 +197,12 @@ void setPointValueFromRuntimeValue(const RuntimeValue &value, DataCenterProto::P
   }
 }
 
-bool tryGetOperandValue(const CalcProto::CalcItemConfig &item, const CalcProto::OperandSpec &operand, const std::unordered_map<std::string, DataCenterProto::PointUpdate> &latestByTag, bool isLeft, RuntimeValue *out, bool *missing, std::string *error) {
+bool tryGetOperandValue(const CalcProto::OperandSpec &operand,
+                        const std::string &tag,
+                        const std::unordered_map<std::string, DataCenterProto::PointUpdate> &latestByTag,
+                        RuntimeValue *out,
+                        bool *missing,
+                        std::string *error) {
   if (out == nullptr || missing == nullptr) {
     return false;
   }
@@ -192,8 +213,6 @@ bool tryGetOperandValue(const CalcProto::CalcItemConfig &item, const CalcProto::
     return true;
   }
 
-  const auto tags = makeItemTags(item.item_name());
-  const auto &tag = isLeft ? tags.leftInputTag : tags.rightInputTag;
   auto it = latestByTag.find(tag);
   if (it == latestByTag.end()) {
     *missing = true;
@@ -202,34 +221,126 @@ bool tryGetOperandValue(const CalcProto::CalcItemConfig &item, const CalcProto::
   return makeValueFromPointUpdate(it->second, out, error);
 }
 
-std::optional<PublishAction> evaluateItem(const CalcProto::CalcItemConfig &item, const std::unordered_map<std::string, DataCenterProto::PointUpdate> &latestByTag, std::string *error) {
-  RuntimeValue left;
-  RuntimeValue right;
-  bool leftMissing = false;
-  bool rightMissing = false;
+bool isNumericValue(const RuntimeValue &value) {
+  return value.type == RuntimeValue::Type::kInt || value.type == RuntimeValue::Type::kDouble;
+}
 
-  if (!tryGetOperandValue(item, item.left_operand(), latestByTag, true, &left, &leftMissing, error)) {
-    return std::nullopt;
+double toDouble(const RuntimeValue &value) {
+  return value.type == RuntimeValue::Type::kDouble ? value.doubleValue : static_cast<double>(value.intValue);
+}
+
+std::string joinTags(const std::vector<std::string> &tags) {
+  std::string result;
+  for (size_t index = 0; index < tags.size(); ++index) {
+    if (index != 0) {
+      result += ", ";
+    }
+    result += tags[index];
   }
-  if (leftMissing) {
-    return std::nullopt;
+  return result;
+}
+
+std::optional<PublishAction> evaluateItem(const CalcProto::CalcItemConfig &item, const std::unordered_map<std::string, DataCenterProto::PointUpdate> &latestByTag, std::string *error) {
+  const auto tags = makeItemTags(item);
+  std::vector<const CalcProto::OperandSpec *> operands;
+  operands.reserve(static_cast<size_t>(isAggregateOperator(item.operator_kind()) ? item.operands_size() : 2));
+  if (isAggregateOperator(item.operator_kind())) {
+    for (const auto &operand : item.operands()) {
+      operands.push_back(&operand);
+    }
+  } else {
+    operands.push_back(&item.left_operand());
+    if (item.has_right_operand()) {
+      operands.push_back(&item.right_operand());
+    }
   }
-  if (item.has_right_operand()) {
-    if (!tryGetOperandValue(item, item.right_operand(), latestByTag, false, &right, &rightMissing, error)) {
+
+  std::vector<RuntimeValue> values;
+  values.reserve(operands.size());
+  std::vector<std::string> missingTags;
+  for (size_t index = 0; index < operands.size(); ++index) {
+    RuntimeValue value;
+    bool missing = false;
+    const auto &tag = tags.inputTags[index];
+    if (!tryGetOperandValue(*operands[index], tag, latestByTag, &value, &missing, error)) {
       return std::nullopt;
     }
-    if (rightMissing) {
-      return std::nullopt;
+    if (missing) {
+      missingTags.push_back(tag);
     }
+    values.push_back(value);
+  }
+  if (!missingTags.empty()) {
+    if (error != nullptr) {
+      *error = std::format("item_name={} 等待输入: {} 尚未收到数据", item.item_name(), joinTags(missingTags));
+    }
+    return std::nullopt;
   }
 
   PublishAction action;
   action.itemName = item.item_name();
-  action.tag = makeItemTags(item.item_name()).resultTag;
+  action.tag = tags.resultTag;
+
+  if (isAggregateOperator(item.operator_kind())) {
+    for (const auto &value : values) {
+      if (!isNumericValue(value)) {
+        if (error != nullptr) {
+          *error = std::format("item_name={} SUM/AVERAGE 仅接受 int64/double", item.item_name());
+        }
+        return std::nullopt;
+      }
+      action.quality = combineQuality(action.quality, value.quality);
+      action.tsMs = std::max(action.tsMs, value.tsMs);
+    }
+
+    if (item.operator_kind() == CalcProto::OPERATOR_KIND_AVERAGE) {
+      double sum = 0.0;
+      for (const auto &value : values) {
+        sum += toDouble(value);
+      }
+      double average = sum / static_cast<double>(values.size());
+      if (item.has_decimal_places()) {
+        const double scale = std::pow(10.0, static_cast<double>(item.decimal_places()));
+        if (std::isfinite(scale) && scale > 0.0) {
+          average = std::round(average * scale) / scale;
+        }
+      }
+      action.value.set_double_value(average);
+      return action;
+    }
+
+    bool allInt = true;
+    int64_t intResult = 0;
+    bool overflow = false;
+    double doubleResult = 0.0;
+    for (const auto &value : values) {
+      allInt = allInt && value.type == RuntimeValue::Type::kInt;
+      if (allInt && !overflow) {
+        int64_t next = 0;
+        overflow = __builtin_add_overflow(intResult, value.intValue, &next);
+        if (!overflow) {
+          intResult = next;
+        }
+      }
+      doubleResult += toDouble(value);
+    }
+    if (allInt && !overflow) {
+      action.value.set_int_value(intResult);
+    } else {
+      action.value.set_double_value(doubleResult);
+    }
+    return action;
+  }
+
+  const auto &left = values[0];
+  RuntimeValue right;
+  if (values.size() > 1) {
+    right = values[1];
+  }
 
   if (isNumericOperator(item.operator_kind())) {
-    const bool leftIsNumeric = left.type == RuntimeValue::Type::kInt || left.type == RuntimeValue::Type::kDouble;
-    const bool rightIsNumeric = right.type == RuntimeValue::Type::kInt || right.type == RuntimeValue::Type::kDouble;
+    const bool leftIsNumeric = isNumericValue(left);
+    const bool rightIsNumeric = isNumericValue(right);
     if (!leftIsNumeric || !rightIsNumeric) {
       if (error != nullptr) {
         *error = std::format("item_name={} 数值运算仅接受 int64/double", item.item_name());
@@ -244,25 +355,21 @@ std::optional<PublishAction> evaluateItem(const CalcProto::CalcItemConfig &item,
         left.type == RuntimeValue::Type::kDouble ||
         right.type == RuntimeValue::Type::kDouble;
     if (item.operator_kind() == CalcProto::OPERATOR_KIND_DIV) {
-      const double rhs = (right.type == RuntimeValue::Type::kDouble) ? right.doubleValue
-                                                                     : static_cast<double>(right.intValue);
+      const double rhs = toDouble(right);
       if (rhs == 0.0) {
         if (error != nullptr) {
           *error = std::format("item_name={} 除零，跳过本轮结果发布", item.item_name());
         }
         return std::nullopt;
       }
-      const double lhs = (left.type == RuntimeValue::Type::kDouble) ? left.doubleValue
-                                                                    : static_cast<double>(left.intValue);
+      const double lhs = toDouble(left);
       action.value.set_double_value(lhs / rhs);
       return action;
     }
 
     if (useDouble) {
-      const double lhs = (left.type == RuntimeValue::Type::kDouble) ? left.doubleValue
-                                                                    : static_cast<double>(left.intValue);
-      const double rhs = (right.type == RuntimeValue::Type::kDouble) ? right.doubleValue
-                                                                     : static_cast<double>(right.intValue);
+      const double lhs = toDouble(left);
+      const double rhs = toDouble(right);
       switch (item.operator_kind()) {
       case CalcProto::OPERATOR_KIND_ADD:
         action.value.set_double_value(lhs + rhs);
@@ -356,11 +463,17 @@ std::optional<PublishAction> evaluateItem(const CalcProto::CalcItemConfig &item,
   return std::nullopt;
 }
 
-std::vector<PublishAction> evaluateGroupLocked(const CalcProto::CalcGroupConfig &config, const std::unordered_map<std::string, DataCenterProto::PointUpdate> &latestByTag, std::vector<std::string> *errors) {
+std::vector<PublishAction> evaluateGroupLocked(const CalcProto::CalcGroupConfig &config,
+                                               const std::unordered_map<std::string, DataCenterProto::PointUpdate> &latestByTag,
+                                               std::vector<std::string> *errors,
+                                               std::unordered_map<std::string, std::string> *itemLastErrors) {
   std::vector<PublishAction> actions;
   for (const auto &item : config.items()) {
     std::string error;
     auto action = evaluateItem(item, latestByTag, &error);
+    if (itemLastErrors != nullptr) {
+      (*itemLastErrors)[item.item_name()] = error;
+    }
     if (!error.empty() && errors != nullptr) {
       errors->push_back(error);
     }
@@ -369,6 +482,72 @@ std::vector<PublishAction> evaluateGroupLocked(const CalcProto::CalcGroupConfig 
     }
   }
   return actions;
+}
+
+void fillOperandStatuses(const CalcProto::CalcItemConfig &item,
+                         const std::unordered_map<std::string, DataCenterProto::PointUpdate> &latestByTag,
+                         CalcProto::CalcItemInfo *itemInfo) {
+  if (itemInfo == nullptr) {
+    return;
+  }
+  const auto tags = makeItemTags(item);
+  const auto addStatus = [&](int index, const CalcProto::OperandSpec &operand) {
+    auto *status = itemInfo->add_operand_status();
+    const auto &tag = tags.inputTags[static_cast<size_t>(index)];
+    status->set_index(static_cast<uint32_t>(index));
+    status->set_input_tag(tag);
+    if (operand.source_kind() == CalcProto::OPERAND_SOURCE_CONSTANT) {
+      status->set_ready(true);
+      status->set_quality(DataCenterProto::QUALITY_GOOD);
+      status->set_ts_ms(0);
+      return;
+    }
+    auto it = latestByTag.find(tag);
+    if (it == latestByTag.end()) {
+      status->set_ready(false);
+      status->set_reason("尚未收到输入数据");
+      return;
+    }
+    status->set_quality(it->second.quality());
+    status->set_ts_ms(it->second.ts_ms());
+    if (it->second.value().kind_case() == DataCenterProto::PointValue::KIND_NOT_SET) {
+      status->set_ready(false);
+      status->set_reason("已收到输入，但值类型不支持");
+      return;
+    }
+    const bool numericOperation = isNumericOperator(item.operator_kind()) ||
+        isAggregateOperator(item.operator_kind());
+    const bool numericValue = it->second.value().has_int_value() ||
+        it->second.value().has_double_value();
+    if (numericOperation && !numericValue) {
+      status->set_ready(false);
+      status->set_reason("已收到输入，但类型不支持当前数值运算");
+      return;
+    }
+    if (isLogicOperator(item.operator_kind()) && !it->second.value().has_bool_value()) {
+      status->set_ready(false);
+      status->set_reason("已收到输入，但类型不支持当前逻辑运算");
+      return;
+    }
+    status->set_ready(true);
+    if (it->second.quality() == DataCenterProto::QUALITY_BAD) {
+      status->set_reason("已收到输入，但质量为 BAD");
+    } else if (it->second.quality() == DataCenterProto::QUALITY_UNCERTAIN ||
+               it->second.quality() == DataCenterProto::QUALITY_UNSPECIFIED) {
+      status->set_reason("已收到输入，但质量为不确定");
+    }
+  };
+
+  if (isAggregateOperator(item.operator_kind())) {
+    for (int index = 0; index < item.operands_size(); ++index) {
+      addStatus(index, item.operands(index));
+    }
+    return;
+  }
+  addStatus(0, item.left_operand());
+  if (item.has_right_operand()) {
+    addStatus(1, item.right_operand());
+  }
 }
 
 }  // namespace
@@ -408,10 +587,20 @@ grpc::Status GroupManager::fillGroupInfoLocked(const GroupRuntime &group, CalcPr
   for (const auto &item : group.config.items()) {
     auto *itemInfo = out->add_items();
     *itemInfo->mutable_config() = item;
-    const auto tags = makeItemTags(item.item_name());
-    itemInfo->set_left_input_tag(tags.leftInputTag);
-    itemInfo->set_right_input_tag(tags.rightInputTag);
+    const auto tags = makeItemTags(item);
+    if (!isAggregateOperator(item.operator_kind())) {
+      itemInfo->set_left_input_tag(tags.leftInputTag);
+      itemInfo->set_right_input_tag(tags.rightInputTag);
+    }
     itemInfo->set_result_tag(tags.resultTag);
+    for (const auto &tag : tags.inputTags) {
+      itemInfo->add_input_tags(tag);
+    }
+    fillOperandStatuses(item, group.latestByTag, itemInfo);
+    auto errorIt = group.itemLastErrors.find(item.item_name());
+    if (errorIt != group.itemLastErrors.end()) {
+      itemInfo->set_last_error(errorIt->second);
+    }
   }
   return grpc::Status::OK;
 }
@@ -426,9 +615,6 @@ grpc::Status GroupManager::checkStartPreconditionsLocked(const GroupRuntime &gro
   }
   if (group.connId == 0) {
     return makePreconditionFailed("分组 conn_id 无效");
-  }
-  if (group.subscribeTags.empty()) {
-    return makePreconditionFailed("分组订阅标签为空，当前规则要求至少存在一路路由输入后才启动分组功能");
   }
   return grpc::Status::OK;
 }
@@ -612,6 +798,7 @@ grpc::Status GroupManager::UpsertGroup(const CalcProto::UpsertGroupRequest &requ
       }
       it->second.config = request.config();
       it->second.latestByTag.clear();
+      it->second.itemLastErrors.clear();
       it->second.lastError.clear();
       rebuildTagCache(&it->second);
       connId = it->second.connId;
@@ -642,6 +829,7 @@ grpc::Status GroupManager::UpsertGroup(const CalcProto::UpsertGroupRequest &requ
       group.connId = connInfo.conn_id();
       group.state = CalcProto::GROUP_STATE_STOPPED;
       group.lastError.clear();
+      group.itemLastErrors.clear();
       rebuildTagCache(&group);
       connId = group.connId;
     }
@@ -794,10 +982,16 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
 
   const auto connId = group->connId;
   std::vector<std::string> subscribeTags(group->subscribeTags.begin(), group->subscribeTags.end());
-  if (connId == 0 || subscribeTags.empty()) {
+  if (connId == 0) {
     group->state = CalcProto::GROUP_STATE_STOPPED;
-    group->lastError = "分组订阅标签为空或连接无效";
+    group->lastError = "分组连接无效";
     LOG_WARNING("Calc 分组启动运算功能失败: group_name={}, conn_id={}, 原因={}", groupName, connId, group->lastError);
+    return;
+  }
+
+  if (subscribeTags.empty()) {
+    group->dcSubscribeContext.reset();
+    LOG_INFO("Calc 分组无需订阅 DataCenter 输入: group_name={}, conn_id={}", groupName, connId);
     return;
   }
 
@@ -842,6 +1036,9 @@ grpc::Status GroupManager::StartGroup(const std::string &groupName) {
     return status;
   }
 
+  std::vector<PublishAction> startupActions;
+  std::vector<std::string> startupErrors;
+  uint32_t startupConnId = 0;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = groupsByName_.find(groupName);
@@ -859,14 +1056,35 @@ grpc::Status GroupManager::StartGroup(const std::string &groupName) {
     }
 
     it->second.latestByTag.clear();
+    it->second.itemLastErrors.clear();
     it->second.lastError.clear();
     it->second.state = CalcProto::GROUP_STATE_RUNNING;
     startThreadsLocked(groupName, &it->second);
-    if (it->second.state != CalcProto::GROUP_STATE_RUNNING || !it->second.dcSubscribeThread.joinable()) {
+    if (it->second.state != CalcProto::GROUP_STATE_RUNNING ||
+        (!it->second.subscribeTags.empty() && !it->second.dcSubscribeThread.joinable())) {
       if (it->second.lastError.empty()) {
         it->second.lastError = "建立 DataCenter 订阅失败";
       }
       return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, it->second.lastError);
+    }
+    startupConnId = it->second.connId;
+    startupActions = evaluateGroupLocked(it->second.config, it->second.latestByTag, &startupErrors, &it->second.itemLastErrors);
+  }
+
+  for (const auto &error : startupErrors) {
+    LOG_WARNING("Calc 启动时计算跳过: group_name={}, 原因={}", groupName, error);
+  }
+  for (const auto &action : startupActions) {
+    auto publishStatus = dataCenter_.PublishValue(startupConnId, action.tag, action.value, action.quality, action.tsMs);
+    if (!publishStatus.ok()) {
+      LOG_ERROR("Calc 启动时发布结果失败: group_name={}, item_name={}, tag={}, 原因={}", groupName, action.itemName, action.tag, publishStatus.error_message());
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = groupsByName_.find(groupName);
+      if (it != groupsByName_.end()) {
+        it->second.lastError = std::format("发布结果失败: {}", publishStatus.error_message());
+      }
+    } else {
+      LOG_DEBUG("Calc 启动时已发布结果: group_name={}, item_name={}, tag={}", groupName, action.itemName, action.tag);
     }
   }
 
@@ -967,7 +1185,7 @@ void GroupManager::handleUpdate(const std::string &groupName, const DataCenterPr
     }
     it->second.latestByTag[update.dst_tag()] = update;
     connId = it->second.connId;
-    actions = evaluateGroupLocked(it->second.config, it->second.latestByTag, &errors);
+    actions = evaluateGroupLocked(it->second.config, it->second.latestByTag, &errors, &it->second.itemLastErrors);
   }
 
   for (const auto &error : errors) {
@@ -986,9 +1204,10 @@ void GroupManager::handleUpdate(const std::string &groupName, const DataCenterPr
 std::unordered_set<std::string> GroupManager::collectAllTags(const CalcProto::CalcGroupConfig &config) {
   std::unordered_set<std::string> tags;
   for (const auto &item : config.items()) {
-    const auto itemTags = makeItemTags(item.item_name());
-    tags.emplace(itemTags.leftInputTag);
-    tags.emplace(itemTags.rightInputTag);
+    const auto itemTags = makeItemTags(item);
+    for (const auto &tag : itemTags.inputTags) {
+      tags.emplace(tag);
+    }
     tags.emplace(itemTags.resultTag);
   }
   return tags;
@@ -1000,7 +1219,15 @@ void GroupManager::rebuildTagCache(GroupRuntime *group) {
   }
   group->subscribeTags.clear();
   for (const auto &item : group->config.items()) {
-    const auto itemTags = makeItemTags(item.item_name());
+    const auto itemTags = makeItemTags(item);
+    if (isAggregateOperator(item.operator_kind())) {
+      for (int index = 0; index < item.operands_size(); ++index) {
+        if (item.operands(index).source_kind() == CalcProto::OPERAND_SOURCE_ROUTED_INPUT) {
+          group->subscribeTags.emplace(itemTags.inputTags[static_cast<size_t>(index)]);
+        }
+      }
+      continue;
+    }
     if (item.left_operand().source_kind() == CalcProto::OPERAND_SOURCE_ROUTED_INPUT) {
       group->subscribeTags.emplace(itemTags.leftInputTag);
     }

@@ -91,6 +91,45 @@ CalcProto::UpsertGroupRequest MakeAndGroupReq(const char *groupName) {
   return req;
 }
 
+CalcProto::UpsertGroupRequest MakeSumGroupReq(const char *groupName, int operandCount = 3) {
+  CalcProto::UpsertGroupRequest req;
+  req.set_create_only(true);
+  auto *cfg = req.mutable_config();
+  cfg->set_group_name(groupName);
+  auto *item = cfg->add_items();
+  item->set_item_name("aggregate");
+  item->set_operator_kind(CalcProto::OPERATOR_KIND_SUM);
+  for (int index = 0; index < operandCount; ++index) {
+    item->add_operands()->set_source_kind(CalcProto::OPERAND_SOURCE_ROUTED_INPUT);
+  }
+  return req;
+}
+
+CalcProto::UpsertGroupRequest MakeAverageGroupReq(const char *groupName, uint32_t decimalPlaces) {
+  auto req = MakeSumGroupReq(groupName, 3);
+  auto *item = req.mutable_config()->mutable_items(0);
+  item->set_operator_kind(CalcProto::OPERATOR_KIND_AVERAGE);
+  item->set_decimal_places(decimalPlaces);
+  return req;
+}
+
+CalcProto::UpsertGroupRequest MakeConstantAverageGroupReq(const char *groupName) {
+  CalcProto::UpsertGroupRequest req;
+  req.set_create_only(true);
+  auto *cfg = req.mutable_config();
+  cfg->set_group_name(groupName);
+  auto *item = cfg->add_items();
+  item->set_item_name("constant_average");
+  item->set_operator_kind(CalcProto::OPERATOR_KIND_AVERAGE);
+  item->set_decimal_places(2);
+  for (double value : {1.0, 2.0, 2.0}) {
+    auto *operand = item->add_operands();
+    operand->set_source_kind(CalcProto::OPERAND_SOURCE_CONSTANT);
+    operand->mutable_constant()->set_double_value(value);
+  }
+  return req;
+}
+
 void PublishIntPoint(FakeDataCenterState *state, uint32_t connId, const std::string &tag, int64_t value) {
   ASSERT_NE(state, nullptr);
   DataCenterProto::PublishRequest req;
@@ -239,6 +278,126 @@ TEST(CalcGroupManagerTest, UpsertGroupRejectsInvalidConfigShapes) {
   missingRightReq.mutable_config()->mutable_items(0)->clear_right_operand();
   status = mgr.UpsertGroup(missingRightReq, &info);
   EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+// 验证：SUM/AVERAGE 必须使用至少两个 operands，且不能与旧左右操作数混用。
+TEST(CalcGroupManagerTest, UpsertGroupRejectsInvalidAggregateOperands) {
+  ScopedTempDir tempDir;
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("Calc", tempDir.path() / "conf/config.db");
+  mgr.setDataCenterStub(stub);
+  CalcProto::CalcGroupInfo info;
+
+  auto tooFew = MakeSumGroupReq("calc-sum-too-few", 1);
+  auto status = mgr.UpsertGroup(tooFew, &info);
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+
+  auto mixed = MakeSumGroupReq("calc-sum-mixed");
+  mixed.mutable_config()->mutable_items(0)->mutable_left_operand()->set_source_kind(
+      CalcProto::OPERAND_SOURCE_ROUTED_INPUT);
+  status = mgr.UpsertGroup(mixed, &info);
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+// 验证：SUM 收齐三个 int64 输入后输出 int64，并返回按顺序生成的输入标签。
+TEST(CalcGroupManagerTest, SumThreeIntsPublishesInt64AndInputTags) {
+  ScopedTempDir tempDir;
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("Calc", tempDir.path() / "conf/config.db");
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeSumGroupReq("calc-sum-three");
+  CalcProto::CalcGroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+
+  ASSERT_EQ(info.items_size(), 1);
+  ASSERT_EQ(info.items(0).input_tags_size(), 3);
+  EXPECT_EQ(info.items(0).input_tags(0), "aggregate/input_1");
+  EXPECT_EQ(info.items(0).input_tags(1), "aggregate/input_2");
+  EXPECT_EQ(info.items(0).input_tags(2), "aggregate/input_3");
+
+  PublishIntPoint(&state, info.conn_id(), "aggregate/input_1", 3);
+  PublishIntPoint(&state, info.conn_id(), "aggregate/input_2", 4);
+  PublishIntPoint(&state, info.conn_id(), "aggregate/input_3", 5);
+
+  EXPECT_TRUE(WaitForIntLatest(state, info.conn_id(), "aggregate/result", 12));
+  ASSERT_TRUE(mgr.StopGroup("calc-sum-three").ok());
+}
+
+// 验证：AVERAGE 按配置的小数位数四舍五入，并始终输出 double。
+TEST(CalcGroupManagerTest, AverageUsesConfiguredDecimalPlaces) {
+  ScopedTempDir tempDir;
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("Calc", tempDir.path() / "conf/config.db");
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeAverageGroupReq("calc-average", 2);
+  CalcProto::CalcGroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+
+  PublishIntPoint(&state, info.conn_id(), "aggregate/input_1", 1);
+  PublishIntPoint(&state, info.conn_id(), "aggregate/input_2", 2);
+  PublishIntPoint(&state, info.conn_id(), "aggregate/input_3", 2);
+
+  EXPECT_TRUE(WaitForDoubleLatest(state, info.conn_id(), "aggregate/result", 1.67));
+  ASSERT_TRUE(mgr.StopGroup("calc-average").ok());
+}
+
+// 验证：缺少任一路由输入时不发布结果，并在计算项状态中指出具体等待点。
+TEST(CalcGroupManagerTest, AggregateWaitsForAllInputsAndReportsMissingTag) {
+  ScopedTempDir tempDir;
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("Calc", tempDir.path() / "conf/config.db");
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeSumGroupReq("calc-sum-missing");
+  CalcProto::CalcGroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+
+  PublishIntPoint(&state, info.conn_id(), "aggregate/input_1", 3);
+  PublishIntPoint(&state, info.conn_id(), "aggregate/input_3", 5);
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "aggregate/result"), 0u);
+
+  CalcProto::CalcGroupInfo current;
+  ASSERT_TRUE(mgr.GetGroup("calc-sum-missing", &current).ok());
+  ASSERT_EQ(current.items_size(), 1);
+  ASSERT_EQ(current.items(0).operand_status_size(), 3);
+  EXPECT_TRUE(current.items(0).operand_status(0).ready());
+  EXPECT_FALSE(current.items(0).operand_status(1).ready());
+  EXPECT_EQ(current.items(0).operand_status(1).input_tag(), "aggregate/input_2");
+  EXPECT_NE(current.items(0).operand_status(1).reason().find("尚未收到"), std::string::npos);
+  EXPECT_NE(current.items(0).last_error().find("aggregate/input_2"), std::string::npos);
+
+  PublishIntPoint(&state, info.conn_id(), "aggregate/input_2", 4);
+  EXPECT_TRUE(WaitForIntLatest(state, info.conn_id(), "aggregate/result", 12));
+  ASSERT_TRUE(mgr.StopGroup("calc-sum-missing").ok());
+}
+
+// 验证：全常量 AVERAGE 无需订阅输入，在分组运算功能启动时发布一次结果。
+TEST(CalcGroupManagerTest, ConstantAveragePublishesOnStart) {
+  ScopedTempDir tempDir;
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("Calc", tempDir.path() / "conf/config.db");
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeConstantAverageGroupReq("calc-constant-average");
+  CalcProto::CalcGroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+  EXPECT_EQ(info.state(), CalcProto::GROUP_STATE_RUNNING);
+  EXPECT_EQ(state.GetSubscriptionCount(info.conn_id()), 0u);
+  EXPECT_TRUE(WaitForDoubleLatest(state, info.conn_id(), "constant_average/result", 1.67));
+  ASSERT_TRUE(mgr.StopGroup("calc-constant-average").ok());
 }
 
 // 验证：int + int 在未溢出时输出 int64。

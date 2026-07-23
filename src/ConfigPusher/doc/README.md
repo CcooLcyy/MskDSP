@@ -87,7 +87,7 @@ README 这里只保留模块说明、启动方式、配置入口与基础语义�
 - AVC 支持 `voltage_cmd` 或 `q_total_cmd` 两类主命令输入；ConfigPusher 只负责按 `jsonc` 收敛下发，控制组是否自动进入运行态由 AVC 模块依据当前配置判定
 - Calc 配置使用 `calc.groups[].upsert` 下发计算分组；`calc.groups[].start` 为兼容保留字段，当前仅记录日志，不再额外调用 `StartGroup`
 - Calc 的 `jsonc` 改名语义按“删除旧组 + 创建新组”处理；ConfigPusher 不提供显式 `RenameGroup` 任务
-- Calc 计算项中的 `ROUTED_INPUT` 只声明输入槽位，外部源点仍通过 DataCenter Route 绑定到 `<item_name>/left_input` 或 `<item_name>/right_input`；计算结果发布到 `<item_name>/result`
+- Calc 计算项中的 `ROUTED_INPUT` 只声明输入槽位，外部源点仍通过 DataCenter Route 绑定到二元项的 `<item_name>/left_input`/`<item_name>/right_input` 或 SUM/AVERAGE 项的 `<item_name>/input_N`；计算结果发布到 `<item_name>/result`
 - DataCenter 配置要求连接已存在（由模块或上位机创建）；若 `point_tables/routes` 引用连接不存在，则该次 DataCenter 配置不下发。注意：这里的 `point_tables` 配置项当前仍沿用历史字段名，实际对应 DataCenter 的连接标签注册表 `ConnTags`。
 - 在 `CONFIG_PUSHER` 严格目标态语义下，`point_tables` 视为 ConnTags 的完整目标集合；路由中涉及的连接与 tag 必须在 `point_tables` 中显式声明，否则会在写入 DataCenter 前校验失败，不执行 ConnTags/Routes 写入。
 - 对 ConfigPusher 而言，`jsonc` 表达的是最终目标态：即使底层 gRPC 结构复用了 `replace` 字段，ConfigPusher 也会确保最终生效结果不保留 `jsonc` 未声明的旧条目
