@@ -118,7 +118,7 @@ TEST(DataCenterCoreTest, RenameConnectionKeepsConnId) {
   EXPECT_EQ(gotNew.conn_id(), created.conn_id());
 }
 
-// 验证：DeleteConnection 会清理该连接关联的连接标签注册表/路由/最新值缓存。
+// 验证：DeleteConnection 会清理该连接关联的连接标签注册表/路由/源端与目的端最新值缓存。
 TEST(DataCenterCoreTest, DeleteConnectionCleansConnTagsRoutesAndLatest) {
   DataCenterCore core;
 
@@ -164,6 +164,12 @@ TEST(DataCenterCoreTest, DeleteConnectionCleansConnTagsRoutesAndLatest) {
   ASSERT_TRUE(core.GetLatest(latestReq, &latestResp).ok());
   ASSERT_EQ(latestResp.updates_size(), 1);
 
+  DataCenterProto::GetSourceLatestRequest sourceLatestReq;
+  sourceLatestReq.set_conn_id(src.conn_id());
+  DataCenterProto::GetSourceLatestResponse sourceLatestResp;
+  ASSERT_TRUE(core.GetSourceLatest(sourceLatestReq, &sourceLatestResp).ok());
+  ASSERT_EQ(sourceLatestResp.updates_size(), 1);
+
   DataCenterProto::DeleteConnectionRequest delReq;
   *delReq.mutable_key() = createSrc.key();
   ASSERT_TRUE(core.DeleteConnection(delReq).ok());
@@ -180,6 +186,11 @@ TEST(DataCenterCoreTest, DeleteConnectionCleansConnTagsRoutesAndLatest) {
   DataCenterProto::GetLatestResponse afterDel;
   ASSERT_TRUE(core.GetLatest(latestReq, &afterDel).ok());
   EXPECT_EQ(afterDel.updates_size(), 0);
+
+  DataCenterProto::GetSourceLatestResponse afterSourceDel;
+  auto sourceStatus = core.GetSourceLatest(sourceLatestReq, &afterSourceDel);
+  EXPECT_FALSE(sourceStatus.ok());
+  EXPECT_EQ(sourceStatus.error_code(), grpc::StatusCode::NOT_FOUND);
 }
 
 // 验证：当连接标签注册表存在时，UpsertRoutes 会校验 tag 必须在注册表内。
@@ -415,6 +426,85 @@ TEST(DataCenterCoreTest, GetLatestReturnsLastRoutedValueByDstEndpoint) {
   EXPECT_EQ(latestResp.updates(0).src_tag(), "电压");
 }
 
+// 验证：GetSourceLatest 可读取无路由源点、按 tag 排序，并返回进程内全局递增 sequence。
+TEST(DataCenterCoreTest, GetSourceLatestReturnsUnroutedPointsWithGlobalSequence) {
+  DataCenterCore core;
+  InstallRouteConnections(core, {1});
+
+  DataCenterProto::PublishRequest pubZ;
+  pubZ.set_conn_id(1);
+  pubZ.set_tag("Z");
+  pubZ.mutable_value()->set_int_value(10);
+  pubZ.set_ts_ms(1001);
+  pubZ.set_quality(DataCenterProto::QUALITY_GOOD);
+
+  std::vector<DataCenterProto::PointUpdate> updates;
+  ASSERT_TRUE(core.Publish(pubZ, &updates).ok());
+  EXPECT_TRUE(updates.empty());
+
+  DataCenterProto::PublishRequest pubA;
+  pubA.set_conn_id(1);
+  pubA.set_tag("A");
+  pubA.mutable_value()->set_double_value(20.5);
+  pubA.set_ts_ms(1002);
+  pubA.set_quality(DataCenterProto::QUALITY_UNCERTAIN);
+  ASSERT_TRUE(core.Publish(pubA, &updates).ok());
+  EXPECT_TRUE(updates.empty());
+
+  DataCenterProto::GetSourceLatestRequest req;
+  req.set_conn_id(1);
+  DataCenterProto::GetSourceLatestResponse resp;
+  ASSERT_TRUE(core.GetSourceLatest(req, &resp).ok());
+  ASSERT_EQ(resp.updates_size(), 2);
+  EXPECT_EQ(resp.updates(0).tag(), "A");
+  EXPECT_DOUBLE_EQ(resp.updates(0).value().double_value(), 20.5);
+  EXPECT_EQ(resp.updates(0).ts_ms(), 1002);
+  EXPECT_EQ(resp.updates(0).quality(), DataCenterProto::QUALITY_UNCERTAIN);
+  EXPECT_EQ(resp.updates(1).tag(), "Z");
+  EXPECT_EQ(resp.updates(1).value().int_value(), 10);
+  EXPECT_EQ(resp.updates(1).ts_ms(), 1001);
+  EXPECT_EQ(resp.updates(1).quality(), DataCenterProto::QUALITY_GOOD);
+  EXPECT_LT(resp.updates(1).sequence(), resp.updates(0).sequence());
+
+  DataCenterProto::GetSourceLatestRequest filteredReq;
+  filteredReq.set_conn_id(1);
+  filteredReq.add_tags("Z");
+  DataCenterProto::GetSourceLatestResponse filteredResp;
+  ASSERT_TRUE(core.GetSourceLatest(filteredReq, &filteredResp).ok());
+  ASSERT_EQ(filteredResp.updates_size(), 1);
+  EXPECT_EQ(filteredResp.updates(0).tag(), "Z");
+  EXPECT_EQ(filteredResp.updates(0).sequence(), resp.updates(1).sequence());
+}
+
+// 验证：源端最新值不写入 DataCenterState，按持久化配置恢复后不会带回进程内实时缓存。
+TEST(DataCenterCoreTest, GetSourceLatestCacheIsNotRestoredFromPersistentState) {
+  DataCenterCore core;
+  InstallRouteConnections(core, {1});
+
+  DataCenterProto::PublishRequest pub;
+  pub.set_conn_id(1);
+  pub.set_tag("瞬时功率");
+  pub.mutable_value()->set_double_value(88.8);
+  std::vector<DataCenterProto::PointUpdate> updates;
+  ASSERT_TRUE(core.Publish(pub, &updates).ok());
+
+  DataCenterProto::DataCenterState persistedState;
+  *persistedState.mutable_connections() = core.DumpConnectionsConfig();
+  *persistedState.mutable_conn_tags() = core.DumpConnTagsConfig();
+  *persistedState.mutable_routes() = core.DumpRoutesConfig();
+
+  DataCenterCore restored;
+  ASSERT_TRUE(restored.ReplaceConnectionsConfig(persistedState.connections()).ok());
+  ASSERT_TRUE(restored.ReplaceConnTagsConfig(persistedState.conn_tags()).ok());
+  ASSERT_TRUE(restored.ReplaceRoutesConfig(persistedState.routes()).ok());
+
+  DataCenterProto::GetSourceLatestRequest req;
+  req.set_conn_id(1);
+  DataCenterProto::GetSourceLatestResponse resp;
+  ASSERT_TRUE(restored.GetSourceLatest(req, &resp).ok());
+  EXPECT_EQ(resp.updates_size(), 0);
+}
+
 // 验证：BatchPublish 在输入合法时会发布全部点并生成对应路由更新。
 TEST(DataCenterCoreTest, BatchPublishPublishesAllPointsWhenValid) {
   DataCenterCore core;
@@ -450,9 +540,20 @@ TEST(DataCenterCoreTest, BatchPublishPublishesAllPointsWhenValid) {
   EXPECT_EQ(latestResp.updates(0).value().int_value(), 10);
   EXPECT_EQ(latestResp.updates(1).dst_tag(), "D");
   EXPECT_EQ(latestResp.updates(1).value().int_value(), 20);
+
+  DataCenterProto::GetSourceLatestRequest sourceLatestReq;
+  sourceLatestReq.set_conn_id(1);
+  DataCenterProto::GetSourceLatestResponse sourceLatestResp;
+  ASSERT_TRUE(core.GetSourceLatest(sourceLatestReq, &sourceLatestResp).ok());
+  ASSERT_EQ(sourceLatestResp.updates_size(), 2);
+  EXPECT_EQ(sourceLatestResp.updates(0).tag(), "A");
+  EXPECT_EQ(sourceLatestResp.updates(0).value().int_value(), 10);
+  EXPECT_EQ(sourceLatestResp.updates(1).tag(), "C");
+  EXPECT_EQ(sourceLatestResp.updates(1).value().int_value(), 20);
+  EXPECT_LT(sourceLatestResp.updates(0).sequence(), sourceLatestResp.updates(1).sequence());
 }
 
-// 验证：BatchPublish 在校验失败时具有原子性（不输出 updates 且不更新 latest）。
+// 验证：BatchPublish 在校验失败时具有原子性（不输出 updates，且不更新源端或目的端 latest）。
 TEST(DataCenterCoreTest, BatchPublishIsAtomicAndDoesNotUpdateLatestOnValidationFailure) {
   DataCenterCore core;
   InstallRouteConnections(core, {1, 2});
@@ -484,6 +585,12 @@ TEST(DataCenterCoreTest, BatchPublishIsAtomicAndDoesNotUpdateLatestOnValidationF
   DataCenterProto::GetLatestResponse latestResp;
   ASSERT_TRUE(core.GetLatest(latestReq, &latestResp).ok());
   EXPECT_EQ(latestResp.updates_size(), 0);
+
+  DataCenterProto::GetSourceLatestRequest sourceLatestReq;
+  sourceLatestReq.set_conn_id(1);
+  DataCenterProto::GetSourceLatestResponse sourceLatestResp;
+  ASSERT_TRUE(core.GetSourceLatest(sourceLatestReq, &sourceLatestResp).ok());
+  EXPECT_EQ(sourceLatestResp.updates_size(), 0);
 }
 
 // 验证：DumpConnTagsConfig 与 ReplaceConnTagsConfig 可 roundtrip 恢复连接标签注册表配置。

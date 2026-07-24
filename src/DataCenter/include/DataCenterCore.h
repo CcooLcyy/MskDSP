@@ -40,6 +40,7 @@ public:
   grpc::Status StoreAcceptedCommand(const DataCenterProto::ExecuteCommandRequest &request, const DataCenterProto::Endpoint &dst);
 
   grpc::Status GetLatest(const DataCenterProto::GetLatestRequest &request, DataCenterProto::GetLatestResponse *out) const;
+  grpc::Status GetSourceLatest(const DataCenterProto::GetSourceLatestRequest &request, DataCenterProto::GetSourceLatestResponse *out) const;
 
 private:
   struct ConnKey {
@@ -98,5 +99,7 @@ private:
   std::unordered_map<ConnKey, std::unordered_set<std::string>, ConnKeyHash> connTagsByKey_;
   std::unordered_map<StableEndpointKey, StableEndpointKeySet, StableEndpointKeyHash> routes_;
   std::unordered_map<EndpointKey, DataCenterProto::PointUpdate, EndpointKeyHash> latestByDst_;
+  std::unordered_map<EndpointKey, DataCenterProto::SourcePointUpdate, EndpointKeyHash> latestBySrc_;
+  uint64_t sourceUpdateSequence_{0};
 };
 }  // namespace DataCenter

@@ -31,6 +31,7 @@ public:
   grpc::Status ExecuteCommand(grpc::ServerContext* context, const DataCenterProto::ExecuteCommandRequest* request, DataCenterProto::ExecuteCommandResponse* response) override;
   grpc::Status BatchPublish(grpc::ServerContext* context, const DataCenterProto::BatchPublishRequest* request, DataCenterProto::Empty* response) override;
 
+  grpc::Status GetSourceLatest(grpc::ServerContext* context, const DataCenterProto::GetSourceLatestRequest* request, DataCenterProto::GetSourceLatestResponse* response) override;
   grpc::Status GetLatest(grpc::ServerContext* context, const DataCenterProto::GetLatestRequest* request, DataCenterProto::GetLatestResponse* response) override;
   grpc::Status Subscribe(grpc::ServerContext* context, const DataCenterProto::SubscribeRequest* request, grpc::ServerWriter<DataCenterProto::PointUpdate>* writer) override;
 
