@@ -6,6 +6,7 @@
 #include <optional>
 #include <stop_token>
 #include <string>
+#include <vector>
 
 #include "ModuleManager.h"
 #include "ModuleManagerGrpcService.h"
@@ -259,6 +260,91 @@ TEST_F(ModuleManagerTest, AutoStartModulesFromJsonConfig) {
 
   const auto dummyInfo = FindModuleInfoByName(mgr.getModuleInfos(), kDummyModuleName);
   mgr.unloadModule(dummyInfo);
+  EXPECT_EQ(mgr.getModuleRunningInfos().module_running_info_size(), 0);
+}
+
+// 验证：全新安装没有 SQLite 配置痕迹时，`UPPER` 模式仍会按显式业务模块列表启动所有可用模块；
+// `ConfigPusher` 即使被误列入，也不会在该模式下启动。
+TEST_F(ModuleManagerTest, UpperModeExplicitBusinessModuleListStartsWithoutSqliteTrace) {
+  const std::vector<std::string> businessModules = {
+      "DataCenter",
+      "MQTTManager",
+      "IEC104",
+      "ModbusRTU",
+      "DLT645",
+      "AGC",
+      "AVC",
+      "Calc"};
+
+  ASSERT_FALSE(fs::exists(ConfDir() / "config.db"));
+  WriteAutoStartConfig(R"jsonc(
+{
+  "boot_config_mode": "UPPER",
+  "auto_start_modules": [
+    "DataCenter",
+    "MQTTManager",
+    "IEC104",
+    "ModbusRTU",
+    "DLT645",
+    "AGC",
+    "AVC",
+    "Calc",
+    "ConfigPusher"
+  ]
+}
+)jsonc");
+
+  ModuleManager::ModuleManager mgr;
+  std::stop_source stopSource;
+  stopSource.request_stop();
+  mgr.start(stopSource.get_token());
+
+  const auto &infos = mgr.getModuleInfos();
+  const auto running = mgr.getModuleRunningInfos();
+  int availableBusinessModuleCount = 0;
+  for (const auto &moduleName : businessModules) {
+    if (!HasUsableModuleInfo(infos, moduleName)) {
+      continue;
+    }
+    ++availableBusinessModuleCount;
+    EXPECT_EQ(CountRunningModuleByName(running, moduleName), 1)
+        << "显式列出的可用业务模块未启动: " << moduleName;
+  }
+  ASSERT_GT(availableBusinessModuleCount, 0)
+      << "当前测试环境至少应提供一个轻量业务模块";
+  EXPECT_EQ(CountRunningModuleByName(running, "ConfigPusher"), 0);
+
+  for (const auto &moduleName : businessModules) {
+    if (CountRunningModuleByName(mgr.getModuleRunningInfos(), moduleName) == 0) {
+      continue;
+    }
+    mgr.unloadModule(FindModuleInfoByName(infos, moduleName));
+  }
+  EXPECT_EQ(mgr.getModuleRunningInfos().module_running_info_size(), 0);
+}
+
+// 验证：显式自动启动列表包含重复项时，每个模块仍只会保留一个运行实例。
+TEST_F(ModuleManagerTest, UpperModeExplicitAutoStartDeduplicatesRepeatedEntries) {
+  WriteAutoStartConfig(R"jsonc(
+{
+  "boot_config_mode": "UPPER",
+  "auto_start_modules": ["Dummy", "Dummy", "AVC", "Dummy", "AVC"]
+}
+)jsonc");
+
+  ModuleManager::ModuleManager mgr;
+  std::stop_source stopSource;
+  stopSource.request_stop();
+  mgr.start(stopSource.get_token());
+
+  const auto running = mgr.getModuleRunningInfos();
+  EXPECT_EQ(CountRunningModuleByName(running, kDummyModuleName), 1);
+  EXPECT_EQ(CountRunningModuleByName(running, kAvcModuleName), 1);
+  EXPECT_EQ(running.module_running_info_size(), 2);
+
+  const auto &infos = mgr.getModuleInfos();
+  mgr.unloadModule(FindModuleInfoByName(infos, kDummyModuleName));
+  mgr.unloadModule(FindModuleInfoByName(infos, kAvcModuleName));
   EXPECT_EQ(mgr.getModuleRunningInfos().module_running_info_size(), 0);
 }
 

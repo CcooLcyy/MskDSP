@@ -293,18 +293,59 @@ ensure_module_dir() {
 
 ensure_default_conf() {
   local conf_dir="${HOST_DIR}/conf"
-  if [[ -d "${conf_dir}" && -n "$(ls -A "${conf_dir}" 2>/dev/null || true)" ]]; then
-    return 0
+  local conf_is_empty=0
+  local init_name="mskdsp-conf-init-$$"
+  local staging_dir=""
+  local staged_config=""
+
+  if [[ ! -d "${conf_dir}" || -z "$(ls -A "${conf_dir}" 2>/dev/null || true)" ]]; then
+    conf_is_empty=1
   fi
   mkdir -p "${conf_dir}"
-  echo "配置目录为空，初始化默认配置到宿主机: ${conf_dir}"
-  local init_name="mskdsp-init-$$"
-  docker create --name "${init_name}" "${IMAGE_TAG}" >/dev/null
-  if ! docker cp "${init_name}:${CONTAINER_DIR}/conf/." "${conf_dir}/"; then
-    docker rm -f "${init_name}" >/dev/null 2>&1 || true
-    die "初始化配置目录失败: ${conf_dir}"
+
+  if ! docker create --name "${init_name}" "${IMAGE_TAG}" >/dev/null; then
+    die "创建配置同步临时容器失败: ${init_name}"
   fi
-  docker rm "${init_name}" >/dev/null
+
+  if [[ "${conf_is_empty}" -eq 1 ]]; then
+    echo "配置目录为空，初始化默认配置到宿主机: ${conf_dir}"
+    if ! docker cp "${init_name}:${CONTAINER_DIR}/conf/." "${conf_dir}/"; then
+      docker rm -f "${init_name}" >/dev/null 2>&1 || true
+      die "初始化配置目录失败: ${conf_dir}"
+    fi
+  else
+    echo "配置目录已有现场配置，将仅同步模块启动策略并保留其他配置: ${conf_dir}"
+  fi
+
+  if ! staging_dir="$(mktemp -d "${conf_dir}/.module-manager-sync.XXXXXX")"; then
+    docker rm -f "${init_name}" >/dev/null 2>&1 || true
+    die "创建模块启动策略临时目录失败，原配置保持不变: ${conf_dir}"
+  fi
+  staged_config="${staging_dir}/module_manager.jsonc"
+
+  if ! docker cp "${init_name}:${CONTAINER_DIR}/conf/module_manager.jsonc" "${staged_config}"; then
+    rm -f "${staged_config}" 2>/dev/null || true
+    rmdir "${staging_dir}" 2>/dev/null || true
+    docker rm -f "${init_name}" >/dev/null 2>&1 || true
+    die "从镜像同步模块启动策略失败，原配置保持不变: ${conf_dir}/module_manager.jsonc"
+  fi
+  if [[ ! -s "${staged_config}" ]]; then
+    rm -f "${staged_config}" 2>/dev/null || true
+    rmdir "${staging_dir}" 2>/dev/null || true
+    docker rm -f "${init_name}" >/dev/null 2>&1 || true
+    die "镜像中的模块启动策略为空，原配置保持不变: ${CONTAINER_DIR}/conf/module_manager.jsonc"
+  fi
+  if ! mv -f "${staged_config}" "${conf_dir}/module_manager.jsonc"; then
+    rm -f "${staged_config}" 2>/dev/null || true
+    rmdir "${staging_dir}" 2>/dev/null || true
+    docker rm -f "${init_name}" >/dev/null 2>&1 || true
+    die "替换模块启动策略失败，原配置保持不变: ${conf_dir}/module_manager.jsonc"
+  fi
+  rmdir "${staging_dir}" 2>/dev/null || true
+  if ! docker rm "${init_name}" >/dev/null 2>&1; then
+    echo "警告: 清理配置同步临时容器失败，可稍后手动删除: ${init_name}" >&2
+  fi
+  echo "已从镜像同步模块启动策略: ${conf_dir}/module_manager.jsonc"
 }
 
 ensure_log_dir() {

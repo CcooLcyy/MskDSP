@@ -156,15 +156,24 @@ docker run --network host --rm --log-driver none \
   - `auto_start_modules`：显式自动加载模块列表
 - 模板：`package/conf/module_manager.jsonc`
 - 建议：使用 `CONFIG_PUSHER` 时，自启动列表仅填写 `ConfigPusher`
+- 默认交付：使用 `UPPER` 模式并显式自动启动全部 8 个业务模块；模块内部链路、控制组和计算组仍按有效持久化配置恢复
+- 安装策略：全新安装、升级或重新安装都会同步默认 `module_manager.jsonc`，但保留现场 `config.db` 及其他业务配置
 - 更完整的模式说明、回退语义与 `UPPER` SQLite 配置痕迹清单，见 `src/core/ModuleManager/doc/README.md`
 
 示例：
 ```jsonc
 {
-  // 启动配置模式：允许 ConfigPusher 在启动后执行配置下发。
-  "boot_config_mode": "CONFIG_PUSHER",
-  // ModuleManager 启动时自动加载的模块列表。
-  "auto_start_modules": ["ConfigPusher"]
+  "boot_config_mode": "UPPER",
+  "auto_start_modules": [
+    "DataCenter",
+    "MQTTManager",
+    "IEC104",
+    "ModbusRTU",
+    "DLT645",
+    "AGC",
+    "AVC",
+    "Calc"
+  ]
 }
 ```
 
