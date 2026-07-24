@@ -442,6 +442,66 @@ TEST_F(DataCenterGrpcServiceTest, DeleteRoutesRemovesRouteAndStopsLatestUpdates)
   }
 }
 
+// 验证：GetSourceLatest 可通过 gRPC 读取未配置路由的源端最新值，并在连接不存在或删除后返回 NOT_FOUND。
+TEST_F(DataCenterGrpcServiceTest, GetSourceLatestReturnsUnroutedPointAndRejectsMissingConnection) {
+  const auto src = GetOrCreateConnection("DLT645", "meter-source");
+
+  {
+    grpc::ClientContext ctx;
+    DataCenterProto::PublishRequest req;
+    req.set_conn_id(src.conn_id());
+    req.set_tag("正向有功电能");
+    req.mutable_value()->set_double_value(123.45);
+    req.set_ts_ms(123456);
+    req.set_quality(DataCenterProto::QUALITY_GOOD);
+    DataCenterProto::Empty resp;
+    ASSERT_TRUE(stub_->Publish(&ctx, req, &resp).ok());
+  }
+
+  {
+    grpc::ClientContext ctx;
+    DataCenterProto::GetSourceLatestRequest req;
+    req.set_conn_id(src.conn_id());
+    DataCenterProto::GetSourceLatestResponse resp;
+    auto status = stub_->GetSourceLatest(&ctx, req, &resp);
+    ASSERT_TRUE(status.ok()) << status.error_message();
+    ASSERT_EQ(resp.updates_size(), 1);
+    EXPECT_EQ(resp.updates(0).conn_id(), src.conn_id());
+    EXPECT_EQ(resp.updates(0).tag(), "正向有功电能");
+    EXPECT_DOUBLE_EQ(resp.updates(0).value().double_value(), 123.45);
+    EXPECT_EQ(resp.updates(0).ts_ms(), 123456);
+    EXPECT_EQ(resp.updates(0).quality(), DataCenterProto::QUALITY_GOOD);
+    EXPECT_GT(resp.updates(0).sequence(), 0u);
+  }
+
+  {
+    grpc::ClientContext ctx;
+    DataCenterProto::GetSourceLatestRequest req;
+    req.set_conn_id(9999);
+    DataCenterProto::GetSourceLatestResponse resp;
+    auto status = stub_->GetSourceLatest(&ctx, req, &resp);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::NOT_FOUND);
+  }
+
+  {
+    grpc::ClientContext ctx;
+    DataCenterProto::DeleteConnectionRequest req;
+    req.mutable_key()->set_module_name("DLT645");
+    req.mutable_key()->set_conn_name("meter-source");
+    DataCenterProto::Empty resp;
+    ASSERT_TRUE(stub_->DeleteConnection(&ctx, req, &resp).ok());
+  }
+
+  {
+    grpc::ClientContext ctx;
+    DataCenterProto::GetSourceLatestRequest req;
+    req.set_conn_id(src.conn_id());
+    DataCenterProto::GetSourceLatestResponse resp;
+    auto status = stub_->GetSourceLatest(&ctx, req, &resp);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::NOT_FOUND);
+  }
+}
+
 // 验证：Subscribe 对非法参数返回 INVALID_ARGUMENT。
 TEST_F(DataCenterGrpcServiceTest, SubscribeRejectsInvalidArguments) {
   {

@@ -1037,6 +1037,27 @@ grpc::Status DataCenterGrpcServiceImpl::BatchPublish(grpc::ServerContext*, const
   return grpc::Status::OK;
 }
 
+grpc::Status DataCenterGrpcServiceImpl::GetSourceLatest(
+    grpc::ServerContext*,
+    const DataCenterProto::GetSourceLatestRequest* request,
+    DataCenterProto::GetSourceLatestResponse* response) {
+  if (request == nullptr || response == nullptr) {
+    LOG_ERROR("DataCenter GetSourceLatest 请求为空");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
+  }
+
+  std::lock_guard<std::mutex> lock(impl_->mu);
+  auto status = impl_->core.GetSourceLatest(*request, response);
+  if (!status.ok()) {
+    LOG_ERROR("DataCenter 获取源端最新值失败: conn_id={}, tags={}, 原因={}",
+              request->conn_id(), request->tags_size(), status.error_message());
+    return status;
+  }
+  LOG_DEBUG("DataCenter 已获取源端最新值: conn_id={}, tags={}, updates={}",
+            request->conn_id(), request->tags_size(), response->updates_size());
+  return grpc::Status::OK;
+}
+
 grpc::Status DataCenterGrpcServiceImpl::GetLatest(grpc::ServerContext*, const DataCenterProto::GetLatestRequest* request, DataCenterProto::GetLatestResponse* response) {
   if (request == nullptr || response == nullptr) {
     LOG_ERROR("DataCenter GetLatest 请求为空");

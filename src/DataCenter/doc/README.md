@@ -10,6 +10,7 @@ DataCenter 是进程内的“数据总线/转发枢纽”，用于在不同协�
 - 有向路由：按点位维度配置 `src -> dst` 的转发规则，支持一对一与一对多
 - 同步命令执行：按唯一路由把协议控制命令转交目标模块，用于 IEC104 等协议形成正/负确认
 - 最新值缓存：支持 `GetLatest` / `Subscribe(snapshot=true)` 获取目的连接内的最新值（best-effort）
+- 源端实时监视：支持 `GetSourceLatest` 获取协议模块已发布的源端最新值，不依赖业务路由
 - 完整状态持久化：将连接注册表、连接标签注册表、路由配置合并落盘到 `./conf/config.db`，重启后按同一份快照恢复
 
 ## 暂未实现功能
@@ -49,7 +50,7 @@ DataCenter 对外提供一组面向“连接/连接标签注册表/路由/转发
 - `RenameConnection(RenameConnectionRequest) -> ConnectionInfo`
   - 重命名连接主键：将 `old_key` 改为 `new_key`，并保持 `conn_id` 不变；若 `new_key` 已存在则返回 `ALREADY_EXISTS`。
 - `DeleteConnection(DeleteConnectionRequest) -> Empty`
-  - 删除连接（按 `(module_name, conn_name)`）；会同步删除该 `conn_id` 关联的连接标签注册表/路由/最新值缓存，并关闭该 `conn_id` 的订阅者连接（best-effort），随后落盘持久化。
+  - 删除连接（按 `(module_name, conn_name)`）；会同步删除该 `conn_id` 关联的连接标签注册表/路由/源端与目的端最新值缓存，并关闭该 `conn_id` 的订阅者连接（best-effort），随后落盘持久化。
 - `UpsertConnection(UpsertConnectionRequest) -> Empty`
   - 兼容接口：更新已分配 `conn_id` 的连接信息（不负责分配 `conn_id`；若 `conn_id` 未在注册表中会返回 `NOT_FOUND`）。
 - `ListConnections(Empty) -> ListConnectionsResponse`
@@ -90,6 +91,11 @@ DataCenter 对外提供一组面向“连接/连接标签注册表/路由/转发
   - 目标模块返回 `COMMAND_ACCEPTED` 时，DataCenter 更新目的命令点最新值缓存；返回 `COMMAND_REJECTED` 时不更新该命令点缓存。
 - `GetLatest(GetLatestRequest) -> GetLatestResponse`
   - 拉取目的连接内的最新值（best-effort，仅最新值，不含历史）；`tags` 为空表示拉取该连接全部已缓存点。
+- `GetSourceLatest(GetSourceLatestRequest) -> GetSourceLatestResponse`
+  - 拉取源连接已发布点的最新值（best-effort，仅最新值，不含历史）；`tags` 为空表示拉取该连接全部源端缓存点。
+  - 此接口用于上位机协议页实时监视，不要求配置业务 Route，也不读取或修改连接标签注册表、路由和持久化配置。
+  - 返回的 `SourcePointUpdate` 包含 `conn_id/tag/value/ts_ms/quality/sequence`；`sequence` 在 DataCenter 当前进程内单调递增，可用于消费方拒绝乱序响应。
+  - 连接不存在时返回 `NOT_FOUND`；连接存在但尚未收到指定点的发布时返回空 updates。
 - `Subscribe(SubscribeRequest) -> stream PointUpdate`
   - 目的连接订阅数据更新（服务端流）；`tags` 为空表示订阅该连接全部点。
   - `snapshot=true` 时，会先 best-effort 推送一次 `GetLatest` 的结果，再推送实时更新。
@@ -106,7 +112,7 @@ DataCenter 对外提供一组面向“连接/连接标签注册表/路由/转发
 ### 2) connId 分配与删除语义
 - 集成侧或协议模块在“配置阶段”先调用 `GetOrCreateConnection` 获取 `connId`，并将返回的 `connId` 固化到该连接配置中（后续运行期 `Publish/Subscribe` 使用同一 `connId`）。
 - `RenameConnection` 用于仅修改主键（`connId` 不变）：DataCenter 会同步改写稳定路由中的连接主键引用。
-- `DeleteConnection` 为破坏性操作：会清理该 `connId` 的连接标签注册表/路由/最新值缓存，并关闭该 `connId` 的订阅者连接（best-effort）。
+- `DeleteConnection` 为破坏性操作：会清理该 `connId` 的连接标签注册表/路由/源端与目的端最新值缓存，并关闭该 `connId` 的订阅者连接（best-effort）。
 
 ### 3) 标签注册表与路由校验
 - 当连接标签注册表存在时，路由会校验 `tag` 必须在注册表中；因此连接标签注册表/路由的 UI 编辑可通过 `GetConnTags` / `ListRoutes` 做回读校验与展示。
@@ -115,6 +121,8 @@ DataCenter 对外提供一组面向“连接/连接标签注册表/路由/转发
 ### 4) 实时值与订阅语义
 - 接收方启动后若希望“先拿到当前值再跟随实时更新”，建议使用 `Subscribe(snapshot=true)`；若只关心一次性拉取，则使用 `GetLatest`。
 - 订阅为 best-effort：消费过慢时服务端会丢弃过旧消息以限制队列增长；如需强一致或历史回放，需要引入独立的历史存储或 ACK/重传机制（不在 DataCenter 当前范围内）。
+- `GetLatest` 的对象是路由后的目的端点；协议采集原始值监视应使用 `GetSourceLatest`，不能通过额外业务 Route 或持久化影子 Route 取得。
+- 源端最新值仅存在于内存，DataCenter 重启或删除对应连接后会清空；这符合实时监视语义，不提供历史回放。
 
 ## 完整状态持久化（当前实现）
 DataCenter 会将连接注册表、连接标签注册表与路由配置作为同一份完整状态落盘到工作目录下的 `./conf/config.db`。这样重启恢复时三类配置来自同一代快照，避免 `connections/conn_tags/routes` 分文件落盘导致连接、tag、路由对不齐。
@@ -127,7 +135,7 @@ DataCenter 会将连接注册表、连接标签注册表与路由配置作为同
 
 ### 保存时机与语义
 - 每次 `GetOrCreateConnection` / `RenameConnection` / `DeleteConnection` / `UpsertConnection` / `UpsertConnTags` / `UpsertRoutes` / `DeleteRoutes` 成功后自动落盘完整状态。
-- `DeleteConnection` 会先在内存中同步删除该连接关联的连接标签注册表/路由/最新值缓存，再将完整状态一次落盘。
+- `DeleteConnection` 会先在内存中同步删除该连接关联的连接标签注册表/路由/源端与目的端最新值缓存，再将完整状态一次落盘。
 - `UpsertConnTags(replace=true)` 会先在内存中同步删除引用已移除 tag 的路由，再将完整状态一次落盘。
 - 落盘失败会返回 `INTERNAL`，但内存中的状态不会回滚（配置端可重试）。
 

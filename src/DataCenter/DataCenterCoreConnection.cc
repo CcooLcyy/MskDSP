@@ -268,6 +268,14 @@ grpc::Status DataCenterCore::DeleteConnection(const DataCenterProto::DeleteConne
     }
   }
 
+  for (auto latestIt = latestBySrc_.begin(); latestIt != latestBySrc_.end();) {
+    if (latestIt->first.connId == connId || latestIt->second.conn_id() == connId) {
+      latestIt = latestBySrc_.erase(latestIt);
+    } else {
+      ++latestIt;
+    }
+  }
+
   return grpc::Status::OK;
 }
 

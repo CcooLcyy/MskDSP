@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -37,16 +38,31 @@ grpc::Status DataCenterCore::Publish(const DataCenterProto::PublishRequest &requ
   }
   StableEndpointKey src{connIt->second.module_name(), connIt->second.conn_name(), request.tag()};
   auto it = routes_.find(src);
+  if (it != routes_.end()) {
+    for (const auto &dst : it->second) {
+      if (!tryResolveConnId(dst, nullptr)) {
+        return grpc::Status(grpc::StatusCode::NOT_FOUND, "目的连接未在连接注册表中找到，无法生成路由更新");
+      }
+    }
+  }
+
+  if (sourceUpdateSequence_ == std::numeric_limits<uint64_t>::max()) {
+    return grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, "源端最新值 sequence 已耗尽");
+  }
+  DataCenterProto::SourcePointUpdate sourceUpdate;
+  sourceUpdate.set_conn_id(request.conn_id());
+  sourceUpdate.set_tag(request.tag());
+  sourceUpdate.mutable_value()->CopyFrom(request.value());
+  sourceUpdate.set_ts_ms(tsMs);
+  sourceUpdate.set_quality(request.quality());
+  sourceUpdate.set_sequence(++sourceUpdateSequence_);
+  latestBySrc_[EndpointKey{request.conn_id(), request.tag()}] = std::move(sourceUpdate);
+
   if (it == routes_.end()) {
     return grpc::Status::OK;
   }
 
   outUpdates->reserve(it->second.size());
-  for (const auto &dst : it->second) {
-    if (!tryResolveConnId(dst, nullptr)) {
-      return grpc::Status(grpc::StatusCode::NOT_FOUND, "目的连接未在连接注册表中找到，无法生成路由更新");
-    }
-  }
   for (const auto &dst : it->second) {
     uint32_t dstConnId = 0;
     (void)tryResolveConnId(dst, &dstConnId);
@@ -99,7 +115,17 @@ grpc::Status DataCenterCore::BatchPublish(const DataCenterProto::BatchPublishReq
     }
     estimatedUpdates += it->second.size();
   }
+
+  const auto pointsCount = static_cast<uint64_t>(request.points_size());
+  if (pointsCount > std::numeric_limits<uint64_t>::max() - sourceUpdateSequence_) {
+    return grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, "源端最新值 sequence 已耗尽");
+  }
+
+  std::vector<DataCenterProto::SourcePointUpdate> sourceUpdates;
+  sourceUpdates.reserve(static_cast<size_t>(request.points_size()));
   outUpdates->reserve(estimatedUpdates);
+
+  uint64_t nextSourceSequence = sourceUpdateSequence_;
 
   for (const auto &point : request.points()) {
     auto connIt = connections_.find(point.conn_id());
@@ -110,6 +136,15 @@ grpc::Status DataCenterCore::BatchPublish(const DataCenterProto::BatchPublishReq
     if (tsMs <= 0) {
       tsMs = nowMs();
     }
+
+    DataCenterProto::SourcePointUpdate sourceUpdate;
+    sourceUpdate.set_conn_id(point.conn_id());
+    sourceUpdate.set_tag(point.tag());
+    sourceUpdate.mutable_value()->CopyFrom(point.value());
+    sourceUpdate.set_ts_ms(tsMs);
+    sourceUpdate.set_quality(point.quality());
+    sourceUpdate.set_sequence(++nextSourceSequence);
+    sourceUpdates.emplace_back(std::move(sourceUpdate));
 
     StableEndpointKey src{connIt->second.module_name(), connIt->second.conn_name(), point.tag()};
     auto it = routes_.find(src);
@@ -133,6 +168,11 @@ grpc::Status DataCenterCore::BatchPublish(const DataCenterProto::BatchPublishReq
       outUpdates->emplace_back(std::move(update));
     }
   }
+
+  for (const auto &sourceUpdate : sourceUpdates) {
+    latestBySrc_[EndpointKey{sourceUpdate.conn_id(), sourceUpdate.tag()}] = sourceUpdate;
+  }
+  sourceUpdateSequence_ = nextSourceSequence;
 
   for (const auto &update : *outUpdates) {
     EndpointKey dst{update.dst_conn_id(), update.dst_tag()};
@@ -297,6 +337,51 @@ grpc::Status DataCenterCore::GetLatest(const DataCenterProto::GetLatestRequest &
   }
 
   std::sort(tmp.begin(), tmp.end(), [](const auto &a, const auto &b) { return a.dst_tag() < b.dst_tag(); });
+
+  out->Clear();
+  for (const auto &update : tmp) {
+    *out->add_updates() = update;
+  }
+  return grpc::Status::OK;
+}
+
+grpc::Status DataCenterCore::GetSourceLatest(
+    const DataCenterProto::GetSourceLatestRequest &request,
+    DataCenterProto::GetSourceLatestResponse *out) const {
+  if (out == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
+  }
+  if (request.conn_id() == 0) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id 不能为空");
+  }
+  for (const auto &tag : request.tags()) {
+    if (tag.empty()) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tags 包含空字符串");
+    }
+  }
+  if (!connections_.contains(request.conn_id())) {
+    return grpc::Status(grpc::StatusCode::NOT_FOUND, "conn_id 未在连接注册表中找到");
+  }
+
+  std::unordered_set<std::string> filter;
+  if (request.tags_size() > 0) {
+    filter.reserve(static_cast<size_t>(request.tags_size()));
+    for (const auto &tag : request.tags()) {
+      filter.emplace(tag);
+    }
+  }
+
+  std::vector<DataCenterProto::SourcePointUpdate> tmp;
+  for (const auto &[src, update] : latestBySrc_) {
+    if (src.connId != request.conn_id()) {
+      continue;
+    }
+    if (!filter.empty() && !filter.contains(src.tag)) {
+      continue;
+    }
+    tmp.emplace_back(update);
+  }
+  std::sort(tmp.begin(), tmp.end(), [](const auto &a, const auto &b) { return a.tag() < b.tag(); });
 
   out->Clear();
   for (const auto &update : tmp) {
