@@ -24,6 +24,7 @@
 #include "MQTTManagerLibInfo.h"
 #include "MQTTTopicMatcher.hpp"
 #include "ModuleManager.pb.h"
+#include "ThreadUtil.hpp"
 
 namespace {
 constexpr size_t kPayloadPreviewLen = 256;
@@ -266,7 +267,7 @@ struct MQTTManager::ConnectionContext {
 
   std::unique_ptr<IMQTTClient> client;
   std::atomic<bool> running{false};
-  std::thread worker;
+  std::jthread worker;
 
   std::mutex subMutex;
   std::unordered_map<std::string, uint32_t> subscriptions;
@@ -376,7 +377,9 @@ struct MQTTManager::ConnectionContext {
       return false;
     }
     running.store(true);
-    worker = std::thread([this]() { consumeLoop(); });
+    worker = ModuleManager::StartModuleThread(
+        MQTTManagerLibInfo.LIB_NAME,
+        [this]() { consumeLoop(); });
     return true;
   }
 

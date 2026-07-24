@@ -144,6 +144,7 @@ docker run --network host --rm --log-driver none \
 说明：
 - 建议 Docker 场景使用 `--log-driver none`，直接关闭 Docker 对容器标准输出/标准错误的日志收集，避免生成 `/var/lib/docker/containers/<id>/<id>-json.log`。
 - 使用该参数后，`docker logs` 不再提供输出；请先将宿主机当前目录的 `./log` 挂载到容器内 `/opt/mskdsp/log`，正式运行日志可直接查看宿主机 `./log` 目录。
+- 下位机进程启动时会维护已有日志目录：压缩遗留的未压缩归档、清理超过 60 天的归档，并按目录限制归档总量为 500 MiB；当前活动日志不会被删除。
 
 ### 启动自加载配置
 可选配置文件：`./conf/module_manager.jsonc`（JSONC，支持注释），用于控制 ModuleManager 启动时的模块自加载行为。

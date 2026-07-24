@@ -103,7 +103,7 @@ extern "C" BOOST_SYMBOL_EXPORT bool GetModuleManifestPb(const uint8_t **data, si
 
 - `moduleManager_test`：覆盖模块扫描（`./module`）、manifest/版本解析、依赖启动与 load/unload 生命周期、运行时信息查询、启动配置落盘、gRPC 管理服务的委派逻辑。
 - `moduleInterface_test`：覆盖 `ModuleInterface::initLibInfo/grpcServerBuilder/shutdownServers` 等基础设施逻辑，并通过一次真实 RPC 触发 interceptor 路径。
-- `logger_test`：覆盖模块日志分目录、追加写入、历史日志压缩与 60 天保留策略。
+- `logger_test`：覆盖模块日志分目录、追加写入、历史日志压缩、未启动模块目录维护、60 天保留与 500 MiB 归档上限。
 
 运行方式：
 ```bash
@@ -127,6 +127,10 @@ ctest --test-dir build -R logger_test --output-on-failure
 
 ## 日志（轮转与保留）
 - 日志文件：`./log/<模块名>/<模块名>.log`（追加写入，重启不会清空）
-- 每日 00:00 轮转；轮转后的文件名形如 `./log/<模块名>/<模块名>_YYYY-MM-DD_HH-MM-SS_N.log.gz`
+- 汇总日志：`./log/RTU.log`（所有模块日志的汇总副本）
+- 每日 00:00 或单文件达到 10 MiB 时轮转；轮转后的文件名形如 `./log/<模块名>/<模块名>_YYYY-MM-DD_HH-MM-SS_N.log.gz`
 - 历史日志自动压缩为 `.gz`，默认保留最近 60 天
-- 需要调整策略时修改 `src/core/ModuleManager/Logger.cc`（`kRotationSizeBytes` / `kRetentionDays`）
+- 进程启动时会遍历已有模块目录，压缩遗留的未压缩归档并清理超过 60 天的归档日志；当前活动日志不会被删除
+- 根目录汇总归档和每个模块目录的归档总量分别限制为 500 MiB，超限时优先删除最早的归档文件
+- 500 MiB 限制针对归档文件，不包含当前正在写入的活动日志；容量限制可能使部分未超过 60 天的旧归档提前删除
+- 需要调整策略时修改 `src/core/ModuleManager/Logger.cc`（`kRotationSizeBytes` / `kRetentionDays` / `kArchiveLimitBytes`）

@@ -5,8 +5,10 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <fstream>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -450,6 +452,13 @@ TEST(MqttManagerReconnectTest, RequestAndWaitRestoresSubscriptionAfterPublishRec
   ASSERT_EQ(firstResp.payload(), R"({"id":"token-1"})");
   ASSERT_TRUE(fakeState->WaitForConnectCount(1, std::chrono::milliseconds(200)));
   ASSERT_TRUE(fakeState->WaitForSubscribeCount(1, std::chrono::milliseconds(200)));
+
+  std::ifstream logFile("log/MQTTManager/MQTTManager.log", std::ios::binary);
+  std::ostringstream logContent;
+  logContent << logFile.rdbuf();
+  const auto content = logContent.str();
+  EXPECT_NE(content.find("[MQTTManager]"), std::string::npos);
+  EXPECT_NE(content.find("MQTTManager 响应匹配成功"), std::string::npos);
 
   fakeState->ForceDisconnect();
 

@@ -15,6 +15,7 @@
 #include <boost/log/utility/setup/console.hpp>
 #include <boost/log/utility/formatting_ostream.hpp>
 #include <boost/make_shared.hpp>
+#include <algorithm>
 #include <chrono>
 #include <cctype>
 #include <ctime>
@@ -23,15 +24,17 @@
 #include <iostream>
 #include <mutex>
 #include <optional>
-#include <unordered_set>
 #include <string>
 #include <string_view>
+#include <unordered_set>
+#include <vector>
 #include <unistd.h>
 #include <utility>
 
 namespace ModuleManager {
 namespace {
 constexpr std::uintmax_t kRotationSizeBytes = 10 * 1024 * 1024;
+constexpr std::uintmax_t kArchiveLimitBytes = 500ull * 1024ull * 1024ull;
 constexpr int kRetentionDays = 60;
 constexpr const char *kDefaultModuleName = "moduleManager";
 constexpr const char *kAggregateLogFileName = "RTU.log";
@@ -244,6 +247,17 @@ bool CompressLogFile(const std::filesystem::path &path) {
   return true;
 }
 
+bool IsRotatedLogFile(const std::filesystem::path &path, std::string_view prefix) {
+  const auto file_name = path.filename().string();
+  if (!file_name.starts_with(prefix) || !ParseLogDate(file_name, prefix)) {
+    return false;
+  }
+  if (path.extension().string() == ".gz") {
+    return path.stem().extension().string() == logExtension;
+  }
+  return path.extension().string() == logExtension;
+}
+
 void CleanupOldLogs(const std::filesystem::path &log_dir, std::string_view prefix) {
   std::error_code ec;
   auto cutoff = CurrentLocalDay() - std::chrono::days(kRetentionDays);
@@ -254,6 +268,9 @@ void CleanupOldLogs(const std::filesystem::path &log_dir, std::string_view prefi
     auto file_name = entry.path().filename().string();
     auto date = ParseLogDate(file_name, prefix);
     if (!date) {
+      continue;
+    }
+    if (!IsRotatedLogFile(entry.path(), prefix)) {
       continue;
     }
     if (*date < cutoff) {
@@ -273,11 +290,72 @@ void CompressLegacyLogs(const std::filesystem::path &log_dir, std::string_view p
     if (path == active_path || path.extension() == ".gz") {
       continue;
     }
-    auto file_name = path.filename().string();
-    if (!file_name.starts_with(prefix)) {
+    if (!IsRotatedLogFile(path, prefix)) {
       continue;
     }
     CompressLogFile(path);
+  }
+}
+
+void EnforceArchiveLimit(const std::filesystem::path &log_dir, std::string_view prefix) {
+  struct ArchiveFile {
+    std::filesystem::path path;
+    std::uintmax_t size;
+  };
+
+  std::error_code ec;
+  std::vector<ArchiveFile> archives;
+  std::uintmax_t total_size = 0;
+  for (const auto &entry : std::filesystem::directory_iterator(log_dir, ec)) {
+    if (!entry.is_regular_file() || !IsRotatedLogFile(entry.path(), prefix)) {
+      continue;
+    }
+    auto size = entry.file_size(ec);
+    if (ec) {
+      ec.clear();
+      continue;
+    }
+    archives.push_back({entry.path(), size});
+    total_size += size;
+  }
+
+  if (total_size <= kArchiveLimitBytes) {
+    return;
+  }
+
+  std::sort(archives.begin(), archives.end(), [](const ArchiveFile &left, const ArchiveFile &right) {
+    return left.path.filename().string() < right.path.filename().string();
+  });
+  for (const auto &archive : archives) {
+    if (total_size <= kArchiveLimitBytes) {
+      break;
+    }
+    std::error_code remove_error;
+    if (std::filesystem::remove(archive.path, remove_error)) {
+      total_size -= archive.size;
+    }
+  }
+}
+
+void MaintainLogDirectory(const std::filesystem::path &log_dir, std::string_view prefix,
+                          const std::filesystem::path &active_path) {
+  CompressLegacyLogs(log_dir, prefix, active_path);
+  CleanupOldLogs(log_dir, prefix);
+  EnforceArchiveLimit(log_dir, prefix);
+}
+
+void MaintainExistingModuleLogsLocked() {
+  std::error_code ec;
+  for (const auto &entry : std::filesystem::directory_iterator(logBaseDir, ec)) {
+    if (!entry.is_directory()) {
+      continue;
+    }
+    const auto module_name = entry.path().filename().string();
+    if (module_name.empty() || moduleSinks.contains(module_name)) {
+      continue;
+    }
+    auto log_info = BuildLogFileInfo(entry.path(), module_name + logExtension);
+    MaintainLogDirectory(entry.path(), log_info.prefix, log_info.active_file);
   }
 }
 
@@ -296,6 +374,7 @@ public:
       CompressLogFile(path);
     }
     CleanupOldLogs(log_dir_, prefix_);
+    EnforceArchiveLimit(log_dir_, prefix_);
   }
 
   bool is_in_storage(log_fs::path const &src_path) const override {
@@ -344,8 +423,7 @@ void CreateModuleSinkLocked(const std::string &module_name) {
   }
   std::string file_name = module_name + logExtension;
   auto log_info = BuildLogFileInfo(module_dir, file_name);
-  CompressLegacyLogs(module_dir, log_info.prefix, log_info.active_file);
-  CleanupOldLogs(module_dir, log_info.prefix);
+  MaintainLogDirectory(module_dir, log_info.prefix, log_info.active_file);
 
   using backend_t = logging::sinks::text_file_backend;
   using sink_t = logging::sinks::synchronous_sink<backend_t>;
@@ -371,8 +449,7 @@ void CreateAggregateSinkLocked() {
     std::filesystem::create_directories(logBaseDir);
   }
   auto log_info = BuildLogFileInfo(logBaseDir, kAggregateLogFileName);
-  CompressLegacyLogs(logBaseDir, log_info.prefix, log_info.active_file);
-  CleanupOldLogs(logBaseDir, log_info.prefix);
+  MaintainLogDirectory(logBaseDir, log_info.prefix, log_info.active_file);
 
   using backend_t = logging::sinks::text_file_backend;
   using sink_t = logging::sinks::synchronous_sink<backend_t>;
@@ -441,6 +518,7 @@ void Logger::init(const std::string &logDir, const std::string &fileName) {
         CreateModuleSinkLocked(kDefaultModuleName);
         moduleSinks.insert(std::string(kDefaultModuleName));
       }
+      MaintainExistingModuleLogsLocked();
     }
     BOOST_LOG_STREAM_SEV(loggerInstance(), boost::log::trivial::info)
         << "统一日志输出已启用"
@@ -470,9 +548,11 @@ void Logger::init(const std::string &logDir, const std::string &fileName) {
     BOOST_LOG_STREAM_SEV(loggerInstance(), boost::log::trivial::info)
         << "日志格式: 已禁用函数名输出";
     BOOST_LOG_STREAM_SEV(loggerInstance(), boost::log::trivial::info)
-        << "Log collector enabled: gzip compression + retention cleanup";
+        << "日志归档维护已启用: 历史日志压缩、按目录清理和容量限制";
     BOOST_LOG_STREAM_SEV(loggerInstance(), boost::log::trivial::info)
-        << "日志轮转配置: 按日切分, 保留" << kRetentionDays << "天, 历史日志自动压缩";
+        << "日志轮转配置: 按日或单文件达到" << (kRotationSizeBytes / (1024 * 1024))
+        << " MiB 切分, 保留" << kRetentionDays << "天, 每个日志目录归档上限"
+        << (kArchiveLimitBytes / (1024 * 1024)) << " MiB";
   });
 }
 
