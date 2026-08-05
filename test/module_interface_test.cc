@@ -9,6 +9,7 @@
 #include <grpcpp/grpcpp.h>
 
 #include "ModbusRTU.grpc.pb.h"
+#include "IEC61850.grpc.pb.h"
 #include "Logger.h"
 #include "ModuleInterface.h"
 
@@ -20,6 +21,10 @@ public:
   void start(std::stop_token) override {}
   void InitForTest(const LibInfo &libInfo) { initLibInfo(libInfo); }
   void BuildServers(const std::shared_ptr<grpc::Service> &service) { grpcServerBuilder(service); }
+  void BuildServers(const std::shared_ptr<grpc::Service> &service,
+                    int maxReceiveMessageBytes) {
+    grpcServerBuilder(service, maxReceiveMessageBytes);
+  }
   void Shutdown() { shutdownServers(); }
   void ReservePortForTest(std::string address) { reservePort(std::move(address)); }
   void ReleasePortForTest(std::string address) { releasePort(std::move(address)); }
@@ -31,6 +36,24 @@ public:
     LOG_INFO("ModbusRTU ListLinks 测试服务已响应");
     return grpc::Status::OK;
   }
+};
+
+class Iec61850LargeImportService final
+    : public IEC61850Proto::IEC61850Service::Service {
+public:
+  grpc::Status ImportScl(
+      grpc::ServerContext*, const IEC61850Proto::ImportSclRequest* request,
+      IEC61850Proto::ImportSclResponse* response) override {
+    if (request == nullptr || response == nullptr) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "IEC61850导入请求或响应为空");
+    }
+    receivedBytes = request->content().size();
+    response->mutable_summary()->set_model_name(request->model_name());
+    return grpc::Status::OK;
+  }
+
+  std::size_t receivedBytes = 0;
 };
 
 fs::path SocketDir() { return fs::path("socket"); }
@@ -110,6 +133,47 @@ TEST(ModuleInterfaceTest, GrpcServerBuilderServesListLinksAndShutdownServersClea
   EXPECT_TRUE(status.ok());
 
   module.Shutdown();
+  module.Shutdown();
+}
+
+// 验证：模块可按需提高gRPC接收上限，使超过默认4MiB的SCL内容能够通过真实RPC到达服务端。
+TEST(ModuleInterfaceTest, GrpcServerBuilderSupportsConfiguredReceiveLimit) {
+  ResetTestEnv();
+  constexpr int kMessageLimitBytes = 8 * 1024 * 1024;
+  constexpr std::size_t kPayloadBytes = 5 * 1024 * 1024;
+
+  TestModule module;
+  const LibInfo libInfo{
+      .VERSION_MAJOR = "0",
+      .VERSION_MINOR = "0",
+      .VERSION_PATCH = "1",
+      .VERSION = "0.0.1",
+      .LIB_NAME = "ModuleInterfaceTestLargeGrpc",
+  };
+  module.InitForTest(libInfo);
+  auto service = std::make_shared<Iec61850LargeImportService>();
+  module.BuildServers(service, kMessageLimitBytes);
+
+  const auto address = LoopbackAddress(module.metaData().outerGRPCServer);
+  grpc::ChannelArguments arguments;
+  arguments.SetMaxSendMessageSize(kMessageLimitBytes);
+  auto channel = grpc::CreateCustomChannel(
+      address, grpc::InsecureChannelCredentials(), arguments);
+  ASSERT_TRUE(channel->WaitForConnected(
+      std::chrono::system_clock::now() + std::chrono::seconds(2)));
+  auto stub = IEC61850Proto::IEC61850Service::NewStub(channel);
+  IEC61850Proto::ImportSclRequest request;
+  request.set_model_name("large-model");
+  request.set_source_name("large.scd");
+  request.set_content(std::string(kPayloadBytes, 'x'));
+  IEC61850Proto::ImportSclResponse response;
+  grpc::ClientContext context;
+
+  const auto status = stub->ImportScl(&context, request, &response);
+
+  ASSERT_TRUE(status.ok()) << status.error_message();
+  EXPECT_EQ(service->receivedBytes, kPayloadBytes);
+  EXPECT_EQ(response.summary().model_name(), "large-model");
   module.Shutdown();
 }
 

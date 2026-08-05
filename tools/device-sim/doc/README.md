@@ -1,4 +1,70 @@
-# DLT645PCD 串口模拟器
+# 设备模拟器
+
+本目录目前包含 DLT645PCD 串口模拟器和 IEC 61850 MMS 基础模拟 IED。两者都是独立进程，
+仅用于联调和反向验证，不进入 MskDSP 主模块发布链路。
+
+## IEC 61850 MMS 基础模拟 IED
+
+### 工具定位
+
+`iec61850_mms_sim` 作为 TCP 服务端模拟下方 IED，使用项目内 `IEC61850` 库的自研
+ISO-on-TCP、COTP、Session、Presentation、ACSE 和 MMS 编解码。它用于验证
+MskDSP MMS 客户端跨进程的建链、目录请求、基础 Read 和基础 Write。
+
+`iec61850_mms_worker_smoke` 是生产 `MmsSessionWorker` 的最小命令行联调客户端，
+用于等待模拟 IED 的 `READY` 状态。它支持空模型以及最小 URCB/数据集模型，
+可以验证 RCB 三阶段 Write、首次 GI，以及 GI 报告中的 RCB/DataSet、ConfRev、序号、
+点值、品质和 TimeOfEntry。
+
+当前工具明确不模拟生产 IED 的完整能力。它只提供基础目录、有限的
+`BOOLEAN/INT32/INT32U/FLOAT32/FLOAT64/QUALITY/TIMESTAMP` 类型、RCB/GI 和基础
+InformationReport；不提供厂商控制模型、普通周期报告、报告分段、断线接管、
+CommandTermination 或 GOOSE/SV 数据面。这些能力仍需通过协议层测试夹具和真实 IED 联调验证。
+
+### 构建
+
+```bash
+cmake -S . -B build -DMSKDSP_BUILD_TOOLS=ON -DCMAKE_BUILD_TYPE=Debug
+cmake --build build --target iec61850_mms_sim
+cmake --build build --target iec61850_mms_worker_smoke
+```
+
+### 启动
+
+```bash
+./build/tools/iec61850_mms_sim \
+  --listen-ip 127.0.0.1 \
+  --port 2102 \
+  --ied IED1 \
+  --access-point AP1 \
+  --domain IED1LD0 \
+  --variable 'LLN0$Beh$stVal' \
+  --dataset 'LLN0$ds1' \
+  --rcb \
+  --once
+```
+
+`--port 0` 仍可让系统分配临时端口，但客户端必须使用日志中打印的实际端口。`--once`
+在处理一个客户端会话后退出，适合脚本联调。可重复使用 `--variable` 和 `--dataset`
+添加目录项；使用 `--rcb --type INT32` 等参数可以切换最小模型的数据类型。
+
+启动模拟器后，在另一个终端运行生产工作器 smoke 客户端：
+
+```bash
+./build/tools/iec61850_mms_worker_smoke --ip 127.0.0.1 --port 2102
+```
+
+验证最小 URCB、三阶段 Write 和 GI 后的 `READY`：
+
+```bash
+./build/tools/iec61850_mms_worker_smoke \
+  --ip 127.0.0.1 --port 2102 --rcb --timeout-ms 15000
+```
+
+日志使用中文，包含连接阶段、收发方向和完整十六进制报文。MMS 模拟器不需要 raw socket
+权限，只使用 TCP 监听端口。
+
+## DLT645PCD 串口模拟器
 
 ## 工具定位
 

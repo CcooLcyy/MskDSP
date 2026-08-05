@@ -131,6 +131,11 @@ public:
     failDeleteConnNames_.emplace(std::move(connName));
   }
 
+  void AllowDeleteForConnName(const std::string& connName) {
+    std::lock_guard<std::mutex> lock(mu_);
+    failDeleteConnNames_.erase(connName);
+  }
+
   void FailPublishForTag(std::string tag) {
     std::lock_guard<std::mutex> lock(mu_);
     failPublishTags_.emplace(std::move(tag));
@@ -162,6 +167,20 @@ public:
       return 0;
     }
     return tagIt->second;
+  }
+
+  bool WaitForPublishCount(uint32_t connId, const std::string& tag,
+                           size_t expected,
+                           std::chrono::milliseconds timeout) const {
+    std::unique_lock<std::mutex> lock(mu_);
+    return publishCv_.wait_for(lock, timeout, [&]() {
+      const auto connIt = publishCountByConnId_.find(connId);
+      if (connIt == publishCountByConnId_.end()) {
+        return false;
+      }
+      const auto tagIt = connIt->second.find(tag);
+      return tagIt != connIt->second.end() && tagIt->second >= expected;
+    });
   }
 
   size_t GetCommandCount(uint32_t connId, const std::string& tag) const {
@@ -387,6 +406,18 @@ public:
       }
       sub->cv.notify_one();
     }
+    publishCv_.notify_all();
+    return grpc::Status::OK;
+  }
+
+  grpc::Status BatchPublish(
+      const DataCenterProto::BatchPublishRequest& request) {
+    for (const auto& point : request.points()) {
+      const auto status = Publish(point);
+      if (!status.ok()) {
+        return status;
+      }
+    }
     return grpc::Status::OK;
   }
 
@@ -515,6 +546,7 @@ public:
 
 private:
   mutable std::mutex mu_;
+  mutable std::condition_variable publishCv_;
   uint32_t nextConnId_ = 1;
   std::unordered_map<ConnKey, DataCenterProto::ConnectionInfo, ConnKeyHash> conns_;
   std::unordered_set<std::string> failDeleteConnNames_;
@@ -574,6 +606,14 @@ inline std::shared_ptr<DataCenterProto::MockDataCenterServiceStub> MakeStub(Fake
       .WillByDefault(::testing::Invoke([state](grpc::ClientContext*, const DataCenterProto::PublishRequest& req, DataCenterProto::Empty*) {
         return state->Publish(req);
       }));
+
+  ON_CALL(*stub, BatchPublish(::testing::_, ::testing::_, ::testing::_))
+      .WillByDefault(::testing::Invoke(
+          [state](grpc::ClientContext*,
+                  const DataCenterProto::BatchPublishRequest& req,
+                  DataCenterProto::Empty*) {
+            return state->BatchPublish(req);
+          }));
 
   ON_CALL(*stub, ExecuteCommand(::testing::_, ::testing::_, ::testing::_))
       .WillByDefault(::testing::Invoke([state](grpc::ClientContext*,

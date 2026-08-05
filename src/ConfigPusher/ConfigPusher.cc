@@ -25,6 +25,7 @@
 #include "ConfigPusherApplyCalc.h"
 #include "ConfigPusherApplyDlt645.h"
 #include "ConfigPusherApplyIec104.h"
+#include "ConfigPusherApplyIec61850.h"
 #include "ConfigPusherApplyModbusRtu.h"
 #include "ConfigPusherConfigLoader.h"
 #include "ConfigPusherDataCenter.h"
@@ -34,9 +35,11 @@
 #include "DLT645.grpc.pb.h"
 #include "DataCenter.grpc.pb.h"
 #include "IEC104.grpc.pb.h"
+#include "IEC61850.grpc.pb.h"
 #include "Logger.h"
 #include "ModbusRTU.grpc.pb.h"
 #include "ModuleManager.grpc.pb.h"
+#include "mskdsp/IEC61850Limits.hpp"
 
 namespace {
 const std::string &GetSerializedManifest() {
@@ -60,6 +63,7 @@ constexpr const char *kBootConfigModeEnvName = "MSKDSP_BOOT_CONFIG_MODE";
 constexpr const char *kBootConfigModeConfigPusher = "CONFIG_PUSHER";
 constexpr const char *kBootConfigModeUpper = "UPPER";
 constexpr const char *kIec104ConfigPath = "./conf/configPusher/iec104.jsonc";
+constexpr const char *kIec61850ConfigPath = "./conf/configPusher/iec61850.jsonc";
 constexpr const char *kModbusRtuConfigPath = "./conf/configPusher/modbus_rtu.jsonc";
 constexpr const char *kDlt645ConfigPath = "./conf/configPusher/DLT645.jsonc";
 constexpr const char *kDataCenterConfigPath = "./conf/configPusher/DataCenter.jsonc";
@@ -69,6 +73,7 @@ constexpr const char *kCalcConfigPath = "./conf/configPusher/calc.jsonc";
 constexpr const char *kModuleManagerAddress = "127.0.0.1:17000";
 constexpr const char *kDataCenterModuleName = "DataCenter";
 constexpr const char *kIec104ModuleName = "IEC104";
+constexpr const char *kIec61850ModuleName = "IEC61850";
 constexpr const char *kModbusRtuModuleName = "ModbusRTU";
 constexpr const char *kDlt645ModuleName = "DLT645";
 constexpr const char *kMqttManagerModuleName = "MQTTManager";
@@ -186,6 +191,8 @@ void ConfigPusher::applyConfig() {
   }
 
   auto iec104Config = LoadConfigFile(ResolveConfigPath(configDir, kIec104ConfigPath));
+  const auto iec61850ConfigPath = ResolveConfigPath(configDir, kIec61850ConfigPath);
+  auto iec61850Config = LoadConfigFile(iec61850ConfigPath);
   auto modbusConfig = LoadConfigFile(ResolveConfigPath(configDir, kModbusRtuConfigPath));
   auto dlt645Config = LoadConfigFile(ResolveConfigPath(configDir, kDlt645ConfigPath));
   auto dataCenterConfig = LoadDataCenterConfigFile(ResolveConfigPath(configDir, kDataCenterConfigPath));
@@ -194,6 +201,7 @@ void ConfigPusher::applyConfig() {
   auto calcConfig = LoadConfigFile(ResolveConfigPath(configDir, kCalcConfigPath));
 
   const bool hasIec104 = iec104Config && iec104Config->has_iec104();
+  const bool hasIec61850 = iec61850Config && iec61850Config->has_iec61850();
   const bool hasModbus = modbusConfig && modbusConfig->has_modbus_rtu();
   const bool hasModbusMqtt = modbusConfig && modbusNeedsMqtt(*modbusConfig);
   const bool hasDlt645 = dlt645Config && dlt645Config->has_dlt645();
@@ -201,9 +209,12 @@ void ConfigPusher::applyConfig() {
   const bool hasAvc = avcConfig && avcConfig->has_avc();
   const bool hasCalc = calcConfig && calcConfig->has_calc();
   const bool hasDataCenter = dataCenterConfig.has_value();
-  const bool needsDataCenter = hasIec104 || hasModbus || hasDlt645 || hasAgc || hasAvc || hasCalc || hasDataCenter;
-  if (!hasIec104 && !hasModbus && !hasDlt645 && !hasAgc && !hasAvc && !hasCalc && !hasDataCenter) {
-    LOG_INFO("配置中未包含 IEC104/ModbusRTU/DLT645/AGC/AVC/Calc/DataCenter 配置");
+  const bool requiresDataCenter = hasIec104 || hasModbus || hasDlt645 ||
+                                  hasAgc || hasAvc || hasCalc || hasDataCenter;
+  const bool wantsDataCenter = requiresDataCenter || hasIec61850;
+  if (!hasIec104 && !hasIec61850 && !hasModbus && !hasDlt645 && !hasAgc &&
+      !hasAvc && !hasCalc && !hasDataCenter) {
+    LOG_INFO("配置中未包含 IEC104/IEC61850/ModbusRTU/DLT645/AGC/AVC/Calc/DataCenter 配置");
     return;
   }
   LOG_INFO("ConfigPusher 配置解析完成，开始准备下发配置");
@@ -223,9 +234,104 @@ void ConfigPusher::applyConfig() {
     return;
   }
 
+  ModuleManagerProto::ModuleRunningInfos running;
+  if (!fetchRunningModuleInfos(moduleStub.get(), &running)) {
+    LOG_ERROR("获取运行中模块信息失败，终止下发");
+    return;
+  }
+
   auto dataCenterInfo = findModuleInfo(moduleInfos, kDataCenterModuleName);
-  if (needsDataCenter && !dataCenterInfo) {
-    LOG_ERROR("未找到模块: {}", kDataCenterModuleName);
+  auto runningDataCenter = findRunningInfo(running, kDataCenterModuleName);
+  std::shared_ptr<grpc::Channel> dataCenterChannel;
+  if (wantsDataCenter) {
+    if (!dataCenterInfo) {
+      LOG_WARNING("未找到DataCenter模块，IEC61850将以异步输出降级模式继续");
+    } else if (!runningDataCenter) {
+      LOG_INFO("DataCenter模块未运行，开始启动模块");
+      if (!startModule(moduleStub.get(), *dataCenterInfo)) {
+        LOG_ERROR("启动DataCenter模块失败，IEC61850将以异步输出降级模式继续");
+      } else {
+        runningDataCenter = waitForModule(
+            moduleStub.get(), kDataCenterModuleName, kModuleStartTimeout);
+        if (!runningDataCenter) {
+          LOG_ERROR("等待DataCenter模块启动超时，IEC61850将以异步输出降级模式继续");
+        } else {
+          LOG_INFO("DataCenter模块已启动");
+        }
+      }
+    } else {
+      LOG_INFO("DataCenter模块已在运行");
+    }
+
+    if (runningDataCenter) {
+      dataCenterChannel = grpc::CreateChannel(
+          runningDataCenter->inner_grpc_server(),
+          grpc::InsecureChannelCredentials());
+      if (!dataCenterChannel->WaitForConnected(
+              std::chrono::system_clock::now() + kModuleStartTimeout)) {
+        LOG_ERROR("DataCenter模块已登记运行但内部gRPC服务未就绪，依赖DataCenter的配置停止下发，IEC61850继续按降级模式运行");
+        runningDataCenter.reset();
+        dataCenterChannel.reset();
+      } else {
+        LOG_INFO("DataCenter内部gRPC服务已就绪: 地址={}",
+                 runningDataCenter->inner_grpc_server());
+      }
+    }
+  }
+
+  std::optional<ModuleManagerProto::ModuleInfo> iec61850Info;
+  std::optional<ModuleManagerProto::ModuleRunningInfo> runningIec61850;
+  if (hasIec61850) {
+    iec61850Info = findModuleInfo(moduleInfos, kIec61850ModuleName);
+    if (!iec61850Info) {
+      LOG_ERROR("未找到模块: {}，跳过IEC61850目标态下发",
+                kIec61850ModuleName);
+    } else {
+      runningIec61850 = findRunningInfo(running, kIec61850ModuleName);
+      if (!runningIec61850) {
+        LOG_INFO("IEC61850模块未运行，开始启动模块");
+        if (!startModule(moduleStub.get(), *iec61850Info)) {
+          LOG_ERROR("启动模块 {} 失败，跳过IEC61850目标态下发",
+                    kIec61850ModuleName);
+        } else {
+          runningIec61850 = waitForModule(
+              moduleStub.get(), kIec61850ModuleName, kModuleStartTimeout);
+          if (!runningIec61850) {
+            LOG_ERROR("等待IEC61850模块启动超时，跳过目标态下发");
+          } else {
+            LOG_INFO("IEC61850模块已启动");
+          }
+        }
+      } else {
+        LOG_INFO("IEC61850模块已在运行");
+      }
+    }
+  }
+
+  if (hasIec61850 && runningIec61850) {
+    grpc::ChannelArguments channelArguments;
+    channelArguments.SetMaxSendMessageSize(mskdsp::kIec61850MaxGrpcMessageBytes);
+    channelArguments.SetMaxReceiveMessageSize(mskdsp::kIec61850MaxGrpcMessageBytes);
+    auto iec61850Channel = grpc::CreateCustomChannel(
+        runningIec61850->inner_grpc_server(),
+        grpc::InsecureChannelCredentials(), channelArguments);
+    if (!iec61850Channel->WaitForConnected(
+            std::chrono::system_clock::now() + kModuleStartTimeout)) {
+      LOG_ERROR("IEC61850模块内部gRPC服务未就绪，跳过目标态下发");
+    } else {
+      auto iec61850Stub =
+          IEC61850Proto::IEC61850Service::NewStub(iec61850Channel);
+      if (!applyIec61850Config(iec61850Config->iec61850(),
+                               iec61850ConfigPath, iec61850Stub.get())) {
+        LOG_ERROR("IEC61850配置下发存在错误");
+      } else {
+        LOG_INFO("IEC61850配置下发完成");
+      }
+    }
+  }
+
+  if (requiresDataCenter && (!dataCenterInfo || !runningDataCenter)) {
+    LOG_ERROR("依赖DataCenter的配置无法继续下发");
     return;
   }
   std::optional<ModuleManagerProto::ModuleInfo> iec104Info;
@@ -283,29 +389,6 @@ void ConfigPusher::applyConfig() {
       LOG_ERROR("未找到模块: {}", kCalcModuleName);
       return;
     }
-  }
-
-  ModuleManagerProto::ModuleRunningInfos running;
-  if (!fetchRunningModuleInfos(moduleStub.get(), &running)) {
-    LOG_ERROR("获取运行中模块信息失败，终止下发");
-    return;
-  }
-
-  auto runningDataCenter = findRunningInfo(running, kDataCenterModuleName);
-  if (needsDataCenter && !runningDataCenter) {
-    LOG_INFO("DataCenter 未运行，开始启动");
-    if (!startModule(moduleStub.get(), *dataCenterInfo)) {
-      LOG_ERROR("启动模块 {} 失败", kDataCenterModuleName);
-      return;
-    }
-    runningDataCenter = waitForModule(moduleStub.get(), kDataCenterModuleName, kModuleStartTimeout);
-    if (!runningDataCenter) {
-      LOG_ERROR("等待 DataCenter 启动超时");
-      return;
-    }
-    LOG_INFO("DataCenter 已启动");
-  } else if (needsDataCenter) {
-    LOG_INFO("DataCenter 已在运行");
   }
 
   std::optional<ModuleManagerProto::ModuleRunningInfo> runningIec104;
@@ -508,8 +591,7 @@ void ConfigPusher::applyConfig() {
     }
   }
 
-  if (hasDataCenter && runningDataCenter) {
-    auto dataCenterChannel = grpc::CreateChannel(runningDataCenter->inner_grpc_server(), grpc::InsecureChannelCredentials());
+  if (hasDataCenter && runningDataCenter && dataCenterChannel) {
     auto dataCenterStub = DataCenterProto::DataCenterService::NewStub(dataCenterChannel);
     if (!ApplyDataCenterConfig(*dataCenterConfig, dataCenterStub.get())) {
       LOG_ERROR("DataCenter 配置下发存在错误");

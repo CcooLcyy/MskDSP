@@ -1,16 +1,17 @@
 # ConfigPusher 模块
 
 ## 简介
-ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/ModbusRTU/DLT645/AGC/AVC/Calc，并按配置调用对应 gRPC 接口完成 IEC104/ModbusRTU/DLT645 连接与点表下发、AGC/AVC 控制组下发、Calc 计算分组下发，以及 DataCenter 连接标签注册表/路由下发。链路、控制组或计算分组的模块内功能是否进入运行态，由各模块在配置达到可运行条件后自动判定。
+ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/IEC61850/ModbusRTU/DLT645/AGC/AVC/Calc，并按配置调用对应 gRPC 接口完成 IEC104/ModbusRTU/DLT645 连接与点表下发、IEC61850模型和IED完整目标态下发、AGC/AVC 控制组下发、Calc 计算分组下发，以及 DataCenter 连接标签注册表/路由下发。链路、IED通信功能、控制组或计算分组的模块内功能是否进入运行态，由各模块依据目标配置判定。
 
 在 `CONFIG_PUSHER` 模式下，ConfigPusher 将 `jsonc` 视为当前进程的目标态与最终真相源，而不是增量补丁：若 SQLite 持久化配置或当前内存态中存在 `jsonc` 未声明的链路、控制组、计算分组、点表、连接标签注册表或路由，ConfigPusher 会在本次编排时将其收敛删除或覆盖，避免旧持久化内容继续生效。
 
 ConfigPusher 更适合作为初始化配置导入与批量编排执行器，不作为上位机日常在线操作的统一入口。
 
 ## 能力清单
-- 自动通过 ModuleManager 启动 DataCenter 与 IEC104/ModbusRTU/DLT645/AGC/AVC/Calc
+- 自动通过 ModuleManager 启动 DataCenter 与 IEC104/IEC61850/ModbusRTU/DLT645/AGC/AVC/Calc
 - 解析 JSONC（支持 `//` 与 `/* */` 注释）
 - 下发 IEC104 配置：UpsertLink / UpsertPointTable
+- 下发 IEC61850 配置：读取SCL文件并单次调用 ApplyTargetConfig
 - 下发 ModbusRTU 配置：UpdateConfig / UpsertLink / UpsertPointTable
 - 下发 DLT645 配置：UpdateConfig / UpsertLink / UpsertPointTable
 - 下发 AGC 配置：UpsertGroup
@@ -63,6 +64,7 @@ README 这里只保留模块说明、启动方式、配置入口与基础语义�
   - `./conf/configPusher/avc.jsonc`
   - `./conf/configPusher/calc.jsonc`
   - `./conf/configPusher/iec104.jsonc`
+  - `./conf/configPusher/iec61850.jsonc`
   - `./conf/configPusher/modbus_rtu.jsonc`
 - 使用 Protobuf JSON 映射：枚举需写全名（例如 `ROLE_SERVER`、`POINT_TYPE_FLOAT`、`FUNCTION_READ_COILS`）
 - `modbus_rtu.jsonc` 的 `function` 支持十六进制字符串（`0x01`/`0x03`/`0x04`/`0x06`/`0x10`），解析时会自动转换为枚举值
@@ -78,6 +80,12 @@ README 这里只保留模块说明、启动方式、配置入口与基础语义�
 - IEC104 可选下发点值上送参数（`point_batch_window_ms/point_max_asdu_bytes/point_use_standard_limit/point_dedupe/point_with_time`；默认不带时标）
 - IEC104 可选下发对时触发 tag（`time_sync_tag`；为空时默认 `__time_sync__`）
 - IEC104 点表类型支持 `POINT_TYPE_FLOAT` 与 `POINT_TYPE_SINGLE`
+- IEC61850配置使用 `iec61850.models[]` 声明SCL来源，使用 `iec61850.ieds[]` 声明逻辑IED、A/B通道、点映射和目标运行状态；相对SCL路径基于 `iec61850.jsonc` 所在目录解析
+- IEC61850的 `jsonc` 按完整目标态下发，未声明的旧模型、IED和点映射会被收敛移除；显式空 `iec61850` 对象表示清空旧目标态
+- ConfigPusher只读取SCL文件，不解析IEC61850模型；SCL解析、引用展开和业务校验由IEC61850模块完成
+- IEC61850单个SCL文件上限为32 MiB、SCL正文合计上限为64 MiB，完整 `ApplyTargetConfig` 序列化请求不得超过72 MiB；超过任一上限时不发出RPC
+- DataCenter对IEC61850是可降级异步输出：ConfigPusher会先尝试启动DataCenter，并在使用其地址前等待内部gRPC通道就绪；DataCenter缺失、启动失败或通道未就绪不阻止IEC61850目标态下发
+- IEC104/ModbusRTU/DLT645/AGC/AVC/Calc及DataCenter自身配置依赖DataCenter时，只有DataCenter内部gRPC通道确认就绪后才继续启动依赖模块或下发配置；未就绪时本次依赖配置停止收敛，避免向尚未监听的地址发送请求
 - AGC 配置使用 `agc.groups[].upsert` 下发控制组；`agc.groups[].start` 为兼容保留字段，当前仅记录日志，不再额外调用 `StartGroup`
 - AGC 控制组配置已不再包含 `loop`、`kp`、`deadband_kw`、`max_step_kw` 等旧闭环参数；ConfigPusher 只接受当前 `GroupConfig` 结构
 - AGC 会在 `p_cmd`、成员量测或 `base_tag` 等相关输入点变化时，直接按 `p_cmd` 计算出的目标总功率进行成员分配；成员上下限、不可控成员扣减、`ABSOLUTE/DELTA` 与 `DELTA_BASE_LAST_TARGET` 等语义保持不变

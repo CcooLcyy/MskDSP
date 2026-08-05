@@ -411,6 +411,12 @@ jobs:
           set -euo pipefail
           cmake --install build-arm64
 
+      - name: 检查 ARM64 IEC61850 交付包
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash script/check_iec61850_package.sh package aarch64 false true
+
       - name: 打包调试符号
         shell: bash
         run: |

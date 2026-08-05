@@ -16,8 +16,9 @@
 
 | 配置对象 | `jsonc` 入口 | ConfigPusher 实际编排动作 | 最终生效语义 | 自动启动与依赖 | 上位机建议建模 |
 | --- | --- | --- | --- | --- | --- |
-| 模块启动编排 | `./conf/module_manager.jsonc` 的 `boot_config_mode`、`auto_start_modules` | 通过 ModuleManager 查询模块信息、按需启动 `DataCenter`、`IEC104`、`ModbusRTU`、`DLT645`、`AGC`、`AVC`、`Calc`、`MQTTManager` | `CONFIG_PUSHER` 下由 ConfigPusher 主导初始化编排；`UPPER` 下仅提供服务，不自动下发 | 依赖 ModuleManager；是否执行配置下发由 `boot_config_mode` 决定 | 作为“初始化模式开关”和“模块准备状态”展示，不应混入日常业务对象编辑页 |
+| 模块启动编排 | `./conf/module_manager.jsonc` 的 `boot_config_mode`、`auto_start_modules` | 通过 ModuleManager 查询模块信息、按需启动 `DataCenter`、`IEC104`、`IEC61850`、`ModbusRTU`、`DLT645`、`AGC`、`AVC`、`Calc`、`MQTTManager` | `CONFIG_PUSHER` 下由 ConfigPusher 主导初始化编排；`UPPER` 下仅提供服务，不自动下发 | 依赖 ModuleManager；是否执行配置下发由 `boot_config_mode` 决定 | 作为“初始化模式开关”和“模块准备状态”展示，不应混入日常业务对象编辑页 |
 | IEC104 链路与点表 | `iec104.links[]` | 先查询现状；必要时停止旧连接功能、清理 `jsonc` 未声明的旧链路；再调用 `UpsertLink`、`UpsertPointTable` | `jsonc` 是目标态快照；同名链路按目标配置覆盖，未声明旧链路不保留 | 依赖 `IEC104` 与 `DataCenter`；配置满足条件后由 IEC104 自动启动模块内连接功能 | 适合建模为“IEC104 初始化模板”；在线增量维护仍建议直连 `IEC104Service` |
+| IEC61850模型、IED与点映射 | `iec61850.models[]`、`iec61850.ieds[]` | 读取全部SCL内容并单次调用 `ApplyTargetConfig`；ConfigPusher不解析SCL | 模型、IED和点映射以单个完整目标态收敛；空目标态用于清理旧配置 | 依赖 `IEC61850`；DataCenter仅为可降级异步输出，缺失时仍下发目标态；IED通信功能由 `desired_running/auto_start` 决定 | 初始化导入应支持SCL文件和目标态预览；在线维护建议直连 `IEC61850Service` |
 | ModbusRTU 链路、点表与 MQTT 全局参数 | `modbus_rtu.links[]`、`modbus_rtu.mqtt` | 先判断是否需要 MQTT；必要时先调 `UpdateConfig`，再查询/收敛旧链路，随后调 `UpsertLink`、`UpsertPointTable` | 链路与点表按目标态覆盖；存在 `TRANSPORT_MQTT_UART` 时要求 `mqtt` 顶层参数完整 | 依赖 `ModbusRTU`、`DataCenter`；MQTT 透传场景还依赖 `MQTTManager`；模块满足条件后自动启动模块内连接功能 | 页面上应区分“本地串口直连”和“MQTT UART 透传”两种模板，不要把 MQTT 全局参数误建成每条链路私有字段 |
 | DLT645 链路、点表与 MQTT 全局参数 | `dlt645.links[]`、`dlt645.mqtt` | 先下发 MQTT 全局参数；支持按 `device_nos` 展开为多条链路，再按展开结果收敛旧链路并调用 `UpsertLink`、`UpsertPointTable` | 展开后的连接名集合构成最终目标态；未出现在展开结果中的旧链路不保留 | 依赖 `DLT645`、`DataCenter`；需要 MQTT 时依赖 `MQTTManager`；模块满足条件后自动启动模块内连接功能 | 适合提供“公共模板 + device_nos 批量展开预览”；上位机应保存展开前模板和展开后连接名两层视图 |
 | AGC 控制组 | `agc.groups[]` | 先查询现状；必要时停止旧控制组功能、清理 `jsonc` 未声明的旧控制组；再调用 `UpsertGroup` | `jsonc` 未声明的旧控制组不保留；同名控制组按目标配置覆盖 | 依赖 `AGC` 与 `DataCenter`；控制组配置满足条件后由 AGC 自动启动模块内控制功能 | 适合建模为“控制组初始化模板”；在线调优仍建议直连 `AGCService` |
@@ -48,8 +49,8 @@
 
 ## 5. 导入执行语义
 
-- 运行前置编排顺序固定为：查询模块信息与运行态，按需启动 `DataCenter`、`IEC104`、`ModbusRTU`、`MQTTManager`、`DLT645`、`AGC`、`AVC`、`Calc`。
-- 进入配置下发阶段后，当前按 `IEC104 -> ModbusRTU -> DLT645 -> AGC -> AVC -> Calc -> DataCenter` 的顺序串行执行。
+- 运行前置编排先查询模块信息与运行态；存在IEC61850目标态时会尽力先启动DataCenter，再启动IEC61850。DataCenter失败不阻止IEC61850，但会阻止仍将其作为硬依赖的其他模块继续下发。
+- 进入配置下发阶段后，IEC61850完整目标态在DataCenter路由之前下发；其余配置继续按 `IEC104 -> ModbusRTU -> DLT645 -> AGC -> AVC -> Calc -> DataCenter` 的顺序串行执行。
 - 单个协议或模块在下发本次目标态前，会先查询现状；必要时停止仍在运行的模块内功能，并清理 `jsonc` 未声明的旧对象。
 - 当前没有跨模块事务；某一类配置下发失败后，不会自动回滚此前已经成功的其他模块或对象。
 - 当前没有自动重试；错误会写日志，后续由上位机或实施人员修正模板、或改走模块原生 RPC 后再次执行。

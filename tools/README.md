@@ -7,7 +7,7 @@
 - 设备模拟相关代码统一放在 `tools/device-sim/`。
 - 设备模拟器按独立进程运行，不接入主模块生命周期管理。
 - 本项目不负责模拟进程的启动/停止/守护，联调时由使用方自行拉起。
-- 当前模拟通信统一通过 PTY 伪串口实现。
+- 串口模拟器通过 PTY 伪串口实现；IEC 61850 MMS 模拟器使用独立 TCP 进程。
 - 模拟协议实现需输出中文收发日志，并包含报文十六进制内容。
 
 ## 构建开关
@@ -35,6 +35,10 @@
 
 ## 已接入工具
 
-- `device-sim`：DLT645PCD 串口模拟器（多实例、读请求固定值回包）。
+- `device-sim`：设备模拟器集合。
   - 说明文档：`tools/device-sim/doc/README.md`
   - 示例配置：`tools/device-sim/conf/dlt645_pcd_sim.jsonc`
+  - DLT645PCD 目标：`dlt645_pcd_sim`
+  - IEC 61850 MMS 目标：`iec61850_mms_sim`
+  - IEC 61850 MMS 工作器 smoke 目标：`iec61850_mms_worker_smoke`
+  - IEC 61850 MMS 参数和联调说明见设备模拟器文档中的对应章节。

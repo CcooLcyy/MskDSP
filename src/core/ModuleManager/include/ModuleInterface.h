@@ -41,7 +41,13 @@ public:
 protected:
   void initLibInfo(LibInfo libInfo);
   void grpcServerBuilder(std::shared_ptr<grpc::Service> service);
+  // 为需要接收大模型等场景的模块设置独立消息上限。
+  void grpcServerBuilder(std::shared_ptr<grpc::Service> service,
+                         int maxReceiveMessageBytes);
   void grpcServerBuilder(const std::vector<std::shared_ptr<grpc::Service>>& services);
+  void grpcServerBuilder(
+      const std::vector<std::shared_ptr<grpc::Service>>& services,
+      int maxReceiveMessageBytes);
   void releasePort(std::string addr);
   void reservePort(std::string addr);
   MetaData metaData_;

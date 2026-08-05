@@ -383,6 +383,7 @@ TEST_F(ModuleManagerTest, ConfigPusherModeIgnoresSqlitePersistentTraceAutoStart)
 TEST_F(ModuleManagerTest, ConfigPusherModeCleansManagedSqliteBeforeModuleStart) {
   mskdsp::ConfigDatabase db(ConfDir() / "config.db");
   ASSERT_TRUE(db.SaveBlob("DataCenter", "state", "test.Payload", "payload").ok());
+  ASSERT_TRUE(db.SaveBlob("IEC61850", "config", "test.Payload", "payload").ok());
   ASSERT_TRUE(db.SaveBlob("Custom", "keep", "test.Payload", "payload").ok());
 
   WriteAutoStartConfig(R"jsonc(
@@ -400,6 +401,9 @@ TEST_F(ModuleManagerTest, ConfigPusherModeCleansManagedSqliteBeforeModuleStart) 
   bool hasState = true;
   ASSERT_TRUE(db.HasAnyBlob("DataCenter", {"state"}, &hasState).ok());
   EXPECT_FALSE(hasState);
+  bool hasIec61850Config = true;
+  ASSERT_TRUE(db.HasAnyBlob("IEC61850", {"config"}, &hasIec61850Config).ok());
+  EXPECT_FALSE(hasIec61850Config);
   bool hasCustom = false;
   ASSERT_TRUE(db.HasAnyBlob("Custom", {"keep"}, &hasCustom).ok());
   EXPECT_TRUE(hasCustom);

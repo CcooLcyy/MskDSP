@@ -15,6 +15,7 @@
 #include "Calc.grpc.pb.h"
 #include "ConfigPusher.h"
 #include "DataCenter.grpc.pb.h"
+#include "IEC61850.grpc.pb.h"
 #include "ModuleManager_mock.grpc.pb.h"
 #include "mskdsp/ConfigDatabase.h"
 
@@ -160,6 +161,39 @@ private:
   DataCenterProto::ListConnectionsResponse connections_;
   std::vector<DataCenterProto::UpsertConnTagsRequest> connTagsRequests_;
   std::vector<DataCenterProto::UpsertRoutesRequest> routeRequests_;
+};
+
+class FakeIec61850Service final : public IEC61850Proto::IEC61850Service::Service {
+public:
+  grpc::Status ApplyTargetConfig(
+      grpc::ServerContext*,
+      const IEC61850Proto::ApplyTargetConfigRequest* request,
+      IEC61850Proto::ApplyTargetConfigResponse* response) override {
+    if (request == nullptr || response == nullptr) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "IEC61850目标态请求或响应为空");
+    }
+    std::lock_guard<std::mutex> lock(mu_);
+    requests_.push_back(*request);
+    for (const auto& model : request->models()) {
+      auto* summary = response->add_models();
+      summary->set_model_name(model.model_name());
+      summary->set_source_name(model.source_name());
+    }
+    for (const auto& ied : request->ieds()) {
+      *response->add_ieds()->mutable_config() = ied.config();
+    }
+    return grpc::Status::OK;
+  }
+
+  std::vector<IEC61850Proto::ApplyTargetConfigRequest> requests() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return requests_;
+  }
+
+private:
+  mutable std::mutex mu_;
+  std::vector<IEC61850Proto::ApplyTargetConfigRequest> requests_;
 };
 
 class FakeAvcService final : public AVCProto::AVCService::Service {
@@ -381,6 +415,135 @@ TEST(ConfigPusherApplyConfigTest, PersistentTraceWithoutJsonStillReturnsEarly) {
   auto stub = std::make_shared<ModuleManagerProto::MockModuleManageStub>();
   EXPECT_CALL(*stub, GetModuleInfo(_, _, _)).Times(0);
   EXPECT_CALL(*stub, GetRunningModuleInfo(_, _, _)).Times(0);
+  EXPECT_CALL(*stub, StartModule(_, _, _)).Times(0);
+
+  ConfigPusherClass pusher;
+  pusher.setModuleManagerStub(stub);
+  pusher.setConfigDirForTest(configDir);
+
+  ConfigPusherTestPeer::ApplyConfig(pusher);
+}
+
+// 验证：IEC61850配置不依赖DataCenter模块存在，ConfigPusher会直接向已运行的IEC61850模块下发完整目标态。
+TEST(ConfigPusherApplyConfigTest, AppliesIec61850WithoutDataCenterModule) {
+  ScopedTempDir workDir;
+  ScopedCwd cwd(workDir.path());
+  const auto configDir = workDir.path() / "configPusher";
+  WriteFile(configDir / "station.scd", "<SCL><IED name=\"IED1\"/></SCL>");
+  WriteFile(configDir / "iec61850.jsonc", R"json(
+{
+  "iec61850": {
+    "models": [
+      {
+        "model_name": "station-model",
+        "scl_file": "station.scd"
+      }
+    ],
+    "ieds": [
+      {
+        "config": {
+          "conn_name": "line-1",
+          "model_name": "station-model",
+          "ied_name": "IED1",
+          "enable_goose": true,
+          "channels": [
+            {
+              "channel": "NETWORK_CHANNEL_A",
+              "enabled": true,
+              "interface_name": "eth0"
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
+)json");
+
+  FakeIec61850Service iec61850Service;
+  grpc::ServerBuilder builder;
+  int port = 0;
+  builder.RegisterService(&iec61850Service);
+  builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(),
+                           &port);
+  auto server = builder.BuildAndStart();
+  ASSERT_NE(server, nullptr);
+  ASSERT_GT(port, 0);
+  const auto address = std::string("127.0.0.1:") + std::to_string(port);
+
+  auto stub = std::make_shared<ModuleManagerProto::MockModuleManageStub>();
+  EXPECT_CALL(*stub, GetModuleInfo(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext*,
+                          const ModuleManagerProto::Empty&,
+                          ModuleManagerProto::ModuleInfos* response) {
+        *response->add_module_info() = MakeModuleInfo("IEC61850");
+        return grpc::Status::OK;
+      }));
+  EXPECT_CALL(*stub, GetRunningModuleInfo(_, _, _))
+      .WillOnce(Invoke([&address](grpc::ClientContext*,
+                                  const ModuleManagerProto::Empty&,
+                                  ModuleManagerProto::ModuleRunningInfos* response) {
+        auto* running = response->add_module_running_info();
+        running->set_module_name("IEC61850");
+        running->set_inner_grpc_server(address);
+        return grpc::Status::OK;
+      }));
+  EXPECT_CALL(*stub, StartModule(_, _, _)).Times(0);
+
+  ConfigPusherClass pusher;
+  pusher.setModuleManagerStub(stub);
+  pusher.setConfigDirForTest(configDir);
+
+  ConfigPusherTestPeer::ApplyConfig(pusher);
+
+  const auto requests = iec61850Service.requests();
+  ASSERT_EQ(requests.size(), 1u);
+  ASSERT_EQ(requests[0].models_size(), 1);
+  EXPECT_EQ(requests[0].models(0).model_name(), "station-model");
+  EXPECT_EQ(requests[0].models(0).source_name(), "station.scd");
+  ASSERT_EQ(requests[0].ieds_size(), 1);
+  EXPECT_EQ(requests[0].ieds(0).config().conn_name(), "line-1");
+
+  server->Shutdown();
+}
+
+// 验证：DataCenter内部gRPC未就绪时，依赖DataCenter的模块不启动，避免继续下发配置。
+TEST(ConfigPusherApplyConfigTest,
+     RejectsDependentModulesWhenDataCenterGrpcIsNotReady) {
+  ScopedTempDir workDir;
+  ScopedCwd cwd(workDir.path());
+  const auto configDir = workDir.path() / "configPusher";
+  WriteFile(configDir / "DataCenter.jsonc", R"json(
+{
+  "point_tables": []
+}
+)json");
+  WriteFile(configDir / "avc.jsonc", R"json(
+{
+  "avc": {
+    "groups": []
+  }
+}
+)json");
+
+  auto stub = std::make_shared<ModuleManagerProto::MockModuleManageStub>();
+  EXPECT_CALL(*stub, GetModuleInfo(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext*,
+                          const ModuleManagerProto::Empty&,
+                          ModuleManagerProto::ModuleInfos* response) {
+        *response->add_module_info() = MakeModuleInfo("DataCenter");
+        *response->add_module_info() = MakeModuleInfo("AVC");
+        return grpc::Status::OK;
+      }));
+  EXPECT_CALL(*stub, GetRunningModuleInfo(_, _, _))
+      .WillRepeatedly(Invoke(
+          [](grpc::ClientContext*, const ModuleManagerProto::Empty&,
+             ModuleManagerProto::ModuleRunningInfos* response) {
+            auto* running = response->add_module_running_info();
+            running->set_module_name("DataCenter");
+            running->set_inner_grpc_server("127.0.0.1:1");
+            return grpc::Status::OK;
+          }));
   EXPECT_CALL(*stub, StartModule(_, _, _)).Times(0);
 
   ConfigPusherClass pusher;
@@ -725,11 +888,13 @@ TEST(ConfigPusherApplyConfigTest, AppliesAvcJsoncAndStartsDataCenterAndAvcModule
   WritePersistentTrace(workDir.path(), "AVC", "groups");
 
   FakeAvcService avcService;
+  FakeDataCenterService dataCenterService;
   avcService.addExistingGroup("avc-legacy", AVCProto::GROUP_STATE_STOPPED);
   avcService.addExistingGroup("avc-1", AVCProto::GROUP_STATE_RUNNING);
 
   grpc::ServerBuilder builder;
   int avcPort = 0;
+  builder.RegisterService(&dataCenterService);
   builder.RegisterService(&avcService);
   builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &avcPort);
   auto avcServer = builder.BuildAndStart();
@@ -755,7 +920,7 @@ TEST(ConfigPusherApplyConfigTest, AppliesAvcJsoncAndStartsDataCenterAndAvcModule
         if (currentCall >= 1) {
           auto *dataCenter = resp->add_module_running_info();
           dataCenter->set_module_name("DataCenter");
-          dataCenter->set_inner_grpc_server("127.0.0.1:19001");
+          dataCenter->set_inner_grpc_server(avcAddr);
         }
         if (currentCall >= 2) {
           auto *avc = resp->add_module_running_info();
@@ -851,11 +1016,13 @@ TEST(ConfigPusherApplyConfigTest, AppliesCalcJsoncAndStartsDataCenterAndCalcModu
   WritePersistentTrace(workDir.path(), "Calc", "groups");
 
   FakeCalcService calcService;
+  FakeDataCenterService dataCenterService;
   calcService.addExistingGroup("calc-legacy", CalcProto::GROUP_STATE_STOPPED);
   calcService.addExistingGroup("calc-1", CalcProto::GROUP_STATE_RUNNING);
 
   grpc::ServerBuilder builder;
   int calcPort = 0;
+  builder.RegisterService(&dataCenterService);
   builder.RegisterService(&calcService);
   builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &calcPort);
   auto calcServer = builder.BuildAndStart();
@@ -881,7 +1048,7 @@ TEST(ConfigPusherApplyConfigTest, AppliesCalcJsoncAndStartsDataCenterAndCalcModu
         if (currentCall >= 1) {
           auto *dataCenter = resp->add_module_running_info();
           dataCenter->set_module_name("DataCenter");
-          dataCenter->set_inner_grpc_server("127.0.0.1:19001");
+          dataCenter->set_inner_grpc_server(calcAddr);
         }
         if (currentCall >= 2) {
           auto *calc = resp->add_module_running_info();

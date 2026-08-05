@@ -178,6 +178,7 @@ std::string toHex(std::string_view text) {
 std::vector<ModuleSqliteAutoStartRule> buildSqliteAutoStartRules() {
   return {
       {"DataCenter", {"state"}},
+      {"IEC61850", {"config"}},
       {"IEC104", {"links", "point_tables"}},
       {"ModbusRTU", {"mqtt", "links", "point_tables"}},
       {"DLT645", {"mqtt", "links", "point_tables"}},

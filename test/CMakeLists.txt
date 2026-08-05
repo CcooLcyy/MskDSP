@@ -22,9 +22,22 @@ function(mskdsp_add_isolated_test test_name)
       "-DMSKDSP_TEST_NAME=${test_name}"
       "-DMSKDSP_TEST_EXECUTABLE=$<TARGET_FILE:${MSKDSP_TEST_TARGET}>"
       "-DMSKDSP_TEST_WORKDIR=${MSKDSP_TEST_WORKING_DIRECTORY}"
+      "-DMSKDSP_TEST_LIBRARY_PATH=${MSKDSP_TEST_LIBRARY_PATH}"
       -P "${MSKDSP_TEST_RUNNER}"
   )
 endfunction()
+
+# 测试可执行文件输出到 package；模块共享库位于 package/module，基础运行库位于
+# package/lib，Debug依赖库位于 vcpkg 目录。运行隔离测试时显式提供全部搜索路径，
+# 避免测试工作目录变化后只能找到部分动态库。这里直接基于顶层包目录构造路径，
+# 不依赖 modulePath/libPath 这类历史变量，确保测试子目录单独重配置时路径仍然明确。
+set(MSKDSP_TEST_PACKAGE_MODULE_DIR "${MSKDSP_PACKAGE_DIR}/module")
+set(MSKDSP_TEST_PACKAGE_LIB_DIR "${MSKDSP_PACKAGE_DIR}/lib")
+set(MSKDSP_TEST_LIBRARY_PATH
+    "${MSKDSP_TEST_PACKAGE_MODULE_DIR}:${MSKDSP_TEST_PACKAGE_LIB_DIR}:${MSKDSP_VCPKG_LIB_DIR}")
+if(EXISTS "${MSKDSP_VCPKG_LIB_DIR}/manual-link")
+  string(APPEND MSKDSP_TEST_LIBRARY_PATH ":${MSKDSP_VCPKG_LIB_DIR}/manual-link")
+endif()
 
 set(MSKDSP_MODULE_MANAGER_TEST_ENV_DIR "${CMAKE_BINARY_DIR}/test_env/moduleManager")
 set(MSKDSP_MODULE_MANAGER_TEST_LIB_DIR "${MSKDSP_MODULE_MANAGER_TEST_ENV_DIR}/module")
@@ -266,6 +279,745 @@ target_link_libraries(iec104PointTable_test PRIVATE
 )
 
 mskdsp_add_isolated_test(iec104PointTable_test)
+
+add_executable(iec61850SclParser_test
+  iec61850_scl_parser_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850SclParser.cc
+)
+
+target_include_directories(iec61850SclParser_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+)
+
+target_link_libraries(iec61850SclParser_test PRIVATE
+  GTest::gtest_main
+  dspProto
+  pugixml::pugixml
+)
+
+mskdsp_add_isolated_test(iec61850SclParser_test)
+
+add_executable(iec61850ConfigValidation_test
+  iec61850_config_validation_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ConfigValidation.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ModelSelection.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ThreadRuntimePolicy.cc
+)
+
+target_include_directories(iec61850ConfigValidation_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+)
+
+target_link_libraries(iec61850ConfigValidation_test PRIVATE
+  GTest::gtest_main
+  dspProto
+  moduleManager
+)
+
+mskdsp_add_isolated_test(iec61850ConfigValidation_test)
+
+add_executable(iec61850ConfigStore_test
+  iec61850_config_store_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ConfigStore.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ConfigValidation.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ModelSelection.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ThreadRuntimePolicy.cc
+)
+
+target_include_directories(iec61850ConfigStore_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+)
+
+target_link_libraries(iec61850ConfigStore_test PRIVATE
+  GTest::gtest_main
+  dspProto
+  moduleManager
+  mskdspConfigStore
+)
+
+mskdsp_add_isolated_test(iec61850ConfigStore_test)
+
+add_executable(iec61850Manager_test
+  iec61850_manager_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850Manager.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsControl.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsSession.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsService.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsBer.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ProtocolStack.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsPipeline.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850DataCenterClient.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ConfigStore.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ConfigValidation.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ModelSelection.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850RealtimePlan.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850RealtimeSignalBus.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850RealtimeSignalProcessor.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ProtectionEngine.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ProtectionActionDispatcher.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ThreadRuntimePolicy.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850GooseRuntime.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850SvRuntime.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850SvMathEngine.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850SvMath.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850SclParser.cc
+)
+
+target_include_directories(iec61850Manager_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(iec61850Manager_test PRIVATE
+  GTest::gtest_main
+  GTest::gmock
+  dspProto
+  moduleManager
+  mskdspConfigStore
+  pugixml::pugixml
+)
+
+mskdsp_add_isolated_test(iec61850Manager_test)
+
+add_executable(iec61850MmsPipeline_test
+  iec61850_mms_pipeline_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsPipeline.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850DataCenterClient.cc
+)
+
+target_include_directories(iec61850MmsPipeline_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(iec61850MmsPipeline_test PRIVATE
+  GTest::gtest_main
+  GTest::gmock
+  dspProto
+  moduleManager
+)
+
+mskdsp_add_isolated_test(iec61850MmsPipeline_test)
+
+add_executable(iec61850MmsSession_test
+  iec61850_mms_session_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsSession.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsChannelPolicy.cc
+)
+
+target_include_directories(iec61850MmsSession_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
+)
+
+target_link_libraries(iec61850MmsSession_test PRIVATE
+  GTest::gtest_main
+  dspProto
+)
+
+mskdsp_add_isolated_test(iec61850MmsSession_test)
+
+add_executable(iec61850MmsIsoSession_test
+  iec61850_mms_iso_session_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsIsoSession.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsBer.cc
+)
+
+target_include_directories(iec61850MmsIsoSession_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+)
+
+target_link_libraries(iec61850MmsIsoSession_test PRIVATE
+  GTest::gtest_main
+  dspProto
+)
+
+mskdsp_add_isolated_test(iec61850MmsIsoSession_test)
+
+add_executable(iec61850MmsInitiate_test
+  iec61850_mms_initiate_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsPdu.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsBer.cc
+)
+
+target_include_directories(iec61850MmsInitiate_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+)
+
+target_link_libraries(iec61850MmsInitiate_test PRIVATE
+  GTest::gtest_main
+  dspProto
+)
+
+mskdsp_add_isolated_test(iec61850MmsInitiate_test)
+
+add_executable(iec61850MmsService_test
+  iec61850_mms_service_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsService.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsOptional.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsBer.cc
+)
+
+target_include_directories(iec61850MmsService_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+)
+
+target_link_libraries(iec61850MmsService_test PRIVATE
+  GTest::gtest_main
+  dspProto
+)
+
+mskdsp_add_isolated_test(iec61850MmsService_test)
+
+add_executable(iec61850MmsFile_test
+  iec61850_mms_file_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsFile.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsExchange.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsIsoSession.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsService.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsOptional.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsBer.cc
+)
+
+target_include_directories(iec61850MmsFile_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+)
+
+target_link_libraries(iec61850MmsFile_test PRIVATE
+  GTest::gtest_main
+  dspProto
+  moduleManager
+)
+
+mskdsp_add_isolated_test(iec61850MmsFile_test)
+
+add_executable(iec61850MmsOptionalTransaction_test
+  iec61850_mms_optional_transaction_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsJournal.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsDynamicDataSet.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsFile.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsExchange.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsIsoSession.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsService.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsOptional.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsBer.cc
+)
+
+target_include_directories(iec61850MmsOptionalTransaction_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+)
+
+target_link_libraries(iec61850MmsOptionalTransaction_test PRIVATE
+  GTest::gtest_main
+  dspProto
+  moduleManager
+)
+
+mskdsp_add_isolated_test(iec61850MmsOptionalTransaction_test)
+
+add_executable(iec61850MmsServer_test
+  iec61850_mms_server_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsServer.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsJournal.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsService.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsOptional.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsBer.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsPdu.cc
+)
+
+target_include_directories(iec61850MmsServer_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+)
+
+target_link_libraries(iec61850MmsServer_test PRIVATE
+  GTest::gtest_main
+  dspProto
+)
+
+mskdsp_add_isolated_test(iec61850MmsServer_test)
+
+add_executable(iec61850MmsSettingGroup_test
+  iec61850_mms_setting_group_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsSettingGroup.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsService.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsBer.cc
+)
+
+target_include_directories(iec61850MmsSettingGroup_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+)
+
+target_link_libraries(iec61850MmsSettingGroup_test PRIVATE
+  GTest::gtest_main
+  dspProto
+  moduleManager
+)
+
+mskdsp_add_isolated_test(iec61850MmsSettingGroup_test)
+
+add_executable(iec61850MmsControl_test
+  iec61850_mms_control_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsControl.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsSession.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsService.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsBer.cc
+)
+
+target_include_directories(iec61850MmsControl_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
+)
+
+target_link_libraries(iec61850MmsControl_test PRIVATE
+  GTest::gtest_main
+  dspProto
+)
+
+mskdsp_add_isolated_test(iec61850MmsControl_test)
+
+add_executable(iec61850MmsReport_test
+  iec61850_mms_report_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsReport.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsBer.cc
+)
+
+target_include_directories(iec61850MmsReport_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
+)
+
+target_link_libraries(iec61850MmsReport_test PRIVATE
+  GTest::gtest_main
+  dspProto
+)
+
+mskdsp_add_isolated_test(iec61850MmsReport_test)
+
+add_executable(iec61850MmsRcb_test
+  iec61850_mms_rcb_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsRcb.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsSession.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsService.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsBer.cc
+)
+
+target_include_directories(iec61850MmsRcb_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
+)
+
+target_link_libraries(iec61850MmsRcb_test PRIVATE
+  GTest::gtest_main
+  dspProto
+)
+
+mskdsp_add_isolated_test(iec61850MmsRcb_test)
+
+add_executable(iec61850GooseState_test
+  iec61850_goose_state_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850GooseState.cc
+)
+
+target_include_directories(iec61850GooseState_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+)
+
+target_link_libraries(iec61850GooseState_test PRIVATE
+  GTest::gtest_main
+  dspProto
+)
+
+mskdsp_add_isolated_test(iec61850GooseState_test)
+
+add_executable(iec61850SvState_test
+  iec61850_sv_state_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850SvState.cc
+)
+
+target_include_directories(iec61850SvState_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+)
+
+target_link_libraries(iec61850SvState_test PRIVATE
+  GTest::gtest_main
+)
+
+mskdsp_add_isolated_test(iec61850SvState_test)
+
+add_executable(iec61850SvMath_test
+  iec61850_sv_math_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850SvMath.cc
+)
+
+target_include_directories(iec61850SvMath_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+)
+
+target_link_libraries(iec61850SvMath_test PRIVATE
+  GTest::gtest_main
+)
+
+mskdsp_add_isolated_test(iec61850SvMath_test)
+
+add_executable(iec61850SvMathEngine_test
+  iec61850_sv_math_engine_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850SvMathEngine.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850SvMath.cc
+)
+
+target_include_directories(iec61850SvMathEngine_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+)
+
+target_link_libraries(iec61850SvMathEngine_test PRIVATE
+  GTest::gtest_main
+  dspProto
+)
+
+mskdsp_add_isolated_test(iec61850SvMathEngine_test)
+
+add_executable(iec61850SvRuntime_test
+  iec61850_sv_runtime_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850SvRuntime.cc
+)
+
+target_include_directories(iec61850SvRuntime_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+)
+
+target_link_libraries(iec61850SvRuntime_test PRIVATE
+  GTest::gtest_main
+  dspProto
+)
+
+mskdsp_add_isolated_test(iec61850SvRuntime_test)
+
+add_executable(iec61850RealtimePlan_test
+  iec61850_realtime_plan_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850RealtimePlan.cc
+)
+
+target_include_directories(iec61850RealtimePlan_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+)
+
+target_link_libraries(iec61850RealtimePlan_test PRIVATE
+  GTest::gtest_main
+  dspProto
+)
+
+mskdsp_add_isolated_test(iec61850RealtimePlan_test)
+
+add_executable(iec61850GooseRuntime_test
+  iec61850_goose_runtime_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850GooseRuntime.cc
+)
+
+target_include_directories(iec61850GooseRuntime_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+)
+
+target_link_libraries(iec61850GooseRuntime_test PRIVATE
+  GTest::gtest_main
+  dspProto
+)
+
+mskdsp_add_isolated_test(iec61850GooseRuntime_test)
+
+add_executable(iec61850RawEthernet_test
+  iec61850_raw_ethernet_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850RawEthernet.cc
+)
+
+target_include_directories(iec61850RawEthernet_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+)
+
+target_link_libraries(iec61850RawEthernet_test PRIVATE
+  GTest::gtest_main
+  dspProto
+)
+
+mskdsp_add_isolated_test(iec61850RawEthernet_test)
+
+add_executable(iec61850MmsTransport_test
+  iec61850_mms_transport_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsTransport.cc
+)
+
+target_include_directories(iec61850MmsTransport_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+)
+
+target_link_libraries(iec61850MmsTransport_test PRIVATE
+  GTest::gtest_main
+  moduleManager
+)
+
+mskdsp_add_isolated_test(iec61850MmsTransport_test)
+
+add_executable(iec61850MmsExchange_test
+  iec61850_mms_exchange_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsExchange.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsIsoSession.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsService.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsBer.cc
+)
+
+target_include_directories(iec61850MmsExchange_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+)
+
+target_link_libraries(iec61850MmsExchange_test PRIVATE
+  GTest::gtest_main
+  dspProto
+  moduleManager
+)
+
+mskdsp_add_isolated_test(iec61850MmsExchange_test)
+
+add_executable(iec61850MmsBer_test
+  iec61850_mms_ber_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsBer.cc
+)
+
+target_include_directories(iec61850MmsBer_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+)
+
+target_link_libraries(iec61850MmsBer_test PRIVATE
+  GTest::gtest_main
+  dspProto
+)
+
+mskdsp_add_isolated_test(iec61850MmsBer_test)
+
+add_executable(iec61850RawProtocolStack_test
+  iec61850_raw_protocol_stack_test.cc
+  iec61850_mms_worker_test.cc
+  iec61850_mms_tcp_integration_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850RawProtocolStack.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850RawEthernet.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850GoosePublisher.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850SvPublisher.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsWorker.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsFile.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsControl.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsChannelPolicy.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsExchange.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsTransport.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsIsoSession.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsPdu.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsService.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsOptional.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsSession.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsRcb.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsReport.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsSettingGroup.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsBer.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ThreadRuntimePolicy.cc
+)
+
+target_include_directories(iec61850RawProtocolStack_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+)
+
+target_link_libraries(iec61850RawProtocolStack_test PRIVATE
+  GTest::gtest_main
+  dspProto
+  moduleManager
+)
+
+mskdsp_add_isolated_test(iec61850RawProtocolStack_test)
+
+# 验证生产MMS Worker与独立模拟IED之间的跨进程建链、目录、RCB和GI闭环。
+if(TARGET iec61850_mms_sim AND TARGET iec61850_mms_worker_smoke)
+  add_executable(iec61850MmsProcess_test
+    iec61850_mms_process_test.cc
+  )
+
+  add_dependencies(iec61850MmsProcess_test
+    iec61850_mms_sim
+    iec61850_mms_worker_smoke
+  )
+
+  add_test(NAME iec61850MmsProcess_test
+    COMMAND iec61850MmsProcess_test
+      $<TARGET_FILE:iec61850_mms_sim>
+      $<TARGET_FILE:iec61850_mms_worker_smoke>
+  )
+  set_tests_properties(iec61850MmsProcess_test PROPERTIES
+    TIMEOUT 90
+  )
+endif()
+
+add_executable(iec61850RealtimeSignalBus_test
+  iec61850_realtime_signal_bus_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850RealtimeSignalBus.cc
+)
+
+target_include_directories(iec61850RealtimeSignalBus_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+)
+
+target_link_libraries(iec61850RealtimeSignalBus_test PRIVATE
+  GTest::gtest_main
+)
+
+mskdsp_add_isolated_test(iec61850RealtimeSignalBus_test)
+
+add_executable(iec61850RealtimeSignalProcessor_test
+  iec61850_realtime_signal_processor_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850RealtimeSignalProcessor.cc
+)
+
+target_include_directories(iec61850RealtimeSignalProcessor_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+)
+
+target_link_libraries(iec61850RealtimeSignalProcessor_test PRIVATE
+  GTest::gtest_main
+  dspProto
+)
+
+mskdsp_add_isolated_test(iec61850RealtimeSignalProcessor_test)
+
+add_executable(iec61850ProtectionEngine_test
+  iec61850_protection_engine_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ProtectionEngine.cc
+  iec61850_protection_action_dispatcher_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ProtectionActionDispatcher.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ThreadRuntimePolicy.cc
+)
+
+target_include_directories(iec61850ProtectionEngine_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+)
+
+target_link_libraries(iec61850ProtectionEngine_test PRIVATE
+  GTest::gtest_main
+  dspProto
+  moduleManager
+)
+
+mskdsp_add_isolated_test(iec61850ProtectionEngine_test)
+
+add_executable(iec61850ThreadRuntimePolicy_test
+  iec61850_thread_runtime_policy_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ThreadRuntimePolicy.cc
+)
+
+target_include_directories(iec61850ThreadRuntimePolicy_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+)
+
+target_link_libraries(iec61850ThreadRuntimePolicy_test PRIVATE
+  GTest::gtest_main
+  moduleManager
+)
+
+mskdsp_add_isolated_test(iec61850ThreadRuntimePolicy_test)
+
+add_executable(iec61850GrpcService_test
+  iec61850_grpc_service_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850CommandExecutorService.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850GrpcService.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850Manager.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ProtocolStack.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsControl.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsSession.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsService.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsBer.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsPipeline.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850DataCenterClient.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ConfigStore.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ConfigValidation.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ModelSelection.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850RealtimePlan.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850RealtimeSignalBus.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850RealtimeSignalProcessor.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ProtectionEngine.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ProtectionActionDispatcher.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850ThreadRuntimePolicy.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850GooseRuntime.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850SvRuntime.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850SvMathEngine.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850SvMath.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850SclParser.cc
+)
+
+target_include_directories(iec61850GrpcService_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+)
+
+target_link_libraries(iec61850GrpcService_test PRIVATE
+  GTest::gtest_main
+  dspProto
+  moduleManager
+  mskdspConfigStore
+  pugixml::pugixml
+)
+
+mskdsp_add_isolated_test(iec61850GrpcService_test)
+
+add_executable(iec61850Manifest_test
+  iec61850_manifest_test.cc
+)
+
+target_include_directories(iec61850Manifest_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+)
+
+target_link_libraries(iec61850Manifest_test PRIVATE
+  GTest::gtest_main
+  dspProto
+  IEC61850
+)
+
+# IEC61850模块库输出到package/module，manifest测试位于package根目录。
+set_property(TARGET iec61850Manifest_test APPEND PROPERTY
+             INSTALL_RPATH "$ORIGIN/module")
+
+mskdsp_add_isolated_test(iec61850Manifest_test)
+
+add_executable(configPusherApplyIec61850_test
+  config_pusher_apply_iec61850_test.cc
+  ${CMAKE_SOURCE_DIR}/src/ConfigPusher/ConfigPusherApplyIec61850.cc
+)
+
+target_include_directories(configPusherApplyIec61850_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/ConfigPusher/include
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
+)
+
+target_link_libraries(configPusherApplyIec61850_test PRIVATE
+  GTest::gtest_main
+  GTest::gmock
+  dspProto
+  moduleManager
+)
+
+mskdsp_add_isolated_test(configPusherApplyIec61850_test)
 
 add_executable(modbusRtuPointTable_test
   modbus_rtu_point_table_test.cc
@@ -859,6 +1611,31 @@ set(MSKDSP_TEST_TARGETS
   dataCenterCore_test
   dataCenterStateStore_test
   dataCenterGrpcService_test
+  iec61850SclParser_test
+  iec61850ConfigValidation_test
+  iec61850ThreadRuntimePolicy_test
+  iec61850ConfigStore_test
+  iec61850Manager_test
+  iec61850MmsPipeline_test
+  iec61850MmsSession_test
+  iec61850MmsIsoSession_test
+  iec61850MmsInitiate_test
+  iec61850MmsService_test
+  iec61850MmsFile_test
+  iec61850MmsOptionalTransaction_test
+  iec61850MmsSettingGroup_test
+  iec61850MmsServer_test
+  iec61850GooseState_test
+  iec61850SvState_test
+  iec61850SvRuntime_test
+  iec61850RealtimePlan_test
+  iec61850ProtectionEngine_test
+  iec61850GooseRuntime_test
+  iec61850RawEthernet_test
+  iec61850RawProtocolStack_test
+  iec61850GrpcService_test
+  iec61850Manifest_test
+  configPusherApplyIec61850_test
   iec104PointTable_test
   modbusRtuPointTable_test
   modbusRtuManifest_test
@@ -959,5 +1736,15 @@ if(MSKDSP_ENABLE_COVERAGE)
       USES_TERMINAL
     )
 
-  add_dependencies(coverage ${MSKDSP_TEST_TARGETS})
+  # 手工列表用于保留覆盖率目标的稳定顺序；实际依赖再从本目录收集全部
+  # *_test 目标，避免新增测试忘记加入列表后 ctest 找不到可执行文件。
+  set(MSKDSP_TEST_BUILD_TARGETS ${MSKDSP_TEST_TARGETS})
+  get_property(MSKDSP_TEST_DIRECTORY_TARGETS DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+  foreach(MSKDSP_TEST_DIRECTORY_TARGET IN LISTS MSKDSP_TEST_DIRECTORY_TARGETS)
+    if(MSKDSP_TEST_DIRECTORY_TARGET MATCHES "_test$")
+      list(APPEND MSKDSP_TEST_BUILD_TARGETS "${MSKDSP_TEST_DIRECTORY_TARGET}")
+    endif()
+  endforeach()
+  list(REMOVE_DUPLICATES MSKDSP_TEST_BUILD_TARGETS)
+  add_dependencies(coverage ${MSKDSP_TEST_BUILD_TARGETS})
 endif()

@@ -233,13 +233,33 @@ void ModuleInterface::grpcServerBuilder(std::shared_ptr<grpc::Service> service) 
   grpcServerBuilder(services);
 }
 
+void ModuleInterface::grpcServerBuilder(
+    std::shared_ptr<grpc::Service> service, int maxReceiveMessageBytes) {
+  std::vector<std::shared_ptr<grpc::Service>> services;
+  if (service) {
+    services.emplace_back(std::move(service));
+  }
+  grpcServerBuilder(services, maxReceiveMessageBytes);
+}
+
 void ModuleInterface::grpcServerBuilder(const std::vector<std::shared_ptr<grpc::Service>>& services) {
+  grpcServerBuilder(services, 0);
+}
+
+void ModuleInterface::grpcServerBuilder(
+    const std::vector<std::shared_ptr<grpc::Service>>& services,
+    int maxReceiveMessageBytes) {
   selfCheckGrpcConfig("gRPC 构建前", metaData_.name, true);
   if (services.empty()) {
     LOG_ERROR("gRPC 服务启动失败，未提供任何服务对象");
     return;
   }
   grpc::ServerBuilder serverBuilder;
+  if (maxReceiveMessageBytes > 0) {
+    serverBuilder.SetMaxReceiveMessageSize(maxReceiveMessageBytes);
+    LOG_INFO("gRPC服务最大接收消息已配置: 字节数={}",
+             maxReceiveMessageBytes);
+  }
   for (const auto& service : services) {
     if (!service) {
       LOG_WARNING("gRPC 服务列表中存在空服务对象，已跳过");
