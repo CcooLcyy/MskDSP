@@ -1,12 +1,16 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
+#include <future>
 #include <initializer_list>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <tuple>
+#include <thread>
 #include <utility>
 
 #include <grpcpp/client_context.h>
@@ -22,7 +26,13 @@ namespace {
 class ScopedTempDir {
 public:
   ScopedTempDir() {
-    auto base = std::filesystem::current_path();
+    // Unix域套接字路径受系统长度限制，测试临时目录放到系统短路径下，
+    // 避免仓库绝对路径较深时无法启动目标gRPC服务。
+    std::error_code error;
+    auto base = std::filesystem::temp_directory_path(error);
+    if (error || base.empty()) {
+      base = std::filesystem::current_path();
+    }
     auto ts = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     path_ = base / ("data_center_grpc_service_test_tmp_" + std::to_string(ts));
     std::filesystem::create_directories(path_);
@@ -53,6 +63,60 @@ public:
 
 private:
   std::filesystem::path old_;
+};
+
+class BlockingCommandExecutor final : public DataCenterProto::CommandExecutor::Service {
+public:
+  grpc::Status ExecuteCommand(
+      grpc::ServerContext* context,
+      const DataCenterProto::ExecuteCommandRequest*,
+      DataCenterProto::ExecuteCommandResponse*) override {
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      started_ = true;
+      deadline_ = context == nullptr
+                      ? std::chrono::system_clock::time_point::max()
+                      : context->deadline();
+    }
+    cv_.notify_all();
+
+    if (context == nullptr) {
+      return grpc::Status(grpc::StatusCode::INTERNAL, "目标测试服务上下文为空");
+    }
+    while (!context->IsCancelled()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      cancelled_ = true;
+    }
+    cv_.notify_all();
+    return grpc::Status(grpc::StatusCode::CANCELLED, "目标测试服务观察到取消");
+  }
+
+  bool waitForStarted(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mu_);
+    return cv_.wait_for(lock, timeout, [this]() { return started_; });
+  }
+
+  bool waitForCancelled(std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mu_);
+    return cv_.wait_for(lock, timeout, [this]() { return cancelled_; });
+  }
+
+  std::chrono::system_clock::time_point deadline() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return deadline_;
+  }
+
+private:
+  mutable std::mutex mu_;
+  std::condition_variable cv_;
+  bool started_{false};
+  bool cancelled_{false};
+  std::chrono::system_clock::time_point deadline_ =
+      std::chrono::system_clock::time_point::max();
 };
 
 class DataCenterGrpcServiceTest : public ::testing::Test {
@@ -523,4 +587,67 @@ TEST_F(DataCenterGrpcServiceTest, SubscribeRejectsInvalidArguments) {
     auto status = reader->Finish();
     EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
   }
+}
+
+// 验证：DataCenter 将上游截止时间传给 IEC61850 CommandExecutor，并把上游取消传播到目标服务。
+TEST_F(DataCenterGrpcServiceTest, ExecuteCommandPropagatesDeadlineAndCancellation) {
+  std::filesystem::create_directories("socket");
+  const auto targetSocket = std::filesystem::absolute("socket/IEC61850.sock").string();
+
+  BlockingCommandExecutor targetService;
+  grpc::ServerBuilder targetBuilder;
+  targetBuilder.RegisterService(&targetService);
+  targetBuilder.AddListeningPort("unix:" + targetSocket,
+                                 grpc::InsecureServerCredentials());
+  auto targetServer = targetBuilder.BuildAndStart();
+  ASSERT_NE(targetServer, nullptr);
+
+  const auto source = GetOrCreateConnection("IEC104", "source");
+  const auto target = GetOrCreateConnection("IEC61850", "ied");
+  UpsertConnTags(source.conn_id(), {"Trip"});
+  UpsertConnTags(target.conn_id(), {"Trip"});
+  UpsertStableRoutes({
+      {"IEC104", "source", "Trip", "IEC61850", "ied", "Trip"},
+  });
+
+  DataCenterProto::ExecuteCommandRequest request;
+  request.mutable_src()->set_conn_id(source.conn_id());
+  request.mutable_src()->set_tag("Trip");
+  request.mutable_value()->set_bool_value(true);
+  request.set_timeout_ms(10000);
+
+  grpc::ClientContext callerContext;
+  const auto callerDeadline =
+      std::chrono::system_clock::now() + std::chrono::seconds(5);
+  callerContext.set_deadline(callerDeadline);
+  DataCenterProto::ExecuteCommandResponse response;
+  auto call = std::async(std::launch::async, [&]() {
+    return stub_->ExecuteCommand(&callerContext, request, &response);
+  });
+
+  if (!targetService.waitForStarted(std::chrono::seconds(2))) {
+    callerContext.TryCancel();
+    targetServer->Shutdown();
+    const auto failedStatus = call.get();
+    ADD_FAILURE() << "目标CommandExecutor未在期限内收到请求: "
+                  << failedStatus.error_message();
+    return;
+  }
+  const auto targetDeadline = targetService.deadline();
+  EXPECT_NE(targetDeadline, std::chrono::system_clock::time_point::max());
+  EXPECT_LE(targetDeadline, callerDeadline + std::chrono::milliseconds(250));
+  EXPECT_GE(targetDeadline, callerDeadline - std::chrono::milliseconds(250));
+
+  callerContext.TryCancel();
+  if (!targetService.waitForCancelled(std::chrono::seconds(2))) {
+    targetServer->Shutdown();
+    const auto failedStatus = call.get();
+    ADD_FAILURE() << "目标CommandExecutor未在期限内收到取消: "
+                  << failedStatus.error_message();
+    return;
+  }
+  const auto status = call.get();
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::CANCELLED);
+
+  targetServer->Shutdown();
 }

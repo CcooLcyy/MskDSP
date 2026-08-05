@@ -1,6 +1,7 @@
 #include "DataCenterGrpcService.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -14,6 +15,7 @@
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -75,7 +77,9 @@ std::string formatPointValue(const DataCenterProto::PointValue& value) {
     case DataCenterProto::PointValue::kDoubleValue:
       return "类型=双精度, 值=" + std::to_string(value.double_value());
     case DataCenterProto::PointValue::kStringValue:
-      return "类型=字符串, 值=\"" + value.string_value() + "\"";
+      return "类型=字符串, 长度=" +
+             std::to_string(value.string_value().size()) +
+             ", 十六进制=" + formatBytesHexPreview(value.string_value());
     case DataCenterProto::PointValue::kBytesValue: {
       const auto& bytes = value.bytes_value();
       return "类型=字节串, 长度=" + std::to_string(bytes.size()) +
@@ -863,12 +867,27 @@ grpc::Status DataCenterGrpcServiceImpl::Publish(grpc::ServerContext*, const Data
 }
 
 grpc::Status DataCenterGrpcServiceImpl::ExecuteCommand(
-    grpc::ServerContext*,
+    grpc::ServerContext* context,
     const DataCenterProto::ExecuteCommandRequest* request,
     DataCenterProto::ExecuteCommandResponse* response) {
   if (request == nullptr || response == nullptr) {
     LOG_ERROR("DataCenter ExecuteCommand 请求/响应为空");
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
+  }
+
+  const auto now = std::chrono::system_clock::now();
+  const auto upstreamDeadline = context == nullptr
+                                    ? std::chrono::system_clock::time_point::max()
+                                    : context->deadline();
+  if (upstreamDeadline <= now) {
+    LOG_WARNING("DataCenter 同步命令在路由前已超过上游截止时间");
+    return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED,
+                        "DataCenter 同步命令已超过上游截止时间");
+  }
+  if (context != nullptr && context->IsCancelled()) {
+    LOG_WARNING("DataCenter 同步命令在路由前已取消");
+    return grpc::Status(grpc::StatusCode::CANCELLED,
+                        "DataCenter 同步命令已取消");
   }
 
   LOG_INFO("DataCenter 收到同步命令: src={}, {}, 质量={}({}), 请求时间戳={}, request_id={}, timeout_ms={}",
@@ -890,6 +909,20 @@ grpc::Status DataCenterGrpcServiceImpl::ExecuteCommand(
     }
   }
 
+  // 路由查询可能耗时；即使没有进入目标模块，也不能在调用方已经取消后
+  // 把此前得到的无路由/歧义结果作为正常同步命令结果返回。
+  const auto afterRoute = std::chrono::system_clock::now();
+  if (upstreamDeadline <= afterRoute) {
+    LOG_WARNING("DataCenter 同步命令在路由解析后已超过上游截止时间");
+    return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED,
+                        "DataCenter 同步命令已超过上游截止时间");
+  }
+  if (context != nullptr && context->IsCancelled()) {
+    LOG_WARNING("DataCenter 同步命令在路由解析后已取消");
+    return grpc::Status(grpc::StatusCode::CANCELLED,
+                        "DataCenter 同步命令已取消");
+  }
+
   if (routeResp.status() != DataCenterProto::COMMAND_STATUS_UNSPECIFIED) {
     *response = routeResp;
     LOG_WARNING("DataCenter 同步命令未进入目标模块: src={}, status={}, reason={}",
@@ -899,18 +932,72 @@ grpc::Status DataCenterGrpcServiceImpl::ExecuteCommand(
     return grpc::Status::OK;
   }
 
+  const auto beforeTargetNow = std::chrono::system_clock::now();
+  if (upstreamDeadline <= beforeTargetNow) {
+    LOG_WARNING("DataCenter 同步命令在调用目标模块前已超过上游截止时间: dst={}",
+                formatEndpointForLog(routeResp.dst()));
+    return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED,
+                        "DataCenter 同步命令已超过上游截止时间");
+  }
+  if (context != nullptr && context->IsCancelled()) {
+    LOG_WARNING("DataCenter 同步命令在调用目标模块前已取消: dst={}",
+                formatEndpointForLog(routeResp.dst()));
+    return grpc::Status(grpc::StatusCode::CANCELLED,
+                        "DataCenter 同步命令已取消");
+  }
+
   auto targetReq = *request;
   *targetReq.mutable_dst() = routeResp.dst();
   auto address = buildModuleUnixSocketAddress(routeResp.dst().module_name());
   auto channel = grpc::CreateChannel(address, grpc::InsecureChannelCredentials());
   auto stub = DataCenterProto::CommandExecutor::NewStub(channel);
 
-  grpc::ClientContext ctx;
-  auto timeoutMs = request->timeout_ms() == 0 ? 1500u : request->timeout_ms();
-  ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(timeoutMs));
+  grpc::ClientContext targetContext;
+  const auto timeoutMs = request->timeout_ms() == 0 ? 1500u : request->timeout_ms();
+  const auto requestDeadline = std::chrono::system_clock::now() +
+                               std::chrono::milliseconds(timeoutMs);
+  const auto targetDeadline = std::min(upstreamDeadline, requestDeadline);
+  targetContext.set_deadline(targetDeadline);
+
+  // 将上游取消传播到目标模块，确保 IEC61850 控制不会在调用方退出后继续执行。
+  std::atomic_bool upstreamCancelled{false};
+  std::jthread cancellationWatcher;
+  if (context != nullptr) {
+    cancellationWatcher = std::jthread(
+        [context, &targetContext, &upstreamCancelled](std::stop_token stopToken) {
+          while (!stopToken.stop_requested()) {
+            if (context->IsCancelled()) {
+              upstreamCancelled.store(true, std::memory_order_release);
+              targetContext.TryCancel();
+              return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          }
+        });
+  }
 
   DataCenterProto::ExecuteCommandResponse targetResp;
-  auto status = stub->ExecuteCommand(&ctx, targetReq, &targetResp);
+  auto status = stub->ExecuteCommand(&targetContext, targetReq, &targetResp);
+  cancellationWatcher.request_stop();
+  if (cancellationWatcher.joinable()) {
+    cancellationWatcher.join();
+  }
+
+  const auto completionNow = std::chrono::system_clock::now();
+  if (upstreamDeadline <= completionNow) {
+    LOG_WARNING("DataCenter 同步命令在目标模块返回前已超过上游截止时间: dst={}",
+                formatEndpointForLog(routeResp.dst()));
+    return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED,
+                        "DataCenter 同步命令已超过上游截止时间");
+  }
+  if (upstreamCancelled.load(std::memory_order_acquire) ||
+      (context != nullptr && context->IsCancelled())) {
+    LOG_WARNING("DataCenter 同步命令在目标模块返回前已取消: dst={}",
+                formatEndpointForLog(routeResp.dst()));
+    return grpc::Status(grpc::StatusCode::CANCELLED,
+                        "DataCenter 同步命令已取消");
+  }
+
   if (!status.ok()) {
     response->Clear();
     *response->mutable_dst() = routeResp.dst();
@@ -942,6 +1029,13 @@ grpc::Status DataCenterGrpcServiceImpl::ExecuteCommand(
   }
 
   if (targetResp.status() == DataCenterProto::COMMAND_ACCEPTED) {
+    if (upstreamCancelled.load(std::memory_order_acquire) ||
+        (context != nullptr && context->IsCancelled())) {
+      LOG_WARNING("DataCenter 同步命令已取消，不写入已接受命令缓存: dst={}",
+                  formatEndpointForLog(routeResp.dst()));
+      return grpc::Status(grpc::StatusCode::CANCELLED,
+                          "DataCenter 同步命令已取消");
+    }
     std::lock_guard<std::mutex> lock(impl_->mu);
     auto storeStatus = impl_->core.StoreAcceptedCommand(targetReq, routeResp.dst());
     if (!storeStatus.ok()) {

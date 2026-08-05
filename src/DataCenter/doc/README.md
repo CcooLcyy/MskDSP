@@ -89,6 +89,9 @@ DataCenter 对外提供一组面向“连接/连接标签注册表/路由/转发
   - 同步执行命令：DataCenter 按源端点路由解析出唯一目的端点，并调用目标模块实现的 `CommandExecutor.ExecuteCommand`。
   - 该接口仅用于需要协议级正/负确认的控制命令，不替代 `Publish/Subscribe` 数据转发；没有路由、多路由、目标模块不可达、目标拒绝或超时时，会通过 `status/reject_code/reason` 返回失败原因。
   - 目标模块返回 `COMMAND_ACCEPTED` 时，DataCenter 更新目的命令点最新值缓存；返回 `COMMAND_REJECTED` 时不更新该命令点缓存。
+  - DataCenter 会将上游 gRPC 调用的截止时间与请求 `timeout_ms` 取较早者设置到目标 `CommandExecutor`；上游调用取消或截止时间到达时，会调用目标 RPC 的取消接口并等待其退出，避免目标协议模块继续执行已取消的控制命令。
+  - 上游调用已取消/超过截止时间时，DataCenter 直接返回对应的 gRPC `CANCELLED`/`DEADLINE_EXCEEDED` 状态，不把该次调用误记为已确认成功。
+  - 路由解析期间或路由返回无目标/多目标结果后若上游已取消或超时，也直接返回对应的 gRPC 状态，不返回过期的路由业务结果。
 - `GetLatest(GetLatestRequest) -> GetLatestResponse`
   - 拉取目的连接内的最新值（best-effort，仅最新值，不含历史）；`tags` 为空表示拉取该连接全部已缓存点。
 - `GetSourceLatest(GetSourceLatestRequest) -> GetSourceLatestResponse`
