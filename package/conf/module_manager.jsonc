@@ -1,0 +1,16 @@
+{
+  // 默认使用 UPPER 模式：由上位机或持久化配置负责业务配置下发。
+  // 若改为 CONFIG_PUSHER，启动时会读取 conf/configPusher 下的目标态模板。
+  "boot_config_mode": "UPPER",
+  // 默认启动全部业务模块服务；模块内链路、控制组和计算组仍由有效配置决定。
+  "auto_start_modules": [
+    "DataCenter",
+    "MQTTManager",
+    "IEC104",
+    "ModbusRTU",
+    "DLT645",
+    "AGC",
+    "AVC",
+    "Calc"
+  ]
+}
