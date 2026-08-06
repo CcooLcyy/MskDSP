@@ -815,7 +815,7 @@ grpc::Status DataCenterGrpcServiceImpl::Publish(grpc::ServerContext*, const Data
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求为空");
   }
 
-  LOG_INFO("DataCenter 收到点值发布: src_conn_id={}, src_tag={}, {}, 质量={}({}), 请求时间戳={}",
+  LOG_DEBUG("DataCenter 收到点值发布: src_conn_id={}, src_tag={}, {}, 质量={}({}), 请求时间戳={}",
            request->conn_id(), request->tag(), formatPointValue(request->value()),
            static_cast<int>(request->quality()), qualityToString(request->quality()), request->ts_ms());
 
@@ -834,7 +834,7 @@ grpc::Status DataCenterGrpcServiceImpl::Publish(grpc::ServerContext*, const Data
     }
     updateCount = updates.size();
     if (updateCount == 0) {
-      LOG_INFO("DataCenter 点值发布未匹配路由: src_conn_id={}, src_tag={}, {}, 质量={}({}), 请求时间戳={}",
+      LOG_DEBUG("DataCenter 点值发布未匹配路由: src_conn_id={}, src_tag={}, {}, 质量={}({}), 请求时间戳={}",
                request->conn_id(), request->tag(), formatPointValue(request->value()),
                static_cast<int>(request->quality()), qualityToString(request->quality()), request->ts_ms());
     }
@@ -842,13 +842,13 @@ grpc::Status DataCenterGrpcServiceImpl::Publish(grpc::ServerContext*, const Data
     for (const auto& update : updates) {
       auto subs = impl_->matchSubscribersLocked(update.dst_conn_id(), update.dst_tag());
       if (subs.empty()) {
-        LOG_INFO("DataCenter 点值已路由但无订阅者: src_conn_id={}, src_tag={}, dst_conn_id={}, dst_tag={}, {}, 质量={}({}), 时间戳={}",
+        LOG_DEBUG("DataCenter 点值已路由但无订阅者: src_conn_id={}, src_tag={}, dst_conn_id={}, dst_tag={}, {}, 质量={}({}), 时间戳={}",
                  update.src_conn_id(), update.src_tag(), update.dst_conn_id(), update.dst_tag(),
                  formatPointValue(update.value()), static_cast<int>(update.quality()),
                  qualityToString(update.quality()), update.ts_ms());
         continue;
       }
-      LOG_INFO("DataCenter 点值转发: src_conn_id={}, src_tag={}, dst_conn_id={}, dst_tag={}, {}, 质量={}({}), 时间戳={}, 订阅者数={}",
+      LOG_DEBUG("DataCenter 点值转发: src_conn_id={}, src_tag={}, dst_conn_id={}, dst_tag={}, {}, 质量={}({}), 时间戳={}, 订阅者数={}",
                update.src_conn_id(), update.src_tag(), update.dst_conn_id(), update.dst_tag(),
                formatPointValue(update.value()), static_cast<int>(update.quality()),
                qualityToString(update.quality()), update.ts_ms(), subs.size());
@@ -1063,7 +1063,7 @@ grpc::Status DataCenterGrpcServiceImpl::BatchPublish(grpc::ServerContext*, const
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求为空");
   }
 
-  LOG_INFO("DataCenter 收到批量点值发布: 点数={}", request->points_size());
+  LOG_DEBUG("DataCenter 收到批量点值发布: 点数={}", request->points_size());
 
   struct SrcKey {
     uint32_t connId{};
@@ -1096,13 +1096,13 @@ grpc::Status DataCenterGrpcServiceImpl::BatchPublish(grpc::ServerContext*, const
       ++updateCountBySrc[SrcKey{update.src_conn_id(), update.src_tag()}];
       auto subs = impl_->matchSubscribersLocked(update.dst_conn_id(), update.dst_tag());
       if (subs.empty()) {
-        LOG_INFO("DataCenter 点值已路由但无订阅者: src_conn_id={}, src_tag={}, dst_conn_id={}, dst_tag={}, {}, 质量={}({}), 时间戳={}",
+        LOG_DEBUG("DataCenter 点值已路由但无订阅者: src_conn_id={}, src_tag={}, dst_conn_id={}, dst_tag={}, {}, 质量={}({}), 时间戳={}",
                  update.src_conn_id(), update.src_tag(), update.dst_conn_id(), update.dst_tag(),
                  formatPointValue(update.value()), static_cast<int>(update.quality()),
                  qualityToString(update.quality()), update.ts_ms());
         continue;
       }
-      LOG_INFO("DataCenter 点值转发: src_conn_id={}, src_tag={}, dst_conn_id={}, dst_tag={}, {}, 质量={}({}), 时间戳={}, 订阅者数={}",
+      LOG_DEBUG("DataCenter 点值转发: src_conn_id={}, src_tag={}, dst_conn_id={}, dst_tag={}, {}, 质量={}({}), 时间戳={}, 订阅者数={}",
                update.src_conn_id(), update.src_tag(), update.dst_conn_id(), update.dst_tag(),
                formatPointValue(update.value()), static_cast<int>(update.quality()),
                qualityToString(update.quality()), update.ts_ms(), subs.size());
@@ -1115,7 +1115,7 @@ grpc::Status DataCenterGrpcServiceImpl::BatchPublish(grpc::ServerContext*, const
     SrcKey key{point.conn_id(), point.tag()};
     if (!updateCountBySrc.contains(key)) {
       ++noRouteCount;
-      LOG_INFO("DataCenter 点值发布未匹配路由: src_conn_id={}, src_tag={}, {}, 质量={}({}), 请求时间戳={}",
+      LOG_DEBUG("DataCenter 点值发布未匹配路由: src_conn_id={}, src_tag={}, {}, 质量={}({}), 请求时间戳={}",
                point.conn_id(), point.tag(), formatPointValue(point.value()),
                static_cast<int>(point.quality()), qualityToString(point.quality()), point.ts_ms());
     }
