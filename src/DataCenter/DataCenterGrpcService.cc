@@ -30,8 +30,6 @@
 
 namespace DataCenter {
 namespace {
-constexpr const char* kProtocolShadowModuleName = "MskDSPUpper";
-constexpr const char* kProtocolShadowConnName = "__protocol_shadow__";
 constexpr size_t kRouteSampleLimit = 3;
 constexpr uint64_t kFnvOffset = 14695981039346656037ull;
 constexpr uint64_t kFnvPrime = 1099511628211ull;
@@ -113,14 +111,6 @@ std::string buildModuleUnixSocketAddress(const std::string& moduleName) {
   return "unix:" + sockPath.string();
 }
 
-bool isProtocolShadowEndpoint(const DataCenterProto::Endpoint& endpoint) {
-  return endpoint.module_name() == kProtocolShadowModuleName && endpoint.conn_name() == kProtocolShadowConnName;
-}
-
-bool isProtocolShadowRoute(const DataCenterProto::Route& route) {
-  return isProtocolShadowEndpoint(route.src()) || isProtocolShadowEndpoint(route.dst());
-}
-
 void appendHash(uint64_t* hash, const std::string& value) {
   if (hash == nullptr) {
     return;
@@ -169,7 +159,6 @@ void appendRouteHash(uint64_t* hash, const DataCenterProto::Route& route) {
 
 struct RouteSummary {
   int total{0};
-  int shadow{0};
   int business{0};
   std::string hash;
   std::string sample;
@@ -183,9 +172,6 @@ RouteSummary summarizeRoutes(const Routes& routes) {
   std::ostringstream sample;
   int index = 0;
   for (const auto& route : routes) {
-    if (isProtocolShadowRoute(route)) {
-      ++summary.shadow;
-    }
     appendRouteHash(&hash, route);
     if (index < static_cast<int>(kRouteSampleLimit)) {
       if (index > 0) {
@@ -195,7 +181,7 @@ RouteSummary summarizeRoutes(const Routes& routes) {
     }
     ++index;
   }
-  summary.business = summary.total - summary.shadow;
+  summary.business = summary.total;
   summary.hash = formatHash(hash);
   if (summary.total == 0) {
     summary.sample = "空";
@@ -307,25 +293,24 @@ bool containsTraceWarning(const std::string& message) {
 
 void logStateStoreTrace(const std::string& source, const RouteSummary& summary, const std::string& message) {
   if (containsTraceWarning(message)) {
-    LOG_WARNING("DataCenter 状态持久化详细流程: 来源={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, {}",
-                source, summary.total, summary.shadow, summary.business, summary.hash, message);
+    LOG_WARNING("DataCenter 状态持久化详细流程: 来源={}, routes_size={}, 业务路由数={}, 路由hash={}, {}",
+                source, summary.total, summary.business, summary.hash, message);
     return;
   }
-  LOG_INFO("DataCenter 状态持久化详细流程: 来源={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, {}",
-           source, summary.total, summary.shadow, summary.business, summary.hash, message);
+  LOG_INFO("DataCenter 状态持久化详细流程: 来源={}, routes_size={}, 业务路由数={}, 路由hash={}, {}",
+           source, summary.total, summary.business, summary.hash, message);
 }
 
 void logStateStoreFiles(const char* phase, const DataCenterStateStore& stateStore, const RouteSummary& summary, const std::string& source = {}) {
   const auto databaseFile = inspectRouteFileState(stateStore.databasePath());
-  LOG_INFO("DataCenter 状态持久化数据库状态: 阶段={}, 来源={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 数据库路径={}, 数据库存在={}, 数据库大小={}, 数据库修改时间ticks={}, 数据库hash={}, 数据库状态错误={}",
-           phase, source, summary.total, summary.shadow, summary.business, summary.hash,
+  LOG_INFO("DataCenter 状态持久化数据库状态: 阶段={}, 来源={}, routes_size={}, 业务路由数={}, 路由hash={}, 数据库路径={}, 数据库存在={}, 数据库大小={}, 数据库修改时间ticks={}, 数据库hash={}, 数据库状态错误={}",
+           phase, source, summary.total, summary.business, summary.hash,
            databaseFile.path, databaseFile.exists, databaseFile.size, databaseFile.writeTimeTicks, databaseFile.hash, databaseFile.error);
 }
 
 RouteSummary unknownRouteSummary() {
   RouteSummary summary;
   summary.total = -1;
-  summary.shadow = -1;
   summary.business = -1;
   summary.hash = "未知";
   summary.sample = "未知";
@@ -462,11 +447,11 @@ struct DataCenterGrpcServiceImpl::Impl {
   grpc::Status saveStateLocked(const std::string& source) {
     auto state = dumpStateLocked();
     const auto summary = summarizeRoutes(state.routes().routes());
-    LOG_INFO("DataCenter 准备保存完整状态: 来源={}, connections={}, conn_tags={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 路由样本={}",
+    LOG_INFO("DataCenter 准备保存完整状态: 来源={}, connections={}, conn_tags={}, routes_size={}, 业务路由数={}, 路由hash={}, 路由样本={}",
              source, state.connections().conns_size(), state.conn_tags().conn_tags_size(),
-             summary.total, summary.shadow, summary.business, summary.hash, summary.sample);
+             summary.total, summary.business, summary.hash, summary.sample);
     if (summary.total == 0) {
-      LOG_WARNING("DataCenter 准备保存完整状态且路由为空: 来源={}, connections={}, conn_tags={}, routes_size=0, 影子路由数=0, 业务路由数=0, 路由hash={}",
+      LOG_WARNING("DataCenter 准备保存完整状态且路由为空: 来源={}, connections={}, conn_tags={}, routes_size=0, 业务路由数=0, 路由hash={}",
                   source, state.connections().conns_size(), state.conn_tags().conn_tags_size(), summary.hash);
     }
     logStateStoreFiles("状态落盘前", stateStore, summary, source);
@@ -474,17 +459,17 @@ struct DataCenterGrpcServiceImpl::Impl {
       logStateStoreTrace(source, summary, message);
     });
     if (!status.ok()) {
-      LOG_ERROR("DataCenter 完整状态落盘失败: 来源={}, connections={}, conn_tags={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 原因={}",
+      LOG_ERROR("DataCenter 完整状态落盘失败: 来源={}, connections={}, conn_tags={}, routes_size={}, 业务路由数={}, 路由hash={}, 原因={}",
                 source, state.connections().conns_size(), state.conn_tags().conn_tags_size(),
-                summary.total, summary.shadow, summary.business, summary.hash, status.error_message());
+                summary.total, summary.business, summary.hash, status.error_message());
       logStateStoreFiles("状态落盘失败后", stateStore, summary, source);
     } else {
       logStateStoreFiles("状态落盘后", stateStore, summary, source);
       const auto databaseFile = inspectRouteFileState(stateStore.databasePath());
       if (isExistingFileWithSize(databaseFile, 0)) {
-        LOG_WARNING("DataCenter 完整状态落盘后数据库文件大小为0: 来源={}, connections={}, conn_tags={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 数据库路径={}",
+        LOG_WARNING("DataCenter 完整状态落盘后数据库文件大小为0: 来源={}, connections={}, conn_tags={}, routes_size={}, 业务路由数={}, 路由hash={}, 数据库路径={}",
                     source, state.connections().conns_size(), state.conn_tags().conn_tags_size(),
-                    summary.total, summary.shadow, summary.business, summary.hash, databaseFile.path);
+                    summary.total, summary.business, summary.hash, databaseFile.path);
       }
     }
     return status;
@@ -532,9 +517,9 @@ DataCenterGrpcServiceImpl::DataCenterGrpcServiceImpl() :
     LOG_WARNING("DataCenter 完整状态中的路由为空: connections={}, conn_tags={}, routes_size=0, 路由hash={}",
                 state.connections().conns_size(), state.conn_tags().conn_tags_size(), summary.hash);
   }
-  LOG_INFO("DataCenter 已加载完整状态: connections={}, conn_tags={}, routes_size={}, 影子路由数={}, 业务路由数={}, 路由hash={}, 路由样本={}",
+  LOG_INFO("DataCenter 已加载完整状态: connections={}, conn_tags={}, routes_size={}, 业务路由数={}, 路由hash={}, 路由样本={}",
            state.connections().conns_size(), state.conn_tags().conn_tags_size(),
-           summary.total, summary.shadow, summary.business, summary.hash, summary.sample);
+           summary.total, summary.business, summary.hash, summary.sample);
 }
 DataCenterGrpcServiceImpl::~DataCenterGrpcServiceImpl() = default;
 
@@ -636,9 +621,9 @@ grpc::Status DataCenterGrpcServiceImpl::DeleteConnection(grpc::ServerContext* co
 
   std::lock_guard<std::mutex> lock(impl_->mu);
   const auto beforeSummary = summarizeRoutes(impl_->core.DumpRoutesConfig().routes());
-  LOG_INFO("DataCenter 收到删除连接请求: 调用方={}, module_name={}, conn_name={}, 写入前总路由数={}, 写入前影子路由数={}, 写入前业务路由数={}, 写入前路由hash={}",
+  LOG_INFO("DataCenter 收到删除连接请求: 调用方={}, module_name={}, conn_name={}, 写入前总路由数={}, 写入前业务路由数={}, 写入前路由hash={}",
            peer, request->key().module_name(), request->key().conn_name(),
-           beforeSummary.total, beforeSummary.shadow, beforeSummary.business, beforeSummary.hash);
+           beforeSummary.total, beforeSummary.business, beforeSummary.hash);
 
   DataCenterProto::ConnectionInfo conn;
   auto status = impl_->core.GetConnectionByKey(request->key(), &conn);
@@ -668,14 +653,14 @@ grpc::Status DataCenterGrpcServiceImpl::DeleteConnection(grpc::ServerContext* co
 
   const auto afterSummary = summarizeRoutes(impl_->core.DumpRoutesConfig().routes());
   if (beforeSummary.total > 0 && afterSummary.total == 0) {
-    LOG_WARNING("DataCenter 删除连接后路由被清空: 调用方={}, module_name={}, conn_name={}, conn_id={}, 写入前总路由数={}, 写入后总路由数={}, 写入前影子路由数={}, 写入后影子路由数={}, 写入前业务路由数={}, 写入后业务路由数={}, 写入前路由hash={}, 写入后路由hash={}",
+    LOG_WARNING("DataCenter 删除连接后路由被清空: 调用方={}, module_name={}, conn_name={}, conn_id={}, 写入前总路由数={}, 写入后总路由数={}, 写入前业务路由数={}, 写入后业务路由数={}, 写入前路由hash={}, 写入后路由hash={}",
                 peer, conn.module_name(), conn.conn_name(), conn.conn_id(),
-                beforeSummary.total, afterSummary.total, beforeSummary.shadow, afterSummary.shadow,
+                beforeSummary.total, afterSummary.total,
                 beforeSummary.business, afterSummary.business, beforeSummary.hash, afterSummary.hash);
   }
-  LOG_INFO("DataCenter 已删除连接: 调用方={}, module_name={}, conn_name={}, conn_id={}, 写入前总路由数={}, 删除后总路由数={}, 写入前影子路由数={}, 删除后影子路由数={}, 写入前业务路由数={}, 删除后业务路由数={}, 写入前路由hash={}, 删除后路由hash={}",
+  LOG_INFO("DataCenter 已删除连接: 调用方={}, module_name={}, conn_name={}, conn_id={}, 写入前总路由数={}, 删除后总路由数={}, 写入前业务路由数={}, 删除后业务路由数={}, 写入前路由hash={}, 删除后路由hash={}",
            peer, conn.module_name(), conn.conn_name(), conn.conn_id(),
-           beforeSummary.total, afterSummary.total, beforeSummary.shadow, afterSummary.shadow,
+           beforeSummary.total, afterSummary.total,
            beforeSummary.business, afterSummary.business, beforeSummary.hash, afterSummary.hash);
   return grpc::Status::OK;
 }
@@ -723,13 +708,13 @@ grpc::Status DataCenterGrpcServiceImpl::UpsertRoutes(grpc::ServerContext* contex
   std::lock_guard<std::mutex> lock(impl_->mu);
   const auto requestSummary = summarizeRoutes(request->routes());
   const auto beforeSummary = summarizeRoutes(impl_->core.DumpRoutesConfig().routes());
-  LOG_INFO("DataCenter 收到更新路由请求: 调用方={}, routes={}, replace={}, 请求影子路由数={}, 请求业务路由数={}, 请求路由hash={}, 请求路由样本={}, 写入前总路由数={}, 写入前影子路由数={}, 写入前业务路由数={}, 写入前路由hash={}",
+  LOG_INFO("DataCenter 收到更新路由请求: 调用方={}, routes={}, replace={}, 请求业务路由数={}, 请求路由hash={}, 请求路由样本={}, 写入前总路由数={}, 写入前业务路由数={}, 写入前路由hash={}",
            peer, requestSummary.total, request->replace(),
-           requestSummary.shadow, requestSummary.business, requestSummary.hash, requestSummary.sample,
-           beforeSummary.total, beforeSummary.shadow, beforeSummary.business, beforeSummary.hash);
+           requestSummary.business, requestSummary.hash, requestSummary.sample,
+           beforeSummary.total, beforeSummary.business, beforeSummary.hash);
   if (request->replace() && request->routes_size() == 0) {
-    LOG_WARNING("DataCenter 收到清空全部路由请求: 调用方={}, routes=0, replace=true, 写入前总路由数={}, 写入前影子路由数={}, 写入前业务路由数={}, 写入前路由hash={}",
-                peer, beforeSummary.total, beforeSummary.shadow, beforeSummary.business, beforeSummary.hash);
+    LOG_WARNING("DataCenter 收到清空全部路由请求: 调用方={}, routes=0, replace=true, 写入前总路由数={}, 写入前业务路由数={}, 写入前路由hash={}",
+                peer, beforeSummary.total, beforeSummary.business, beforeSummary.hash);
   }
   auto status = impl_->core.UpsertRoutes(*request);
   if (!status.ok()) {
@@ -746,15 +731,15 @@ grpc::Status DataCenterGrpcServiceImpl::UpsertRoutes(grpc::ServerContext* contex
   }
   const auto afterSummary = summarizeRoutes(impl_->core.DumpRoutesConfig().routes());
   if (beforeSummary.total > 0 && afterSummary.total == 0) {
-    LOG_WARNING("DataCenter 更新路由后路由被清空: 调用方={}, routes={}, replace={}, 请求路由hash={}, 写入前总路由数={}, 写入后总路由数={}, 写入前影子路由数={}, 写入后影子路由数={}, 写入前业务路由数={}, 写入后业务路由数={}, 写入前路由hash={}, 写入后路由hash={}",
+    LOG_WARNING("DataCenter 更新路由后路由被清空: 调用方={}, routes={}, replace={}, 请求路由hash={}, 写入前总路由数={}, 写入后总路由数={}, 写入前业务路由数={}, 写入后业务路由数={}, 写入前路由hash={}, 写入后路由hash={}",
                 peer, requestSummary.total, request->replace(), requestSummary.hash,
-                beforeSummary.total, afterSummary.total, beforeSummary.shadow, afterSummary.shadow,
+                beforeSummary.total, afterSummary.total,
                 beforeSummary.business, afterSummary.business, beforeSummary.hash, afterSummary.hash);
   }
-  LOG_INFO("DataCenter 已更新路由并按稳定连接主键归一化: 调用方={}, routes={}, replace={}, 请求影子路由数={}, 请求业务路由数={}, 请求路由hash={}, 写入前总路由数={}, 写入后总路由数={}, 写入前影子路由数={}, 写入后影子路由数={}, 写入前业务路由数={}, 写入后业务路由数={}, 写入前路由hash={}, 写入后路由hash={}",
+  LOG_INFO("DataCenter 已更新路由并按稳定连接主键归一化: 调用方={}, routes={}, replace={}, 请求业务路由数={}, 请求路由hash={}, 写入前总路由数={}, 写入后总路由数={}, 写入前业务路由数={}, 写入后业务路由数={}, 写入前路由hash={}, 写入后路由hash={}",
            peer, requestSummary.total, request->replace(),
-           requestSummary.shadow, requestSummary.business, requestSummary.hash,
-           beforeSummary.total, afterSummary.total, beforeSummary.shadow, afterSummary.shadow,
+           requestSummary.business, requestSummary.hash,
+           beforeSummary.total, afterSummary.total,
            beforeSummary.business, afterSummary.business, beforeSummary.hash, afterSummary.hash);
   return grpc::Status::OK;
 }
@@ -768,10 +753,10 @@ grpc::Status DataCenterGrpcServiceImpl::DeleteRoutes(grpc::ServerContext* contex
   std::lock_guard<std::mutex> lock(impl_->mu);
   const auto requestSummary = summarizeRoutes(request->routes());
   const auto beforeSummary = summarizeRoutes(impl_->core.DumpRoutesConfig().routes());
-  LOG_INFO("DataCenter 收到删除路由请求: 调用方={}, routes={}, 请求影子路由数={}, 请求业务路由数={}, 请求路由hash={}, 请求路由样本={}, 写入前总路由数={}, 写入前影子路由数={}, 写入前业务路由数={}, 写入前路由hash={}",
+  LOG_INFO("DataCenter 收到删除路由请求: 调用方={}, routes={}, 请求业务路由数={}, 请求路由hash={}, 请求路由样本={}, 写入前总路由数={}, 写入前业务路由数={}, 写入前路由hash={}",
            peer, requestSummary.total,
-           requestSummary.shadow, requestSummary.business, requestSummary.hash, requestSummary.sample,
-           beforeSummary.total, beforeSummary.shadow, beforeSummary.business, beforeSummary.hash);
+           requestSummary.business, requestSummary.hash, requestSummary.sample,
+           beforeSummary.total, beforeSummary.business, beforeSummary.hash);
   auto status = impl_->core.DeleteRoutes(*request);
   if (!status.ok()) {
     LOG_ERROR("DataCenter 删除路由失败: 调用方={}, routes={}, 原因={}",
@@ -786,15 +771,15 @@ grpc::Status DataCenterGrpcServiceImpl::DeleteRoutes(grpc::ServerContext* contex
   }
   const auto afterSummary = summarizeRoutes(impl_->core.DumpRoutesConfig().routes());
   if (beforeSummary.total > 0 && afterSummary.total == 0) {
-    LOG_WARNING("DataCenter 删除路由后路由被清空: 调用方={}, routes={}, 请求路由hash={}, 写入前总路由数={}, 写入后总路由数={}, 写入前影子路由数={}, 写入后影子路由数={}, 写入前业务路由数={}, 写入后业务路由数={}, 写入前路由hash={}, 写入后路由hash={}",
+    LOG_WARNING("DataCenter 删除路由后路由被清空: 调用方={}, routes={}, 请求路由hash={}, 写入前总路由数={}, 写入后总路由数={}, 写入前业务路由数={}, 写入后业务路由数={}, 写入前路由hash={}, 写入后路由hash={}",
                 peer, requestSummary.total, requestSummary.hash,
-                beforeSummary.total, afterSummary.total, beforeSummary.shadow, afterSummary.shadow,
+                beforeSummary.total, afterSummary.total,
                 beforeSummary.business, afterSummary.business, beforeSummary.hash, afterSummary.hash);
   }
-  LOG_INFO("DataCenter 已删除稳定连接主键匹配的路由: 调用方={}, routes={}, 请求影子路由数={}, 请求业务路由数={}, 请求路由hash={}, 写入前总路由数={}, 写入后总路由数={}, 写入前影子路由数={}, 写入后影子路由数={}, 写入前业务路由数={}, 写入后业务路由数={}, 写入前路由hash={}, 写入后路由hash={}",
+  LOG_INFO("DataCenter 已删除稳定连接主键匹配的路由: 调用方={}, routes={}, 请求业务路由数={}, 请求路由hash={}, 写入前总路由数={}, 写入后总路由数={}, 写入前业务路由数={}, 写入后业务路由数={}, 写入前路由hash={}, 写入后路由hash={}",
            peer, requestSummary.total,
-           requestSummary.shadow, requestSummary.business, requestSummary.hash,
-           beforeSummary.total, afterSummary.total, beforeSummary.shadow, afterSummary.shadow,
+           requestSummary.business, requestSummary.hash,
+           beforeSummary.total, afterSummary.total,
            beforeSummary.business, afterSummary.business, beforeSummary.hash, afterSummary.hash);
   return grpc::Status::OK;
 }

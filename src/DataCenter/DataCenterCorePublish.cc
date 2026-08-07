@@ -6,8 +6,6 @@
 #include <utility>
 #include <vector>
 
-#include "Logger.h"
-
 namespace DataCenter {
 int64_t DataCenterCore::nowMs() {
   auto now = std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now());
@@ -210,17 +208,8 @@ grpc::Status DataCenterCore::ResolveCommandRoute(
   }
   std::vector<const StableEndpointKey *> businessDsts;
   businessDsts.reserve(it->second.size());
-  size_t shadowRouteCount = 0;
   for (const auto &dst : it->second) {
-    if (dst.moduleName == "MskDSPUpper" && dst.connName == "__protocol_shadow__") {
-      ++shadowRouteCount;
-      continue;
-    }
     businessDsts.emplace_back(&dst);
-  }
-  if (shadowRouteCount > 0) {
-    LOG_INFO("DataCenter 同步命令路由解析已忽略上位机影子路由: src_module={}, src_conn={}, src_tag={}, 影子路由数={}, 业务路由数={}",
-             src.moduleName, src.connName, src.tag, shadowRouteCount, businessDsts.size());
   }
   if (businessDsts.empty()) {
     out->set_status(DataCenterProto::COMMAND_NO_ROUTE);

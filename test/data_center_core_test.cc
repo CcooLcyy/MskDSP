@@ -362,15 +362,15 @@ TEST(DataCenterCoreTest, PublishRoutesOneToMany) {
   EXPECT_EQ(dsts[1], (std::pair<uint32_t, std::string>{3u, "功率"}));
 }
 
-// 验证：同步命令解析会忽略上位机影子监控路由，只用唯一业务目的端形成协议确认。
-TEST(DataCenterCoreTest, ResolveCommandRouteIgnoresProtocolShadowDestination) {
+// 验证：同步命令匹配到多个正常业务目的端时必须拒绝歧义，不再特殊处理任何目的模块。
+TEST(DataCenterCoreTest, ResolveCommandRouteRejectsMultipleBusinessDestinations) {
   DataCenterCore core;
 
   DataCenterProto::ConnectionsConfig cfg;
   cfg.set_next_conn_id(4);
   *cfg.add_conns() = MakeConnInfo(1, "IEC104", "104主站");
   *cfg.add_conns() = MakeConnInfo(2, "AGC", "AGC");
-  *cfg.add_conns() = MakeConnInfo(3, "MskDSPUpper", "__protocol_shadow__");
+  *cfg.add_conns() = MakeConnInfo(3, "AVC", "AVC");
   ASSERT_TRUE(core.ReplaceConnectionsConfig(cfg).ok());
 
   DataCenterProto::UpsertRoutesRequest routes;
@@ -378,7 +378,7 @@ TEST(DataCenterCoreTest, ResolveCommandRouteIgnoresProtocolShadowDestination) {
   *routes.add_routes() = MakeStableRoute(1, "IEC104", "104主站", "AGC_AGC_AGC总控点",
                                          2, "AGC", "AGC", "AGC总控点");
   *routes.add_routes() = MakeStableRoute(1, "IEC104", "104主站", "AGC_AGC_AGC总控点",
-                                         3, "MskDSPUpper", "__protocol_shadow__", "conn_1::AGC_AGC_AGC总控点");
+                                         3, "AVC", "AVC", "AVC总控点");
   ASSERT_TRUE(core.UpsertRoutes(routes).ok());
 
   DataCenterProto::ExecuteCommandRequest req;
@@ -389,12 +389,8 @@ TEST(DataCenterCoreTest, ResolveCommandRouteIgnoresProtocolShadowDestination) {
 
   DataCenterProto::ExecuteCommandResponse resp;
   ASSERT_TRUE(core.ResolveCommandRoute(req, &resp).ok());
-  EXPECT_EQ(resp.status(), DataCenterProto::COMMAND_STATUS_UNSPECIFIED);
-  EXPECT_EQ(resp.dst().conn_id(), 2u);
-  EXPECT_EQ(resp.dst().module_name(), "AGC");
-  EXPECT_EQ(resp.dst().conn_name(), "AGC");
-  EXPECT_EQ(resp.dst().tag(), "AGC总控点");
-  EXPECT_DOUBLE_EQ(resp.requested_value(), 500.0);
+  EXPECT_EQ(resp.status(), DataCenterProto::COMMAND_AMBIGUOUS_ROUTE);
+  EXPECT_TRUE(resp.dst().module_name().empty());
 }
 
 // 验证：GetLatest 返回目标连接内“按目的端点”最新一次路由后的值（按 dst_tag 排序）。
