@@ -12,6 +12,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 
@@ -244,6 +245,21 @@ MQTTManagerProto::RequestAndWaitRequest MakeRequestAndWaitRequest(const std::str
   req.set_payload(payload);
   return req;
 }
+
+bool WaitForLogContains(const std::string &path, const std::string &text,
+                        std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  do {
+    std::ifstream logFile(path, std::ios::binary);
+    std::ostringstream logContent;
+    logContent << logFile.rdbuf();
+    if (logContent.str().find(text) != std::string::npos) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  } while (std::chrono::steady_clock::now() < deadline);
+  return false;
+}
 }  // namespace
 
 // 验证主题过滤匹配支持 + 与 # 通配符。
@@ -453,12 +469,10 @@ TEST(MqttManagerReconnectTest, RequestAndWaitRestoresSubscriptionAfterPublishRec
   ASSERT_TRUE(fakeState->WaitForConnectCount(1, std::chrono::milliseconds(200)));
   ASSERT_TRUE(fakeState->WaitForSubscribeCount(1, std::chrono::milliseconds(200)));
 
-  std::ifstream logFile("log/MQTTManager/MQTTManager.log", std::ios::binary);
-  std::ostringstream logContent;
-  logContent << logFile.rdbuf();
-  const auto content = logContent.str();
-  EXPECT_NE(content.find("[MQTTManager]"), std::string::npos);
-  EXPECT_NE(content.find("MQTTManager 响应匹配成功"), std::string::npos);
+  const std::string mqttLogPath = "log/MQTTManager/MQTTManager.log";
+  EXPECT_TRUE(WaitForLogContains(mqttLogPath, "[MQTTManager]", std::chrono::milliseconds(500)));
+  EXPECT_TRUE(WaitForLogContains(mqttLogPath, "MQTTManager 响应匹配成功",
+                                 std::chrono::milliseconds(500)));
 
   fakeState->ForceDisconnect();
 
