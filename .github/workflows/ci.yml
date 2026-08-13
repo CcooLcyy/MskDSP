@@ -482,6 +482,17 @@ jobs:
             --source-ref "${{ github.ref_name }}" \
             --source-sha "${SOURCE_SHA}"
 
+      - name: 上传 arm64 测试安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.archive_name }}
+          path: |
+            images/${{ steps.meta.outputs.archive_name }}
+            ${{ steps.meta.outputs.debug_archive_name }}.tar.gz
+            SHA256SUMS
+            latest.json
+          if-no-files-found: ignore
+
       - name: 同步 CI 静态更新源
         shell: bash
         env:
@@ -499,14 +510,3 @@ jobs:
             --ssh-port "${STATIC_UPDATE_SSH_PORT}" \
             --ssh-user "${STATIC_UPDATE_SSH_USER}" \
             --remote-root "${STATIC_UPDATE_REMOTE_ROOT}"
-
-      - name: 上传 arm64 测试安装包
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.meta.outputs.archive_name }}
-          path: |
-            images/${{ steps.meta.outputs.archive_name }}
-            ${{ steps.meta.outputs.debug_archive_name }}.tar.gz
-            SHA256SUMS
-            latest.json
-          if-no-files-found: ignore
