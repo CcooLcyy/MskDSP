@@ -21,6 +21,10 @@ public:
   grpc::Status UpsertPointTable(grpc::ServerContext *context, const IEC104Proto::UpsertPointTableRequest *request, IEC104Proto::Empty *) override;
   grpc::Status GetPointTable(grpc::ServerContext *context, const IEC104Proto::GetPointTableRequest *request, IEC104Proto::PointTable *response) override;
   grpc::Status SendTimeSync(grpc::ServerContext *context, const IEC104Proto::SendTimeSyncRequest *request, IEC104Proto::Empty *) override;
+  grpc::Status GenerateSimulationValues(grpc::ServerContext *context, const IEC104Proto::SimulationRequest *request, IEC104Proto::SimulationSnapshot *response) override;
+  grpc::Status GetSimulationSnapshot(grpc::ServerContext *context, const IEC104Proto::SimulationRequest *request, IEC104Proto::SimulationSnapshot *response) override;
+  grpc::Status ApplySimulationValues(grpc::ServerContext *context, const IEC104Proto::SimulationRequest *request, IEC104Proto::Empty *) override;
+  grpc::Status ClearSimulationValues(grpc::ServerContext *context, const IEC104Proto::SimulationRequest *request, IEC104Proto::Empty *) override;
 
 private:
   IEC104 *iec104_{nullptr};

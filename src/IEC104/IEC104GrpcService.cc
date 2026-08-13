@@ -231,4 +231,66 @@ grpc::Status IEC104GrpcServiceImpl::SendTimeSync(
   }
   return status;
 }
+
+grpc::Status IEC104GrpcServiceImpl::GenerateSimulationValues(
+    grpc::ServerContext *, const IEC104Proto::SimulationRequest *request, IEC104Proto::SimulationSnapshot *response) {
+  if (iec104_ == nullptr) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
+  }
+  if (request == nullptr || response == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
+  }
+  auto status = iec104_->linkManager().GenerateSimulationValues(request->conn_name(), response);
+  if (!status.ok()) {
+    LOG_ERROR("IEC104 生成模拟值失败: conn_name={}, 原因={}", request->conn_name(), status.error_message());
+  } else {
+    LOG_INFO("IEC104 生成模拟值成功: conn_name={}, 点数={}", request->conn_name(), response->points_size());
+  }
+  return status;
+}
+
+grpc::Status IEC104GrpcServiceImpl::GetSimulationSnapshot(
+    grpc::ServerContext *, const IEC104Proto::SimulationRequest *request, IEC104Proto::SimulationSnapshot *response) {
+  if (iec104_ == nullptr) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
+  }
+  if (request == nullptr || response == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
+  }
+  return iec104_->linkManager().GetSimulationSnapshot(request->conn_name(), response);
+}
+
+grpc::Status IEC104GrpcServiceImpl::ApplySimulationValues(
+    grpc::ServerContext *, const IEC104Proto::SimulationRequest *request, IEC104Proto::Empty *) {
+  if (iec104_ == nullptr) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
+  }
+  if (request == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求为空");
+  }
+  auto status = iec104_->linkManager().ApplySimulationValues(request->conn_name());
+  if (!status.ok()) {
+    LOG_ERROR("IEC104 应用模拟值失败: conn_name={}, 原因={}", request->conn_name(), status.error_message());
+  } else {
+    LOG_INFO("IEC104 已应用模拟值: conn_name={}", request->conn_name());
+  }
+  return status;
+}
+
+grpc::Status IEC104GrpcServiceImpl::ClearSimulationValues(
+    grpc::ServerContext *, const IEC104Proto::SimulationRequest *request, IEC104Proto::Empty *) {
+  if (iec104_ == nullptr) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
+  }
+  if (request == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求为空");
+  }
+  auto status = iec104_->linkManager().ClearSimulationValues(request->conn_name());
+  if (!status.ok()) {
+    LOG_ERROR("IEC104 清除模拟值失败: conn_name={}, 原因={}", request->conn_name(), status.error_message());
+  } else {
+    LOG_INFO("IEC104 已清除模拟值: conn_name={}", request->conn_name());
+  }
+  return status;
+}
 }  // namespace IEC104

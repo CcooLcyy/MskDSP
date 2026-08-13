@@ -3,6 +3,7 @@
 #include <grpcpp/client_context.h>
 #include <grpcpp/support/status.h>
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -45,6 +46,10 @@ public:
 
   grpc::Status UpsertPointTable(const IEC104Proto::UpsertPointTableRequest &request);
   grpc::Status GetPointTable(const std::string &connName, IEC104Proto::PointTable *out) const;
+  grpc::Status GenerateSimulationValues(const std::string &connName, IEC104Proto::SimulationSnapshot *out);
+  grpc::Status GetSimulationSnapshot(const std::string &connName, IEC104Proto::SimulationSnapshot *out) const;
+  grpc::Status ApplySimulationValues(const std::string &connName);
+  grpc::Status ClearSimulationValues(const std::string &connName);
 
 private:
   friend class IEC104LinkManagerTestPeer;
@@ -66,6 +71,8 @@ private:
     PointTable pointTable;
     bool pointTableConfigured = false;
     std::unordered_map<std::string, double> lastReportedByTag;
+    std::unordered_map<std::string, IEC104Proto::SimulationPoint> simulationValues;
+    std::shared_ptr<std::atomic_bool> simulationEnabled = std::make_shared<std::atomic_bool>(false);
 
     std::unique_ptr<TcpLink> transport;
 
@@ -114,6 +121,7 @@ private:
   CommandResult handleCommandValue(const std::string &connName, const CommandValue &cv);
   grpc::Status handleTimeSyncCommand(const std::string &connName, int64_t tsMs);
   std::vector<PointValue> buildInterrogationSnapshot(const std::string &connName);
+  grpc::Status fillSimulationSnapshotLocked(const LinkRuntime &link, IEC104Proto::SimulationSnapshot *out) const;
 
   static std::string normalizeTimeSyncTag(const IEC104Proto::LinkConfig &config);
 

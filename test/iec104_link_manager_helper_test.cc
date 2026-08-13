@@ -366,3 +366,97 @@ TEST(IEC104LinkManagerHelperTest, BuildInterrogationSnapshotBuildsValues) {
   auto snapshot = mgr.buildInterrogationSnapshot("conn");
   EXPECT_FALSE(snapshot.empty());
 }
+
+// 验证：无 DataCenter Route 时可生成固定随机模拟值，并且重复查询不会改变快照。
+TEST(IEC104LinkManagerHelperTest, GeneratesAndKeepsSimulationValuesWithoutRoute) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+  LinkManager::LinkRuntime runtime;
+  runtime.config = MakeClientConfig("sim", IEC104Proto::STATION_ROLE_SLAVE);
+  runtime.config.set_role(IEC104Proto::ROLE_SERVER);
+  runtime.pointTable = MakePointTable();
+  runtime.pointTableConfigured = true;
+  mgr.linksByName_.emplace("sim", std::move(runtime));
+
+  IEC104Proto::SimulationSnapshot generated;
+  ASSERT_TRUE(mgr.GenerateSimulationValues("sim", &generated).ok());
+  ASSERT_EQ(generated.points_size(), 3);
+
+  IEC104Proto::SimulationSnapshot loaded;
+  ASSERT_TRUE(mgr.GetSimulationSnapshot("sim", &loaded).ok());
+  EXPECT_EQ(loaded.SerializeAsString(), generated.SerializeAsString());
+}
+
+// 验证：模拟接口拒绝主站或客户端链路。
+TEST(IEC104LinkManagerHelperTest, SimulationValuesRejectNonSlaveServer) {
+  LinkManager mgr("IEC104");
+  LinkManager::LinkRuntime runtime;
+  runtime.config = MakeClientConfig("master", IEC104Proto::STATION_ROLE_MASTER);
+  runtime.pointTable = MakePointTable();
+  runtime.pointTableConfigured = true;
+  mgr.linksByName_.emplace("master", std::move(runtime));
+
+  IEC104Proto::SimulationSnapshot response;
+  auto st = mgr.GenerateSimulationValues("master", &response);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+}
+
+// 验证：总召优先使用固定模拟值，不读取 DataCenter 最新值。
+TEST(IEC104LinkManagerHelperTest, InterrogationUsesSimulationSnapshotFirst) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+  LinkManager::LinkRuntime runtime;
+  runtime.connId = 7;
+  runtime.config = MakeClientConfig("sim", IEC104Proto::STATION_ROLE_SLAVE);
+  runtime.config.set_role(IEC104Proto::ROLE_SERVER);
+  runtime.pointTable = MakePointTable();
+  runtime.pointTableConfigured = true;
+  IEC104Proto::SimulationPoint point;
+  point.set_tag("float-tag");
+  point.set_type(IEC104Proto::POINT_TYPE_FLOAT);
+  point.set_double_value(11.0);
+  runtime.simulationValues.emplace("float-tag", point);
+  mgr.linksByName_.emplace("sim", std::move(runtime));
+
+  state.FailGetLatestForConn(7);
+  auto snapshot = mgr.buildInterrogationSnapshot("sim");
+  ASSERT_EQ(snapshot.size(), 1u);
+  EXPECT_EQ(snapshot.front().ioa, 100u);
+  EXPECT_DOUBLE_EQ(snapshot.front().doubleValue, 5.0);
+}
+
+// 验证：清除模拟值后总召恢复 DataCenter 最新值路径。
+TEST(IEC104LinkManagerHelperTest, ClearSimulationValuesRestoresDataCenterSnapshot) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+  LinkManager::LinkRuntime runtime;
+  runtime.connId = 8;
+  runtime.config = MakeClientConfig("sim", IEC104Proto::STATION_ROLE_SLAVE);
+  runtime.config.set_role(IEC104Proto::ROLE_SERVER);
+  runtime.pointTable = MakePointTable();
+  runtime.pointTableConfigured = true;
+  IEC104Proto::SimulationPoint point;
+  point.set_tag("float-tag");
+  point.set_type(IEC104Proto::POINT_TYPE_FLOAT);
+  point.set_double_value(11.0);
+  runtime.simulationValues.emplace("float-tag", point);
+  mgr.linksByName_.emplace("sim", std::move(runtime));
+
+  DataCenterProto::PublishRequest publish;
+  publish.set_conn_id(8);
+  publish.set_tag("float-tag");
+  publish.mutable_value()->set_double_value(7.0);
+  publish.set_quality(DataCenterProto::QUALITY_GOOD);
+  ASSERT_TRUE(state.Publish(publish).ok());
+  ASSERT_TRUE(mgr.ClearSimulationValues("sim").ok());
+
+  state.FailGetLatestForConn(8);
+  EXPECT_TRUE(mgr.buildInterrogationSnapshot("sim").empty());
+}
