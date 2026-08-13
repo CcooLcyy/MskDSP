@@ -88,6 +88,7 @@ README 这里只保留模块说明、启动方式、配置入口与基础语义�
 - IEC104/ModbusRTU/DLT645/AGC/AVC/Calc及DataCenter自身配置依赖DataCenter时，只有DataCenter内部gRPC通道确认就绪后才继续启动依赖模块或下发配置；未就绪时本次依赖配置停止收敛，避免向尚未监听的地址发送请求
 - AGC 配置使用 `agc.groups[].upsert` 下发控制组；`agc.groups[].start` 为兼容保留字段，当前仅记录日志，不再额外调用 `StartGroup`
 - AGC 控制组配置已不再包含 `loop`、`kp`、`deadband_kw`、`max_step_kw` 等旧闭环参数；ConfigPusher 只接受当前 `GroupConfig` 结构
+- AGC 每个成员必须配置大于 0 的 `capacity_kw`；该字段由 ConfigPusher 原样下发，由 AGC 最终校验，容量缺失或非法时控制组不会创建/更新成功
 - AGC 会在 `p_cmd`、成员量测或 `base_tag` 等相关输入点变化时，直接按 `p_cmd` 计算出的目标总功率进行成员分配；成员上下限、不可控成员扣减、`ABSOLUTE/DELTA` 与 `DELTA_BASE_LAST_TARGET` 等语义保持不变
 - 若 JSONC 里仍保留旧 `loop` 字段，ConfigPusher 会在解析阶段直接报错，避免继续向 AGC 下发过期配置
 - AVC 配置使用 `avc.groups[].upsert` 下发控制组；`avc.groups[].start` 为兼容保留字段，当前仅记录日志，不再额外调用 `StartGroup`

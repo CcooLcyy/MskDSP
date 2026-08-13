@@ -1046,9 +1046,27 @@ void GroupManager::publishDefaultLimitPoints(const std::string &groupName, std::
   const auto theoreticalUpperTag = defaultPointTag(AGCProto::DEFAULT_POINT_KIND_THEORETICAL_UPPER);
   const auto dynamicLowerTag = defaultPointTag(AGCProto::DEFAULT_POINT_KIND_DYNAMIC_LOWER);
   const auto dynamicUpperTag = defaultPointTag(AGCProto::DEFAULT_POINT_KIND_DYNAMIC_UPPER);
+  const auto installedCapacityTag = defaultPointTag(AGCProto::DEFAULT_POINT_KIND_INSTALLED_CAPACITY);
   const auto theoreticalQuality = DataCenterProto::QUALITY_GOOD;
 
-  auto status = dataCenter_.PublishDouble(connId, std::string(theoreticalLowerTag), defaultOutput.theoreticalLowerKw, theoreticalQuality, 0);
+  const auto installedCapacityKw = ComputeInstalledCapacityKw(config);
+  auto status = dataCenter_.PublishDouble(connId, std::string(installedCapacityTag), installedCapacityKw, theoreticalQuality, 0);
+  if (!status.ok()) {
+    LOG_ERROR("AGC 发布装机容量失败: group_name={}, tag={}, 触发来源={}, capacity_kw={}, 原因={}",
+              groupName,
+              installedCapacityTag,
+              trigger,
+              installedCapacityKw,
+              status.error_message());
+  } else {
+    LOG_DEBUG("AGC 已发布装机容量: group_name={}, tag={}, 触发来源={}, capacity_kw={}",
+              groupName,
+              installedCapacityTag,
+              trigger,
+              installedCapacityKw);
+  }
+
+  status = dataCenter_.PublishDouble(connId, std::string(theoreticalLowerTag), defaultOutput.theoreticalLowerKw, theoreticalQuality, 0);
   if (!status.ok()) {
     LOG_ERROR("AGC 发布默认点失败: group_name={}, tag={}, 触发来源={}, 原因={}", groupName, theoreticalLowerTag, trigger, status.error_message());
   }

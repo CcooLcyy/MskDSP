@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -195,7 +196,7 @@ TEST(AgcGroupManagerTest, UpsertGroupReturnsDefaultPointInfos) {
 
   AGCProto::GroupInfo info;
   ASSERT_TRUE(mgr.UpsertGroup(MakeGroupReq("g-default-points"), &info).ok());
-  ASSERT_EQ(info.default_points_size(), 5);
+  ASSERT_EQ(info.default_points_size(), 6);
 
   std::unordered_map<std::string, AGCProto::DefaultPointKind> defaultPoints;
   for (const auto &point : info.default_points()) {
@@ -206,8 +207,57 @@ TEST(AgcGroupManagerTest, UpsertGroupReturnsDefaultPointInfos) {
   EXPECT_EQ(defaultPoints["当前可调有功下限"], AGCProto::DEFAULT_POINT_KIND_DYNAMIC_LOWER);
   EXPECT_EQ(defaultPoints["当前可调有功上限"], AGCProto::DEFAULT_POINT_KIND_DYNAMIC_UPPER);
   EXPECT_EQ(defaultPoints["调节返回值"], AGCProto::DEFAULT_POINT_KIND_COMMAND_ECHO);
+  EXPECT_EQ(defaultPoints["AGC装机容量"], AGCProto::DEFAULT_POINT_KIND_INSTALLED_CAPACITY);
 
   ASSERT_TRUE(mgr.StopGroup("g-default-points").ok());
+}
+
+// 验证：任一成员缺少正的额定容量时，AGC 拒绝创建控制组。
+TEST(AgcGroupManagerTest, UpsertGroupRejectsMissingMemberCapacity) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  auto req = MakeGroupReq("g-missing-capacity");
+  req.mutable_config()->mutable_members(1)->set_capacity_kw(0.0);
+
+  AGCProto::GroupInfo info;
+  const auto status = mgr.UpsertGroup(req, &info);
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  EXPECT_THAT(status.error_message(), ::testing::HasSubstr("inv-2"));
+}
+
+// 验证：成员额定容量必须是有限数值，NaN/Inf 不能绕过配置校验。
+TEST(AgcGroupManagerTest, UpsertGroupRejectsNonFiniteMemberCapacity) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  auto req = MakeGroupReq("g-non-finite-capacity");
+  req.mutable_config()->mutable_members(0)->set_capacity_kw(std::numeric_limits<double>::infinity());
+
+  AGCProto::GroupInfo info;
+  const auto status = mgr.UpsertGroup(req, &info);
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  EXPECT_THAT(status.error_message(), ::testing::HasSubstr("inv-1"));
+}
+
+// 验证：AGC装机容量默认点发布所有成员额定容量之和。
+TEST(AgcGroupManagerTest, PublishesInstalledCapacityDefaultPoint) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  AGCProto::GroupInfo info;
+  auto req = MakeGroupReq("g-installed-capacity");
+  req.mutable_config()->mutable_members(1)->set_controllable(false);
+  ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "AGC装机容量", 150.0));
+  ASSERT_TRUE(mgr.StopGroup("g-installed-capacity").ok());
 }
 
 // 验证：当 DataCenter 已存在相同 (module_name, conn_name) 时，create_only UpsertGroup 返回 ALREADY_EXISTS。
@@ -348,6 +398,7 @@ TEST(AgcGroupManagerTest, UpsertGroupRegistersBaseTagToDataCenterConnTags) {
         EXPECT_TRUE(tags.contains("当前可调有功下限"));
         EXPECT_TRUE(tags.contains("当前可调有功上限"));
         EXPECT_TRUE(tags.contains("调节返回值"));
+        EXPECT_TRUE(tags.contains("AGC装机容量"));
         return grpc::Status::OK;
       }));
 

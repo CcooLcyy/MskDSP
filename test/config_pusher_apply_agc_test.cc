@@ -32,6 +32,7 @@ ConfigPusherProto::AgcConfig MakeAgcConfig(bool start) {
   auto* member = group->add_members();
   member->set_member_name("inv-1");
   member->set_controllable(true);
+  member->set_capacity_kw(100.0);
   member->mutable_p_meas()->set_tag("INV1_P_MEAS");
   member->mutable_p_meas()->set_unit("kW");
   member->mutable_p_set()->mutable_signal()->set_tag("INV1_P_SET");

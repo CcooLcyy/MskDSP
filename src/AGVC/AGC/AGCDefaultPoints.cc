@@ -5,7 +5,7 @@
 namespace AGC {
 namespace {
 
-constexpr std::array<DefaultPointDefinition, 5> kDefaultPoints{{
+constexpr std::array<DefaultPointDefinition, 6> kDefaultPoints{{
     {
         .kind = AGCProto::DEFAULT_POINT_KIND_THEORETICAL_LOWER,
         .tag = "理论可调有功下限",
@@ -36,6 +36,12 @@ constexpr std::array<DefaultPointDefinition, 5> kDefaultPoints{{
         .name = "调节返回值",
         .description = "对主站下发到 AGC 总设定点的工程量、质量与时间戳做回显",
     },
+    {
+        .kind = AGCProto::DEFAULT_POINT_KIND_INSTALLED_CAPACITY,
+        .tag = "AGC装机容量",
+        .name = "AGC装机容量",
+        .description = "当前控制组所有成员额定容量之和，单位为 kW",
+    },
 }};
 
 }  // namespace
@@ -65,6 +71,14 @@ void FillDefaultPointInfos(google::protobuf::RepeatedPtrField<AGCProto::DefaultP
     info->set_name(point.name.data(), static_cast<int>(point.name.size()));
     info->set_description(point.description.data(), static_cast<int>(point.description.size()));
   }
+}
+
+double ComputeInstalledCapacityKw(const AGCProto::GroupConfig &config) {
+  double total = 0.0;
+  for (const auto &member : config.members()) {
+    total += member.capacity_kw();
+  }
+  return total;
 }
 
 }  // namespace AGC

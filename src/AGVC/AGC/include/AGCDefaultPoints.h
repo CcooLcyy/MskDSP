@@ -19,5 +19,6 @@ struct DefaultPointDefinition {
 std::span<const DefaultPointDefinition> DefaultPointDefinitions();
 bool IsReservedDefaultPointTag(std::string_view tag);
 void FillDefaultPointInfos(google::protobuf::RepeatedPtrField<AGCProto::DefaultPointInfo> *out);
+double ComputeInstalledCapacityKw(const AGCProto::GroupConfig &config);
 
 }  // namespace AGC

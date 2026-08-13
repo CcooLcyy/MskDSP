@@ -1,6 +1,7 @@
 #include "AGCGroupValidation.h"
 
 #include <format>
+#include <cmath>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -71,6 +72,7 @@ grpc::Status ValidateGroupConfig(const AGCProto::GroupConfig& config) {
 
   std::unordered_set<std::string> memberNames;
   memberNames.reserve(static_cast<size_t>(config.members_size()));
+  double installedCapacityKw = 0.0;
   for (const auto& m : config.members()) {
     if (m.member_name().empty()) {
       return makeInvalid("members.member_name 不能为空");
@@ -80,6 +82,13 @@ grpc::Status ValidateGroupConfig(const AGCProto::GroupConfig& config) {
     }
     if (!m.has_p_meas() || m.p_meas().tag().empty()) {
       return makeInvalid(std::format("members[{}].p_meas.tag 不能为空", m.member_name()));
+    }
+    if (!std::isfinite(m.capacity_kw()) || m.capacity_kw() <= 0.0) {
+      return makeInvalid(std::format("成员 {} 的 capacity_kw 必须是大于 0 的有限数值", m.member_name()));
+    }
+    installedCapacityKw += m.capacity_kw();
+    if (!std::isfinite(installedCapacityKw)) {
+      return makeInvalid("所有成员 capacity_kw 之和必须是有限数值");
     }
     status = validateNoReservedDefaultTag(m.p_meas().tag(), std::format("members[{}].p_meas.tag", m.member_name()));
     if (!status.ok()) {
