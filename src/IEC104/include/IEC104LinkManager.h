@@ -46,7 +46,8 @@ public:
 
   grpc::Status UpsertPointTable(const IEC104Proto::UpsertPointTableRequest &request);
   grpc::Status GetPointTable(const std::string &connName, IEC104Proto::PointTable *out) const;
-  grpc::Status GenerateSimulationValues(const std::string &connName, IEC104Proto::SimulationSnapshot *out);
+  grpc::Status GenerateSimulationValues(const IEC104Proto::SimulationRequest &request,
+                                        IEC104Proto::SimulationSnapshot *out);
   grpc::Status GetSimulationSnapshot(const std::string &connName, IEC104Proto::SimulationSnapshot *out) const;
   grpc::Status ApplySimulationValues(const std::string &connName);
   grpc::Status ClearSimulationValues(const std::string &connName);

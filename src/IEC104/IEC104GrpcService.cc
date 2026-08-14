@@ -240,7 +240,7 @@ grpc::Status IEC104GrpcServiceImpl::GenerateSimulationValues(
   if (request == nullptr || response == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
   }
-  auto status = iec104_->linkManager().GenerateSimulationValues(request->conn_name(), response);
+  auto status = iec104_->linkManager().GenerateSimulationValues(*request, response);
   if (!status.ok()) {
     LOG_ERROR("IEC104 生成模拟值失败: conn_name={}, 原因={}", request->conn_name(), status.error_message());
   } else {

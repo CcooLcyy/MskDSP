@@ -819,6 +819,14 @@ grpc::Status LinkManager::fillSimulationSnapshotLocked(
   out->Clear();
   out->set_conn_name(link.config.conn_name());
   auto tags = link.pointTable.Tags();
+  std::stable_sort(tags.begin(), tags.end(), [&link](const std::string& lhs, const std::string& rhs) {
+    const auto left = link.pointTable.FindByTag(lhs);
+    const auto right = link.pointTable.FindByTag(rhs);
+    if (!left || !right) {
+      return lhs < rhs;
+    }
+    return left->ioa < right->ioa;
+  });
   for (const auto& tag : tags) {
     auto it = link.simulationValues.find(tag);
     if (it != link.simulationValues.end()) {
@@ -829,7 +837,8 @@ grpc::Status LinkManager::fillSimulationSnapshotLocked(
 }
 
 grpc::Status LinkManager::GenerateSimulationValues(
-    const std::string& connName, IEC104Proto::SimulationSnapshot* out) {
+    const IEC104Proto::SimulationRequest& request, IEC104Proto::SimulationSnapshot* out) {
+  const auto& connName = request.conn_name();
   auto status = validateConnName(connName);
   if (!status.ok()) {
     return status;
@@ -846,27 +855,53 @@ grpc::Status LinkManager::GenerateSimulationValues(
     return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "点表未配置，无法生成模拟值");
   }
 
+  const bool incremental = request.mode() == IEC104Proto::SIMULATION_MODE_INCREMENT;
+  constexpr double kIncrementStartValue = 1.0;
+  constexpr double kIncrementStep = 1.0;
+
   std::mt19937_64 rng(std::random_device{}());
   std::uniform_real_distribution<double> floatDistribution(0.0, 100.0);
   std::bernoulli_distribution boolDistribution(0.5);
   const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                        std::chrono::system_clock::now().time_since_epoch())
                        .count();
-  std::unordered_map<std::string, IEC104Proto::SimulationPoint> generatedValues;
-  generatedValues.reserve(it->second.pointTable.Tags().size());
+  struct SimulationPointMeta {
+    std::string tag;
+    PointTable::Point point;
+  };
+  std::vector<SimulationPointMeta> pointMetas;
+  pointMetas.reserve(it->second.pointTable.Tags().size());
   for (const auto& tag : it->second.pointTable.Tags()) {
     auto point = it->second.pointTable.FindByTag(tag);
-    if (!point) {
-      continue;
+    if (point) {
+      pointMetas.push_back(SimulationPointMeta{tag, std::move(*point)});
     }
+  }
+  if (incremental) {
+    std::stable_sort(pointMetas.begin(), pointMetas.end(), [](const auto& lhs, const auto& rhs) {
+      return lhs.point.ioa < rhs.point.ioa;
+    });
+  }
+
+  std::unordered_map<std::string, IEC104Proto::SimulationPoint> generatedValues;
+  generatedValues.reserve(pointMetas.size());
+  size_t floatIndex = 0;
+  for (const auto& meta : pointMetas) {
+    const auto& tag = meta.tag;
+    const auto& point = meta.point;
     IEC104Proto::SimulationPoint sim;
     sim.set_tag(tag);
-    sim.set_type(point->type);
+    sim.set_type(point.type);
     sim.set_quality(0);
     sim.set_ts_ms(now);
-    if (point->type == IEC104Proto::POINT_TYPE_FLOAT) {
-      sim.set_double_value(floatDistribution(rng));
-    } else if (point->type == IEC104Proto::POINT_TYPE_SINGLE) {
+    if (point.type == IEC104Proto::POINT_TYPE_FLOAT) {
+      if (incremental) {
+        sim.set_double_value(kIncrementStartValue + static_cast<double>(floatIndex) * kIncrementStep);
+      } else {
+        sim.set_double_value(floatDistribution(rng));
+      }
+      ++floatIndex;
+    } else if (point.type == IEC104Proto::POINT_TYPE_SINGLE) {
       sim.set_bool_value(boolDistribution(rng));
     } else {
       continue;
@@ -876,7 +911,8 @@ grpc::Status LinkManager::GenerateSimulationValues(
   it->second.simulationValues = std::move(generatedValues);
   // 先写入快照，再切换订阅线程的数据源，避免模拟开关打开但快照尚未就绪。
   it->second.simulationEnabled->store(true, std::memory_order_release);
-  LOG_INFO("IEC104 已生成固定随机模拟值: conn_name={}, 点数={}", connName, it->second.simulationValues.size());
+  LOG_INFO("IEC104 已生成固定模拟值: conn_name={}, 模式={}, 遥测点数={}, 总点数={}",
+           connName, incremental ? "递增" : "随机", floatIndex, it->second.simulationValues.size());
   return fillSimulationSnapshotLocked(it->second, out);
 }
 

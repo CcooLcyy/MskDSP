@@ -367,7 +367,7 @@ TEST(IEC104LinkManagerHelperTest, BuildInterrogationSnapshotBuildsValues) {
   EXPECT_FALSE(snapshot.empty());
 }
 
-// 验证：无 DataCenter Route 时可生成固定随机模拟值，并且重复查询不会改变快照。
+// 验证：无 DataCenter Route 时遥测按 IOA 升序连续递增，并且重复查询不会改变快照。
 TEST(IEC104LinkManagerHelperTest, GeneratesAndKeepsSimulationValuesWithoutRoute) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
@@ -381,9 +381,59 @@ TEST(IEC104LinkManagerHelperTest, GeneratesAndKeepsSimulationValuesWithoutRoute)
   runtime.pointTableConfigured = true;
   mgr.linksByName_.emplace("sim", std::move(runtime));
 
+  IEC104Proto::SimulationSnapshot randomGenerated;
+  IEC104Proto::SimulationRequest randomRequest;
+  randomRequest.set_conn_name("sim");
+  ASSERT_TRUE(mgr.GenerateSimulationValues(randomRequest, &randomGenerated).ok());
+  ASSERT_EQ(randomGenerated.points_size(), 3);
+  EXPECT_GE(randomGenerated.points(0).double_value(), 0.0);
+  EXPECT_LE(randomGenerated.points(0).double_value(), 100.0);
+  EXPECT_GE(randomGenerated.points(1).double_value(), 0.0);
+  EXPECT_LE(randomGenerated.points(1).double_value(), 100.0);
+
   IEC104Proto::SimulationSnapshot generated;
-  ASSERT_TRUE(mgr.GenerateSimulationValues("sim", &generated).ok());
+  IEC104Proto::SimulationRequest request;
+  request.set_conn_name("sim");
+  request.set_mode(IEC104Proto::SIMULATION_MODE_INCREMENT);
+  ASSERT_TRUE(mgr.GenerateSimulationValues(request, &generated).ok());
   ASSERT_EQ(generated.points_size(), 3);
+
+  ASSERT_EQ(generated.points(0).tag(), "float-tag");
+  ASSERT_DOUBLE_EQ(generated.points(0).double_value(), 1.0);
+  ASSERT_EQ(generated.points(1).tag(), "float-tag-2");
+  ASSERT_DOUBLE_EQ(generated.points(1).double_value(), 2.0);
+  EXPECT_TRUE(generated.points(2).has_bool_value());
+
+  // 标签顺序与 IOA 顺序相反时，递增值仍绑定 IOA 升序，而不是标签字典序。
+  auto reorderedTable = MakePointTable();
+  IEC104Proto::UpsertPointTableRequest replaceRequest;
+  auto *latePoint = replaceRequest.add_points();
+  latePoint->set_tag("a-telemetry");
+  latePoint->set_ioa(4003);
+  latePoint->set_type(IEC104Proto::POINT_TYPE_FLOAT);
+  auto *earlyPoint = replaceRequest.add_points();
+  earlyPoint->set_tag("z-telemetry");
+  earlyPoint->set_ioa(4001);
+  earlyPoint->set_type(IEC104Proto::POINT_TYPE_FLOAT);
+  ASSERT_TRUE(reorderedTable.Upsert(replaceRequest.points(), true).ok());
+
+  LinkManager::LinkRuntime reorderedRuntime;
+  reorderedRuntime.config = MakeClientConfig("sim-reordered", IEC104Proto::STATION_ROLE_SLAVE);
+  reorderedRuntime.config.set_role(IEC104Proto::ROLE_SERVER);
+  reorderedRuntime.pointTable = std::move(reorderedTable);
+  reorderedRuntime.pointTableConfigured = true;
+  mgr.linksByName_.emplace("sim-reordered", std::move(reorderedRuntime));
+
+  IEC104Proto::SimulationSnapshot reordered;
+  IEC104Proto::SimulationRequest reorderedRequest;
+  reorderedRequest.set_conn_name("sim-reordered");
+  reorderedRequest.set_mode(IEC104Proto::SIMULATION_MODE_INCREMENT);
+  ASSERT_TRUE(mgr.GenerateSimulationValues(reorderedRequest, &reordered).ok());
+  ASSERT_EQ(reordered.points_size(), 2);
+  EXPECT_EQ(reordered.points(0).tag(), "z-telemetry");
+  EXPECT_DOUBLE_EQ(reordered.points(0).double_value(), 1.0);
+  EXPECT_EQ(reordered.points(1).tag(), "a-telemetry");
+  EXPECT_DOUBLE_EQ(reordered.points(1).double_value(), 2.0);
 
   IEC104Proto::SimulationSnapshot loaded;
   ASSERT_TRUE(mgr.GetSimulationSnapshot("sim", &loaded).ok());
@@ -400,7 +450,9 @@ TEST(IEC104LinkManagerHelperTest, SimulationValuesRejectNonSlaveServer) {
   mgr.linksByName_.emplace("master", std::move(runtime));
 
   IEC104Proto::SimulationSnapshot response;
-  auto st = mgr.GenerateSimulationValues("master", &response);
+  IEC104Proto::SimulationRequest request;
+  request.set_conn_name("master");
+  auto st = mgr.GenerateSimulationValues(request, &response);
   EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
 }
 
