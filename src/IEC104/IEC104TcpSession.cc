@@ -356,6 +356,37 @@ void TcpSession::enqueuePointValuesBatch(std::vector<PointValue> values, uint8_t
   if (values.empty()) {
     return;
   }
+
+  std::vector<PointValue> floatValues;
+  std::vector<PointValue> singleValues;
+  floatValues.reserve(values.size());
+  singleValues.reserve(values.size());
+  for (const auto &value : values) {
+    if (value.type == IEC104Proto::POINT_TYPE_FLOAT) {
+      floatValues.push_back(value);
+    } else if (value.type == IEC104Proto::POINT_TYPE_SINGLE) {
+      singleValues.push_back(value);
+    } else {
+      LOG_WARNING("IEC104 跳过不支持的点类型: conn_name={}, ioa={}, type={}",
+                  config_.conn_name(), value.ioa, static_cast<int>(value.type));
+    }
+  }
+
+  if (!floatValues.empty() && !singleValues.empty()) {
+    LOG_DEBUG("IEC104 混合点类型拆分组包: conn_name={}, 浮点点数={}, 单点点数={}, cause={}",
+              config_.conn_name(), floatValues.size(), singleValues.size(), cause);
+    enqueuePointValuesBatch(std::move(floatValues), cause);
+    enqueuePointValuesBatch(std::move(singleValues), cause);
+    return;
+  }
+  if (!floatValues.empty()) {
+    values = std::move(floatValues);
+  } else if (!singleValues.empty()) {
+    values = std::move(singleValues);
+  } else {
+    return;
+  }
+
   const auto type = values.front().type;
 
   std::stable_sort(values.begin(), values.end(), [](const PointValue &a, const PointValue &b) {

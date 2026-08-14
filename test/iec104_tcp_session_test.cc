@@ -34,6 +34,7 @@ constexpr uint8_t kTypeIdSetpointShort = 50;
 constexpr uint8_t kCotActivation = 6;
 constexpr uint8_t kCotActivationCon = 7;
 constexpr uint8_t kCotActivationTermination = 10;
+constexpr uint8_t kCotInterrogatedByStation = 20;
 constexpr uint8_t kCotNegative = 0x40;
 constexpr uint8_t kCotSpontaneous = 3;
 constexpr uint8_t kQoiStation = 20;
@@ -176,6 +177,19 @@ std::vector<uint8_t> BuildSetpointCommandAsdu(uint32_t ioa, float value, bool se
   return asdu;
 }
 
+std::vector<uint8_t> BuildInterrogationAsdu(uint8_t cause, uint8_t qoi) {
+  return {kTypeIdInterrogationCmd,
+          0x01,
+          static_cast<uint8_t>(cause & 0x3F),
+          0x01,
+          0x01,
+          0x00,
+          0x00,
+          0x00,
+          0x00,
+          qoi};
+}
+
 struct SocketPair {
   std::shared_ptr<boost::asio::io_context> peer_io;
   tcp::socket session_socket;
@@ -258,6 +272,108 @@ TEST(IEC104TcpSessionTest, ClientAutoInterrogationAfterStartDt) {
   EXPECT_EQ(interrogation[6], kTypeIdInterrogationCmd);
   EXPECT_EQ(static_cast<uint8_t>(interrogation[8] & 0x3F), kCotActivation);
   EXPECT_EQ(interrogation.back(), kQoiStation);
+
+  session->Stop();
+  io->stop();
+}
+
+// 验证总召快照包含混合点类型时，会按类型分别编码为单点和短浮点报文。
+TEST(IEC104TcpSessionTest, InterrogationSnapshotWithMixedPointTypes) {
+  auto io = std::make_shared<boost::asio::io_context>();
+  auto sockets = MakeConnectedSockets(*io);
+
+  auto config = MakeConfig("interrogation-mixed-types", IEC104Proto::ROLE_SERVER, 2, 2, 1, 5, 8);
+  config.set_point_with_time(false);
+  auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
+
+  session->SetInterrogationSnapshotProvider([] {
+    IEC104::PointValue single;
+    single.ioa = 200;
+    single.type = IEC104Proto::POINT_TYPE_SINGLE;
+    single.boolValue = true;
+
+    IEC104::PointValue measured;
+    measured.ioa = 100;
+    measured.type = IEC104Proto::POINT_TYPE_FLOAT;
+    measured.doubleValue = 12.5;
+
+    // 首个点故意使用单点，覆盖按首点类型编码整批快照的回归场景。
+    return std::vector<IEC104::PointValue>{single, measured};
+  });
+  session->Start(std::move(sockets.session_socket));
+
+  std::jthread session_thread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [&]() { io->run(); });
+
+  auto start_act = BuildUFrame(kUStartDtAct);
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(start_act));
+
+  auto start_con = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "总召启动确认");
+  ASSERT_FALSE(start_con.empty());
+  ASSERT_EQ(FrameTypeOf(start_con), FrameType::U);
+  EXPECT_EQ(start_con[2], kUStartDtCon);
+
+  auto interrogation = BuildIFrame(0, 0, BuildInterrogationAsdu(kCotActivation, kQoiStation));
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(interrogation));
+
+  bool foundConfirmation = false;
+  bool foundSingle = false;
+  bool foundMeasured = false;
+  bool foundTermination = false;
+  for (int i = 0; i < 4; ++i) {
+    auto apdu = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "总召响应");
+    ASSERT_FALSE(apdu.empty());
+    ASSERT_EQ(FrameTypeOf(apdu), FrameType::I);
+    ASSERT_GT(apdu.size(), 7u);
+
+    const auto typeId = apdu[6];
+    const auto cause = static_cast<uint8_t>(apdu[8] & 0x3F);
+    const auto count = static_cast<uint8_t>(apdu[7] & 0x7F);
+    if (typeId == kTypeIdInterrogationCmd && cause == kCotActivationCon) {
+      EXPECT_EQ(count, 1);
+      EXPECT_EQ(apdu.back(), kQoiStation);
+      foundConfirmation = true;
+    } else if (typeId == kTypeIdSinglePoint) {
+      foundSingle = true;
+      EXPECT_EQ(cause, kCotInterrogatedByStation);
+      EXPECT_EQ(count, 1);
+      ASSERT_GE(apdu.size(), 16u);
+      EXPECT_EQ(static_cast<uint32_t>(apdu[12]) |
+                    (static_cast<uint32_t>(apdu[13]) << 8) |
+                    (static_cast<uint32_t>(apdu[14]) << 16),
+                200u);
+      EXPECT_EQ(apdu[15] & 0x01, 0x01);
+    } else if (typeId == kTypeIdMeasuredValueShort) {
+      foundMeasured = true;
+      EXPECT_EQ(cause, kCotInterrogatedByStation);
+      EXPECT_EQ(count, 1);
+      ASSERT_GE(apdu.size(), 20u);
+      EXPECT_EQ(static_cast<uint32_t>(apdu[12]) |
+                    (static_cast<uint32_t>(apdu[13]) << 8) |
+                    (static_cast<uint32_t>(apdu[14]) << 16),
+                100u);
+      uint32_t bits = static_cast<uint32_t>(apdu[15]) |
+          (static_cast<uint32_t>(apdu[16]) << 8) |
+          (static_cast<uint32_t>(apdu[17]) << 16) |
+          (static_cast<uint32_t>(apdu[18]) << 24);
+      float value = 0.0F;
+      std::memcpy(&value, &bits, sizeof(value));
+      EXPECT_FLOAT_EQ(value, 12.5F);
+      EXPECT_EQ(apdu[19], 0x00);
+    } else if (typeId == kTypeIdInterrogationCmd) {
+      EXPECT_EQ(cause, kCotActivationTermination);
+      EXPECT_EQ(apdu.back(), kQoiStation);
+      foundTermination = true;
+    } else {
+      ADD_FAILURE() << "总召响应出现未预期类型: " << static_cast<int>(typeId);
+    }
+  }
+
+  EXPECT_TRUE(foundConfirmation);
+  EXPECT_TRUE(foundSingle);
+  EXPECT_TRUE(foundMeasured);
+  EXPECT_TRUE(foundTermination);
 
   session->Stop();
   io->stop();
