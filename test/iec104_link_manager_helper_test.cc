@@ -461,7 +461,7 @@ TEST(IEC104LinkManagerHelperTest, SimulationValuesSetAllSingleValues) {
   secondSingle->set_tag("single-tag-2");
   secondSingle->set_ioa(201);
   secondSingle->set_type(IEC104Proto::POINT_TYPE_SINGLE);
-  ASSERT_TRUE(table.Upsert(secondSingleRequest.points(), true).ok());
+  ASSERT_TRUE(table.Upsert(secondSingleRequest.points(), false).ok());
   runtime.pointTable = std::move(table);
   runtime.pointTableConfigured = true;
   mgr.linksByName_.emplace("sim-single", std::move(runtime));
