@@ -838,26 +838,91 @@ grpc::Status LinkManager::fillSimulationSnapshotLocked(
 
 grpc::Status LinkManager::GenerateSimulationValues(
     const IEC104Proto::SimulationRequest& request, IEC104Proto::SimulationSnapshot* out) {
+  if (out == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
+  }
   const auto& connName = request.conn_name();
   auto status = validateConnName(connName);
   if (!status.ok()) {
     return status;
   }
-  std::lock_guard<std::mutex> lock(mu_);
-  auto it = linksByName_.find(connName);
-  if (it == linksByName_.end()) {
-    return makeNotFound(connName);
-  }
-  if (!isSlaveStation(it->second.config) || it->second.config.role() != IEC104Proto::ROLE_SERVER) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "仅允许 IEC104 从站服务端生成模拟值");
-  }
-  if (it->second.pointTable.Tags().empty()) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "点表未配置，无法生成模拟值");
-  }
-
   const bool incremental = request.mode() == IEC104Proto::SIMULATION_MODE_INCREMENT;
+  const auto boolMode = request.bool_mode();
   constexpr double kIncrementStartValue = 1.0;
   constexpr double kIncrementStep = 1.0;
+
+  struct SimulationPointMeta {
+    std::string tag;
+    PointTable::Point point;
+  };
+  std::vector<SimulationPointMeta> pointMetas;
+  std::unordered_map<std::string, IEC104Proto::SimulationPoint> previousValues;
+  uint32_t connId = 0;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = linksByName_.find(connName);
+    if (it == linksByName_.end()) {
+      return makeNotFound(connName);
+    }
+    if (!isSlaveStation(it->second.config)) {
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "仅允许 IEC104 从站生成模拟值");
+    }
+    if (it->second.pointTable.Tags().empty()) {
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "点表未配置，无法生成模拟值");
+    }
+
+    connId = it->second.connId;
+    previousValues = it->second.simulationValues;
+    pointMetas.reserve(it->second.pointTable.Tags().size());
+    for (const auto& tag : it->second.pointTable.Tags()) {
+      auto point = it->second.pointTable.FindByTag(tag);
+      if (point) {
+        pointMetas.push_back(SimulationPointMeta{tag, std::move(*point)});
+      }
+    }
+  }
+
+  std::unordered_map<std::string, bool> currentBoolValues;
+  if (boolMode == IEC104Proto::SIMULATION_BOOL_MODE_INVERT_CURRENT) {
+    std::vector<std::string> missingTags;
+    for (const auto& meta : pointMetas) {
+      if (meta.point.type != IEC104Proto::POINT_TYPE_SINGLE) {
+        continue;
+      }
+      auto previousIt = previousValues.find(meta.tag);
+      if (previousIt != previousValues.end() && previousIt->second.has_bool_value()) {
+        currentBoolValues.emplace(meta.tag, previousIt->second.bool_value());
+      } else {
+        missingTags.push_back(meta.tag);
+      }
+    }
+
+    if (!missingTags.empty()) {
+      if (connId == 0) {
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "没有可取反的当前遥信值");
+      }
+      DataCenterProto::GetLatestResponse latest;
+      status = dataCenter_.GetLatest(connId, missingTags, &latest);
+      if (!status.ok()) {
+        LOG_WARNING("IEC104 读取当前遥信值失败: conn_name={}, 错误={}", connName, status.error_message());
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                            std::format("无法读取当前遥信值: {}", status.error_message()));
+      }
+      for (const auto& update : latest.updates()) {
+        bool value = false;
+        if (pointValueToBool(update.value(), &value)) {
+          currentBoolValues[update.dst_tag()] = value;
+        }
+      }
+    }
+
+    for (const auto& tag : missingTags) {
+      if (!currentBoolValues.contains(tag)) {
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                            std::format("遥信 {} 没有可取反的当前值", tag));
+      }
+    }
+  }
 
   std::mt19937_64 rng(std::random_device{}());
   std::uniform_real_distribution<double> floatDistribution(0.0, 100.0);
@@ -865,18 +930,6 @@ grpc::Status LinkManager::GenerateSimulationValues(
   const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
                        std::chrono::system_clock::now().time_since_epoch())
                        .count();
-  struct SimulationPointMeta {
-    std::string tag;
-    PointTable::Point point;
-  };
-  std::vector<SimulationPointMeta> pointMetas;
-  pointMetas.reserve(it->second.pointTable.Tags().size());
-  for (const auto& tag : it->second.pointTable.Tags()) {
-    auto point = it->second.pointTable.FindByTag(tag);
-    if (point) {
-      pointMetas.push_back(SimulationPointMeta{tag, std::move(*point)});
-    }
-  }
   if (incremental) {
     std::stable_sort(pointMetas.begin(), pointMetas.end(), [](const auto& lhs, const auto& rhs) {
       return lhs.point.ioa < rhs.point.ioa;
@@ -902,17 +955,65 @@ grpc::Status LinkManager::GenerateSimulationValues(
       }
       ++floatIndex;
     } else if (point.type == IEC104Proto::POINT_TYPE_SINGLE) {
-      sim.set_bool_value(boolDistribution(rng));
+      bool value = false;
+      switch (boolMode) {
+      case IEC104Proto::SIMULATION_BOOL_MODE_ALL_FALSE:
+        value = false;
+        break;
+      case IEC104Proto::SIMULATION_BOOL_MODE_ALL_TRUE:
+        value = true;
+        break;
+      case IEC104Proto::SIMULATION_BOOL_MODE_INVERT_CURRENT:
+        value = !currentBoolValues.at(tag);
+        break;
+      case IEC104Proto::SIMULATION_BOOL_MODE_RANDOM:
+      default:
+        value = boolDistribution(rng);
+        break;
+      }
+      sim.set_bool_value(value);
     } else {
       continue;
     }
     generatedValues.emplace(tag, std::move(sim));
   }
+  std::lock_guard<std::mutex> lock(mu_);
+  auto it = linksByName_.find(connName);
+  if (it == linksByName_.end()) {
+    return makeNotFound(connName);
+  }
+  if (!isSlaveStation(it->second.config)) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "仅允许 IEC104 从站生成模拟值");
+  }
+  if (it->second.pointTable.Tags().size() != pointMetas.size()) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "点表在生成期间发生变化，请重试");
+  }
+  for (const auto& meta : pointMetas) {
+    const auto currentPoint = it->second.pointTable.FindByTag(meta.tag);
+    if (!currentPoint || currentPoint->ioa != meta.point.ioa || currentPoint->type != meta.point.type) {
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "点表在生成期间发生变化，请重试");
+    }
+  }
   it->second.simulationValues = std::move(generatedValues);
   // 先写入快照，再切换订阅线程的数据源，避免模拟开关打开但快照尚未就绪。
   it->second.simulationEnabled->store(true, std::memory_order_release);
-  LOG_INFO("IEC104 已生成固定模拟值: conn_name={}, 模式={}, 遥测点数={}, 总点数={}",
-           connName, incremental ? "递增" : "随机", floatIndex, it->second.simulationValues.size());
+  const char* boolModeLabel = "随机";
+  switch (boolMode) {
+  case IEC104Proto::SIMULATION_BOOL_MODE_ALL_FALSE:
+    boolModeLabel = "全假";
+    break;
+  case IEC104Proto::SIMULATION_BOOL_MODE_ALL_TRUE:
+    boolModeLabel = "全真";
+    break;
+  case IEC104Proto::SIMULATION_BOOL_MODE_INVERT_CURRENT:
+    boolModeLabel = "取反";
+    break;
+  case IEC104Proto::SIMULATION_BOOL_MODE_RANDOM:
+  default:
+    break;
+  }
+  LOG_INFO("IEC104 已生成固定模拟值: conn_name={}, 遥测模式={}, 遥信模式={}, 遥测点数={}, 总点数={}",
+           connName, incremental ? "递增" : "随机", boolModeLabel, floatIndex, it->second.simulationValues.size());
   return fillSimulationSnapshotLocked(it->second, out);
 }
 
@@ -927,8 +1028,8 @@ grpc::Status LinkManager::GetSimulationSnapshot(
   if (it == linksByName_.end()) {
     return makeNotFound(connName);
   }
-  if (!isSlaveStation(it->second.config) || it->second.config.role() != IEC104Proto::ROLE_SERVER) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模拟值仅支持 IEC104 从站服务端链路");
+  if (!isSlaveStation(it->second.config)) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模拟值仅支持 IEC104 从站链路");
   }
   return fillSimulationSnapshotLocked(it->second, out);
 }
@@ -944,8 +1045,8 @@ grpc::Status LinkManager::ApplySimulationValues(const std::string& connName) {
     return makeNotFound(connName);
   }
   auto& link = it->second;
-  if (!isSlaveStation(link.config) || link.config.role() != IEC104Proto::ROLE_SERVER) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "仅允许 IEC104 从站服务端应用模拟值");
+  if (!isSlaveStation(link.config)) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "仅允许 IEC104 从站应用模拟值");
   }
   if (link.simulationValues.empty()) {
     return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "当前没有模拟值，请先生成");
@@ -989,8 +1090,8 @@ grpc::Status LinkManager::ClearSimulationValues(const std::string& connName) {
   if (it == linksByName_.end()) {
     return makeNotFound(connName);
   }
-  if (!isSlaveStation(it->second.config) || it->second.config.role() != IEC104Proto::ROLE_SERVER) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模拟值仅支持 IEC104 从站服务端链路");
+  if (!isSlaveStation(it->second.config)) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模拟值仅支持 IEC104 从站链路");
   }
   it->second.simulationValues.clear();
   it->second.simulationEnabled->store(false, std::memory_order_release);

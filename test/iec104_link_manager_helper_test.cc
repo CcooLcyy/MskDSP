@@ -53,6 +53,16 @@ PointTable MakePointTable() {
   table.Upsert(req.points(), true);
   return table;
 }
+
+const IEC104Proto::SimulationPoint *FindSimulationPoint(
+    const IEC104Proto::SimulationSnapshot &snapshot, const std::string &tag) {
+  for (const auto &point : snapshot.points()) {
+    if (point.tag() == tag) {
+      return &point;
+    }
+  }
+  return nullptr;
+}
 }  // 命名空间结束
 
 // 验证：validateLinkConfig 对缺失/非法字段返回错误。
@@ -440,8 +450,169 @@ TEST(IEC104LinkManagerHelperTest, GeneratesAndKeepsSimulationValuesWithoutRoute)
   EXPECT_EQ(loaded.SerializeAsString(), generated.SerializeAsString());
 }
 
-// 验证：模拟接口拒绝主站或客户端链路。
-TEST(IEC104LinkManagerHelperTest, SimulationValuesRejectNonSlaveServer) {
+// 验证：遥信模拟方式可以把所有 SINGLE 点统一置为 true 或 false。
+TEST(IEC104LinkManagerHelperTest, SimulationValuesSetAllSingleValues) {
+  LinkManager mgr("IEC104");
+  LinkManager::LinkRuntime runtime;
+  runtime.config = MakeClientConfig("sim-single", IEC104Proto::STATION_ROLE_SLAVE);
+  auto table = MakePointTable();
+  IEC104Proto::UpsertPointTableRequest secondSingleRequest;
+  auto *secondSingle = secondSingleRequest.add_points();
+  secondSingle->set_tag("single-tag-2");
+  secondSingle->set_ioa(201);
+  secondSingle->set_type(IEC104Proto::POINT_TYPE_SINGLE);
+  ASSERT_TRUE(table.Upsert(secondSingleRequest.points(), true).ok());
+  runtime.pointTable = std::move(table);
+  runtime.pointTableConfigured = true;
+  mgr.linksByName_.emplace("sim-single", std::move(runtime));
+
+  IEC104Proto::SimulationSnapshot generated;
+  IEC104Proto::SimulationRequest request;
+  request.set_conn_name("sim-single");
+  request.set_bool_mode(IEC104Proto::SIMULATION_BOOL_MODE_ALL_TRUE);
+  ASSERT_TRUE(mgr.GenerateSimulationValues(request, &generated).ok());
+  ASSERT_EQ(generated.points_size(), 4);
+  const auto *single = FindSimulationPoint(generated, "single-tag");
+  ASSERT_NE(single, nullptr);
+  ASSERT_TRUE(single->has_bool_value());
+  EXPECT_TRUE(single->bool_value());
+  const auto *second = FindSimulationPoint(generated, "single-tag-2");
+  ASSERT_NE(second, nullptr);
+  ASSERT_TRUE(second->has_bool_value());
+  EXPECT_TRUE(second->bool_value());
+
+  request.set_bool_mode(IEC104Proto::SIMULATION_BOOL_MODE_ALL_FALSE);
+  ASSERT_TRUE(mgr.GenerateSimulationValues(request, &generated).ok());
+  ASSERT_EQ(generated.points_size(), 4);
+  single = FindSimulationPoint(generated, "single-tag");
+  ASSERT_NE(single, nullptr);
+  ASSERT_TRUE(single->has_bool_value());
+  EXPECT_FALSE(single->bool_value());
+  second = FindSimulationPoint(generated, "single-tag-2");
+  ASSERT_NE(second, nullptr);
+  ASSERT_TRUE(second->has_bool_value());
+  EXPECT_FALSE(second->bool_value());
+}
+
+// 验证：取反模式优先使用已有模拟快照中的遥信值。
+TEST(IEC104LinkManagerHelperTest, SimulationValuesInvertExistingSnapshot) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+  LinkManager::LinkRuntime runtime;
+  runtime.connId = 9;
+  runtime.config = MakeClientConfig("sim-invert-snapshot", IEC104Proto::STATION_ROLE_SLAVE);
+  runtime.pointTable = MakePointTable();
+  runtime.pointTableConfigured = true;
+  IEC104Proto::SimulationPoint existing;
+  existing.set_tag("single-tag");
+  existing.set_type(IEC104Proto::POINT_TYPE_SINGLE);
+  existing.set_bool_value(true);
+  runtime.simulationValues.emplace("single-tag", existing);
+  mgr.linksByName_.emplace("sim-invert-snapshot", std::move(runtime));
+
+  IEC104Proto::SimulationSnapshot generated;
+  IEC104Proto::SimulationRequest request;
+  request.set_conn_name("sim-invert-snapshot");
+  request.set_bool_mode(IEC104Proto::SIMULATION_BOOL_MODE_INVERT_CURRENT);
+  ASSERT_TRUE(mgr.GenerateSimulationValues(request, &generated).ok());
+  ASSERT_EQ(generated.points_size(), 3);
+  const auto *single = FindSimulationPoint(generated, "single-tag");
+  ASSERT_NE(single, nullptr);
+  ASSERT_TRUE(single->has_bool_value());
+  EXPECT_FALSE(single->bool_value());
+}
+
+// 验证：没有模拟快照时，取反模式读取 DataCenter 当前遥信值。
+TEST(IEC104LinkManagerHelperTest, SimulationValuesInvertDataCenterLatestValue) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  DataCenterProto::PublishRequest publish;
+  publish.set_conn_id(10);
+  publish.set_tag("single-tag");
+  publish.mutable_value()->set_bool_value(false);
+  publish.set_quality(DataCenterProto::QUALITY_GOOD);
+  ASSERT_TRUE(state.Publish(publish).ok());
+
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+  LinkManager::LinkRuntime runtime;
+  runtime.connId = 10;
+  runtime.config = MakeClientConfig("sim-invert-latest", IEC104Proto::STATION_ROLE_SLAVE);
+  runtime.pointTable = MakePointTable();
+  runtime.pointTableConfigured = true;
+  mgr.linksByName_.emplace("sim-invert-latest", std::move(runtime));
+
+  IEC104Proto::SimulationSnapshot generated;
+  IEC104Proto::SimulationRequest request;
+  request.set_conn_name("sim-invert-latest");
+  request.set_bool_mode(IEC104Proto::SIMULATION_BOOL_MODE_INVERT_CURRENT);
+  ASSERT_TRUE(mgr.GenerateSimulationValues(request, &generated).ok());
+  ASSERT_EQ(generated.points_size(), 3);
+  const auto *single = FindSimulationPoint(generated, "single-tag");
+  ASSERT_NE(single, nullptr);
+  ASSERT_TRUE(single->has_bool_value());
+  EXPECT_TRUE(single->bool_value());
+}
+
+// 验证：取反模式没有模拟值且 DataCenter 无当前值时返回错误并保持原快照为空。
+TEST(IEC104LinkManagerHelperTest, SimulationValuesInvertRejectsMissingCurrentValue) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+  LinkManager::LinkRuntime runtime;
+  runtime.connId = 11;
+  runtime.config = MakeClientConfig("sim-invert-missing", IEC104Proto::STATION_ROLE_SLAVE);
+  runtime.pointTable = MakePointTable();
+  runtime.pointTableConfigured = true;
+  mgr.linksByName_.emplace("sim-invert-missing", std::move(runtime));
+
+  IEC104Proto::SimulationSnapshot generated;
+  generated.set_conn_name("sentinel");
+  IEC104Proto::SimulationRequest request;
+  request.set_conn_name("sim-invert-missing");
+  request.set_bool_mode(IEC104Proto::SIMULATION_BOOL_MODE_INVERT_CURRENT);
+  const auto status = mgr.GenerateSimulationValues(request, &generated);
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+
+  IEC104Proto::SimulationSnapshot loaded;
+  ASSERT_TRUE(mgr.GetSimulationSnapshot("sim-invert-missing", &loaded).ok());
+  EXPECT_TRUE(loaded.points().empty());
+}
+
+// 验证：从站客户端可以生成、查询并清除固定模拟值。
+TEST(IEC104LinkManagerHelperTest, SimulationValuesAllowSlaveClient) {
+  LinkManager mgr("IEC104");
+  LinkManager::LinkRuntime runtime;
+  runtime.config = MakeClientConfig("slave-client", IEC104Proto::STATION_ROLE_SLAVE);
+  runtime.pointTable = MakePointTable();
+  runtime.pointTableConfigured = true;
+  mgr.linksByName_.emplace("slave-client", std::move(runtime));
+
+  IEC104Proto::SimulationRequest request;
+  request.set_conn_name("slave-client");
+  request.set_mode(IEC104Proto::SIMULATION_MODE_INCREMENT);
+
+  IEC104Proto::SimulationSnapshot generated;
+  ASSERT_TRUE(mgr.GenerateSimulationValues(request, &generated).ok());
+  ASSERT_EQ(generated.points_size(), 3);
+
+  IEC104Proto::SimulationSnapshot loaded;
+  ASSERT_TRUE(mgr.GetSimulationSnapshot("slave-client", &loaded).ok());
+  EXPECT_EQ(loaded.SerializeAsString(), generated.SerializeAsString());
+
+  ASSERT_TRUE(mgr.ClearSimulationValues("slave-client").ok());
+  ASSERT_TRUE(mgr.GetSimulationSnapshot("slave-client", &loaded).ok());
+  EXPECT_EQ(loaded.points_size(), 0);
+}
+
+// 验证：模拟接口拒绝主站链路。
+TEST(IEC104LinkManagerHelperTest, SimulationValuesRejectMasterStation) {
   LinkManager mgr("IEC104");
   LinkManager::LinkRuntime runtime;
   runtime.config = MakeClientConfig("master", IEC104Proto::STATION_ROLE_MASTER);
