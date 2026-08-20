@@ -399,7 +399,6 @@ void LinkManager::startCommandSubscribeLocked(const std::string& connName, LinkR
     double offset = 0.0;
   };
   std::unordered_map<std::string, PointMeta> metaByTag;
-  std::unordered_map<std::string, IEC104Proto::SimulationPoint> simulationValues;
   metaByTag.reserve(tags.size());
   for (const auto& tag : tags) {
     auto p = link->pointTable.FindByTag(tag);
@@ -718,6 +717,7 @@ std::vector<PointValue> LinkManager::buildInterrogationSnapshot(const std::strin
     double offset = 0.0;
   };
   std::unordered_map<std::string, PointMeta> metaByTag;
+  std::unordered_map<std::string, IEC104Proto::SimulationPoint> simulationValues;
   std::vector<std::string> tags;
   {
     std::lock_guard<std::mutex> lock(mu_);
