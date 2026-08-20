@@ -189,10 +189,9 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, Li
   link->dcSubscribeContext = std::make_shared<grpc::ClientContext>();
   auto ctx = link->dcSubscribeContext;
 
-  auto simulationEnabled = link->simulationEnabled;
   link->dcSubscribeThread = ModuleManager::StartModuleThread(
       IEC104LibInfo.LIB_NAME,
-      [this, connName, ctx, connId, tags, metaByTag, transport, simulationEnabled](std::stop_token st) {
+      [this, connName, ctx, connId, tags, metaByTag, transport](std::stop_token st) {
     std::stop_callback cb(st, [&ctx]() { ctx->TryCancel(); });
 
     auto reader = dataCenter_.Subscribe(ctx.get(), connId, tags, false);
@@ -205,8 +204,8 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, Li
     lastSentByTag.reserve(metaByTag.size());
     DataCenterProto::PointUpdate update;
     while (reader->Read(&update)) {
-      if (simulationEnabled && simulationEnabled->load(std::memory_order_acquire)) {
-        LOG_DEBUG("IEC104 模拟值已启用，忽略 DataCenter 实时值: conn_name={}, tag={}", connName, update.dst_tag());
+      if (isSimulationValueActive(connName, update.dst_tag())) {
+        LOG_DEBUG("IEC104 当前 Tag 存在模拟值，忽略 DataCenter 实时值: conn_name={}, tag={}", connName, update.dst_tag());
         continue;
       }
       auto it = metaByTag.find(update.dst_tag());
@@ -275,6 +274,12 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, Li
       }
     }
   });
+}
+
+bool LinkManager::isSimulationValueActive(const std::string& connName, const std::string& tag) const {
+  std::lock_guard<std::mutex> lock(mu_);
+  auto it = linksByName_.find(connName);
+  return it != linksByName_.end() && it->second.simulationValues.contains(tag);
 }
 
 void LinkManager::stopTimeSyncSubscribeLocked(LinkRuntime* link) {
@@ -394,6 +399,7 @@ void LinkManager::startCommandSubscribeLocked(const std::string& connName, LinkR
     double offset = 0.0;
   };
   std::unordered_map<std::string, PointMeta> metaByTag;
+  std::unordered_map<std::string, IEC104Proto::SimulationPoint> simulationValues;
   metaByTag.reserve(tags.size());
   for (const auto& tag : tags) {
     auto p = link->pointTable.FindByTag(tag);
@@ -728,34 +734,7 @@ std::vector<PointValue> LinkManager::buildInterrogationSnapshot(const std::strin
         metaByTag.emplace(tag, PointMeta{p->ioa, p->type, p->scale, p->offset});
       }
     }
-    if (!it->second.simulationValues.empty()) {
-      std::vector<PointValue> out;
-      out.reserve(it->second.simulationValues.size());
-      for (const auto& tag : tags) {
-        auto simIt = it->second.simulationValues.find(tag);
-        auto metaIt = metaByTag.find(tag);
-        if (simIt == it->second.simulationValues.end() || metaIt == metaByTag.end()) {
-          continue;
-        }
-        const auto& sim = simIt->second;
-        PointValue pv;
-        pv.ioa = metaIt->second.ioa;
-        pv.type = metaIt->second.type;
-        pv.quality = static_cast<uint8_t>(sim.quality());
-        pv.tsMs = sim.ts_ms();
-        if (metaIt->second.type == IEC104Proto::POINT_TYPE_FLOAT && sim.has_double_value()) {
-          if (!reverseScale(sim.double_value(), metaIt->second.scale, metaIt->second.offset, &pv.doubleValue)) {
-            continue;
-          }
-        } else if (metaIt->second.type == IEC104Proto::POINT_TYPE_SINGLE && sim.has_bool_value()) {
-          pv.boolValue = sim.bool_value();
-        } else {
-          continue;
-        }
-        out.emplace_back(std::move(pv));
-      }
-      return out;
-    }
+    simulationValues = it->second.simulationValues;
   }
 
   DataCenterProto::GetLatestResponse resp;
@@ -767,11 +746,11 @@ std::vector<PointValue> LinkManager::buildInterrogationSnapshot(const std::strin
     if (it != linksByName_.end()) {
       it->second.lastError = status.error_message();
     }
-    return {};
+    resp.Clear();
   }
 
-  std::vector<PointValue> out;
-  out.reserve(static_cast<size_t>(resp.updates_size()));
+  std::unordered_map<std::string, PointValue> valuesByTag;
+  valuesByTag.reserve(static_cast<size_t>(resp.updates_size()) + simulationValues.size());
   for (const auto& update : resp.updates()) {
     auto it = metaByTag.find(update.dst_tag());
     if (it == metaByTag.end()) {
@@ -793,7 +772,7 @@ std::vector<PointValue> LinkManager::buildInterrogationSnapshot(const std::strin
       mv.doubleValue = rawValue;
       mv.quality = toIec104Quality(update.quality());
       mv.tsMs = update.ts_ms();
-      out.emplace_back(std::move(mv));
+      valuesByTag[update.dst_tag()] = std::move(mv);
     } else if (it->second.type == IEC104Proto::POINT_TYPE_SINGLE) {
       bool value = false;
       if (!pointValueToBool(update.value(), &value)) {
@@ -805,7 +784,40 @@ std::vector<PointValue> LinkManager::buildInterrogationSnapshot(const std::strin
       pv.boolValue = value;
       pv.quality = toIec104Quality(update.quality());
       pv.tsMs = update.ts_ms();
-      out.emplace_back(std::move(pv));
+      valuesByTag[update.dst_tag()] = std::move(pv);
+    }
+  }
+
+  for (const auto& tag : tags) {
+    auto simIt = simulationValues.find(tag);
+    auto metaIt = metaByTag.find(tag);
+    if (simIt == simulationValues.end() || metaIt == metaByTag.end()) {
+      continue;
+    }
+    const auto& sim = simIt->second;
+    PointValue pv;
+    pv.ioa = metaIt->second.ioa;
+    pv.type = metaIt->second.type;
+    pv.quality = static_cast<uint8_t>(sim.quality());
+    pv.tsMs = sim.ts_ms();
+    if (metaIt->second.type == IEC104Proto::POINT_TYPE_FLOAT && sim.has_double_value()) {
+      if (!reverseScale(sim.double_value(), metaIt->second.scale, metaIt->second.offset, &pv.doubleValue)) {
+        continue;
+      }
+    } else if (metaIt->second.type == IEC104Proto::POINT_TYPE_SINGLE && sim.has_bool_value()) {
+      pv.boolValue = sim.bool_value();
+    } else {
+      continue;
+    }
+    valuesByTag[tag] = std::move(pv);
+  }
+
+  std::vector<PointValue> out;
+  out.reserve(valuesByTag.size());
+  for (const auto& tag : tags) {
+    auto it = valuesByTag.find(tag);
+    if (it != valuesByTag.end()) {
+      out.emplace_back(it->second);
     }
   }
   return out;
@@ -858,6 +870,7 @@ grpc::Status LinkManager::GenerateSimulationValues(
   std::vector<SimulationPointMeta> pointMetas;
   std::unordered_map<std::string, IEC104Proto::SimulationPoint> previousValues;
   uint32_t connId = 0;
+  size_t configuredPointCount = 0;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = linksByName_.find(connName);
@@ -873,12 +886,17 @@ grpc::Status LinkManager::GenerateSimulationValues(
 
     connId = it->second.connId;
     previousValues = it->second.simulationValues;
-    pointMetas.reserve(it->second.pointTable.Tags().size());
-    for (const auto& tag : it->second.pointTable.Tags()) {
+    const auto pointTags = it->second.pointTable.Tags();
+    configuredPointCount = pointTags.size();
+    pointMetas.reserve(configuredPointCount);
+    for (const auto& tag : pointTags) {
       auto point = it->second.pointTable.FindByTag(tag);
-      if (point) {
+      if (point && PointTable::IsSimulationBusinessType(point->businessType)) {
         pointMetas.push_back(SimulationPointMeta{tag, std::move(*point)});
       }
+    }
+    if (pointMetas.empty()) {
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "点表中没有可模拟的遥信或遥测点");
     }
   }
 
@@ -985,18 +1003,25 @@ grpc::Status LinkManager::GenerateSimulationValues(
   if (!isSlaveStation(it->second.config)) {
     return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "仅允许 IEC104 从站生成模拟值");
   }
-  if (it->second.pointTable.Tags().size() != pointMetas.size()) {
+  size_t currentSimulationPointCount = 0;
+  for (const auto& tag : it->second.pointTable.Tags()) {
+    const auto currentPoint = it->second.pointTable.FindByTag(tag);
+    if (currentPoint && PointTable::IsSimulationBusinessType(currentPoint->businessType)) {
+      ++currentSimulationPointCount;
+    }
+  }
+  if (currentSimulationPointCount != pointMetas.size()) {
     return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "点表在生成期间发生变化，请重试");
   }
   for (const auto& meta : pointMetas) {
     const auto currentPoint = it->second.pointTable.FindByTag(meta.tag);
-    if (!currentPoint || currentPoint->ioa != meta.point.ioa || currentPoint->type != meta.point.type) {
+    if (!currentPoint || currentPoint->ioa != meta.point.ioa || currentPoint->type != meta.point.type
+        || currentPoint->businessType != meta.point.businessType) {
       return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "点表在生成期间发生变化，请重试");
     }
   }
   it->second.simulationValues = std::move(generatedValues);
-  // 先写入快照，再切换订阅线程的数据源，避免模拟开关打开但快照尚未就绪。
-  it->second.simulationEnabled->store(true, std::memory_order_release);
+  // 先写入快照，再由订阅线程按 Tag 屏蔽对应真实值，避免模拟快照尚未就绪。
   const char* boolModeLabel = "随机";
   switch (boolMode) {
   case IEC104Proto::SIMULATION_BOOL_MODE_ALL_FALSE:
@@ -1012,8 +1037,9 @@ grpc::Status LinkManager::GenerateSimulationValues(
   default:
     break;
   }
-  LOG_INFO("IEC104 已生成固定模拟值: conn_name={}, 遥测模式={}, 遥信模式={}, 遥测点数={}, 总点数={}",
-           connName, incremental ? "递增" : "随机", boolModeLabel, floatIndex, it->second.simulationValues.size());
+  LOG_INFO("IEC104 已生成固定模拟值: conn_name={}, 遥测模式={}, 遥信模式={}, 遥测点数={}, 总点数={}, 已排除非模拟业务点数={}",
+           connName, incremental ? "递增" : "随机", boolModeLabel, floatIndex, it->second.simulationValues.size(),
+           configuredPointCount - it->second.simulationValues.size());
   return fillSimulationSnapshotLocked(it->second, out);
 }
 
@@ -1094,7 +1120,6 @@ grpc::Status LinkManager::ClearSimulationValues(const std::string& connName) {
     return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模拟值仅支持 IEC104 从站链路");
   }
   it->second.simulationValues.clear();
-  it->second.simulationEnabled->store(false, std::memory_order_release);
   LOG_INFO("IEC104 已清除模拟值并恢复 DataCenter 数据路径: conn_name={}", connName);
   return grpc::Status::OK;
 }

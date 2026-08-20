@@ -1153,8 +1153,7 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
   link.state = IEC104Proto::LINK_STATE_RUNNING;
   link.lastError.clear();
   if (isSlaveStation(link.config)) {
-    link.simulationEnabled->store(!link.simulationValues.empty(), std::memory_order_release);
-    // 订阅线程始终保持运行；模拟开关只控制是否忽略真实更新，清除模拟值后可立即恢复真实路径。
+    // 订阅线程始终保持运行；仅对模拟快照中已有的 Tag 屏蔽真实更新。
     startDataCenterSubscribeLocked(connName, &link);
   } else if (isMasterStation(link.config)) {
     startTimeSyncSubscribeLocked(connName, &link);
@@ -1281,7 +1280,6 @@ grpc::Status LinkManager::UpsertPointTable(const IEC104Proto::UpsertPointTableRe
     it->second.pointTableConfigured = true;
     it->second.lastReportedByTag.clear();
     it->second.simulationValues.clear();
-    it->second.simulationEnabled->store(false, std::memory_order_release);
     status = savePointTablesLocked();
     if (!status.ok()) {
       LOG_ERROR("IEC104 点表配置落盘失败: conn_name={}, 原因={}", request.conn_name(), status.error_message());

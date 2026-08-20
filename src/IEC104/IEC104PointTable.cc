@@ -4,6 +4,31 @@
 
 namespace IEC104 {
 
+IEC104Proto::PointBusinessType PointTable::InferBusinessType(
+    uint32_t ioa, IEC104Proto::PointType type) {
+  if (ioa >= 0x6201 && ioa <= 0x7FFF) {
+    return IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_ADJUST;
+  }
+  if (ioa >= 0x8000 && ioa <= 0x9FFF) {
+    return IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_CONTROL;
+  }
+  if (ioa >= 0xA000 && ioa <= 0xBFFF) {
+    return IEC104Proto::POINT_BUSINESS_TYPE_PARAMETER;
+  }
+  if (ioa >= 1 && ioa <= 0x6200) {
+    // 旧点表没有业务字段：按协议类型保留原有四遥语义。
+    return type == IEC104Proto::POINT_TYPE_SINGLE
+        ? IEC104Proto::POINT_BUSINESS_TYPE_TELEINDICATION
+        : IEC104Proto::POINT_BUSINESS_TYPE_TELEMETRY;
+  }
+  return IEC104Proto::POINT_BUSINESS_TYPE_UNSPECIFIED;
+}
+
+bool PointTable::IsSimulationBusinessType(IEC104Proto::PointBusinessType businessType) {
+  return businessType == IEC104Proto::POINT_BUSINESS_TYPE_TELEINDICATION
+      || businessType == IEC104Proto::POINT_BUSINESS_TYPE_TELEMETRY;
+}
+
 grpc::Status PointTable::Upsert(const google::protobuf::RepeatedPtrField<IEC104Proto::Point>& points, bool replace) {
   if (replace) {
     byTag_.clear();
@@ -42,6 +67,17 @@ grpc::Status PointTable::validatePoint(const IEC104Proto::Point& point) const {
   if (point.deadband() < 0) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "死区不能为负");
   }
+  switch (point.business_type()) {
+  case IEC104Proto::POINT_BUSINESS_TYPE_UNSPECIFIED:
+  case IEC104Proto::POINT_BUSINESS_TYPE_TELEINDICATION:
+  case IEC104Proto::POINT_BUSINESS_TYPE_TELEMETRY:
+  case IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_ADJUST:
+  case IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_CONTROL:
+  case IEC104Proto::POINT_BUSINESS_TYPE_PARAMETER:
+    break;
+  default:
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "business_type 不支持");
+  }
   return grpc::Status::OK;
 }
 
@@ -54,6 +90,9 @@ grpc::Status PointTable::insertOrUpdatePoint(const IEC104Proto::Point& point) {
     p.tag = point.tag();
     p.ioa = point.ioa();
     p.type = point.type();
+    p.businessType = point.business_type() == IEC104Proto::POINT_BUSINESS_TYPE_UNSPECIFIED
+        ? InferBusinessType(p.ioa, p.type)
+        : point.business_type();
     if (p.type == IEC104Proto::POINT_TYPE_FLOAT) {
       p.scale = point.scale();
       if (p.scale == 0.0) {
@@ -82,6 +121,9 @@ grpc::Status PointTable::insertOrUpdatePoint(const IEC104Proto::Point& point) {
   p.tag = point.tag();
   p.ioa = point.ioa();
   p.type = point.type();
+  p.businessType = point.business_type() == IEC104Proto::POINT_BUSINESS_TYPE_UNSPECIFIED
+      ? InferBusinessType(p.ioa, p.type)
+      : point.business_type();
   if (p.type == IEC104Proto::POINT_TYPE_FLOAT) {
     p.scale = point.scale();
     if (p.scale == 0.0) {
@@ -138,6 +180,7 @@ void PointTable::ToProto(const std::string& connName, IEC104Proto::PointTable* o
     dst->set_tag(p.tag);
     dst->set_ioa(p.ioa);
     dst->set_type(p.type);
+    dst->set_business_type(p.businessType);
     dst->set_scale(p.scale);
     dst->set_offset(p.offset);
     dst->set_deadband(p.deadband);

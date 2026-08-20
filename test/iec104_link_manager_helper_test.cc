@@ -34,6 +34,7 @@ PointTable MakePointTable() {
   p1->set_tag("float-tag");
   p1->set_ioa(100);
   p1->set_type(IEC104Proto::POINT_TYPE_FLOAT);
+  p1->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_TELEMETRY);
   p1->set_scale(2.0);
   p1->set_offset(1.0);
   p1->set_deadband(0.5);
@@ -42,6 +43,7 @@ PointTable MakePointTable() {
   p3->set_tag("float-tag-2");
   p3->set_ioa(101);
   p3->set_type(IEC104Proto::POINT_TYPE_FLOAT);
+  p3->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_TELEMETRY);
   p3->set_scale(1.0);
   p3->set_offset(0.0);
 
@@ -49,6 +51,7 @@ PointTable MakePointTable() {
   p2->set_tag("single-tag");
   p2->set_ioa(200);
   p2->set_type(IEC104Proto::POINT_TYPE_SINGLE);
+  p2->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_TELEINDICATION);
 
   table.Upsert(req.points(), true);
   return table;
@@ -448,6 +451,78 @@ TEST(IEC104LinkManagerHelperTest, GeneratesAndKeepsSimulationValuesWithoutRoute)
   IEC104Proto::SimulationSnapshot loaded;
   ASSERT_TRUE(mgr.GetSimulationSnapshot("sim", &loaded).ok());
   EXPECT_EQ(loaded.SerializeAsString(), generated.SerializeAsString());
+}
+
+// 验证：模拟快照只包含遥测和遥信，遥调、遥控点不会生成或发送模拟点值。
+TEST(IEC104LinkManagerHelperTest, SimulationValuesExcludeRemoteAdjustAndRemoteControl) {
+  LinkManager mgr("IEC104");
+  LinkManager::LinkRuntime runtime;
+  runtime.config = MakeClientConfig("sim-business", IEC104Proto::STATION_ROLE_SLAVE);
+  auto table = MakePointTable();
+  IEC104Proto::UpsertPointTableRequest commandPoints;
+  auto* remoteAdjust = commandPoints.add_points();
+  remoteAdjust->set_tag("remote-adjust");
+  remoteAdjust->set_ioa(0x6201);
+  remoteAdjust->set_type(IEC104Proto::POINT_TYPE_FLOAT);
+  remoteAdjust->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_ADJUST);
+  auto* remoteControl = commandPoints.add_points();
+  remoteControl->set_tag("remote-control");
+  remoteControl->set_ioa(0x8000);
+  remoteControl->set_type(IEC104Proto::POINT_TYPE_SINGLE);
+  remoteControl->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_CONTROL);
+  ASSERT_TRUE(table.Upsert(commandPoints.points(), false).ok());
+  runtime.pointTable = std::move(table);
+  runtime.pointTableConfigured = true;
+  mgr.linksByName_.emplace("sim-business", std::move(runtime));
+
+  IEC104Proto::SimulationSnapshot generated;
+  IEC104Proto::SimulationRequest request;
+  request.set_conn_name("sim-business");
+  ASSERT_TRUE(mgr.GenerateSimulationValues(request, &generated).ok());
+  EXPECT_EQ(generated.points_size(), 3);
+  EXPECT_EQ(FindSimulationPoint(generated, "remote-adjust"), nullptr);
+  EXPECT_EQ(FindSimulationPoint(generated, "remote-control"), nullptr);
+}
+
+// 验证：模拟值只遮蔽同 Tag 的真实数据，未模拟的遥调点仍保留在总召快照中。
+TEST(IEC104LinkManagerHelperTest, InterrogationMergesSimulationWithUnsimulatedRealValues) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+  LinkManager::LinkRuntime runtime;
+  runtime.connId = 12;
+  runtime.config = MakeClientConfig("sim-merge", IEC104Proto::STATION_ROLE_SLAVE);
+  auto table = MakePointTable();
+  IEC104Proto::UpsertPointTableRequest commandPoint;
+  auto* remoteAdjust = commandPoint.add_points();
+  remoteAdjust->set_tag("remote-adjust");
+  remoteAdjust->set_ioa(0x6201);
+  remoteAdjust->set_type(IEC104Proto::POINT_TYPE_FLOAT);
+  remoteAdjust->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_ADJUST);
+  ASSERT_TRUE(table.Upsert(commandPoint.points(), false).ok());
+  runtime.pointTable = std::move(table);
+  runtime.pointTableConfigured = true;
+  IEC104Proto::SimulationPoint simulation;
+  simulation.set_tag("float-tag");
+  simulation.set_type(IEC104Proto::POINT_TYPE_FLOAT);
+  simulation.set_double_value(11.0);
+  runtime.simulationValues.emplace("float-tag", simulation);
+  mgr.linksByName_.emplace("sim-merge", std::move(runtime));
+
+  DataCenterProto::PublishRequest publish;
+  publish.set_conn_id(12);
+  publish.set_tag("remote-adjust");
+  publish.mutable_value()->set_double_value(15.0);
+  publish.set_quality(DataCenterProto::QUALITY_GOOD);
+  ASSERT_TRUE(state.Publish(publish).ok());
+
+  const auto snapshot = mgr.buildInterrogationSnapshot("sim-merge");
+  ASSERT_EQ(snapshot.size(), 2u);
+  EXPECT_EQ(snapshot[0].ioa, 100u);
+  EXPECT_DOUBLE_EQ(snapshot[0].doubleValue, 5.0);
+  EXPECT_EQ(snapshot[1].ioa, 0x6201u);
+  EXPECT_DOUBLE_EQ(snapshot[1].doubleValue, 15.0);
 }
 
 // 验证：遥信模拟方式可以把所有 SINGLE 点统一置为 true 或 false。

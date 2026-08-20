@@ -79,7 +79,7 @@ README 这里只保留模块说明、启动方式、配置入口与基础语义�
 - 若需要为同一协议转换器批量生成多条连接，可通过 `{device_no}` 与 `device_nos` 做统一展开。
 - IEC104 可选下发点值上送参数（`point_batch_window_ms/point_max_asdu_bytes/point_use_standard_limit/point_dedupe/point_with_time`；默认不带时标）
 - IEC104 可选下发对时触发 tag（`time_sync_tag`；为空时默认 `__time_sync__`）
-- IEC104 点表类型支持 `POINT_TYPE_FLOAT` 与 `POINT_TYPE_SINGLE`
+- IEC104 点表类型支持 `POINT_TYPE_FLOAT` 与 `POINT_TYPE_SINGLE`；点表可选 `business_type` 区分遥信、遥测、遥调、遥控和参数。未填写时由 IEC104 按 IOA/协议类型兼容推导；模拟数据仅覆盖遥信和遥测。
 - IEC61850配置使用 `iec61850.models[]` 声明SCL来源，使用 `iec61850.ieds[]` 声明逻辑IED、A/B通道、点映射和目标运行状态；相对SCL路径基于 `iec61850.jsonc` 所在目录解析
 - IEC61850的 `jsonc` 按完整目标态下发，未声明的旧模型、IED和点映射会被收敛移除；显式空 `iec61850` 对象表示清空旧目标态
 - ConfigPusher只读取SCL文件，不解析IEC61850模型；SCL解析、引用展开和业务校验由IEC61850模块完成
@@ -289,7 +289,7 @@ IEC104 示例：
         "point_table": {
           "replace": true,
           "points": [
-            { "tag": "Ua", "ioa": 100, "type": "POINT_TYPE_FLOAT" }
+            { "tag": "Ua", "ioa": 100, "type": "POINT_TYPE_FLOAT", "business_type": "POINT_BUSINESS_TYPE_TELEMETRY" }
           ]
         },
         "start": true

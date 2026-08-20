@@ -102,6 +102,57 @@ TEST(IEC104PointTableTest, NormalizesScaleAndKeepsDeadband) {
   EXPECT_DOUBLE_EQ(out.points(0).deadband(), 0.5);
 }
 
+// 验证：显式业务类型会随点表保存和查询，并允许业务语义与协议数据类型独立表达。
+TEST(IEC104PointTableTest, KeepsExplicitBusinessType) {
+  PointTable table;
+
+  IEC104Proto::UpsertPointTableRequest req;
+  auto* point = req.add_points();
+  point->set_tag("setpoint");
+  point->set_ioa(0x6201);
+  point->set_type(IEC104Proto::POINT_TYPE_FLOAT);
+  point->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_ADJUST);
+  req.set_replace(true);
+
+  ASSERT_TRUE(table.Upsert(req.points(), req.replace()).ok());
+  const auto stored = table.FindByTag("setpoint");
+  ASSERT_TRUE(stored.has_value());
+  EXPECT_EQ(stored->businessType, IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_ADJUST);
+
+  IEC104Proto::PointTable out;
+  table.ToProto("conn-1", &out);
+  ASSERT_EQ(out.points_size(), 1);
+  EXPECT_EQ(out.points(0).business_type(), IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_ADJUST);
+}
+
+// 验证：旧点表未携带业务类型时，已知 IOA 区间会推导出对应业务类型，未分类地址保持未指定。
+TEST(IEC104PointTableTest, InfersLegacyBusinessTypeFromIoaRange) {
+  PointTable table;
+
+  IEC104Proto::UpsertPointTableRequest req;
+  auto* remoteAdjust = req.add_points();
+  remoteAdjust->set_tag("legacy-setpoint");
+  remoteAdjust->set_ioa(0x6201);
+  remoteAdjust->set_type(IEC104Proto::POINT_TYPE_FLOAT);
+  auto* remoteControl = req.add_points();
+  remoteControl->set_tag("legacy-command");
+  remoteControl->set_ioa(0x8000);
+  remoteControl->set_type(IEC104Proto::POINT_TYPE_SINGLE);
+  auto* custom = req.add_points();
+  custom->set_tag("legacy-custom");
+  custom->set_ioa(0xC000);
+  custom->set_type(IEC104Proto::POINT_TYPE_FLOAT);
+  req.set_replace(true);
+
+  ASSERT_TRUE(table.Upsert(req.points(), req.replace()).ok());
+  EXPECT_EQ(table.FindByTag("legacy-setpoint")->businessType,
+            IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_ADJUST);
+  EXPECT_EQ(table.FindByTag("legacy-command")->businessType,
+            IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_CONTROL);
+  EXPECT_EQ(table.FindByTag("legacy-custom")->businessType,
+            IEC104Proto::POINT_BUSINESS_TYPE_UNSPECIFIED);
+}
+
 // 验证：单点类型忽略 scale/offset/deadband，并归一为默认值。
 TEST(IEC104PointTableTest, SinglePointIgnoresScaleOffsetDeadband) {
   PointTable table;

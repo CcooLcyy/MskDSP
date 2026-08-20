@@ -231,11 +231,13 @@ IEC104 `UpsertPointTable`（点表下发）：
   "conn_name": "line-1",
   "replace": true,
   "points": [
-    { "tag": "A相电压", "ioa": 16385, "type": "POINT_TYPE_FLOAT", "scale": 1.0, "offset": 0.0, "deadband": 0.0 },
-    { "tag": "断路器合位", "ioa": 100, "type": "POINT_TYPE_SINGLE" }
+    { "tag": "A相电压", "ioa": 16385, "type": "POINT_TYPE_FLOAT", "business_type": "POINT_BUSINESS_TYPE_TELEMETRY", "scale": 1.0, "offset": 0.0, "deadband": 0.0 },
+    { "tag": "断路器合位", "ioa": 100, "type": "POINT_TYPE_SINGLE", "business_type": "POINT_BUSINESS_TYPE_TELEINDICATION" }
   ]
 }
 ```
+
+`business_type` 用于区分遥信、遥测、遥调、遥控和参数，独立于 `type` 的 `FLOAT`/`SINGLE` 协议数据类型。未填写时兼容旧点表：IEC104 会根据 IOA 区间和协议类型推导；建议新配置显式填写。模拟数据仅生成 `TELEINDICATION` 与 `TELEMETRY`，不会生成或发送遥调、遥控、参数和未分类点。
 
 IEC104 `SendTimeSync`（主动对时）：
 ```jsonc

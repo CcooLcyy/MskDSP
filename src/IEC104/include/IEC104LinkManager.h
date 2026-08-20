@@ -3,7 +3,6 @@
 #include <grpcpp/client_context.h>
 #include <grpcpp/support/status.h>
 
-#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -73,7 +72,6 @@ private:
     bool pointTableConfigured = false;
     std::unordered_map<std::string, double> lastReportedByTag;
     std::unordered_map<std::string, IEC104Proto::SimulationPoint> simulationValues;
-    std::shared_ptr<std::atomic_bool> simulationEnabled = std::make_shared<std::atomic_bool>(false);
 
     std::unique_ptr<TcpLink> transport;
 
@@ -122,6 +120,7 @@ private:
   CommandResult handleCommandValue(const std::string &connName, const CommandValue &cv);
   grpc::Status handleTimeSyncCommand(const std::string &connName, int64_t tsMs);
   std::vector<PointValue> buildInterrogationSnapshot(const std::string &connName);
+  bool isSimulationValueActive(const std::string &connName, const std::string &tag) const;
   grpc::Status fillSimulationSnapshotLocked(const LinkRuntime &link, IEC104Proto::SimulationSnapshot *out) const;
 
   static std::string normalizeTimeSyncTag(const IEC104Proto::LinkConfig &config);
