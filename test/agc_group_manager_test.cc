@@ -110,6 +110,50 @@ bool WaitForLatestDouble(const FakeDataCenterState &state, uint32_t connId, cons
   return false;
 }
 
+bool WaitForLatestBool(const FakeDataCenterState &state, uint32_t connId, const char *tag, bool expected) {
+  for (int i = 0; i < 50; ++i) {
+    DataCenterProto::GetLatestRequest req;
+    req.set_conn_id(connId);
+    req.add_tags(tag);
+
+    DataCenterProto::GetLatestResponse resp;
+    if (state.GetLatest(req, &resp).ok() && resp.updates_size() == 1 && resp.updates(0).value().has_bool_value() &&
+        resp.updates(0).value().bool_value() == expected) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return false;
+}
+
+DataCenterProto::ExecuteCommandResponse ExecuteBoolCommand(
+    GroupManager *manager, const std::string &groupName, uint32_t connId, const char *tag, bool value) {
+  DataCenterProto::ExecuteCommandRequest request;
+  request.mutable_dst()->set_conn_id(connId);
+  request.mutable_dst()->set_conn_name(groupName);
+  request.mutable_dst()->set_tag(tag);
+  request.mutable_value()->set_bool_value(value);
+  request.set_quality(DataCenterProto::QUALITY_GOOD);
+
+  DataCenterProto::ExecuteCommandResponse response;
+  EXPECT_TRUE(manager->ExecuteCommand(request, &response).ok());
+  return response;
+}
+
+DataCenterProto::ExecuteCommandResponse ExecuteDoubleCommand(
+    GroupManager *manager, const std::string &groupName, uint32_t connId, const char *tag, double value) {
+  DataCenterProto::ExecuteCommandRequest request;
+  request.mutable_dst()->set_conn_id(connId);
+  request.mutable_dst()->set_conn_name(groupName);
+  request.mutable_dst()->set_tag(tag);
+  request.mutable_value()->set_double_value(value);
+  request.set_quality(DataCenterProto::QUALITY_GOOD);
+
+  DataCenterProto::ExecuteCommandResponse response;
+  EXPECT_TRUE(manager->ExecuteCommand(request, &response).ok());
+  return response;
+}
+
 bool WaitForLatestDoubleWithQuality(
     const FakeDataCenterState &state, uint32_t connId, const char *tag, double expected, DataCenterProto::Quality quality) {
   for (int i = 0; i < 50; ++i) {
@@ -182,6 +226,8 @@ TEST(AgcGroupManagerTest, UpsertGroupCreateOnlyReturnsConnIdAndAutoStartsReadyGr
   EXPECT_NE(info.conn_id(), 0u);
   EXPECT_EQ(info.state(), AGCProto::GROUP_STATE_RUNNING);
   EXPECT_EQ(info.config().group_name(), "g-1");
+  EXPECT_TRUE(info.function_enabled());
+  EXPECT_TRUE(info.remote_enabled());
   EXPECT_TRUE(state.HasConnection("AGC", "g-1"));
   ASSERT_TRUE(mgr.StopGroup("g-1").ok());
 }
@@ -196,7 +242,7 @@ TEST(AgcGroupManagerTest, UpsertGroupReturnsDefaultPointInfos) {
 
   AGCProto::GroupInfo info;
   ASSERT_TRUE(mgr.UpsertGroup(MakeGroupReq("g-default-points"), &info).ok());
-  ASSERT_EQ(info.default_points_size(), 6);
+  ASSERT_EQ(info.default_points_size(), 8);
 
   std::unordered_map<std::string, AGCProto::DefaultPointKind> defaultPoints;
   for (const auto &point : info.default_points()) {
@@ -208,8 +254,218 @@ TEST(AgcGroupManagerTest, UpsertGroupReturnsDefaultPointInfos) {
   EXPECT_EQ(defaultPoints["当前可调有功上限"], AGCProto::DEFAULT_POINT_KIND_DYNAMIC_UPPER);
   EXPECT_EQ(defaultPoints["调节返回值"], AGCProto::DEFAULT_POINT_KIND_COMMAND_ECHO);
   EXPECT_EQ(defaultPoints["AGC装机容量"], AGCProto::DEFAULT_POINT_KIND_INSTALLED_CAPACITY);
+  EXPECT_EQ(defaultPoints["AGC功能投入"], AGCProto::DEFAULT_POINT_KIND_FUNCTION_ENABLE);
+  EXPECT_EQ(defaultPoints["AGC远方操作"], AGCProto::DEFAULT_POINT_KIND_REMOTE_OPERATION);
 
   ASSERT_TRUE(mgr.StopGroup("g-default-points").ok());
+}
+
+// 验证：控制组创建后两个控制状态默认启用，并以 BOOL 点发布到 DataCenter 供上位机回读。
+TEST(AgcGroupManagerTest, ControlStatesDefaultToEnabledAndPublishBoolReadback) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(MakeGroupReq("g-control-defaults"), &info).ok());
+  EXPECT_TRUE(info.function_enabled());
+  EXPECT_TRUE(info.remote_enabled());
+  EXPECT_TRUE(WaitForLatestBool(state, info.conn_id(), "AGC功能投入", true));
+  EXPECT_TRUE(WaitForLatestBool(state, info.conn_id(), "AGC远方操作", true));
+
+  ASSERT_TRUE(mgr.StopGroup("g-control-defaults").ok());
+}
+
+// 验证：两个控制点仅接受 BOOL，切换成功后会更新 GroupInfo 并发布最终状态回读。
+TEST(AgcGroupManagerTest, ControlPointCommandsRequireBoolAndPublishFinalState) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(MakeGroupReq("g-control-command"), &info).ok());
+
+  auto invalid = ExecuteDoubleCommand(&mgr, "g-control-command", info.conn_id(), "AGC功能投入", 0.0);
+  EXPECT_EQ(invalid.status(), DataCenterProto::COMMAND_REJECTED);
+  EXPECT_EQ(invalid.reject_code(), DataCenterProto::COMMAND_REJECT_UNSUPPORTED_POINT);
+  EXPECT_EQ(invalid.reason(), "AGC 控制点仅接受 BOOL 类型");
+
+  auto functionDisabled = ExecuteBoolCommand(&mgr, "g-control-command", info.conn_id(), "AGC功能投入", false);
+  EXPECT_EQ(functionDisabled.status(), DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_EQ(functionDisabled.reject_code(), DataCenterProto::COMMAND_REJECT_UNSPECIFIED);
+  EXPECT_TRUE(WaitForLatestBool(state, info.conn_id(), "AGC功能投入", false));
+
+  auto remoteDisabled = ExecuteBoolCommand(&mgr, "g-control-command", info.conn_id(), "AGC远方操作", false);
+  EXPECT_EQ(remoteDisabled.status(), DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_EQ(remoteDisabled.reject_code(), DataCenterProto::COMMAND_REJECT_UNSPECIFIED);
+  EXPECT_TRUE(WaitForLatestBool(state, info.conn_id(), "AGC远方操作", false));
+
+  auto functionBlocked = ExecuteBoolCommand(&mgr, "g-control-command", info.conn_id(), "AGC功能投入", true);
+  EXPECT_EQ(functionBlocked.status(), DataCenterProto::COMMAND_REJECTED);
+  EXPECT_EQ(functionBlocked.reject_code(), DataCenterProto::COMMAND_REJECT_UNSPECIFIED);
+  EXPECT_EQ(functionBlocked.reason(), "AGC 当前不允许远方操作");
+
+  auto remoteEnabled = ExecuteBoolCommand(&mgr, "g-control-command", info.conn_id(), "AGC远方操作", true);
+  EXPECT_EQ(remoteEnabled.status(), DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_TRUE(WaitForLatestBool(state, info.conn_id(), "AGC远方操作", true));
+
+  AGCProto::GroupInfo current;
+  ASSERT_TRUE(mgr.GetGroup("g-control-command", &current).ok());
+  EXPECT_FALSE(current.function_enabled());
+  EXPECT_TRUE(current.remote_enabled());
+
+  ASSERT_TRUE(mgr.StopGroup("g-control-command").ok());
+}
+
+// 验证：功能退出或远方操作关闭时同步总有功命令被拒绝，并沿用通用拒绝状态与文本原因。
+TEST(AgcGroupManagerTest, ControlStatesRejectSynchronousPowerCommand) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(MakeGroupReq("g-control-gates"), &info).ok());
+
+  ASSERT_EQ(
+      ExecuteBoolCommand(&mgr, "g-control-gates", info.conn_id(), "AGC功能投入", false).status(),
+      DataCenterProto::COMMAND_ACCEPTED);
+  auto functionRejected = ExecuteDoubleCommand(&mgr, "g-control-gates", info.conn_id(), "P_CMD", 60.0);
+  EXPECT_EQ(functionRejected.status(), DataCenterProto::COMMAND_REJECTED);
+  EXPECT_EQ(functionRejected.reject_code(), DataCenterProto::COMMAND_REJECT_UNSPECIFIED);
+  EXPECT_EQ(functionRejected.reason(), "AGC 功能未投入");
+
+  ASSERT_EQ(
+      ExecuteBoolCommand(&mgr, "g-control-gates", info.conn_id(), "AGC功能投入", true).status(),
+      DataCenterProto::COMMAND_ACCEPTED);
+  ASSERT_EQ(
+      ExecuteBoolCommand(&mgr, "g-control-gates", info.conn_id(), "AGC远方操作", false).status(),
+      DataCenterProto::COMMAND_ACCEPTED);
+  auto remoteRejected = ExecuteDoubleCommand(&mgr, "g-control-gates", info.conn_id(), "P_CMD", 60.0);
+  EXPECT_EQ(remoteRejected.status(), DataCenterProto::COMMAND_REJECTED);
+  EXPECT_EQ(remoteRejected.reject_code(), DataCenterProto::COMMAND_REJECT_UNSPECIFIED);
+  EXPECT_EQ(remoteRejected.reason(), "AGC 当前不允许远方操作");
+
+  ASSERT_TRUE(mgr.StopGroup("g-control-gates").ok());
+}
+
+// 验证：功能退出后订阅输入仍更新量测汇总，但不再发布成员控制设定；重新投入后恢复控制。
+TEST(AgcGroupManagerTest, FunctionDisabledBlocksSubscribedControlOutputButKeepsMeasurement) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(MakeGroupReq("g-function-disabled"), &info).ok());
+  ASSERT_TRUE(WaitForSubscriptionCount(state, info.conn_id(), 1u));
+  ASSERT_EQ(
+      ExecuteBoolCommand(&mgr, "g-function-disabled", info.conn_id(), "AGC功能投入", false).status(),
+      DataCenterProto::COMMAND_ACCEPTED);
+
+  PublishDoublePoint(&state, info.conn_id(), "P_CMD", 60.0);
+  PublishDoublePoint(&state, info.conn_id(), "INV1_P_MEAS", 10.0);
+  PublishDoublePoint(&state, info.conn_id(), "INV2_P_MEAS", 20.0);
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "P_TOTAL", 30.0));
+  std::this_thread::sleep_for(std::chrono::milliseconds(120));
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV1_P_SET"), 0u);
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV2_P_SET"), 0u);
+
+  ASSERT_EQ(
+      ExecuteBoolCommand(&mgr, "g-function-disabled", info.conn_id(), "AGC功能投入", true).status(),
+      DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV1_P_SET", 20.0));
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV2_P_SET", 40.0));
+
+  ASSERT_TRUE(mgr.StopGroup("g-function-disabled").ok());
+}
+
+// 验证：控制状态在同一运行时停止再启动后保持不变，并在启动时重新发布当前 BOOL 状态。
+TEST(AgcGroupManagerTest, RestartKeepsRuntimeControlStatesAndRepublishesThem) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(MakeGroupReq("g-control-restart"), &info).ok());
+  ASSERT_EQ(
+      ExecuteBoolCommand(&mgr, "g-control-restart", info.conn_id(), "AGC功能投入", false).status(),
+      DataCenterProto::COMMAND_ACCEPTED);
+  ASSERT_EQ(
+      ExecuteBoolCommand(&mgr, "g-control-restart", info.conn_id(), "AGC远方操作", false).status(),
+      DataCenterProto::COMMAND_ACCEPTED);
+  ASSERT_TRUE(mgr.StopGroup("g-control-restart").ok());
+  ASSERT_EQ(
+      ExecuteBoolCommand(&mgr, "g-control-restart", info.conn_id(), "AGC远方操作", true).status(),
+      DataCenterProto::COMMAND_ACCEPTED);
+  ASSERT_EQ(
+      ExecuteBoolCommand(&mgr, "g-control-restart", info.conn_id(), "AGC功能投入", true).status(),
+      DataCenterProto::COMMAND_ACCEPTED);
+  ASSERT_EQ(
+      ExecuteBoolCommand(&mgr, "g-control-restart", info.conn_id(), "AGC功能投入", false).status(),
+      DataCenterProto::COMMAND_ACCEPTED);
+  ASSERT_EQ(
+      ExecuteBoolCommand(&mgr, "g-control-restart", info.conn_id(), "AGC远方操作", false).status(),
+      DataCenterProto::COMMAND_ACCEPTED);
+  const auto functionPublishCount = state.GetPublishCount(info.conn_id(), "AGC功能投入");
+  const auto remotePublishCount = state.GetPublishCount(info.conn_id(), "AGC远方操作");
+
+  ASSERT_TRUE(mgr.StartGroup("g-control-restart").ok());
+  EXPECT_TRUE(WaitForPublishCount(state, info.conn_id(), "AGC功能投入", functionPublishCount + 1));
+  EXPECT_TRUE(WaitForPublishCount(state, info.conn_id(), "AGC远方操作", remotePublishCount + 1));
+  EXPECT_TRUE(WaitForLatestBool(state, info.conn_id(), "AGC功能投入", false));
+  EXPECT_TRUE(WaitForLatestBool(state, info.conn_id(), "AGC远方操作", false));
+
+  AGCProto::GroupInfo current;
+  ASSERT_TRUE(mgr.GetGroup("g-control-restart", &current).ok());
+  EXPECT_FALSE(current.function_enabled());
+  EXPECT_FALSE(current.remote_enabled());
+
+  ASSERT_TRUE(mgr.StopGroup("g-control-restart").ok());
+}
+
+// 验证：控制状态不写入持久化配置，新的 GroupManager 恢复后按 true/true 初始化并发布。
+TEST(AgcGroupManagerTest, RestoreResetsRuntimeControlStatesToEnabled) {
+  ScopedTempDir dir;
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  const auto configDbPath = dir.path() / "config.db";
+  uint32_t connId = 0;
+
+  {
+    GroupManager writer("AGC", configDbPath);
+    writer.setDataCenterStub(stub);
+    AGCProto::GroupInfo info;
+    ASSERT_TRUE(writer.UpsertGroup(MakeGroupReq("g-control-restore"), &info).ok());
+    connId = info.conn_id();
+    ASSERT_EQ(
+        ExecuteBoolCommand(&writer, "g-control-restore", connId, "AGC功能投入", false).status(),
+        DataCenterProto::COMMAND_ACCEPTED);
+    ASSERT_EQ(
+        ExecuteBoolCommand(&writer, "g-control-restore", connId, "AGC远方操作", false).status(),
+        DataCenterProto::COMMAND_ACCEPTED);
+    ASSERT_TRUE(writer.StopGroup("g-control-restore").ok());
+  }
+
+  GroupManager reader("AGC", configDbPath);
+  reader.setDataCenterStub(stub);
+  ASSERT_TRUE(reader.LoadPersistedConfig().ok());
+  AGCProto::GroupInfo restored;
+  ASSERT_TRUE(reader.GetGroup("g-control-restore", &restored).ok());
+  EXPECT_TRUE(restored.function_enabled());
+  EXPECT_TRUE(restored.remote_enabled());
+  EXPECT_TRUE(WaitForLatestBool(state, connId, "AGC功能投入", true));
+  EXPECT_TRUE(WaitForLatestBool(state, connId, "AGC远方操作", true));
+
+  ASSERT_TRUE(reader.StopGroup("g-control-restore").ok());
 }
 
 // 验证：任一成员缺少正的额定容量时，AGC 拒绝创建控制组。
@@ -399,6 +655,8 @@ TEST(AgcGroupManagerTest, UpsertGroupRegistersBaseTagToDataCenterConnTags) {
         EXPECT_TRUE(tags.contains("当前可调有功上限"));
         EXPECT_TRUE(tags.contains("调节返回值"));
         EXPECT_TRUE(tags.contains("AGC装机容量"));
+        EXPECT_TRUE(tags.contains("AGC功能投入"));
+        EXPECT_TRUE(tags.contains("AGC远方操作"));
         return grpc::Status::OK;
       }));
 

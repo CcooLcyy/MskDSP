@@ -52,6 +52,9 @@ private:
     uint32_t connId{0};
     AGCProto::GroupState state{AGCProto::GROUP_STATE_STOPPED};
     std::string lastError;
+    // 控制权限状态仅保存在当前运行时，重启/恢复时按安全默认值重新初始化。
+    bool functionEnabled{true};
+    bool remoteEnabled{true};
 
     std::shared_ptr<grpc::ClientContext> dcSubscribeContext;
     std::jthread dcSubscribeThread;
@@ -92,6 +95,7 @@ private:
   void startThreadsLocked(const std::string &groupName, GroupRuntime *g);
   void primeControlInputs(const std::string &groupName);
   void requestControlLocked(const std::string &groupName, GroupRuntime *g, std::string_view reason, std::string_view tag);
+  void publishControlStatePoints(const std::string &groupName, std::string_view trigger);
   void publishDefaultLimitPoints(const std::string &groupName, std::string_view trigger);
   void publishCommandEchoPoint(uint32_t connId, const AGCProto::ValueSpec &commandSpec, const DataCenterProto::PointUpdate &update);
 

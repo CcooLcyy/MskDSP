@@ -5,7 +5,7 @@
 namespace AGC {
 namespace {
 
-constexpr std::array<DefaultPointDefinition, 6> kDefaultPoints{{
+constexpr std::array<DefaultPointDefinition, 8> kDefaultPoints{{
     {
         .kind = AGCProto::DEFAULT_POINT_KIND_THEORETICAL_LOWER,
         .tag = "理论可调有功下限",
@@ -41,6 +41,18 @@ constexpr std::array<DefaultPointDefinition, 6> kDefaultPoints{{
         .tag = "AGC装机容量",
         .name = "AGC装机容量",
         .description = "当前控制组所有成员额定容量之和，单位为 kW",
+    },
+    {
+        .kind = AGCProto::DEFAULT_POINT_KIND_FUNCTION_ENABLE,
+        .tag = "AGC功能投入",
+        .name = "AGC功能投入",
+        .description = "AGC 自动有功控制功能投入状态；BOOL，true 表示投入",
+    },
+    {
+        .kind = AGCProto::DEFAULT_POINT_KIND_REMOTE_OPERATION,
+        .tag = "AGC远方操作",
+        .name = "AGC远方操作",
+        .description = "AGC 是否允许远方控制状态；BOOL，true 表示允许",
     },
 }};
 

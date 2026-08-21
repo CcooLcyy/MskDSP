@@ -5,7 +5,7 @@
 namespace AVC {
 namespace {
 
-constexpr std::array<DefaultPointDefinition, 10> kDefaultPoints{{
+constexpr std::array<DefaultPointDefinition, 12> kDefaultPoints{{
     {
         .kind = AVCProto::DEFAULT_POINT_KIND_THEORETICAL_LOWER,
         .tag = "理论可调无功下限",
@@ -65,6 +65,18 @@ constexpr std::array<DefaultPointDefinition, 10> kDefaultPoints{{
         .tag = "电压偏差",
         .name = "电压偏差",
         .description = "目标电压与当前电压之间的偏差值；仅目标电压模式下发布",
+    },
+    {
+        .kind = AVCProto::DEFAULT_POINT_KIND_FUNCTION_ENABLE,
+        .tag = "AVC功能投入",
+        .name = "AVC功能投入",
+        .description = "AVC 自动电压/无功控制功能投入状态；BOOL，true 表示投入",
+    },
+    {
+        .kind = AVCProto::DEFAULT_POINT_KIND_REMOTE_OPERATION,
+        .tag = "AVC远方操作",
+        .name = "AVC远方操作",
+        .description = "AVC 是否允许远方控制状态；BOOL，true 表示允许",
     },
 }};
 

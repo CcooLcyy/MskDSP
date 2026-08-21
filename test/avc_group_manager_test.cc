@@ -102,6 +102,19 @@ void PublishDoublePoint(FakeDataCenterState* state, uint32_t connId, const char*
   ASSERT_TRUE(state->Publish(req).ok());
 }
 
+DataCenterProto::ExecuteCommandResponse ExecuteBoolCommand(
+    GroupManager* manager, const char* groupName, uint32_t connId, const char* tag, bool value) {
+  DataCenterProto::ExecuteCommandRequest request;
+  request.mutable_dst()->set_conn_name(groupName);
+  request.mutable_dst()->set_conn_id(connId);
+  request.mutable_dst()->set_tag(tag);
+  request.mutable_value()->set_bool_value(value);
+  request.set_quality(DataCenterProto::QUALITY_GOOD);
+  DataCenterProto::ExecuteCommandResponse response;
+  EXPECT_TRUE(manager->ExecuteCommand(request, &response).ok());
+  return response;
+}
+
 bool WaitForLatestDouble(const FakeDataCenterState& state, uint32_t connId, const char* tag, double expected) {
   for (int i = 0; i < 50; ++i) {
     DataCenterProto::GetLatestRequest req;
@@ -150,6 +163,22 @@ bool WaitForLatestDoubleWithQualityAndTs(
           resp.updates(0).ts_ms() == tsMs) {
         return true;
       }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return false;
+}
+
+bool WaitForLatestBool(const FakeDataCenterState& state, uint32_t connId, const char* tag, bool expected) {
+  for (int i = 0; i < 50; ++i) {
+    DataCenterProto::GetLatestRequest req;
+    req.set_conn_id(connId);
+    req.add_tags(tag);
+
+    DataCenterProto::GetLatestResponse resp;
+    if (state.GetLatest(req, &resp).ok() && resp.updates_size() == 1 && resp.updates(0).value().has_bool_value() &&
+        resp.updates(0).value().bool_value() == expected) {
+      return true;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
@@ -205,7 +234,7 @@ TEST(AvcGroupManagerTest, UpsertGroupReturnsDefaultPointInfos) {
 
   AVCProto::GroupInfo info;
   ASSERT_TRUE(mgr.UpsertGroup(MakeVoltageGroupReq("g-default-points"), &info).ok());
-  ASSERT_EQ(info.default_points_size(), 10);
+  ASSERT_EQ(info.default_points_size(), 12);
 
   std::unordered_map<std::string, AVCProto::DefaultPointKind> defaultPoints;
   for (const auto& point : info.default_points()) {
@@ -221,8 +250,110 @@ TEST(AvcGroupManagerTest, UpsertGroupReturnsDefaultPointInfos) {
   EXPECT_EQ(defaultPoints["总无功实测"], AVCProto::DEFAULT_POINT_KIND_TOTAL_Q_MEAS);
   EXPECT_EQ(defaultPoints["总无功偏差"], AVCProto::DEFAULT_POINT_KIND_TOTAL_Q_ERROR);
   EXPECT_EQ(defaultPoints["电压偏差"], AVCProto::DEFAULT_POINT_KIND_VOLTAGE_ERROR);
+  EXPECT_EQ(defaultPoints["AVC功能投入"], AVCProto::DEFAULT_POINT_KIND_FUNCTION_ENABLE);
+  EXPECT_EQ(defaultPoints["AVC远方操作"], AVCProto::DEFAULT_POINT_KIND_REMOTE_OPERATION);
+  EXPECT_TRUE(info.function_enabled());
+  EXPECT_TRUE(info.remote_enabled());
 
   ASSERT_TRUE(mgr.StopGroup("g-default-points").ok());
+}
+
+// 验证：AVC 功能投入与远方操作控制点接受 BOOL 命令、发布当前状态，并对普通目标命令执行门控。
+TEST(AvcGroupManagerTest, ControlStateCommandsPublishStateAndGateTargetCommands) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AVC");
+  mgr.setDataCenterStub(stub);
+
+  AVCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(MakeVoltageGroupReq("g-control-state"), &info).ok());
+  ASSERT_TRUE(WaitForLatestBool(state, info.conn_id(), "AVC功能投入", true));
+  ASSERT_TRUE(WaitForLatestBool(state, info.conn_id(), "AVC远方操作", true));
+
+  DataCenterProto::ExecuteCommandRequest disableFunction;
+  disableFunction.mutable_dst()->set_conn_name("g-control-state");
+  disableFunction.mutable_dst()->set_tag("AVC功能投入");
+  disableFunction.mutable_value()->set_bool_value(false);
+  DataCenterProto::ExecuteCommandResponse response;
+  ASSERT_TRUE(mgr.ExecuteCommand(disableFunction, &response).ok());
+  EXPECT_EQ(response.status(), DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_TRUE(WaitForLatestBool(state, info.conn_id(), "AVC功能投入", false));
+
+  PublishDoublePoint(&state, info.conn_id(), "V_CMD", 1.0);
+  PublishDoublePoint(&state, info.conn_id(), "V_MEAS", 0.9);
+  PublishDoublePoint(&state, info.conn_id(), "INV1_Q_MEAS", 0.0);
+  PublishDoublePoint(&state, info.conn_id(), "INV2_Q_MEAS", 0.0);
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "当前电压", 0.9));
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "总无功实测", 0.0));
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "总无功目标"), 0u);
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV1_Q_SET"), 0u);
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV2_Q_SET"), 0u);
+
+  DataCenterProto::ExecuteCommandRequest target;
+  target.mutable_dst()->set_conn_name("g-control-state");
+  target.mutable_dst()->set_tag("V_CMD");
+  target.mutable_value()->set_double_value(1.0);
+  ASSERT_TRUE(mgr.ExecuteCommand(target, &response).ok());
+  EXPECT_EQ(response.status(), DataCenterProto::COMMAND_REJECTED);
+  EXPECT_EQ(response.reason(), "AVC 功能未投入");
+
+  DataCenterProto::ExecuteCommandRequest disableRemote;
+  disableRemote.mutable_dst()->set_conn_name("g-control-state");
+  disableRemote.mutable_dst()->set_tag("AVC远方操作");
+  disableRemote.mutable_value()->set_bool_value(false);
+  ASSERT_TRUE(mgr.ExecuteCommand(disableRemote, &response).ok());
+  EXPECT_EQ(response.status(), DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_TRUE(WaitForLatestBool(state, info.conn_id(), "AVC远方操作", false));
+
+  DataCenterProto::ExecuteCommandRequest enableFunction;
+  enableFunction.mutable_dst()->set_conn_name("g-control-state");
+  enableFunction.mutable_dst()->set_tag("AVC功能投入");
+  enableFunction.mutable_value()->set_bool_value(true);
+  ASSERT_TRUE(mgr.ExecuteCommand(enableFunction, &response).ok());
+  EXPECT_EQ(response.status(), DataCenterProto::COMMAND_REJECTED);
+  EXPECT_EQ(response.reason(), "AVC 当前不允许远方操作");
+
+  ASSERT_TRUE(mgr.StopGroup("g-control-state").ok());
+}
+
+// 验证：AVC 控制组重启或幂等启动时保留运行态控制状态并重新发布 BOOL 状态点。
+TEST(AvcGroupManagerTest, RestartAndIdempotentStartRepublishRuntimeControlStates) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AVC");
+  mgr.setDataCenterStub(stub);
+
+  AVCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(MakeVoltageGroupReq("g-control-restart"), &info).ok());
+  ASSERT_EQ(
+      ExecuteBoolCommand(&mgr, "g-control-restart", info.conn_id(), "AVC功能投入", false).status(),
+      DataCenterProto::COMMAND_ACCEPTED);
+  ASSERT_EQ(
+      ExecuteBoolCommand(&mgr, "g-control-restart", info.conn_id(), "AVC远方操作", false).status(),
+      DataCenterProto::COMMAND_ACCEPTED);
+  ASSERT_TRUE(mgr.StopGroup("g-control-restart").ok());
+
+  const auto functionPublishCount = state.GetPublishCount(info.conn_id(), "AVC功能投入");
+  const auto remotePublishCount = state.GetPublishCount(info.conn_id(), "AVC远方操作");
+  ASSERT_TRUE(mgr.StartGroup("g-control-restart").ok());
+  EXPECT_TRUE(WaitForPublishCount(state, info.conn_id(), "AVC功能投入", functionPublishCount + 1));
+  EXPECT_TRUE(WaitForPublishCount(state, info.conn_id(), "AVC远方操作", remotePublishCount + 1));
+  EXPECT_TRUE(WaitForLatestBool(state, info.conn_id(), "AVC功能投入", false));
+  EXPECT_TRUE(WaitForLatestBool(state, info.conn_id(), "AVC远方操作", false));
+
+  const auto runningFunctionPublishCount = state.GetPublishCount(info.conn_id(), "AVC功能投入");
+  const auto runningRemotePublishCount = state.GetPublishCount(info.conn_id(), "AVC远方操作");
+  ASSERT_TRUE(mgr.StartGroup("g-control-restart").ok());
+  EXPECT_TRUE(WaitForPublishCount(state, info.conn_id(), "AVC功能投入", runningFunctionPublishCount + 1));
+  EXPECT_TRUE(WaitForPublishCount(state, info.conn_id(), "AVC远方操作", runningRemotePublishCount + 1));
+
+  AVCProto::GroupInfo current;
+  ASSERT_TRUE(mgr.GetGroup("g-control-restart", &current).ok());
+  EXPECT_FALSE(current.function_enabled());
+  EXPECT_FALSE(current.remote_enabled());
+  ASSERT_TRUE(mgr.StopGroup("g-control-restart").ok());
 }
 
 // 验证：默认限值点会注册到 DataCenter 标签注册表并在不可控缺测时先发布 BAD 质量，量测到来后转为 GOOD。
@@ -556,5 +687,9 @@ TEST(AvcGroupManagerTest, LoadPersistedConfigRestoresConnIdAndAutoStartsGroup) {
   AVCProto::GroupInfo info;
   ASSERT_TRUE(reader.GetGroup("g-restore", &info).ok());
   EXPECT_EQ(info.state(), AVCProto::GROUP_STATE_RUNNING);
+  EXPECT_TRUE(info.function_enabled());
+  EXPECT_TRUE(info.remote_enabled());
+  EXPECT_TRUE(WaitForLatestBool(state, info.conn_id(), "AVC功能投入", true));
+  EXPECT_TRUE(WaitForLatestBool(state, info.conn_id(), "AVC远方操作", true));
   ASSERT_TRUE(reader.StopGroup("g-restore").ok());
 }

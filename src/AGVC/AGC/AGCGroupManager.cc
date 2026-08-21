@@ -101,6 +101,8 @@ grpc::Status GroupManager::fillGroupInfoLocked(const GroupRuntime &g, AGCProto::
   out->set_conn_id(g.connId);
   out->set_state(g.state);
   out->set_last_error(g.lastError);
+  out->set_function_enabled(g.functionEnabled);
+  out->set_remote_enabled(g.remoteEnabled);
   FillDefaultPointInfos(out->mutable_default_points());
   return grpc::Status::OK;
 }
@@ -217,6 +219,8 @@ grpc::Status GroupManager::restoreGroupFromConfig(const AGCProto::GroupConfig &c
   runtime.connId = connInfo.conn_id();
   runtime.state = restoredState;
   runtime.lastError.clear();
+  runtime.functionEnabled = true;
+  runtime.remoteEnabled = true;
   rebuildTagCache(&runtime);
 
   const auto tags = collectAllTags(config);
@@ -237,6 +241,7 @@ grpc::Status GroupManager::restoreGroupFromConfig(const AGCProto::GroupConfig &c
       std::lock_guard<std::mutex> lock(mu_);
       groupsByName_[config.group_name()] = std::move(runtime);
     }
+    publishControlStatePoints(config.group_name(), "控制组持久化恢复");
     publishDefaultLimitPoints(config.group_name(), "控制组持久化恢复");
     return connTagsStatus;
   }
@@ -245,6 +250,7 @@ grpc::Status GroupManager::restoreGroupFromConfig(const AGCProto::GroupConfig &c
     std::lock_guard<std::mutex> lock(mu_);
     groupsByName_[config.group_name()] = std::move(runtime);
   }
+  publishControlStatePoints(config.group_name(), "控制组持久化恢复");
   publishDefaultLimitPoints(config.group_name(), "控制组持久化恢复");
   return grpc::Status::OK;
 }
@@ -359,6 +365,8 @@ grpc::Status GroupManager::UpsertGroup(const AGCProto::UpsertGroupRequest &reque
       g.connId = connInfo.conn_id();
       g.state = AGCProto::GROUP_STATE_STOPPED;
       g.lastError.clear();
+      g.functionEnabled = true;
+      g.remoteEnabled = true;
       rebuildTagCache(&g);
       fillGroupInfoLocked(g, out);
     }
@@ -401,6 +409,7 @@ grpc::Status GroupManager::UpsertGroup(const AGCProto::UpsertGroupRequest &reque
       }
     }
   }
+  publishControlStatePoints(groupName, "控制组配置更新成功");
   publishDefaultLimitPoints(groupName, "控制组配置更新成功");
   (void)tryAutoStartGroup(groupName, "控制组配置更新成功");
   {
@@ -537,6 +546,7 @@ grpc::Status GroupManager::StartGroup(const std::string &groupName) {
     return status;
   }
 
+  bool alreadyRunning = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = groupsByName_.find(groupName);
@@ -544,18 +554,24 @@ grpc::Status GroupManager::StartGroup(const std::string &groupName) {
       return makeNotFound(groupName);
     }
     if (it->second.state == AGCProto::GROUP_STATE_RUNNING) {
-      LOG_INFO("AGC 启动控制组请求幂等成功: group_name={}, 原因=控制组已在运行", groupName);
-      return grpc::Status::OK;
+      alreadyRunning = true;
+    } else {
+      status = checkStartPreconditionsLocked(it->second);
+      if (!status.ok()) {
+        it->second.lastError = status.error_message();
+        return status;
+      }
+      startThreadsLocked(groupName, &it->second);
+      it->second.state = AGCProto::GROUP_STATE_RUNNING;
+      it->second.lastError.clear();
     }
-    status = checkStartPreconditionsLocked(it->second);
-    if (!status.ok()) {
-      it->second.lastError = status.error_message();
-      return status;
-    }
-    startThreadsLocked(groupName, &it->second);
-    it->second.state = AGCProto::GROUP_STATE_RUNNING;
-    it->second.lastError.clear();
   }
+  if (alreadyRunning) {
+    publishControlStatePoints(groupName, "控制组启动幂等请求");
+    LOG_INFO("AGC 启动控制组请求幂等成功: group_name={}, 原因=控制组已在运行", groupName);
+    return grpc::Status::OK;
+  }
+  publishControlStatePoints(groupName, "控制组启动");
   primeControlInputs(groupName);
   LOG_INFO("AGC 控制组已启动事件触发控制功能: group_name={}", groupName);
   return grpc::Status::OK;
@@ -665,6 +681,75 @@ grpc::Status GroupManager::ExecuteCommand(
   }
   *response->mutable_dst() = request.dst();
 
+  const auto groupName = request.dst().conn_name();
+  const auto functionTag = defaultPointTag(AGCProto::DEFAULT_POINT_KIND_FUNCTION_ENABLE);
+  const auto remoteTag = defaultPointTag(AGCProto::DEFAULT_POINT_KIND_REMOTE_OPERATION);
+  const bool isFunctionPoint = request.dst().tag() == functionTag;
+  const bool isRemotePoint = request.dst().tag() == remoteTag;
+  if (isFunctionPoint || isRemotePoint) {
+    bool publishState = false;
+    bool requestControl = false;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = groupsByName_.find(groupName);
+      if (it == groupsByName_.end()) {
+        response->set_status(DataCenterProto::COMMAND_REJECTED);
+        response->set_reject_code(DataCenterProto::COMMAND_REJECT_BAD_CONFIG);
+        response->set_reason("未找到 AGC 控制组");
+        return grpc::Status::OK;
+      }
+      if (it->second.state == AGCProto::GROUP_STATE_PENDING_DELETE) {
+        response->set_status(DataCenterProto::COMMAND_REJECTED);
+        response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSPECIFIED);
+        response->set_reason("AGC 控制组处于待删除状态");
+        LOG_WARNING("AGC 拒绝控制状态命令: group_name={}, tag={}, 原因=控制组处于待删除状态", groupName, request.dst().tag());
+        return grpc::Status::OK;
+      }
+      if (!request.value().has_bool_value()) {
+        response->set_status(DataCenterProto::COMMAND_REJECTED);
+        response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSUPPORTED_POINT);
+        response->set_reason("AGC 控制点仅接受 BOOL 类型");
+        LOG_WARNING("AGC 拒绝控制状态命令: group_name={}, tag={}, 原因=控制点仅接受 BOOL 类型", groupName, request.dst().tag());
+        return grpc::Status::OK;
+      }
+      const bool value = request.value().bool_value();
+      if (isFunctionPoint && !it->second.remoteEnabled) {
+        response->set_status(DataCenterProto::COMMAND_REJECTED);
+        response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSPECIFIED);
+        response->set_reason("AGC 当前不允许远方操作");
+        LOG_WARNING("AGC 拒绝功能投入命令: group_name={}, value={}, 原因=AGC 当前不允许远方操作", groupName, value);
+        return grpc::Status::OK;
+      }
+      if (isFunctionPoint) {
+        if (it->second.functionEnabled != value) {
+          it->second.functionEnabled = value;
+          publishState = true;
+          requestControl = value && it->second.state == AGCProto::GROUP_STATE_RUNNING;
+        }
+      } else if (it->second.remoteEnabled != value) {
+        it->second.remoteEnabled = value;
+        publishState = true;
+      }
+      response->set_status(DataCenterProto::COMMAND_ACCEPTED);
+      response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSPECIFIED);
+      response->set_requested_value(value ? 1.0 : 0.0);
+      response->set_accepted_value(value ? 1.0 : 0.0);
+      response->set_reason(isFunctionPoint ? "AGC 功能投入状态已更新" : "AGC 远方操作状态已更新");
+      LOG_INFO("AGC 已接受控制状态命令: group_name={}, tag={}, value={}, 状态已变化={}", groupName, request.dst().tag(), value, publishState);
+    }
+    if (publishState) {
+      publishControlStatePoints(groupName, isFunctionPoint ? "同步功能投入命令" : "同步远方操作命令");
+    }
+    if (requestControl) {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = groupsByName_.find(groupName);
+      if (it != groupsByName_.end()) {
+        requestControlLocked(groupName, &it->second, "功能重新投入", functionTag);
+      }
+    }
+    return grpc::Status::OK;
+  }
+
   double raw = 0.0;
   if (!pointValueToDouble(request.value(), &raw)) {
     response->set_status(DataCenterProto::COMMAND_REJECTED);
@@ -673,7 +758,6 @@ grpc::Status GroupManager::ExecuteCommand(
     return grpc::Status::OK;
   }
 
-  const auto groupName = request.dst().conn_name();
   AGCProto::GroupConfig config;
   uint32_t connId = 0;
   ControlInput input;
@@ -690,6 +774,20 @@ grpc::Status GroupManager::ExecuteCommand(
       response->set_status(DataCenterProto::COMMAND_REJECTED);
       response->set_reject_code(DataCenterProto::COMMAND_REJECT_GROUP_NOT_RUNNING);
       response->set_reason("AGC 控制组未运行");
+      return grpc::Status::OK;
+    }
+    if (!it->second.remoteEnabled) {
+      response->set_status(DataCenterProto::COMMAND_REJECTED);
+      response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSPECIFIED);
+      response->set_reason("AGC 当前不允许远方操作");
+      LOG_WARNING("AGC 拒绝同步总有功命令: group_name={}, 原因=AGC 当前不允许远方操作", groupName);
+      return grpc::Status::OK;
+    }
+    if (!it->second.functionEnabled) {
+      response->set_status(DataCenterProto::COMMAND_REJECTED);
+      response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSPECIFIED);
+      response->set_reason("AGC 功能未投入");
+      LOG_WARNING("AGC 拒绝同步总有功命令: group_name={}, 原因=AGC 功能未投入", groupName);
       return grpc::Status::OK;
     }
     if (it->second.cmdTag.empty() || request.dst().tag() != it->second.cmdTag) {
@@ -984,6 +1082,67 @@ void GroupManager::requestControlLocked(
   }
 }
 
+void GroupManager::publishControlStatePoints(const std::string &groupName, std::string_view trigger) {
+  uint32_t connId = 0;
+  bool functionEnabled = true;
+  bool remoteEnabled = true;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end()) {
+      return;
+    }
+    connId = it->second.connId;
+    functionEnabled = it->second.functionEnabled;
+    remoteEnabled = it->second.remoteEnabled;
+  }
+  if (connId == 0) {
+    return;
+  }
+
+  const auto functionTag = defaultPointTag(AGCProto::DEFAULT_POINT_KIND_FUNCTION_ENABLE);
+  const auto remoteTag = defaultPointTag(AGCProto::DEFAULT_POINT_KIND_REMOTE_OPERATION);
+  DataCenterProto::PointValue functionValue;
+  functionValue.set_bool_value(functionEnabled);
+  auto status = dataCenter_.PublishValue(connId, std::string(functionTag), functionValue, DataCenterProto::QUALITY_GOOD, 0);
+  if (!status.ok()) {
+    LOG_ERROR("AGC 发布功能投入状态失败: group_name={}, conn_id={}, tag={}, value={}, 触发来源={}, 原因={}",
+              groupName,
+              connId,
+              functionTag,
+              functionEnabled,
+              trigger,
+              status.error_message());
+  } else {
+    LOG_DEBUG("AGC 已发布功能投入状态: group_name={}, conn_id={}, tag={}, value={}, 触发来源={}",
+              groupName,
+              connId,
+              functionTag,
+              functionEnabled,
+              trigger);
+  }
+
+  DataCenterProto::PointValue remoteValue;
+  remoteValue.set_bool_value(remoteEnabled);
+  status = dataCenter_.PublishValue(connId, std::string(remoteTag), remoteValue, DataCenterProto::QUALITY_GOOD, 0);
+  if (!status.ok()) {
+    LOG_ERROR("AGC 发布远方操作状态失败: group_name={}, conn_id={}, tag={}, value={}, 触发来源={}, 原因={}",
+              groupName,
+              connId,
+              remoteTag,
+              remoteEnabled,
+              trigger,
+              status.error_message());
+  } else {
+    LOG_DEBUG("AGC 已发布远方操作状态: group_name={}, conn_id={}, tag={}, value={}, 触发来源={}",
+              groupName,
+              connId,
+              remoteTag,
+              remoteEnabled,
+              trigger);
+  }
+}
+
 bool GroupManager::handleUpdateLocked(GroupRuntime *g, const DataCenterProto::PointUpdate &update) {
   if (g == nullptr) {
     return false;
@@ -1123,6 +1282,7 @@ void GroupManager::publishCommandEchoPoint(
 void GroupManager::controlTick(const std::string &groupName) {
   AGCProto::GroupConfig config;
   uint32_t connId = 0;
+  bool functionEnabled = true;
   ControlInput input;
 
   {
@@ -1137,6 +1297,7 @@ void GroupManager::controlTick(const std::string &groupName) {
 
     config = it->second.config;
     connId = it->second.connId;
+    functionEnabled = it->second.functionEnabled;
     input.hasCmdRaw = it->second.hasCmdRaw;
     input.cmdRaw = it->second.cmdRaw;
     input.baseRawByTag = it->second.baseRawByTag;
@@ -1174,6 +1335,11 @@ void GroupManager::controlTick(const std::string &groupName) {
     }
   }
   publishDefaultLimitPoints(groupName, "事件触发控制");
+
+  if (!functionEnabled) {
+    LOG_DEBUG("AGC 跳过控制输出: group_name={}, 原因=AGC 功能未投入", groupName);
+    return;
+  }
 
   const auto outputOpt = ComputeControlOutput(config, input, weightedStrategy_);
   if (!outputOpt) {
