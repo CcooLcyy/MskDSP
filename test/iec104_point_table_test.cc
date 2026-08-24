@@ -136,7 +136,7 @@ TEST(IEC104PointTableTest, InfersLegacyBusinessTypeFromIoaRange) {
   remoteAdjust->set_type(IEC104Proto::POINT_TYPE_FLOAT);
   auto* remoteControl = req.add_points();
   remoteControl->set_tag("legacy-command");
-  remoteControl->set_ioa(0x8000);
+  remoteControl->set_ioa(0x6001);
   remoteControl->set_type(IEC104Proto::POINT_TYPE_SINGLE);
   auto* custom = req.add_points();
   custom->set_tag("legacy-custom");
@@ -151,6 +151,66 @@ TEST(IEC104PointTableTest, InfersLegacyBusinessTypeFromIoaRange) {
             IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_CONTROL);
   EXPECT_EQ(table.FindByTag("legacy-custom")->businessType,
             IEC104Proto::POINT_BUSINESS_TYPE_UNSPECIFIED);
+}
+
+// 验证：旧点表按确认的 IOA 边界推导遥信、遥测、遥控、遥调和参数业务类型，空档保持未分类。
+TEST(IEC104PointTableTest, InfersConfirmedBusinessTypeBoundaries) {
+  struct BoundaryCase {
+    const char* tag;
+    uint32_t ioa;
+    IEC104Proto::PointType type;
+    IEC104Proto::PointBusinessType expected;
+  };
+
+  const BoundaryCase cases[] = {
+      {"teleindication-start-float", 0x0001, IEC104Proto::POINT_TYPE_FLOAT,
+       IEC104Proto::POINT_BUSINESS_TYPE_TELEINDICATION},
+      {"teleindication-end", 0x4000, IEC104Proto::POINT_TYPE_SINGLE,
+       IEC104Proto::POINT_BUSINESS_TYPE_TELEINDICATION},
+      {"telemetry-start-single", 0x4001, IEC104Proto::POINT_TYPE_SINGLE,
+       IEC104Proto::POINT_BUSINESS_TYPE_TELEMETRY},
+      {"telemetry-end", 0x5000, IEC104Proto::POINT_TYPE_FLOAT,
+       IEC104Proto::POINT_BUSINESS_TYPE_TELEMETRY},
+      {"gap-after-telemetry", 0x5001, IEC104Proto::POINT_TYPE_FLOAT,
+       IEC104Proto::POINT_BUSINESS_TYPE_UNSPECIFIED},
+      {"gap-before-remote-control", 0x6000, IEC104Proto::POINT_TYPE_SINGLE,
+       IEC104Proto::POINT_BUSINESS_TYPE_UNSPECIFIED},
+      {"remote-control-start", 0x6001, IEC104Proto::POINT_TYPE_SINGLE,
+       IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_CONTROL},
+      {"remote-control-end", 0x6100, IEC104Proto::POINT_TYPE_SINGLE,
+       IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_CONTROL},
+      {"gap-after-remote-control", 0x6101, IEC104Proto::POINT_TYPE_SINGLE,
+       IEC104Proto::POINT_BUSINESS_TYPE_UNSPECIFIED},
+      {"gap-before-remote-adjust", 0x6200, IEC104Proto::POINT_TYPE_FLOAT,
+       IEC104Proto::POINT_BUSINESS_TYPE_UNSPECIFIED},
+      {"remote-adjust-start", 0x6201, IEC104Proto::POINT_TYPE_FLOAT,
+       IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_ADJUST},
+      {"remote-adjust-end", 0x6400, IEC104Proto::POINT_TYPE_FLOAT,
+       IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_ADJUST},
+      {"gap-after-remote-adjust", 0x6401, IEC104Proto::POINT_TYPE_FLOAT,
+       IEC104Proto::POINT_BUSINESS_TYPE_UNSPECIFIED},
+      {"parameter-start", 0xA000, IEC104Proto::POINT_TYPE_FLOAT,
+       IEC104Proto::POINT_BUSINESS_TYPE_PARAMETER},
+      {"parameter-end", 0xBFFF, IEC104Proto::POINT_TYPE_FLOAT,
+       IEC104Proto::POINT_BUSINESS_TYPE_PARAMETER},
+  };
+
+  PointTable table;
+  IEC104Proto::UpsertPointTableRequest req;
+  for (const auto& boundary : cases) {
+    auto* point = req.add_points();
+    point->set_tag(boundary.tag);
+    point->set_ioa(boundary.ioa);
+    point->set_type(boundary.type);
+  }
+  req.set_replace(true);
+
+  ASSERT_TRUE(table.Upsert(req.points(), req.replace()).ok());
+  for (const auto& boundary : cases) {
+    const auto point = table.FindByTag(boundary.tag);
+    ASSERT_TRUE(point.has_value()) << boundary.tag;
+    EXPECT_EQ(point->businessType, boundary.expected) << boundary.tag;
+  }
 }
 
 // 验证：单点类型忽略 scale/offset/deadband，并归一为默认值。

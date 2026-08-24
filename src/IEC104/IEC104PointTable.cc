@@ -2,24 +2,27 @@
 
 #include <algorithm>
 
+#include "Logger.h"
+
 namespace IEC104 {
 
 IEC104Proto::PointBusinessType PointTable::InferBusinessType(
     uint32_t ioa, IEC104Proto::PointType type) {
-  if (ioa >= 0x6201 && ioa <= 0x7FFF) {
-    return IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_ADJUST;
+  (void)type;
+  if (ioa >= 1 && ioa <= 0x4000) {
+    return IEC104Proto::POINT_BUSINESS_TYPE_TELEINDICATION;
   }
-  if (ioa >= 0x8000 && ioa <= 0x9FFF) {
+  if (ioa >= 0x4001 && ioa <= 0x5000) {
+    return IEC104Proto::POINT_BUSINESS_TYPE_TELEMETRY;
+  }
+  if (ioa >= 0x6001 && ioa <= 0x6100) {
     return IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_CONTROL;
+  }
+  if (ioa >= 0x6201 && ioa <= 0x6400) {
+    return IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_ADJUST;
   }
   if (ioa >= 0xA000 && ioa <= 0xBFFF) {
     return IEC104Proto::POINT_BUSINESS_TYPE_PARAMETER;
-  }
-  if (ioa >= 1 && ioa <= 0x6200) {
-    // 旧点表没有业务字段：按协议类型保留原有四遥语义。
-    return type == IEC104Proto::POINT_TYPE_SINGLE
-        ? IEC104Proto::POINT_BUSINESS_TYPE_TELEINDICATION
-        : IEC104Proto::POINT_BUSINESS_TYPE_TELEMETRY;
   }
   return IEC104Proto::POINT_BUSINESS_TYPE_UNSPECIFIED;
 }
@@ -90,9 +93,14 @@ grpc::Status PointTable::insertOrUpdatePoint(const IEC104Proto::Point& point) {
     p.tag = point.tag();
     p.ioa = point.ioa();
     p.type = point.type();
-    p.businessType = point.business_type() == IEC104Proto::POINT_BUSINESS_TYPE_UNSPECIFIED
-        ? InferBusinessType(p.ioa, p.type)
-        : point.business_type();
+    const bool inferredBusinessType =
+        point.business_type() == IEC104Proto::POINT_BUSINESS_TYPE_UNSPECIFIED;
+    p.businessType = inferredBusinessType ? InferBusinessType(p.ioa, p.type)
+                                          : point.business_type();
+    if (inferredBusinessType) {
+      LOG_DEBUG("IEC104 按 IOA 推导点表业务类型: tag={}, ioa=0x{:06X}, business_type={}",
+                p.tag, p.ioa, static_cast<int>(p.businessType));
+    }
     if (p.type == IEC104Proto::POINT_TYPE_FLOAT) {
       p.scale = point.scale();
       if (p.scale == 0.0) {
@@ -121,9 +129,14 @@ grpc::Status PointTable::insertOrUpdatePoint(const IEC104Proto::Point& point) {
   p.tag = point.tag();
   p.ioa = point.ioa();
   p.type = point.type();
-  p.businessType = point.business_type() == IEC104Proto::POINT_BUSINESS_TYPE_UNSPECIFIED
-      ? InferBusinessType(p.ioa, p.type)
-      : point.business_type();
+  const bool inferredBusinessType =
+      point.business_type() == IEC104Proto::POINT_BUSINESS_TYPE_UNSPECIFIED;
+  p.businessType = inferredBusinessType ? InferBusinessType(p.ioa, p.type)
+                                        : point.business_type();
+  if (inferredBusinessType) {
+    LOG_DEBUG("IEC104 按 IOA 推导点表业务类型: tag={}, ioa=0x{:06X}, business_type={}",
+              p.tag, p.ioa, static_cast<int>(p.businessType));
+  }
   if (p.type == IEC104Proto::POINT_TYPE_FLOAT) {
     p.scale = point.scale();
     if (p.scale == 0.0) {

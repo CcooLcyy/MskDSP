@@ -467,7 +467,7 @@ TEST(IEC104LinkManagerHelperTest, SimulationValuesExcludeRemoteAdjustAndRemoteCo
   remoteAdjust->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_ADJUST);
   auto* remoteControl = commandPoints.add_points();
   remoteControl->set_tag("remote-control");
-  remoteControl->set_ioa(0x8000);
+  remoteControl->set_ioa(0x6001);
   remoteControl->set_type(IEC104Proto::POINT_TYPE_SINGLE);
   remoteControl->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_CONTROL);
   ASSERT_TRUE(table.Upsert(commandPoints.points(), false).ok());

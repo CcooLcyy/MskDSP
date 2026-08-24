@@ -237,7 +237,7 @@ IEC104 `UpsertPointTable`（点表下发）：
 }
 ```
 
-`business_type` 用于区分遥信、遥测、遥调、遥控和参数，独立于 `type` 的 `FLOAT`/`SINGLE` 协议数据类型。未填写时兼容旧点表：IEC104 会根据 IOA 区间和协议类型推导；建议新配置显式填写。模拟数据仅生成 `TELEINDICATION` 与 `TELEMETRY`，不会生成或发送遥调、遥控、参数和未分类点。
+`business_type` 用于区分遥信、遥测、遥调、遥控和参数，独立于 `type` 的 `FLOAT`/`SINGLE` 协议数据类型。默认 IOA 地址规划（十六进制，首尾均包含）为：遥信 `0x0001–0x4000`、遥测 `0x4001–0x5000`、遥控 `0x6001–0x6100`、遥调 `0x6201–0x6400`、参数 `0xA000–0xBFFF`；其他地址未分类。未填写 `business_type` 时兼容旧点表，IEC104 会根据上述 IOA 区间推导；显式业务类型优先，不受 IOA 区间限制。建议新配置显式填写。模拟数据仅生成 `TELEINDICATION` 与 `TELEMETRY`，不会生成或发送遥调、遥控、参数和未分类点。
 
 IEC104 `SendTimeSync`（主动对时）：
 ```jsonc
