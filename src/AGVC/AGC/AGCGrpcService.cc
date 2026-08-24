@@ -131,7 +131,8 @@ grpc::Status AGCGrpcServiceImpl::StartTuning(
   if (!status.ok()) {
     LOG_ERROR("AGC 启动自动调试失败: group_name={}, 原因={}", request->group_name(), status.error_message());
   } else {
-    LOG_INFO("AGC 启动自动调试请求已接受: group_name={}, state={}", request->group_name(), response->state());
+    LOG_INFO("AGC 启动自动调试请求已接受: group_name={}, state={}", request->group_name(),
+             static_cast<int>(response->state()));
   }
   return status;
 }

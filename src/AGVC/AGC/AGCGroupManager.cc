@@ -1906,7 +1906,8 @@ grpc::Status GroupManager::StartTuning(
               group.tuningStatus.set_stable_elapsed_seconds(0.0);
               group.tuningPreviousTargetKw = previousTargetKw;
               group.tuningInitialCaptured = false;
-              LOG_WARNING("AGC 自动调试单轮超时，切换方向: group_name={}, direction={}", groupName, group.tuningStatus.direction());
+              LOG_WARNING("AGC 自动调试单轮超时，切换方向: group_name={}, direction={}", groupName,
+                          static_cast<int>(group.tuningStatus.direction()));
             }
             const auto totalLimit = static_cast<double>(group.tuningConfig.total_time_minutes()) * 60.0;
             if (!finish && totalElapsedSeconds > totalLimit) {
