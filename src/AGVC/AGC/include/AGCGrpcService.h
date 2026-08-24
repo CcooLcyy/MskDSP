@@ -20,6 +20,11 @@ public:
   grpc::Status DeleteGroup(grpc::ServerContext* context, const AGCProto::DeleteGroupRequest* request, AGCProto::Empty* response) override;
   grpc::Status StartGroup(grpc::ServerContext* context, const AGCProto::StartGroupRequest* request, AGCProto::Empty* response) override;
   grpc::Status StopGroup(grpc::ServerContext* context, const AGCProto::StopGroupRequest* request, AGCProto::Empty* response) override;
+  grpc::Status StartTuning(grpc::ServerContext* context, const AGCProto::StartTuningRequest* request, AGCProto::TuningStatus* response) override;
+  grpc::Status StopTuning(grpc::ServerContext* context, const AGCProto::StopTuningRequest* request, AGCProto::TuningStatus* response) override;
+  grpc::Status GetTuningStatus(grpc::ServerContext* context, const AGCProto::GetTuningStatusRequest* request, AGCProto::TuningStatus* response) override;
+  grpc::Status GetControlProfile(grpc::ServerContext* context, const AGCProto::GetControlProfileRequest* request, AGCProto::GroupControlProfile* response) override;
+  grpc::Status ConfirmControlProfile(grpc::ServerContext* context, const AGCProto::ConfirmControlProfileRequest* request, AGCProto::GroupControlProfile* response) override;
 
 private:
   AGC* module_{nullptr};

@@ -4,6 +4,7 @@
 #include <grpcpp/support/status.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -18,6 +19,7 @@
 #include <vector>
 
 #include "AGC.pb.h"
+#include "AGCControlProfileStore.h"
 #include "AGCGroupStore.h"
 #include "AgvcDataCenterClient.h"
 #include "AgvcStrategy.h"
@@ -39,6 +41,11 @@ public:
   grpc::Status StopGroup(const std::string &groupName);
   grpc::Status DeleteGroup(const std::string &groupName);
   grpc::Status ExecuteCommand(const DataCenterProto::ExecuteCommandRequest &request, DataCenterProto::ExecuteCommandResponse *response);
+  grpc::Status StartTuning(const AGCProto::StartTuningRequest &request, AGCProto::TuningStatus *out);
+  grpc::Status StopTuning(const std::string &groupName, AGCProto::TuningStatus *out);
+  grpc::Status GetTuningStatus(const std::string &groupName, AGCProto::TuningStatus *out) const;
+  grpc::Status GetControlProfile(const std::string &groupName, AGCProto::GroupControlProfile *out) const;
+  grpc::Status ConfirmControlProfile(const AGCProto::GroupControlProfile &profile, AGCProto::GroupControlProfile *out);
   void TryAutoStartReadyGroups(std::string_view trigger);
 
 private:
@@ -59,6 +66,7 @@ private:
     std::shared_ptr<grpc::ClientContext> dcSubscribeContext;
     std::jthread dcSubscribeThread;
     std::jthread controlThread;
+    std::jthread tuningThread;
     std::shared_ptr<ControlTrigger> controlTrigger;
 
     // 由配置派生的缓存 tags（供订阅线程使用）。
@@ -78,6 +86,21 @@ private:
 
     std::vector<bool> hasLastMemberTargetKw;
     std::vector<double> lastMemberTargetKw;
+    std::vector<bool> hasLastControlMemberMeasKw;
+    std::vector<double> lastControlMemberMeasKw;
+
+    AGCProto::GroupControlProfile controlProfile;
+    std::vector<double> integralMemoryKw;
+    std::chrono::steady_clock::time_point lastControlTickAt{};
+    AGCProto::TuningConfig tuningConfig;
+    AGCProto::TuningStatus tuningStatus;
+    std::chrono::steady_clock::time_point tuningPhaseStartedAt{};
+    std::chrono::steady_clock::time_point tuningTaskStartedAt{};
+    std::chrono::steady_clock::time_point tuningEnteredRangeAt{};
+    std::vector<double> tuningPhaseInitialMeasKw;
+    double tuningPreviousTargetKw{0.0};
+    bool tuningInitialCaptured{false};
+    bool tuningInRange{false};
 
     bool hasLastUnallocatedKw{false};
     double lastUnallocatedKw{0.0};
@@ -91,6 +114,10 @@ private:
   AGCProto::GroupsConfig dumpGroupsConfigLocked() const;
   grpc::Status saveGroupsLocked();
   grpc::Status restoreGroupFromConfig(const AGCProto::GroupConfig &config, AGCProto::GroupState restoredState);
+  grpc::Status validateTuningConfig(const AGCProto::TuningConfig &config) const;
+  AGCProto::GroupControlProfile makeDefaultControlProfileLocked(const GroupRuntime &g) const;
+  grpc::Status fillTuningStatusLocked(const GroupRuntime &g, AGCProto::TuningStatus *out) const;
+  grpc::Status saveControlProfilesLocked();
 
   void startThreadsLocked(const std::string &groupName, GroupRuntime *g);
   void primeControlInputs(const std::string &groupName);
@@ -110,6 +137,8 @@ private:
   mutable std::mutex mu_;
   std::unordered_map<std::string, GroupRuntime> groupsByName_;
   AGCGroupStore groupStore_;
+  AGCControlProfileStore controlProfileStore_;
+  std::unordered_map<std::string, AGCProto::GroupControlProfile> controlProfilesByGroup_;
 
   AGVC::DataCenterClient dataCenter_;
   AGVC::WeightedStrategy weightedStrategy_;

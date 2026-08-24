@@ -1427,6 +1427,7 @@ add_executable(agcGroupManager_test
   ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCDefaultPoints.cc
   ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCGroupValidation.cc
   ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCControl.cc
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCControlProfileStore.cc
 )
 
 target_include_directories(agcGroupManager_test PRIVATE
@@ -1441,6 +1442,7 @@ target_link_libraries(agcGroupManager_test PRIVATE
   agvcCommon
   dspProto
   moduleManager
+  mskdspConfigStore
 )
 
 mskdsp_add_isolated_test(agcGroupManager_test)
@@ -1466,6 +1468,26 @@ target_link_libraries(agcGroupStore_test PRIVATE
 )
 
 mskdsp_add_isolated_test(agcGroupStore_test)
+
+add_executable(agcControlProfileStore_test
+  agc_control_profile_store_test.cc
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCControlProfileStore.cc
+)
+
+target_include_directories(agcControlProfileStore_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+)
+
+target_link_libraries(agcControlProfileStore_test PRIVATE
+  GTest::gtest_main
+  dspProto
+  moduleManager
+  mskdspConfigStore
+)
+
+mskdsp_add_isolated_test(agcControlProfileStore_test)
 
 add_executable(agcControl_test
   agc_control_test.cc
@@ -1652,6 +1674,7 @@ set(MSKDSP_TEST_TARGETS
   agvcStrategy_test
   agcGroupManager_test
   agcGroupStore_test
+  agcControlProfileStore_test
   agcControl_test
   avcGroupManager_test
   avcGroupStore_test

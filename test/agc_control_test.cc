@@ -79,6 +79,40 @@ TEST(AgcControlTest, AbsoluteCommandAllocatesByWeight) {
   EXPECT_NEAR(out->nextLastDesiredTotalKw, 60.0, 1e-6);
 }
 
+// 验证：固定参数按成员独立生效，积分记忆在控制计算后更新。
+TEST(AgcControlTest, MemberControlProfileAppliesIndependentPiCorrection) {
+  auto cfg = MakeBaseConfig();
+  AGVC::WeightedStrategy strategy;
+  auto input = MakeBaseInput(60.0, {10.0, 20.0});
+  auto *profile = input.controlProfile.mutable_members()->Add();
+  profile->set_member_name("m1");
+  profile->set_up_p_gain(0.5);
+  profile->set_up_i_gain(0.1);
+  profile->set_integral_limit_kw(100.0);
+  input.controlPeriodSeconds = 1.0;
+
+  auto out = AGC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(out.has_value());
+  EXPECT_NEAR(out->memberTargetKw[0], 32.0, 1e-6);
+  EXPECT_NEAR(out->memberTargetKw[1], 40.0, 1e-6);
+  EXPECT_NEAR(out->nextIntegralMemoryKw[0], 10.0, 1e-6);
+}
+
+// 验证：调试目标覆盖临时总目标，但不改变原有成员分配策略。
+TEST(AgcControlTest, DesiredTotalOverrideUsesTemporaryTuningTarget) {
+  auto cfg = MakeBaseConfig();
+  AGVC::WeightedStrategy strategy;
+  auto input = MakeBaseInput(10.0, {0.0, 0.0});
+  input.hasDesiredTotalOverride = true;
+  input.desiredTotalOverrideKw = 80.0;
+
+  auto out = AGC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(out.has_value());
+  EXPECT_NEAR(out->desiredTotalKw, 80.0, 1e-6);
+  EXPECT_NEAR(out->memberTargetKw[0], 80.0 / 3.0, 1e-6);
+  EXPECT_NEAR(out->memberTargetKw[1], 160.0 / 3.0, 1e-6);
+}
+
 // 验证：DELTA_BASE_LAST_TARGET 使用上一轮期望总目标值作为基准。
 TEST(AgcControlTest, DeltaBaseLastTargetUsesDesiredTotal) {
   auto cfg = MakeBaseConfig();

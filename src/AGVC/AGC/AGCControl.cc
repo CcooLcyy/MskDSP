@@ -1,5 +1,9 @@
 #include "AGCControl.h"
 
+#include <algorithm>
+#include <cmath>
+#include <unordered_map>
+
 #include "Logger.h"
 
 namespace AGC {
@@ -30,6 +34,25 @@ double effectiveMemberMaxKw(const AGCProto::MemberConfig& member) {
     return member.capacity_kw();
   }
   return 0.0;
+}
+
+const AGCProto::MemberControlProfile* findControlProfile(
+    const AGCProto::GroupControlProfile& profile, const std::string& memberName) {
+  for (const auto& member : profile.members()) {
+    if (member.member_name() == memberName) {
+      return &member;
+    }
+  }
+  return nullptr;
+}
+
+double clampToMemberLimits(const AGCProto::MemberConfig& member, double value) {
+  const auto minKw = member.min_kw();
+  const auto maxKw = effectiveMemberMaxKw(member);
+  if (maxKw > 0.0) {
+    value = std::min(value, maxKw);
+  }
+  return std::max(value, minKw);
 }
 
 double computeTotalMeasKw(const AGCProto::GroupConfig& config, const ControlInput& input) {
@@ -96,7 +119,7 @@ std::optional<ControlOutput> ComputeControlOutput(
     LOG_DEBUG("AGC 控制计算跳过: group_name={}, 原因=缺少总设定点配置", config.group_name());
     return std::nullopt;
   }
-  if (!input.hasCmdRaw) {
+  if (!input.hasCmdRaw && !input.hasDesiredTotalOverride) {
     LOG_DEBUG("AGC 控制计算跳过: group_name={}, 原因=尚未收到总设定输入", config.group_name());
     return std::nullopt;
   }
@@ -152,6 +175,9 @@ std::optional<ControlOutput> ComputeControlOutput(
     }
     desiredTotalKw = baseKw + cmdKw;
   }
+  if (input.hasDesiredTotalOverride && std::isfinite(input.desiredTotalOverrideKw)) {
+    desiredTotalKw = input.desiredTotalOverrideKw;
+  }
   out.desiredTotalKw = desiredTotalKw;
   out.totalErrorKw = desiredTotalKw - out.totalMeasKw;
 
@@ -196,6 +222,60 @@ std::optional<ControlOutput> ComputeControlOutput(
 
   for (size_t k = 0; k < controllableIdx.size() && k < alloc.values.size(); ++k) {
     out.memberTargetKw[controllableIdx[k]] = alloc.values[k];
+  }
+
+  // 固定参数只修正成员自己的分配目标。这样每台设备可以使用独立的
+  // P/I/bias 参数，同时仍然以原有平均/加权分配作为基准，不在上一轮目标上累加。
+  out.nextIntegralMemoryKw.assign(memberCount, 0.0);
+  for (size_t i = 0; i < memberCount; ++i) {
+    if (!config.members(static_cast<int>(i)).controllable()) {
+      continue;
+    }
+    const auto* profile = findControlProfile(input.controlProfile, config.members(static_cast<int>(i)).member_name());
+    const auto previousIntegral = i < input.integralMemoryKw.size() ? input.integralMemoryKw[i] : 0.0;
+    out.nextIntegralMemoryKw[i] = previousIntegral;
+    if (profile == nullptr) {
+      continue;
+    }
+
+    const auto measuredKw = measKw[i];
+    const auto baseTargetKw = out.memberTargetKw[i];
+    const auto memberErrorKw = baseTargetKw - measuredKw;
+    const auto dt = std::isfinite(input.controlPeriodSeconds) && input.controlPeriodSeconds > 0.0
+                        ? input.controlPeriodSeconds
+                        : 1.0;
+    auto integral = input.integralEnabled ? previousIntegral + memberErrorKw * dt : previousIntegral;
+    const auto integralLimit = profile->integral_limit_kw();
+    if (integralLimit > 0.0 && std::isfinite(integralLimit)) {
+      integral = std::clamp(integral, -integralLimit, integralLimit);
+    }
+    out.nextIntegralMemoryKw[i] = integral;
+
+    double correctionKw = 0.0;
+    if (memberErrorKw >= 0.0) {
+      correctionKw += profile->up_p_gain() * memberErrorKw;
+      correctionKw += input.integralEnabled ? profile->up_i_gain() * integral : 0.0;
+      correctionKw += profile->up_bias_kw();
+    } else {
+      correctionKw += profile->down_p_gain() * memberErrorKw;
+      correctionKw += input.integralEnabled ? profile->down_i_gain() * integral : 0.0;
+      correctionKw -= profile->down_bias_kw();
+    }
+    if (!std::isfinite(correctionKw)) {
+      correctionKw = 0.0;
+    }
+    if (profile->max_step_kw() > 0.0 && std::isfinite(profile->max_step_kw())) {
+      correctionKw = std::clamp(correctionKw, -profile->max_step_kw(), profile->max_step_kw());
+    }
+    auto correctedTargetKw = baseTargetKw + correctionKw;
+    if (profile->max_ramp_kw_per_s() > 0.0 && std::isfinite(profile->max_ramp_kw_per_s()) &&
+        i < input.hasLastMemberTargetKw.size() && i < input.lastMemberTargetKw.size() && input.hasLastMemberTargetKw[i]) {
+      const auto maxDeltaKw = profile->max_ramp_kw_per_s() * dt;
+      correctedTargetKw = std::clamp(correctedTargetKw,
+                                     input.lastMemberTargetKw[i] - maxDeltaKw,
+                                     input.lastMemberTargetKw[i] + maxDeltaKw);
+    }
+    out.memberTargetKw[i] = clampToMemberLimits(config.members(static_cast<int>(i)), correctedTargetKw);
   }
 
   double actualTargetKw = passiveKw;

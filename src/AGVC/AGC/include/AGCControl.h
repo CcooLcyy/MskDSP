@@ -24,6 +24,14 @@ struct ControlInput {
 
   std::vector<bool> hasLastMemberTargetKw;
   std::vector<double> lastMemberTargetKw;
+
+  // 已确认的成员固定控制参数；缺少某个成员时沿用原始分配结果。
+  AGCProto::GroupControlProfile controlProfile;
+  std::vector<double> integralMemoryKw;
+  double controlPeriodSeconds{1.0};
+  bool integralEnabled{true};
+  bool hasDesiredTotalOverride{false};
+  double desiredTotalOverrideKw{0.0};
 };
 
 struct ControlOutput {
@@ -49,6 +57,8 @@ struct ControlOutput {
 
   std::vector<bool> hasLastMemberTargetKw;
   std::vector<double> nextLastMemberTargetKw;
+
+  std::vector<double> nextIntegralMemoryKw;
 };
 
 struct DefaultPointOutput {

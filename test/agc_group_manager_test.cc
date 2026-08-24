@@ -1135,3 +1135,49 @@ TEST(AgcGroupManagerTest, DeleteGroupRemovesPersistedConfig) {
   auto status = reader.GetGroup("g-removed", &got);
   EXPECT_EQ(status.error_code(), grpc::StatusCode::NOT_FOUND);
 }
+
+// 验证：确认后的成员固定控制参数可查询，并在新的 GroupManager 中从独立 SQLite 配置恢复。
+TEST(AgcGroupManagerTest, ConfirmedControlProfilePersistsAcrossManagerRestart) {
+  ScopedTempDir dir;
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  const auto configDbPath = dir.path() / "config.db";
+
+  {
+    GroupManager writer("AGC", configDbPath);
+    writer.setDataCenterStub(stub);
+    auto request = MakeGroupReq("g-profile");
+    AGCProto::GroupInfo info;
+    ASSERT_TRUE(writer.UpsertGroup(request, &info).ok());
+    ASSERT_TRUE(writer.StopGroup("g-profile").ok());
+
+    AGCProto::GroupControlProfile profile;
+    profile.set_group_name("g-profile");
+    auto *member1 = profile.add_members();
+    member1->set_member_name("inv-1");
+    member1->set_up_p_gain(0.4);
+    member1->set_up_i_gain(0.02);
+    member1->set_integral_limit_kw(20.0);
+    auto *member2 = profile.add_members();
+    member2->set_member_name("inv-2");
+    member2->set_down_p_gain(0.7);
+    member2->set_down_i_gain(0.03);
+    member2->set_integral_limit_kw(30.0);
+
+    AGCProto::GroupControlProfile confirmed;
+    ASSERT_TRUE(writer.ConfirmControlProfile(profile, &confirmed).ok());
+    EXPECT_EQ(confirmed.version(), 1u);
+  }
+
+  GroupManager reader("AGC", configDbPath);
+  reader.setDataCenterStub(stub);
+  ASSERT_TRUE(reader.LoadPersistedConfig().ok());
+
+  AGCProto::GroupControlProfile restored;
+  ASSERT_TRUE(reader.GetControlProfile("g-profile", &restored).ok());
+  ASSERT_EQ(restored.members_size(), 2);
+  EXPECT_EQ(restored.version(), 1u);
+  EXPECT_DOUBLE_EQ(restored.members(0).up_p_gain(), 0.4);
+  EXPECT_DOUBLE_EQ(restored.members(1).down_p_gain(), 0.7);
+  ASSERT_TRUE(reader.StopGroup("g-profile").ok());
+}

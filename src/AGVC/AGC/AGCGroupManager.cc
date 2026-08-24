@@ -2,8 +2,11 @@
 
 #include <grpcpp/client_context.h>
 
+#include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <format>
+#include <unordered_set>
 #include <utility>
 
 #include "AGCControl.h"
@@ -70,7 +73,8 @@ std::string_view defaultPointTag(AGCProto::DefaultPointKind kind) {
 }  // namespace
 
 GroupManager::GroupManager(std::string moduleName, std::filesystem::path configDbPath) :
-  groupStore_(std::move(configDbPath)),
+  groupStore_(configDbPath),
+  controlProfileStore_(std::move(configDbPath)),
   dataCenter_(std::move(moduleName)) {}
 
 void GroupManager::setDataCenterServerAddress(std::string address) {
@@ -105,6 +109,87 @@ grpc::Status GroupManager::fillGroupInfoLocked(const GroupRuntime &g, AGCProto::
   out->set_remote_enabled(g.remoteEnabled);
   FillDefaultPointInfos(out->mutable_default_points());
   return grpc::Status::OK;
+}
+
+AGCProto::GroupControlProfile GroupManager::makeDefaultControlProfileLocked(const GroupRuntime &g) const {
+  AGCProto::GroupControlProfile profile;
+  profile.set_group_name(g.config.group_name());
+  const auto persisted = controlProfilesByGroup_.find(g.config.group_name());
+  for (const auto &member : g.config.members()) {
+    if (!member.controllable()) {
+      continue;
+    }
+    const AGCProto::MemberControlProfile *stored = nullptr;
+    if (persisted != controlProfilesByGroup_.end()) {
+      for (const auto &candidate : persisted->second.members()) {
+        if (candidate.member_name() == member.member_name()) {
+          stored = &candidate;
+          break;
+        }
+      }
+    }
+    auto *target = profile.add_members();
+    if (stored != nullptr) {
+      *target = *stored;
+    } else {
+      target->set_member_name(member.member_name());
+    }
+  }
+  if (persisted != controlProfilesByGroup_.end()) {
+    profile.set_version(persisted->second.version());
+    profile.set_confirmed_at_ms(persisted->second.confirmed_at_ms());
+  }
+  return profile;
+}
+
+grpc::Status GroupManager::fillTuningStatusLocked(const GroupRuntime &g, AGCProto::TuningStatus *out) const {
+  if (out == nullptr) {
+    return makeInvalid("out 为空");
+  }
+  *out = g.tuningStatus;
+  out->set_group_name(g.config.group_name());
+  if (out->state() == AGCProto::TUNING_STATE_RUNNING && out->started_at_ms() > 0) {
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    out->set_elapsed_ms(now > static_cast<int64_t>(out->started_at_ms())
+                            ? static_cast<uint64_t>(now) - out->started_at_ms()
+                            : 0);
+  }
+  return grpc::Status::OK;
+}
+
+grpc::Status GroupManager::validateTuningConfig(const AGCProto::TuningConfig &config) const {
+  if (!std::isfinite(config.target_lower_kw()) || !std::isfinite(config.target_upper_kw()) ||
+      config.target_lower_kw() >= config.target_upper_kw()) {
+    return makeInvalid("调试目标范围必须是有限数值且下限小于上限");
+  }
+  if (config.total_time_minutes() == 0 || config.attempt_max_time_minutes() == 0 ||
+      config.target_entry_time_seconds() == 0 || config.stable_hold_time_seconds() == 0) {
+    return makeInvalid("调试总时间、单轮时间、进入目标时间和稳定保持时间必须大于 0");
+  }
+  if (config.min_up_tests() < 3 || config.min_down_tests() < 3) {
+    return makeInvalid("调试至少需要 3 次有效上调和 3 次有效下调");
+  }
+  if (!std::isfinite(config.total_tolerance_kw()) || config.total_tolerance_kw() <= 0.0) {
+    return makeInvalid("调试总量精度必须是大于 0 的有限数值");
+  }
+  const uint64_t requiredMinutes = static_cast<uint64_t>(config.min_up_tests()) + config.min_down_tests();
+  if (static_cast<uint64_t>(config.total_time_minutes()) < requiredMinutes * config.attempt_max_time_minutes()) {
+    return makeInvalid("调试总时间不足以覆盖配置的最低上调/下调次数和单轮最大时间");
+  }
+  return grpc::Status::OK;
+}
+
+grpc::Status GroupManager::saveControlProfilesLocked() {
+  AGCProto::ControlProfilesConfig config;
+  for (const auto &[_, profile] : controlProfilesByGroup_) {
+    *config.add_profiles() = profile;
+  }
+  const auto status = controlProfileStore_.Save(config);
+  if (!status.ok()) {
+    LOG_ERROR("AGC 固定控制参数落盘失败: 原因={}", status.error_message());
+  }
+  return status;
 }
 
 grpc::Status GroupManager::checkStartPreconditionsLocked(const GroupRuntime &g) const {
@@ -222,6 +307,10 @@ grpc::Status GroupManager::restoreGroupFromConfig(const AGCProto::GroupConfig &c
   runtime.functionEnabled = true;
   runtime.remoteEnabled = true;
   rebuildTagCache(&runtime);
+  runtime.controlProfile = makeDefaultControlProfileLocked(runtime);
+  runtime.integralMemoryKw.assign(static_cast<size_t>(config.members_size()), 0.0);
+  runtime.tuningStatus.set_group_name(config.group_name());
+  runtime.tuningStatus.set_state(AGCProto::TUNING_STATE_IDLE);
 
   const auto tags = collectAllTags(config);
   if (!tags.empty()) {
@@ -256,6 +345,21 @@ grpc::Status GroupManager::restoreGroupFromConfig(const AGCProto::GroupConfig &c
 }
 
 grpc::Status GroupManager::LoadPersistedConfig() {
+  AGCProto::ControlProfilesConfig profiles;
+  auto profileStatus = controlProfileStore_.Load(&profiles);
+  if (!profileStatus.ok()) {
+    LOG_ERROR("AGC 固定控制参数加载失败: 原因={}", profileStatus.error_message());
+    return profileStatus;
+  }
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    controlProfilesByGroup_.clear();
+    for (const auto &profile : profiles.profiles()) {
+      controlProfilesByGroup_[profile.group_name()] = profile;
+    }
+  }
+  LOG_INFO("AGC 固定控制参数加载完成: 控制组数={}", profiles.profiles_size());
+
   AGCProto::GroupsConfig config;
   auto status = groupStore_.Load(&config);
   if (!status.ok()) {
@@ -335,6 +439,8 @@ grpc::Status GroupManager::UpsertGroup(const AGCProto::UpsertGroupRequest &reque
 
       it->second.config = request.config();
       rebuildTagCache(&it->second);
+      it->second.controlProfile = makeDefaultControlProfileLocked(it->second);
+      it->second.integralMemoryKw.assign(static_cast<size_t>(request.config().members_size()), 0.0);
       it->second.lastError.clear();
       fillGroupInfoLocked(it->second, out);
     } else {
@@ -368,6 +474,10 @@ grpc::Status GroupManager::UpsertGroup(const AGCProto::UpsertGroupRequest &reque
       g.functionEnabled = true;
       g.remoteEnabled = true;
       rebuildTagCache(&g);
+      g.controlProfile = makeDefaultControlProfileLocked(g);
+      g.integralMemoryKw.assign(static_cast<size_t>(request.config().members_size()), 0.0);
+      g.tuningStatus.set_group_name(groupName);
+      g.tuningStatus.set_state(AGCProto::TUNING_STATE_IDLE);
       fillGroupInfoLocked(g, out);
     }
 
@@ -585,6 +695,7 @@ grpc::Status GroupManager::StopGroup(const std::string &groupName) {
 
   std::jthread dcSubscribeThread;
   std::jthread controlThread;
+  std::jthread tuningThread;
   std::shared_ptr<ControlTrigger> controlTrigger;
   bool pendingDelete = false;
   {
@@ -595,10 +706,16 @@ grpc::Status GroupManager::StopGroup(const std::string &groupName) {
     }
     dcSubscribeThread = std::move(it->second.dcSubscribeThread);
     controlThread = std::move(it->second.controlThread);
+    tuningThread = std::move(it->second.tuningThread);
     controlTrigger = std::move(it->second.controlTrigger);
     it->second.dcSubscribeContext.reset();
     pendingDelete = (it->second.state == AGCProto::GROUP_STATE_PENDING_DELETE);
     it->second.state = pendingDelete ? AGCProto::GROUP_STATE_PENDING_DELETE : AGCProto::GROUP_STATE_STOPPED;
+    std::fill(it->second.integralMemoryKw.begin(), it->second.integralMemoryKw.end(), 0.0);
+    if (it->second.tuningStatus.state() == AGCProto::TUNING_STATE_RUNNING) {
+      it->second.tuningStatus.set_state(AGCProto::TUNING_STATE_STOPPED);
+      it->second.tuningStatus.set_last_error("控制组停止导致自动调试中止");
+    }
   }
   if (dcSubscribeThread.joinable()) {
     dcSubscribeThread.request_stop();
@@ -614,6 +731,10 @@ grpc::Status GroupManager::StopGroup(const std::string &groupName) {
   }
   if (controlThread.joinable()) {
     controlThread.join();
+  }
+  if (tuningThread.joinable()) {
+    tuningThread.request_stop();
+    tuningThread.join();
   }
   if (pendingDelete) {
     LOG_INFO("AGC 控制组已停止并保持待删除状态: group_name={}", groupName);
@@ -662,6 +783,11 @@ grpc::Status GroupManager::DeleteGroup(const std::string &groupName) {
   status = saveGroupsLocked();
   if (!status.ok()) {
     return status;
+  }
+  controlProfilesByGroup_.erase(groupName);
+  status = saveControlProfilesLocked();
+  if (!status.ok()) {
+    LOG_WARNING("AGC 控制组已删除，但清理固定控制参数失败: group_name={}, 原因={}", groupName, status.error_message());
   }
   return grpc::Status::OK;
 }
@@ -776,6 +902,12 @@ grpc::Status GroupManager::ExecuteCommand(
       response->set_reason("AGC 控制组未运行");
       return grpc::Status::OK;
     }
+    if (it->second.tuningStatus.state() == AGCProto::TUNING_STATE_RUNNING) {
+      response->set_status(DataCenterProto::COMMAND_REJECTED);
+      response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSPECIFIED);
+      response->set_reason("AGC 正在自动调试，暂不接受正式总目标命令");
+      return grpc::Status::OK;
+    }
     if (!it->second.remoteEnabled) {
       response->set_status(DataCenterProto::COMMAND_REJECTED);
       response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSPECIFIED);
@@ -808,6 +940,8 @@ grpc::Status GroupManager::ExecuteCommand(
     input.lastMemberTargetKw = it->second.lastMemberTargetKw;
     input.hasLastDesiredTotalKw = it->second.hasLastDesiredTotalKw;
     input.lastDesiredTotalKw = it->second.lastDesiredTotalKw;
+    input.controlProfile = it->second.controlProfile;
+    input.integralMemoryKw = it->second.integralMemoryKw;
   }
 
   const auto defaultOutput = ComputeDefaultPointOutput(config, input);
@@ -869,6 +1003,7 @@ grpc::Status GroupManager::ExecuteCommand(
     it->second.lastDesiredTotalKw = output.nextLastDesiredTotalKw;
     it->second.hasLastMemberTargetKw = output.hasLastMemberTargetKw;
     it->second.lastMemberTargetKw = output.nextLastMemberTargetKw;
+    it->second.integralMemoryKw = output.nextIntegralMemoryKw;
     it->second.hasLastUnallocatedKw = false;
     it->second.lastUnallocatedKw = 0.0;
   }
@@ -986,6 +1121,8 @@ void GroupManager::rebuildTagCache(GroupRuntime *g) {
   g->memberMeasRaw.assign(memberCount, 0.0);
   g->hasLastMemberTargetKw.assign(memberCount, false);
   g->lastMemberTargetKw.assign(memberCount, 0.0);
+  g->hasLastControlMemberMeasKw.assign(memberCount, false);
+  g->lastControlMemberMeasKw.assign(memberCount, 0.0);
 
   if (g->config.has_p_cmd() && g->config.p_cmd().has_signal()) {
     g->cmdTag = g->config.p_cmd().signal().tag();
@@ -1157,6 +1294,10 @@ bool GroupManager::handleUpdateLocked(GroupRuntime *g, const DataCenterProto::Po
     const auto changed = !g->hasCmdRaw || !sameValue(g->cmdRaw, raw);
     g->cmdRaw = raw;
     g->hasCmdRaw = true;
+    if (changed) {
+      std::fill(g->integralMemoryKw.begin(), g->integralMemoryKw.end(), 0.0);
+      LOG_DEBUG("AGC 收到新的总目标，已清空本次运行积分记忆: group_name={}, tag={}", g->config.group_name(), tag);
+    }
     return changed;
   }
 
@@ -1307,6 +1448,52 @@ void GroupManager::controlTick(const std::string &groupName) {
     input.lastMemberTargetKw = it->second.lastMemberTargetKw;
     input.hasLastDesiredTotalKw = it->second.hasLastDesiredTotalKw;
     input.lastDesiredTotalKw = it->second.lastDesiredTotalKw;
+    input.controlProfile = it->second.controlProfile;
+    input.integralMemoryKw = it->second.integralMemoryKw;
+    const auto now = std::chrono::steady_clock::now();
+    if (it->second.lastControlTickAt.time_since_epoch().count() > 0) {
+      input.controlPeriodSeconds = std::clamp(
+          std::chrono::duration_cast<std::chrono::duration<double>>(now - it->second.lastControlTickAt).count(), 0.05, 30.0);
+    }
+    it->second.lastControlTickAt = now;
+    bool hasComparableMeasurement = false;
+    bool allMembersDeclining = true;
+    bool hasMeasurement = false;
+    bool allMembersNearZero = true;
+    for (int i = 0; i < config.members_size(); ++i) {
+      const auto &member = config.members(i);
+      if (!member.controllable() || static_cast<size_t>(i) >= it->second.memberMeasRaw.size() ||
+          static_cast<size_t>(i) >= it->second.hasMemberMeasRaw.size() || !it->second.hasMemberMeasRaw[static_cast<size_t>(i)]) {
+        continue;
+      }
+      const auto scale = member.p_meas().scale() == 0.0 ? 1.0 : member.p_meas().scale();
+      const auto measuredKw = it->second.memberMeasRaw[static_cast<size_t>(i)] * scale + member.p_meas().offset();
+      hasMeasurement = true;
+      allMembersNearZero = allMembersNearZero && measuredKw <= std::max(1.0, member.capacity_kw() * 0.05);
+      if (static_cast<size_t>(i) < it->second.hasLastControlMemberMeasKw.size() &&
+          it->second.hasLastControlMemberMeasKw[static_cast<size_t>(i)]) {
+        hasComparableMeasurement = true;
+        if (measuredKw > it->second.lastControlMemberMeasKw[static_cast<size_t>(i)] - 0.5) {
+          allMembersDeclining = false;
+        }
+      } else {
+        allMembersDeclining = false;
+      }
+      if (static_cast<size_t>(i) < it->second.lastControlMemberMeasKw.size()) {
+        it->second.lastControlMemberMeasKw[static_cast<size_t>(i)] = measuredKw;
+        it->second.hasLastControlMemberMeasKw[static_cast<size_t>(i)] = true;
+      }
+    }
+    input.integralEnabled = !(hasMeasurement &&
+                              ((hasComparableMeasurement && allMembersDeclining) || allMembersNearZero));
+    if (!input.integralEnabled) {
+      LOG_DEBUG("AGC 暂停积分修正: group_name={}, 原因=检测到全体成员共同下降或接近零出力，疑似光照资源下降", groupName);
+    }
+    if (it->second.tuningStatus.state() == AGCProto::TUNING_STATE_RUNNING) {
+      input.controlProfile = it->second.tuningStatus.candidate_profile();
+      input.hasDesiredTotalOverride = true;
+      input.desiredTotalOverrideKw = it->second.tuningStatus.current_target_kw();
+    }
   }
 
   if (connId == 0) {
@@ -1388,6 +1575,7 @@ void GroupManager::controlTick(const std::string &groupName) {
     it->second.lastDesiredTotalKw = output.nextLastDesiredTotalKw;
     it->second.hasLastMemberTargetKw = output.hasLastMemberTargetKw;
     it->second.lastMemberTargetKw = output.nextLastMemberTargetKw;
+    it->second.integralMemoryKw = output.nextIntegralMemoryKw;
 
     constexpr double kEps = 1e-6;
     if (std::fabs(unallocatedKw) > kEps) {
@@ -1412,6 +1600,406 @@ void GroupManager::controlTick(const std::string &groupName) {
         desiredTotalKw,
         actualTargetKw);
   }
+}
+
+grpc::Status GroupManager::GetControlProfile(
+    const std::string &groupName, AGCProto::GroupControlProfile *out) const {
+  if (out == nullptr) {
+    return makeInvalid("out 为空");
+  }
+  auto status = validateGroupName(groupName);
+  if (!status.ok()) {
+    return status;
+  }
+  std::lock_guard<std::mutex> lock(mu_);
+  const auto it = groupsByName_.find(groupName);
+  if (it == groupsByName_.end()) {
+    return makeNotFound(groupName);
+  }
+  *out = makeDefaultControlProfileLocked(it->second);
+  return grpc::Status::OK;
+}
+
+grpc::Status GroupManager::ConfirmControlProfile(
+    const AGCProto::GroupControlProfile &profile, AGCProto::GroupControlProfile *out) {
+  if (out == nullptr) {
+    return makeInvalid("out 为空");
+  }
+  auto status = validateGroupName(profile.group_name());
+  if (!status.ok()) {
+    return status;
+  }
+
+  AGCProto::ControlProfilesConfig validation;
+  *validation.add_profiles() = profile;
+  status = ValidateControlProfilesConfig(validation);
+  if (!status.ok()) {
+    return status;
+  }
+
+  std::lock_guard<std::mutex> lock(mu_);
+  auto groupIt = groupsByName_.find(profile.group_name());
+  if (groupIt == groupsByName_.end()) {
+    return makeNotFound(profile.group_name());
+  }
+  if (groupIt->second.state == AGCProto::GROUP_STATE_RUNNING) {
+    return makePreconditionFailed("确认固定控制参数前请先停止控制组");
+  }
+
+  std::unordered_set<std::string> controllableNames;
+  for (const auto &member : groupIt->second.config.members()) {
+    if (member.controllable()) {
+      controllableNames.emplace(member.member_name());
+    }
+  }
+  if (profile.members_size() != static_cast<int>(controllableNames.size())) {
+    return makeInvalid("固定控制参数必须覆盖当前控制组全部可控成员");
+  }
+  std::unordered_set<std::string> profileNames;
+  for (const auto &member : profile.members()) {
+    if (!controllableNames.contains(member.member_name()) || !profileNames.emplace(member.member_name()).second) {
+      return makeInvalid(std::format("固定控制参数成员与当前控制组不匹配: member_name={}", member.member_name()));
+    }
+  }
+
+  const auto oldProfileIt = controlProfilesByGroup_.find(profile.group_name());
+  const bool hadOldProfile = oldProfileIt != controlProfilesByGroup_.end();
+  const auto oldRuntimeProfile = groupIt->second.controlProfile;
+  const auto oldProfile = !hadOldProfile
+                              ? AGCProto::GroupControlProfile{}
+                              : oldProfileIt->second;
+  auto confirmed = profile;
+  confirmed.set_group_name(profile.group_name());
+  confirmed.set_version(oldProfile.version() + 1);
+  confirmed.set_confirmed_at_ms(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count()));
+  for (auto &member : *confirmed.mutable_members()) {
+    member.set_version(confirmed.version());
+    member.set_confirmed_at_ms(confirmed.confirmed_at_ms());
+  }
+  controlProfilesByGroup_[profile.group_name()] = confirmed;
+  groupIt->second.controlProfile = makeDefaultControlProfileLocked(groupIt->second);
+  std::fill(groupIt->second.integralMemoryKw.begin(), groupIt->second.integralMemoryKw.end(), 0.0);
+
+  status = saveControlProfilesLocked();
+  if (!status.ok()) {
+    if (!hadOldProfile) {
+      controlProfilesByGroup_.erase(profile.group_name());
+    } else {
+      controlProfilesByGroup_[profile.group_name()] = oldProfile;
+    }
+    groupIt->second.controlProfile = oldRuntimeProfile;
+    return status;
+  }
+  *out = groupIt->second.controlProfile;
+  LOG_INFO("AGC 已确认并保存固定控制参数: group_name={}, version={}, 成员数={}",
+           profile.group_name(), confirmed.version(), confirmed.members_size());
+  return grpc::Status::OK;
+}
+
+grpc::Status GroupManager::StartTuning(
+    const AGCProto::StartTuningRequest &request, AGCProto::TuningStatus *out) {
+  if (out == nullptr) {
+    return makeInvalid("out 为空");
+  }
+  auto status = validateGroupName(request.group_name());
+  if (!status.ok()) {
+    return status;
+  }
+  if (!request.has_config()) {
+    return makeInvalid("调试配置不能为空");
+  }
+  status = validateTuningConfig(request.config());
+  if (!status.ok()) {
+    return status;
+  }
+
+  std::unique_lock<std::mutex> lock(mu_);
+  auto it = groupsByName_.find(request.group_name());
+  if (it == groupsByName_.end()) {
+    return makeNotFound(request.group_name());
+  }
+  if (it->second.state == AGCProto::GROUP_STATE_RUNNING) {
+    return makePreconditionFailed("启动调试前请先停止正式控制组");
+  }
+  status = checkStartPreconditionsLocked(it->second);
+  if (!status.ok()) {
+    return status;
+  }
+  double installedCapacityKw = 0.0;
+  for (const auto &member : it->second.config.members()) {
+    installedCapacityKw += member.capacity_kw();
+  }
+  const auto maximumToleranceKw = std::min(300.0, installedCapacityKw * 0.003);
+  if (request.config().target_lower_kw() < 0.0 || request.config().target_upper_kw() > installedCapacityKw) {
+    return makeInvalid("调试目标范围必须落在控制组装机容量范围内");
+  }
+  if (request.config().total_tolerance_kw() > maximumToleranceKw) {
+    return makeInvalid(std::format("调试总量精度不能超过 300kW 或装机容量 0.3%% 中的较小值: 最大允许={}kW", maximumToleranceKw));
+  }
+  if (it->second.tuningStatus.state() == AGCProto::TUNING_STATE_RUNNING) {
+    return makePreconditionFailed("该控制组已有调试任务在运行");
+  }
+  if (it->second.tuningThread.joinable() || it->second.controlThread.joinable() || it->second.dcSubscribeThread.joinable()) {
+    return makePreconditionFailed("上一次调试任务尚未完成线程清理，请先停止调试任务");
+  }
+
+  const auto groupName = request.group_name();
+  it->second.tuningConfig = request.config();
+  it->second.state = AGCProto::GROUP_STATE_RUNNING;
+  it->second.tuningStatus.Clear();
+  it->second.tuningStatus.set_group_name(groupName);
+  it->second.tuningStatus.set_state(AGCProto::TUNING_STATE_RUNNING);
+  it->second.tuningStatus.set_direction(AGCProto::TUNING_DIRECTION_UP);
+  it->second.tuningStatus.set_started_at_ms(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count()));
+  it->second.tuningStatus.set_current_target_kw(request.config().target_upper_kw());
+  *it->second.tuningStatus.mutable_candidate_profile() = makeDefaultControlProfileLocked(it->second);
+  it->second.tuningPhaseStartedAt = std::chrono::steady_clock::now();
+  it->second.tuningTaskStartedAt = it->second.tuningPhaseStartedAt;
+  it->second.tuningEnteredRangeAt = {};
+  it->second.tuningInRange = false;
+  startThreadsLocked(groupName, &it->second);
+  it->second.tuningThread = ModuleManager::StartModuleThread(
+      AGCLibInfo.LIB_NAME,
+      [this, groupName](std::stop_token st) {
+        while (!st.stop_requested()) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(200));
+          bool finish = false;
+          {
+            std::lock_guard<std::mutex> stateLock(mu_);
+            auto groupIt = groupsByName_.find(groupName);
+            if (groupIt == groupsByName_.end() || groupIt->second.tuningStatus.state() != AGCProto::TUNING_STATE_RUNNING) {
+              break;
+            }
+            auto &group = groupIt->second;
+            const auto now = std::chrono::steady_clock::now();
+            const auto elapsedSeconds = std::chrono::duration_cast<std::chrono::duration<double>>(now - group.tuningPhaseStartedAt).count();
+            const auto totalElapsedSeconds = std::chrono::duration_cast<std::chrono::duration<double>>(
+                now - group.tuningTaskStartedAt).count();
+            double totalMeasKw = 0.0;
+            for (int i = 0; i < group.config.members_size(); ++i) {
+              if (static_cast<size_t>(i) >= group.memberMeasRaw.size() ||
+                  static_cast<size_t>(i) >= group.hasMemberMeasRaw.size() || !group.hasMemberMeasRaw[static_cast<size_t>(i)]) {
+                continue;
+              }
+              const auto &signal = group.config.members(i).p_meas();
+              const auto scale = signal.scale() == 0.0 ? 1.0 : signal.scale();
+              totalMeasKw += group.memberMeasRaw[static_cast<size_t>(i)] * scale + signal.offset();
+            }
+            if (!group.tuningInitialCaptured) {
+              group.tuningPhaseInitialMeasKw.assign(group.memberMeasRaw.size(), 0.0);
+              for (int i = 0; i < group.config.members_size(); ++i) {
+                if (static_cast<size_t>(i) < group.memberMeasRaw.size() &&
+                    static_cast<size_t>(i) < group.hasMemberMeasRaw.size() && group.hasMemberMeasRaw[static_cast<size_t>(i)]) {
+                  const auto &signal = group.config.members(i).p_meas();
+                  const auto scale = signal.scale() == 0.0 ? 1.0 : signal.scale();
+                  group.tuningPhaseInitialMeasKw[static_cast<size_t>(i)] = group.memberMeasRaw[static_cast<size_t>(i)] * scale + signal.offset();
+                }
+              }
+              group.tuningInitialCaptured = true;
+              group.tuningPreviousTargetKw = totalMeasKw;
+            }
+            group.tuningStatus.set_current_total_meas_kw(totalMeasKw);
+            const auto errorKw = group.tuningStatus.current_target_kw() - totalMeasKw;
+            const auto tolerance = group.tuningConfig.total_tolerance_kw();
+            if (std::fabs(errorKw) <= tolerance) {
+              if (!group.tuningInRange) {
+                group.tuningInRange = true;
+                group.tuningEnteredRangeAt = now;
+                group.tuningStatus.set_target_entry_elapsed_seconds(elapsedSeconds);
+              }
+              const auto stableSeconds = std::chrono::duration_cast<std::chrono::duration<double>>(now - group.tuningEnteredRangeAt).count();
+              group.tuningStatus.set_stable_elapsed_seconds(stableSeconds);
+              if (stableSeconds >= group.tuningConfig.stable_hold_time_seconds()) {
+                if (group.tuningStatus.direction() == AGCProto::TUNING_DIRECTION_UP) {
+                  group.tuningStatus.set_completed_up_tests(group.tuningStatus.completed_up_tests() + 1);
+                } else {
+                  group.tuningStatus.set_completed_down_tests(group.tuningStatus.completed_down_tests() + 1);
+                }
+                auto *candidate = group.tuningStatus.mutable_candidate_profile();
+                double totalWeight = 0.0;
+                for (const auto &member : group.config.members()) {
+                  if (member.controllable()) {
+                    totalWeight += member.weight() > 0.0 ? member.weight() : 1.0;
+                  }
+                }
+                for (int i = 0; i < group.config.members_size(); ++i) {
+                  const auto &member = group.config.members(i);
+                  if (!member.controllable()) {
+                    continue;
+                  }
+                  AGCProto::MemberControlProfile *profile = nullptr;
+                  for (int candidateIndex = 0; candidateIndex < candidate->members_size(); ++candidateIndex) {
+                    if (candidate->members(candidateIndex).member_name() == member.member_name()) {
+                      profile = candidate->mutable_members(candidateIndex);
+                      break;
+                    }
+                  }
+                  if (profile == nullptr) {
+                    continue;
+                  }
+                  const auto share = member.weight() > 0.0 ? member.weight() : 1.0;
+                  const auto correction = errorKw * (totalWeight > 0.0 ? share / totalWeight : 0.0);
+                  const auto currentMeasured = static_cast<size_t>(i) < group.memberMeasRaw.size()
+                                                   ? group.memberMeasRaw[static_cast<size_t>(i)] *
+                                                         (group.config.members(i).p_meas().scale() == 0.0 ? 1.0 : group.config.members(i).p_meas().scale()) +
+                                                         group.config.members(i).p_meas().offset()
+                                                   : 0.0;
+                  const auto initialMeasured = static_cast<size_t>(i) < group.tuningPhaseInitialMeasKw.size() ? group.tuningPhaseInitialMeasKw[static_cast<size_t>(i)] : currentMeasured;
+                  if (std::fabs(group.tuningStatus.current_target_kw() - group.tuningPreviousTargetKw) > 1e-6 &&
+                      std::fabs(currentMeasured - initialMeasured) > 1e-3) {
+                    const auto expectedMemberDelta = (group.tuningStatus.current_target_kw() - group.tuningPreviousTargetKw) *
+                                                     (totalWeight > 0.0 ? share / totalWeight : 0.0);
+                    const auto estimatedGain = std::clamp(std::fabs(expectedMemberDelta / (currentMeasured - initialMeasured)), 0.05, 10.0);
+                    if (group.tuningStatus.direction() == AGCProto::TUNING_DIRECTION_UP) {
+                      profile->set_up_p_gain(estimatedGain);
+                    } else {
+                      profile->set_down_p_gain(estimatedGain);
+                    }
+                  }
+                  if (group.tuningStatus.direction() == AGCProto::TUNING_DIRECTION_UP) {
+                    profile->set_up_bias_kw(std::max(0.0, profile->up_bias_kw() + correction));
+                  } else {
+                    profile->set_down_bias_kw(std::max(0.0, profile->down_bias_kw() - correction));
+                  }
+                }
+                const bool enough = group.tuningStatus.completed_up_tests() >= group.tuningConfig.min_up_tests() &&
+                                    group.tuningStatus.completed_down_tests() >= group.tuningConfig.min_down_tests();
+                if (enough) {
+                  group.tuningStatus.set_state(AGCProto::TUNING_STATE_COMPLETED);
+                  group.state = AGCProto::GROUP_STATE_STOPPED;
+                  finish = true;
+                } else {
+                  const auto previousTargetKw = group.tuningStatus.current_target_kw();
+                  const auto nextDirection = group.tuningStatus.direction() == AGCProto::TUNING_DIRECTION_UP
+                                                  ? AGCProto::TUNING_DIRECTION_DOWN
+                                                  : AGCProto::TUNING_DIRECTION_UP;
+                  group.tuningStatus.set_direction(nextDirection);
+                  group.tuningStatus.set_current_target_kw(nextDirection == AGCProto::TUNING_DIRECTION_UP
+                                                                ? group.tuningConfig.target_upper_kw()
+                                                                : group.tuningConfig.target_lower_kw());
+                  group.tuningPhaseStartedAt = now;
+                  group.tuningPreviousTargetKw = previousTargetKw;
+                  group.tuningInitialCaptured = false;
+                  group.tuningInRange = false;
+                  group.tuningStatus.set_target_entry_elapsed_seconds(0.0);
+                  group.tuningStatus.set_stable_elapsed_seconds(0.0);
+                }
+              }
+            } else {
+              group.tuningInRange = false;
+              group.tuningStatus.set_stable_elapsed_seconds(0.0);
+            }
+            if (!finish && elapsedSeconds > static_cast<double>(group.tuningConfig.attempt_max_time_minutes()) * 60.0) {
+              const auto previousTargetKw = group.tuningStatus.current_target_kw();
+              const auto nextDirection = group.tuningStatus.direction() == AGCProto::TUNING_DIRECTION_UP
+                                              ? AGCProto::TUNING_DIRECTION_DOWN
+                                              : AGCProto::TUNING_DIRECTION_UP;
+              group.tuningStatus.set_direction(nextDirection);
+              group.tuningStatus.set_current_target_kw(nextDirection == AGCProto::TUNING_DIRECTION_UP
+                                                            ? group.tuningConfig.target_upper_kw()
+                                                            : group.tuningConfig.target_lower_kw());
+              group.tuningPhaseStartedAt = now;
+              group.tuningInRange = false;
+              group.tuningStatus.set_target_entry_elapsed_seconds(0.0);
+              group.tuningStatus.set_stable_elapsed_seconds(0.0);
+              group.tuningPreviousTargetKw = previousTargetKw;
+              group.tuningInitialCaptured = false;
+              LOG_WARNING("AGC 自动调试单轮超时，切换方向: group_name={}, direction={}", groupName, group.tuningStatus.direction());
+            }
+            const auto totalLimit = static_cast<double>(group.tuningConfig.total_time_minutes()) * 60.0;
+            if (!finish && totalElapsedSeconds > totalLimit) {
+              const bool enough = group.tuningStatus.completed_up_tests() >= group.tuningConfig.min_up_tests() &&
+                                  group.tuningStatus.completed_down_tests() >= group.tuningConfig.min_down_tests();
+              group.tuningStatus.set_state(enough ? AGCProto::TUNING_STATE_COMPLETED : AGCProto::TUNING_STATE_FAILED);
+              if (!enough) {
+                group.tuningStatus.set_last_error("调试总时间到期但未完成最低上调/下调次数");
+              }
+              group.state = AGCProto::GROUP_STATE_STOPPED;
+              finish = true;
+            }
+            if (finish) {
+              if (group.dcSubscribeThread.joinable()) {
+                group.dcSubscribeThread.request_stop();
+              }
+              if (group.controlThread.joinable()) {
+                group.controlThread.request_stop();
+              }
+              if (group.controlTrigger) {
+                group.controlTrigger->signal.release();
+              }
+            } else {
+              requestControlLocked(groupName, &group, "自动调试周期", "");
+            }
+          }
+          if (finish) {
+            LOG_INFO("AGC 自动调试任务结束: group_name={}", groupName);
+            break;
+          }
+        }
+      });
+  *out = it->second.tuningStatus;
+  lock.unlock();
+  primeControlInputs(groupName);
+  LOG_INFO("AGC 已创建自动调试任务: group_name={}, 目标范围=[{}, {}]kW, 总时间={}min, 最低上调/下调={}/{}",
+           request.group_name(), request.config().target_lower_kw(), request.config().target_upper_kw(),
+           request.config().total_time_minutes(), request.config().min_up_tests(), request.config().min_down_tests());
+  return grpc::Status::OK;
+}
+
+grpc::Status GroupManager::StopTuning(const std::string &groupName, AGCProto::TuningStatus *out) {
+  if (out == nullptr) {
+    return makeInvalid("out 为空");
+  }
+  auto status = validateGroupName(groupName);
+  if (!status.ok()) {
+    return status;
+  }
+  bool wasRunning = false;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end()) {
+      return makeNotFound(groupName);
+    }
+    wasRunning = it->second.tuningStatus.state() == AGCProto::TUNING_STATE_RUNNING;
+    if (wasRunning) {
+      it->second.tuningStatus.set_state(AGCProto::TUNING_STATE_STOPPED);
+      it->second.tuningStatus.set_last_error("调试任务由上位机停止");
+      LOG_INFO("AGC 已停止自动调试任务: group_name={}", groupName);
+    }
+  }
+  bool needsCleanup = wasRunning;
+  if (!needsCleanup) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = groupsByName_.find(groupName);
+    needsCleanup = it != groupsByName_.end() &&
+                   (it->second.tuningThread.joinable() || it->second.controlThread.joinable() || it->second.dcSubscribeThread.joinable());
+  }
+  if (needsCleanup) {
+    status = StopGroup(groupName);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  return GetTuningStatus(groupName, out);
+}
+
+grpc::Status GroupManager::GetTuningStatus(const std::string &groupName, AGCProto::TuningStatus *out) const {
+  if (out == nullptr) {
+    return makeInvalid("out 为空");
+  }
+  auto status = validateGroupName(groupName);
+  if (!status.ok()) {
+    return status;
+  }
+  std::lock_guard<std::mutex> lock(mu_);
+  auto it = groupsByName_.find(groupName);
+  if (it == groupsByName_.end()) {
+    return makeNotFound(groupName);
+  }
+  return fillTuningStatusLocked(it->second, out);
 }
 
 }  // namespace AGC
