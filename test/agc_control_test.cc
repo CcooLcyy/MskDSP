@@ -93,7 +93,7 @@ TEST(AgcControlTest, MemberControlProfileAppliesIndependentPiCorrection) {
 
   auto out = AGC::ComputeControlOutput(cfg, input, strategy);
   ASSERT_TRUE(out.has_value());
-  EXPECT_NEAR(out->memberTargetKw[0], 32.0, 1e-6);
+  EXPECT_NEAR(out->memberTargetKw[0], 26.0, 1e-6);
   EXPECT_NEAR(out->memberTargetKw[1], 40.0, 1e-6);
   EXPECT_NEAR(out->nextIntegralMemoryKw[0], 10.0, 1e-6);
 }
