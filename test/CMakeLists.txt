@@ -271,11 +271,13 @@ add_executable(iec104PointTable_test
 
 target_include_directories(iec104PointTable_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/IEC104/include
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
 )
 
 target_link_libraries(iec104PointTable_test PRIVATE
   GTest::gtest_main
   dspProto
+  moduleManager
 )
 
 mskdsp_add_isolated_test(iec104PointTable_test)
