@@ -99,6 +99,9 @@ DataCenter 对外提供一组面向“连接/连接标签注册表/路由/转发
   - 此接口用于上位机协议页实时监视，不要求配置业务 Route，也不读取或修改连接标签注册表、路由和持久化配置。
   - 返回的 `SourcePointUpdate` 包含 `conn_id/tag/value/ts_ms/quality/sequence`；`sequence` 在 DataCenter 当前进程内单调递增，可用于消费方拒绝乱序响应。
   - 连接不存在时返回 `NOT_FOUND`；连接存在但尚未收到指定点的发布时返回空 updates。
+- `GetThroughputSnapshot(Empty) -> ThroughputSnapshot`
+  - 返回当前 DataCenter 进程内最近 60 秒的路由转发吞吐量窗口，按秒统计 Publish/BatchPublish 生成的目的端点更新数。
+  - 不统计源端入站数、订阅投递数或发布失败数；窗口只保存在内存，进程重启后清空。
 - `Subscribe(SubscribeRequest) -> stream PointUpdate`
   - 目的连接订阅数据更新（服务端流）；`tags` 为空表示订阅该连接全部点。
   - `snapshot=true` 时，会先 best-effort 推送一次 `GetLatest` 的结果，再推送实时更新。

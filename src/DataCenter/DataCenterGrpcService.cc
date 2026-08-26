@@ -1146,6 +1146,19 @@ grpc::Status DataCenterGrpcServiceImpl::GetLatest(grpc::ServerContext*, const Da
   return impl_->core.GetLatest(*request, response);
 }
 
+grpc::Status DataCenterGrpcServiceImpl::GetThroughputSnapshot(
+    grpc::ServerContext*, const DataCenterProto::Empty* request, DataCenterProto::ThroughputSnapshot* response) {
+  if (request == nullptr || response == nullptr) {
+    LOG_ERROR("DataCenter GetThroughputSnapshot 请求/响应为空");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
+  }
+  std::lock_guard<std::mutex> lock(impl_->mu);
+  *response = impl_->core.GetThroughputSnapshot();
+  LOG_DEBUG("DataCenter 已返回吞吐量快照: samples={}, current_points_per_second={}, peak_points_per_second={}",
+            response->samples_size(), response->current_points_per_second(), response->peak_points_per_second());
+  return grpc::Status::OK;
+}
+
 grpc::Status DataCenterGrpcServiceImpl::Subscribe(grpc::ServerContext* context, const DataCenterProto::SubscribeRequest* request, grpc::ServerWriter<DataCenterProto::PointUpdate>* writer) {
   if (context == nullptr || request == nullptr || writer == nullptr) {
     LOG_ERROR("DataCenter Subscribe 请求为空");

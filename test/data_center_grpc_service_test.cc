@@ -566,6 +566,34 @@ TEST_F(DataCenterGrpcServiceTest, GetSourceLatestReturnsUnroutedPointAndRejectsM
   }
 }
 
+// 验证：DataCenter gRPC 吞吐量快照反映按路由生成的目的端点更新数。
+TEST_F(DataCenterGrpcServiceTest, GetThroughputSnapshotReturnsRoutedUpdateCount) {
+  const auto src = GetOrCreateConnection("测试源模块", "源连接");
+  const auto dst = GetOrCreateConnection("测试目标模块", "目标连接");
+  UpsertRoutes({{src.conn_id(), "A", dst.conn_id(), "B"}});
+
+  grpc::ClientContext publishContext;
+  DataCenterProto::PublishRequest publish;
+  publish.set_conn_id(src.conn_id());
+  publish.set_tag("A");
+  publish.mutable_value()->set_double_value(3.14);
+  DataCenterProto::Empty publishResponse;
+  ASSERT_TRUE(stub_->Publish(&publishContext, publish, &publishResponse).ok());
+
+  grpc::ClientContext snapshotContext;
+  DataCenterProto::ThroughputSnapshot snapshot;
+  ASSERT_TRUE(stub_->GetThroughputSnapshot(&snapshotContext, DataCenterProto::Empty{}, &snapshot).ok());
+  EXPECT_GT(snapshot.process_start_time_ms(), 0);
+  EXPECT_GT(snapshot.updated_at_ms(), 0);
+  ASSERT_FALSE(snapshot.samples().empty());
+  uint64_t sampleTotal = 0;
+  for (const auto &sample : snapshot.samples()) {
+    sampleTotal += sample.routed_points_per_second();
+  }
+  EXPECT_EQ(sampleTotal, 1u);
+  EXPECT_EQ(snapshot.peak_points_per_second(), 1u);
+}
+
 // 验证：Subscribe 对非法参数返回 INVALID_ARGUMENT。
 TEST_F(DataCenterGrpcServiceTest, SubscribeRejectsInvalidArguments) {
   {

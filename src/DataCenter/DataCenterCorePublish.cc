@@ -12,6 +12,29 @@ int64_t DataCenterCore::nowMs() {
   return now.time_since_epoch().count();
 }
 
+void DataCenterCore::recordRoutedUpdates(size_t count) {
+  if (count == 0) {
+    return;
+  }
+
+  constexpr int64_t kThroughputWindowMs = 60 * 1000;
+  const auto timestampMs = nowMs();
+  const auto bucketTimestampMs = (timestampMs / 1000) * 1000;
+  while (!throughputBuckets_.empty() &&
+         throughputBuckets_.front().timestampMs < bucketTimestampMs - kThroughputWindowMs + 1000) {
+    throughputBuckets_.pop_front();
+  }
+
+  if (!throughputBuckets_.empty() && throughputBuckets_.back().timestampMs == bucketTimestampMs) {
+    throughputBuckets_.back().routedPoints += static_cast<uint64_t>(count);
+  } else {
+    throughputBuckets_.push_back(ThroughputBucket{
+        .timestampMs = bucketTimestampMs,
+        .routedPoints = static_cast<uint64_t>(count),
+    });
+  }
+}
+
 grpc::Status DataCenterCore::Publish(const DataCenterProto::PublishRequest &request, std::vector<DataCenterProto::PointUpdate> *outUpdates) {
   if (outUpdates == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "outUpdates 为空");
@@ -76,6 +99,7 @@ grpc::Status DataCenterCore::Publish(const DataCenterProto::PublishRequest &requ
     latestByDst_[EndpointKey{dstConnId, dst.tag}] = update;
     outUpdates->emplace_back(std::move(update));
   }
+  recordRoutedUpdates(outUpdates->size());
   return grpc::Status::OK;
 }
 
@@ -176,6 +200,7 @@ grpc::Status DataCenterCore::BatchPublish(const DataCenterProto::BatchPublishReq
     EndpointKey dst{update.dst_conn_id(), update.dst_tag()};
     latestByDst_[std::move(dst)] = update;
   }
+  recordRoutedUpdates(outUpdates->size());
   return grpc::Status::OK;
 }
 
@@ -377,5 +402,32 @@ grpc::Status DataCenterCore::GetSourceLatest(
     *out->add_updates() = update;
   }
   return grpc::Status::OK;
+}
+
+DataCenterProto::ThroughputSnapshot DataCenterCore::GetThroughputSnapshot() const {
+  constexpr int64_t kThroughputWindowMs = 60 * 1000;
+  const auto now = nowMs();
+  const auto currentBucketTimestampMs = (now / 1000) * 1000;
+  const auto oldestBucketTimestampMs = currentBucketTimestampMs - kThroughputWindowMs + 1000;
+
+  DataCenterProto::ThroughputSnapshot snapshot;
+  snapshot.set_process_start_time_ms(processStartTimeMs_);
+  snapshot.set_updated_at_ms(now);
+
+  uint64_t peak = 0;
+  for (const auto &bucket : throughputBuckets_) {
+    if (bucket.timestampMs < oldestBucketTimestampMs || bucket.timestampMs > currentBucketTimestampMs) {
+      continue;
+    }
+    auto *sample = snapshot.add_samples();
+    sample->set_timestamp_ms(bucket.timestampMs);
+    sample->set_routed_points_per_second(bucket.routedPoints);
+    peak = std::max(peak, bucket.routedPoints);
+    if (bucket.timestampMs == currentBucketTimestampMs) {
+      snapshot.set_current_points_per_second(bucket.routedPoints);
+    }
+  }
+  snapshot.set_peak_points_per_second(peak);
+  return snapshot;
 }
 }  // namespace DataCenter

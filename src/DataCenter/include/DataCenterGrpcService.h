@@ -33,6 +33,7 @@ public:
 
   grpc::Status GetSourceLatest(grpc::ServerContext* context, const DataCenterProto::GetSourceLatestRequest* request, DataCenterProto::GetSourceLatestResponse* response) override;
   grpc::Status GetLatest(grpc::ServerContext* context, const DataCenterProto::GetLatestRequest* request, DataCenterProto::GetLatestResponse* response) override;
+  grpc::Status GetThroughputSnapshot(grpc::ServerContext* context, const DataCenterProto::Empty* request, DataCenterProto::ThroughputSnapshot* response) override;
   grpc::Status Subscribe(grpc::ServerContext* context, const DataCenterProto::SubscribeRequest* request, grpc::ServerWriter<DataCenterProto::PointUpdate>* writer) override;
 
 private:

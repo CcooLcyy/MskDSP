@@ -2,7 +2,9 @@
 
 #include <grpcpp/support/status.h>
 
+#include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -41,6 +43,7 @@ public:
 
   grpc::Status GetLatest(const DataCenterProto::GetLatestRequest &request, DataCenterProto::GetLatestResponse *out) const;
   grpc::Status GetSourceLatest(const DataCenterProto::GetSourceLatestRequest &request, DataCenterProto::GetSourceLatestResponse *out) const;
+  DataCenterProto::ThroughputSnapshot GetThroughputSnapshot() const;
 
 private:
   struct ConnKey {
@@ -93,6 +96,13 @@ private:
 
   static int64_t nowMs();
 
+  struct ThroughputBucket {
+    int64_t timestampMs{};
+    uint64_t routedPoints{};
+  };
+
+  void recordRoutedUpdates(size_t count);
+
   std::unordered_map<uint32_t, DataCenterProto::ConnectionInfo> connections_;
   std::unordered_map<ConnKey, uint32_t, ConnKeyHash> connIdsByKey_;
   uint32_t nextConnId_{1};
@@ -101,5 +111,7 @@ private:
   std::unordered_map<EndpointKey, DataCenterProto::PointUpdate, EndpointKeyHash> latestByDst_;
   std::unordered_map<EndpointKey, DataCenterProto::SourcePointUpdate, EndpointKeyHash> latestBySrc_;
   uint64_t sourceUpdateSequence_{0};
+  int64_t processStartTimeMs_{nowMs()};
+  std::deque<ThroughputBucket> throughputBuckets_;
 };
 }  // namespace DataCenter

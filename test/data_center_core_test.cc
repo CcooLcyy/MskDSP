@@ -1185,3 +1185,28 @@ TEST(DataCenterCoreTest, GetLatestFiltersByTags) {
   EXPECT_EQ(resp.updates(0).dst_tag(), "D");
   EXPECT_EQ(resp.updates(0).value().int_value(), 20);
 }
+
+// 验证：新的 DataCenterCore 实例拥有新的进程统计窗口，启动时间有效且计数清零。
+TEST(DataCenterCoreTest, ThroughputSnapshotStartsFreshForNewCoreInstance) {
+  DataCenterCore first;
+  InstallRouteConnections(first, {1, 2});
+
+  DataCenterProto::UpsertRoutesRequest routes;
+  routes.set_replace(true);
+  *routes.add_routes() = MakeRoute(1, "A", 2, "B");
+  ASSERT_TRUE(first.UpsertRoutes(routes).ok());
+
+  DataCenterProto::PublishRequest publish;
+  publish.set_conn_id(1);
+  publish.set_tag("A");
+  publish.mutable_value()->set_int_value(1);
+  std::vector<DataCenterProto::PointUpdate> updates;
+  ASSERT_TRUE(first.Publish(publish, &updates).ok());
+  ASSERT_EQ(first.GetThroughputSnapshot().peak_points_per_second(), 1u);
+
+  const auto secondSnapshot = DataCenterCore{}.GetThroughputSnapshot();
+  EXPECT_GT(secondSnapshot.process_start_time_ms(), 0);
+  EXPECT_EQ(secondSnapshot.current_points_per_second(), 0u);
+  EXPECT_EQ(secondSnapshot.peak_points_per_second(), 0u);
+  EXPECT_EQ(secondSnapshot.samples_size(), 0);
+}
