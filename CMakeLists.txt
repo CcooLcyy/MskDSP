@@ -133,6 +133,7 @@ set(MSKDSP_MODULE_TARGETS
   AGC
   AVC
   Calc
+  ControlOrchestrator
 )
 
 set(MSKDSP_VCPKG_INSTALL_DIR "")

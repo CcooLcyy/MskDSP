@@ -7,6 +7,7 @@
     "DataCenter",
     "MQTTManager",
     "IEC104",
+    "IEC61850",
     "ModbusRTU",
     "DLT645",
     "AGC",

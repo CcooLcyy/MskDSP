@@ -1,0 +1,26 @@
+{
+  // 命令编排目标态配置；默认不声明任何编排。
+  "controlOrchestrator": {
+    "sequences": []
+  }
+}
+
+// 编排步骤示例（不要直接取消注释，需先在 DataCenter 配置对应的源端点和路由）：
+// {
+//   "sequenceName": "逆变器遥调前置合闸",
+//   "steps": [
+//     {
+//       "stepName": "遥控合",
+//       "source": { "moduleName": "ModbusRTU", "connName": "逆变器1", "tag": "remote_close" },
+//       "value": { "boolValue": true },
+//       "timeoutMs": 3000,
+//       "delayAfterMs": 200
+//     },
+//     {
+//       "stepName": "有功遥调",
+//       "source": { "moduleName": "ModbusRTU", "connName": "逆变器1", "tag": "active_power" },
+//       "useTriggerValue": true,
+//       "timeoutMs": 5000
+//     }
+//   ]
+// }

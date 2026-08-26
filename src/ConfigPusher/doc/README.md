@@ -1,7 +1,7 @@
 # ConfigPusher 模块
 
 ## 简介
-ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/IEC61850/ModbusRTU/DLT645/AGC/AVC/Calc，并按配置调用对应 gRPC 接口完成 IEC104/ModbusRTU/DLT645 连接与点表下发、IEC61850模型和IED完整目标态下发、AGC/AVC 控制组下发、Calc 计算分组下发，以及 DataCenter 连接标签注册表/路由下发。链路、IED通信功能、控制组或计算分组的模块内功能是否进入运行态，由各模块依据目标配置判定。
+ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/IEC61850/ModbusRTU/DLT645/AGC/AVC/Calc/ControlOrchestrator，并按配置调用对应 gRPC 接口完成 IEC104/ModbusRTU/DLT645 连接与点表下发、IEC61850模型和IED完整目标态下发、AGC/AVC 控制组下发、Calc 计算分组下发、ControlOrchestrator 命令编排下发，以及 DataCenter 连接标签注册表/路由下发。链路、IED通信功能、控制组或计算分组的模块内功能是否进入运行态，由各模块依据目标配置判定。
 
 在 `CONFIG_PUSHER` 模式下，ConfigPusher 将 `jsonc` 视为当前进程的目标态与最终真相源，而不是增量补丁：若 SQLite 持久化配置或当前内存态中存在 `jsonc` 未声明的链路、控制组、计算分组、点表、连接标签注册表或路由，ConfigPusher 会在本次编排时将其收敛删除或覆盖，避免旧持久化内容继续生效。
 
@@ -17,6 +17,7 @@ ConfigPusher 更适合作为初始化配置导入与批量编排执行器，不�
 - 下发 AGC 配置：UpsertGroup
 - 下发 AVC 配置：UpsertGroup
 - 下发 Calc 配置：UpsertGroup
+- 下发 ControlOrchestrator 配置：UpsertSequence / DeleteSequence 收敛线性命令编排
 - 下发 DataCenter 配置：UpsertConnTags / UpsertRoutes（仅对已存在连接生效）
 - 下发流程记录请求/响应报文日志（ModuleManager/IEC104/ModbusRTU/DLT645/AGC/AVC/Calc/DataCenter）
 - 失败记录日志（当前不做重试）

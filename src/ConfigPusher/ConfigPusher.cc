@@ -19,10 +19,12 @@
 #include "AGC.grpc.pb.h"
 #include "AVC.grpc.pb.h"
 #include "Calc.grpc.pb.h"
+#include "ControlOrchestrator.grpc.pb.h"
 #include "ConfigPusher.pb.h"
 #include "ConfigPusherApplyAgc.h"
 #include "ConfigPusherApplyAvc.h"
 #include "ConfigPusherApplyCalc.h"
+#include "ConfigPusherApplyControlOrchestrator.h"
 #include "ConfigPusherApplyDlt645.h"
 #include "ConfigPusherApplyIec104.h"
 #include "ConfigPusherApplyIec61850.h"
@@ -70,6 +72,7 @@ constexpr const char *kDataCenterConfigPath = "./conf/configPusher/DataCenter.js
 constexpr const char *kAgcConfigPath = "./conf/configPusher/agc.jsonc";
 constexpr const char *kAvcConfigPath = "./conf/configPusher/avc.jsonc";
 constexpr const char *kCalcConfigPath = "./conf/configPusher/calc.jsonc";
+constexpr const char *kControlOrchestratorConfigPath = "./conf/configPusher/control_orchestrator.jsonc";
 constexpr const char *kModuleManagerAddress = "127.0.0.1:17000";
 constexpr const char *kDataCenterModuleName = "DataCenter";
 constexpr const char *kIec104ModuleName = "IEC104";
@@ -199,6 +202,7 @@ void ConfigPusher::applyConfig() {
   auto agcConfig = LoadConfigFile(ResolveConfigPath(configDir, kAgcConfigPath));
   auto avcConfig = LoadConfigFile(ResolveConfigPath(configDir, kAvcConfigPath));
   auto calcConfig = LoadConfigFile(ResolveConfigPath(configDir, kCalcConfigPath));
+  auto controlOrchestratorConfig = LoadConfigFile(ResolveConfigPath(configDir, kControlOrchestratorConfigPath));
 
   const bool hasIec104 = iec104Config && iec104Config->has_iec104();
   const bool hasIec61850 = iec61850Config && iec61850Config->has_iec61850();
@@ -208,13 +212,14 @@ void ConfigPusher::applyConfig() {
   const bool hasAgc = agcConfig && agcConfig->has_agc();
   const bool hasAvc = avcConfig && avcConfig->has_avc();
   const bool hasCalc = calcConfig && calcConfig->has_calc();
+  const bool hasControlOrchestrator = controlOrchestratorConfig && controlOrchestratorConfig->has_control_orchestrator();
   const bool hasDataCenter = dataCenterConfig.has_value();
   const bool requiresDataCenter = hasIec104 || hasModbus || hasDlt645 ||
-                                  hasAgc || hasAvc || hasCalc || hasDataCenter;
+                                  hasAgc || hasAvc || hasCalc || hasControlOrchestrator || hasDataCenter;
   const bool wantsDataCenter = requiresDataCenter || hasIec61850;
   if (!hasIec104 && !hasIec61850 && !hasModbus && !hasDlt645 && !hasAgc &&
-      !hasAvc && !hasCalc && !hasDataCenter) {
-    LOG_INFO("配置中未包含 IEC104/IEC61850/ModbusRTU/DLT645/AGC/AVC/Calc/DataCenter 配置");
+      !hasAvc && !hasCalc && !hasControlOrchestrator && !hasDataCenter) {
+    LOG_INFO("配置中未包含 IEC104/IEC61850/ModbusRTU/DLT645/AGC/AVC/Calc/ControlOrchestrator/DataCenter 配置");
     return;
   }
   LOG_INFO("ConfigPusher 配置解析完成，开始准备下发配置");
@@ -390,6 +395,14 @@ void ConfigPusher::applyConfig() {
       return;
     }
   }
+  std::optional<ModuleManagerProto::ModuleInfo> controlOrchestratorInfo;
+  if (hasControlOrchestrator) {
+    controlOrchestratorInfo = findModuleInfo(moduleInfos, "ControlOrchestrator");
+    if (!controlOrchestratorInfo) {
+      LOG_ERROR("未找到模块: ControlOrchestrator");
+      return;
+    }
+  }
 
   std::optional<ModuleManagerProto::ModuleRunningInfo> runningIec104;
   if (hasIec104) {
@@ -530,6 +543,22 @@ void ConfigPusher::applyConfig() {
       LOG_INFO("Calc 已在运行");
     }
   }
+  std::optional<ModuleManagerProto::ModuleRunningInfo> runningControlOrchestrator;
+  if (hasControlOrchestrator) {
+    runningControlOrchestrator = findRunningInfo(running, "ControlOrchestrator");
+    if (!runningControlOrchestrator) {
+      LOG_INFO("ControlOrchestrator 未运行，开始启动");
+      if (!startModule(moduleStub.get(), *controlOrchestratorInfo)) {
+        LOG_ERROR("启动模块 ControlOrchestrator 失败");
+        return;
+      }
+      runningControlOrchestrator = waitForModule(moduleStub.get(), "ControlOrchestrator", kModuleStartTimeout);
+      if (!runningControlOrchestrator) {
+        LOG_ERROR("等待 ControlOrchestrator 启动超时");
+        return;
+      }
+    }
+  }
 
   if (hasIec104 && runningIec104) {
     auto iecChannel = grpc::CreateChannel(runningIec104->inner_grpc_server(), grpc::InsecureChannelCredentials());
@@ -588,6 +617,15 @@ void ConfigPusher::applyConfig() {
       LOG_ERROR("Calc 配置下发存在错误");
     } else {
       LOG_INFO("Calc 配置下发完成");
+    }
+  }
+  if (hasControlOrchestrator && runningControlOrchestrator) {
+    auto channel = grpc::CreateChannel(runningControlOrchestrator->inner_grpc_server(), grpc::InsecureChannelCredentials());
+    auto stub = ControlOrchestratorProto::ControlOrchestratorService::NewStub(channel);
+    if (!applyControlOrchestratorConfig(controlOrchestratorConfig->control_orchestrator(), stub.get())) {
+      LOG_ERROR("ControlOrchestrator 配置下发存在错误");
+    } else {
+      LOG_INFO("ControlOrchestrator 配置下发完成");
     }
   }
 

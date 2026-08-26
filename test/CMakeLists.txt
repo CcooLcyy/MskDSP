@@ -196,6 +196,20 @@ target_link_libraries(calc_group_manager_test PRIVATE
 
 mskdsp_add_isolated_test(calc_group_manager_test)
 
+add_executable(control_orchestrator_test
+  control_orchestrator_test.cc
+)
+target_include_directories(control_orchestrator_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/ControlOrchestrator/include
+)
+target_link_libraries(control_orchestrator_test PRIVATE
+  GTest::gtest_main
+  GTest::gmock
+  dspProto
+  ControlOrchestrator
+)
+mskdsp_add_isolated_test(control_orchestrator_test)
+
 add_executable(dataCenterCore_test
   data_center_core_test.cc
   ${CMAKE_SOURCE_DIR}/src/DataCenter/DataCenterCore.cc
@@ -1688,6 +1702,7 @@ set(MSKDSP_TEST_TARGETS
   configPusherApplyAgc_test
   configPusherApplyAvc_test
   configPusherApplyCalc_test
+  control_orchestrator_test
 )
 
 if(MSKDSP_ENABLE_COVERAGE)
