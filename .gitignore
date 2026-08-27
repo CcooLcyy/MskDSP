@@ -33,6 +33,9 @@ IEC104/*
 .ccache
 images/*
 
+# GitHub Actions self-hosted runner 本地注册凭据
+docker/lower-runner/.env
+
 # Word 文档
 *.doc
 *.docx

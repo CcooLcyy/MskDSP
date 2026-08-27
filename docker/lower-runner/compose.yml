@@ -1,0 +1,33 @@
+services:
+  lower-runner:
+    build:
+      context: .
+      args:
+        RUNNER_VERSION: ${RUNNER_VERSION:-2.321.0}
+        RUNNER_DOWNLOAD_BASE_URL: ${RUNNER_DOWNLOAD_BASE_URL:-https://github.com}
+    image: mskdsp-lower-runner:ubuntu24.04
+    container_name: mskdsp-lower-runner
+    environment:
+      GITHUB_URL: ${GITHUB_URL:?请在 .env 中设置 GITHUB_URL}
+      RUNNER_TOKEN: ${RUNNER_TOKEN:-}
+      RUNNER_NAME: ${RUNNER_NAME:-mskdsp-lower-builder-01}
+      RUNNER_LABELS: ${RUNNER_LABELS:-lower-builder,x64}
+      RUNNER_GROUP: ${RUNNER_GROUP:-Default}
+      RUNNER_EPHEMERAL: "false"
+      RUNNER_DISABLE_UPDATE: "false"
+      RUNNER_STATE_DIRECTORY: /var/lib/actions-runner
+      RUNNER_REMOVE_TOKEN: ${RUNNER_REMOVE_TOKEN:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - lower-runner-state:/var/lib/actions-runner
+      - lower-runner-work:/opt/actions-runner/_work
+      - lower-runner-docker:/home/runner/.docker
+    restart: unless-stopped
+
+volumes:
+  lower-runner-state:
+    name: lower-runner-state
+  lower-runner-work:
+    name: lower-runner-work
+  lower-runner-docker:
+    name: lower-runner-docker
