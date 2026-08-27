@@ -223,7 +223,7 @@ jobs:
 
   arm64-package:
     name: 产出 arm64 Beta 包
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, lower-builder]
     needs:
       - x64-verify
     env:
