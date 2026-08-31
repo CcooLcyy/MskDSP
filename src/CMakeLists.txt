@@ -10,6 +10,7 @@ add_subdirectory(ControlOrchestrator)
 add_subdirectory(ConfigPusher)
 add_subdirectory(MQTTManager)
 add_subdirectory(IEC61850)
+add_subdirectory(DigitalInput)
 add_executable(${PROJECT_NAME} main.cc)
 target_link_libraries(${PROJECT_NAME} PUBLIC 
     moduleManager

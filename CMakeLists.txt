@@ -134,6 +134,7 @@ set(MSKDSP_MODULE_TARGETS
   AVC
   Calc
   ControlOrchestrator
+  DigitalInput
 )
 
 set(MSKDSP_VCPKG_INSTALL_DIR "")

@@ -779,6 +779,13 @@ IEC61850Proto::SclModelSummary SclParser::BuildSummary(
   summary.set_source_checksum(model.source_checksum());
   summary.set_ied_count(static_cast<uint32_t>(model.ieds_size()));
   for (const auto& ied : model.ieds()) {
+    auto* iedSummary = summary.add_ieds();
+    iedSummary->set_name(ied.name());
+    for (const auto& accessPoint : ied.access_points()) {
+      auto* accessPointSummary = iedSummary->add_access_points();
+      accessPointSummary->set_name(accessPoint.name());
+      accessPointSummary->set_has_server(accessPoint.has_server());
+    }
     summary.set_logical_node_count(summary.logical_node_count() +
                                    static_cast<uint32_t>(ied.logical_nodes_size()));
     summary.set_data_attribute_count(summary.data_attribute_count() +

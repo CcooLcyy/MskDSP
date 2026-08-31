@@ -16,7 +16,7 @@
 
 | 配置对象 | `jsonc` 入口 | ConfigPusher 实际编排动作 | 最终生效语义 | 自动启动与依赖 | 上位机建议建模 |
 | --- | --- | --- | --- | --- | --- |
-| 模块启动编排 | `./conf/module_manager.jsonc` 的 `boot_config_mode`、`auto_start_modules` | 通过 ModuleManager 查询模块信息、按需启动 `DataCenter`、`IEC104`、`IEC61850`、`ModbusRTU`、`DLT645`、`AGC`、`AVC`、`Calc`、`MQTTManager` | `CONFIG_PUSHER` 下由 ConfigPusher 主导初始化编排；`UPPER` 下仅提供服务，不自动下发 | 依赖 ModuleManager；是否执行配置下发由 `boot_config_mode` 决定 | 作为“初始化模式开关”和“模块准备状态”展示，不应混入日常业务对象编辑页 |
+| 模块启动编排 | `./conf/module_manager.jsonc` 的 `boot_config_mode`、`auto_start_modules` | 通过 ModuleManager 查询模块信息、按需启动 `DataCenter`、`IEC104`、`IEC61850`、`ModbusRTU`、`DLT645`、`AGC`、`AVC`、`Calc`、`MQTTManager`、`DigitalInput` | `CONFIG_PUSHER` 下由 ConfigPusher 主导初始化编排；`UPPER` 下仅提供服务，不自动下发 | 依赖 ModuleManager；是否执行配置下发由 `boot_config_mode` 决定 | 作为“初始化模式开关”和“模块准备状态”展示，不应混入日常业务对象编辑页 |
 | IEC104 链路与点表 | `iec104.links[]` | 先查询现状；必要时停止旧连接功能、清理 `jsonc` 未声明的旧链路；再调用 `UpsertLink`、`UpsertPointTable` | `jsonc` 是目标态快照；同名链路按目标配置覆盖，未声明旧链路不保留 | 依赖 `IEC104` 与 `DataCenter`；配置满足条件后由 IEC104 自动启动模块内连接功能 | 适合建模为“IEC104 初始化模板”；在线增量维护仍建议直连 `IEC104Service` |
 | IEC61850模型、IED与点映射 | `iec61850.models[]`、`iec61850.ieds[]` | 读取全部SCL内容并单次调用 `ApplyTargetConfig`；ConfigPusher不解析SCL | 模型、IED和点映射以单个完整目标态收敛；空目标态用于清理旧配置 | 依赖 `IEC61850`；DataCenter仅为可降级异步输出，缺失时仍下发目标态；IED通信功能由 `desired_running/auto_start` 决定 | 初始化导入应支持SCL文件和目标态预览；在线维护建议直连 `IEC61850Service` |
 | ModbusRTU 链路、点表与 MQTT 全局参数 | `modbus_rtu.links[]`、`modbus_rtu.mqtt` | 先判断是否需要 MQTT；必要时先调 `UpdateConfig`，再查询/收敛旧链路，随后调 `UpsertLink`、`UpsertPointTable` | 链路与点表按目标态覆盖；存在 `TRANSPORT_MQTT_UART` 时要求 `mqtt` 顶层参数完整 | 依赖 `ModbusRTU`、`DataCenter`；MQTT 透传场景还依赖 `MQTTManager`；模块满足条件后自动启动模块内连接功能 | 页面上应区分“本地串口直连”和“MQTT UART 透传”两种模板，不要把 MQTT 全局参数误建成每条链路私有字段 |

@@ -12,6 +12,7 @@
     "DLT645",
     "AGC",
     "AVC",
-    "Calc"
+    "Calc",
+    "DigitalInput"
   ]
 }

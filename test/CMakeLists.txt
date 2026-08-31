@@ -179,6 +179,38 @@ target_link_libraries(configDatabase_test PRIVATE
 
 mskdsp_add_isolated_test(configDatabase_test)
 
+add_executable(digitalInputEventProcessor_test
+  digital_input_event_processor_test.cc
+  ${CMAKE_SOURCE_DIR}/src/DigitalInput/DigitalInputEventProcessor.cc
+)
+
+target_include_directories(digitalInputEventProcessor_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/DigitalInput/include
+)
+
+target_link_libraries(digitalInputEventProcessor_test PRIVATE
+  GTest::gtest_main
+)
+
+mskdsp_add_isolated_test(digitalInputEventProcessor_test)
+
+add_executable(digitalInputDataCenterClient_test
+  digital_input_data_center_client_test.cc
+  ${CMAKE_SOURCE_DIR}/src/DigitalInput/DigitalInputDataCenterClient.cc
+)
+
+target_include_directories(digitalInputDataCenterClient_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/DigitalInput/include
+)
+
+target_link_libraries(digitalInputDataCenterClient_test PRIVATE
+  GTest::gtest_main
+  GTest::gmock
+  dspProto
+)
+
+mskdsp_add_isolated_test(digitalInputDataCenterClient_test)
+
 add_executable(calc_group_manager_test
   calc_group_manager_test.cc
 )
@@ -1646,6 +1678,8 @@ set(MSKDSP_TEST_TARGETS
   logger_test
   mqtt_manager_test
   configDatabase_test
+  digitalInputEventProcessor_test
+  digitalInputDataCenterClient_test
   dataCenterCore_test
   dataCenterStateStore_test
   dataCenterGrpcService_test

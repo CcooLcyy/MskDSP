@@ -701,12 +701,27 @@ TEST(IEC61850ManagerTest, ImportsQueriesAndReloadsModel) {
   ASSERT_TRUE(manager.GetModelSummary("station-model", &summary).ok());
   EXPECT_EQ(summary.source_name(), "station.scd");
   EXPECT_EQ(summary.ied_count(), 1u);
+  ASSERT_EQ(summary.ieds_size(), 1);
+  EXPECT_EQ(summary.ieds(0).name(), "IED1");
+  ASSERT_EQ(summary.ieds(0).access_points_size(), 3);
+  EXPECT_EQ(summary.ieds(0).access_points(0).name(), "AP1");
+  EXPECT_TRUE(summary.ieds(0).access_points(0).has_server());
+  EXPECT_EQ(summary.ieds(0).access_points(2).name(), "AP3");
+  EXPECT_TRUE(summary.ieds(0).access_points(2).has_server());
+
+  IEC61850Proto::ListModelsResponse models;
+  ASSERT_TRUE(manager.ListModels(&models).ok());
+  ASSERT_EQ(models.models_size(), 1);
+  ASSERT_EQ(models.models(0).ieds_size(), 1);
+  EXPECT_EQ(models.models(0).ieds(0).name(), "IED1");
 
   IEC61850::Manager reloaded(directory.database());
   ASSERT_TRUE(reloaded.LoadPersistedConfig().ok());
   summary.Clear();
   ASSERT_TRUE(reloaded.GetModelSummary("station-model", &summary).ok());
   EXPECT_EQ(summary.ied_count(), 1u);
+  ASSERT_EQ(summary.ieds_size(), 1);
+  EXPECT_EQ(summary.ieds(0).name(), "IED1");
 }
 
 // 验证：相同内容重复导入幂等，不需要replace=true。

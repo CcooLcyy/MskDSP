@@ -66,7 +66,12 @@ grpc::Status IEC61850GrpcServiceImpl::GetModelSummary(
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
                         "请求和响应不能为空");
   }
-  return manager_->GetModelSummary(request->model_name(), response);
+  const auto status = manager_->GetModelSummary(request->model_name(), response);
+  if (status.ok()) {
+    LOG_INFO("IEC61850返回模型目录摘要: 模型={}, IED数={}",
+             request->model_name(), response->ieds_size());
+  }
+  return status;
 }
 
 grpc::Status IEC61850GrpcServiceImpl::ListModels(
@@ -75,7 +80,11 @@ grpc::Status IEC61850GrpcServiceImpl::ListModels(
   if (auto status = EnsureReady(); !status.ok()) {
     return status;
   }
-  return manager_->ListModels(response);
+  const auto status = manager_->ListModels(response);
+  if (status.ok()) {
+    LOG_INFO("IEC61850返回模型目录列表: 模型数={}", response->models_size());
+  }
+  return status;
 }
 
 grpc::Status IEC61850GrpcServiceImpl::DeleteModel(

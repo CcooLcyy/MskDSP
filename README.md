@@ -21,6 +21,7 @@ MskDSP 是一个基于 C++23 的模块化系统：核心由 `ModuleManager` 管�
 - [src/AGVC/AGC/](./src/AGVC/AGC/)：AGC 自动功率控制（总设定拆分/派生点计算，通过 DataCenter 路由与上下游联动，[文档](./src/AGVC/AGC/doc/README.md)）
 - [src/AGVC/AVC/](./src/AGVC/AVC/)：AVC 自动电压控制（集中式电压-无功控制、默认点与控制组管理，[文档](./src/AGVC/AVC/doc/README.md)）
 - [src/Calc/](./src/Calc/)：Calc 类型化运算模块（分组化四则/逻辑运算，通过 DataCenter Route 接入已有点，[文档](./src/Calc/doc/README.md)）
+- [src/DigitalInput/](./src/DigitalInput/)：设备板 4 路 DI 遥信采集（GPIO character device + 严格 SOE，发布到 DataCenter，[文档](./src/DigitalInput/doc/README.md)）
 - [src/ConfigPusher/](./src/ConfigPusher/)：配置编排与初始化下发能力（[文档](./src/ConfigPusher/doc/README.md)）
 - [src/MQTTManager/](./src/MQTTManager/)：MQTT 通道管理与协议适配能力
 
@@ -135,11 +136,14 @@ docker build --platform=linux/arm64 -t mskdsp:arm64 .
 ```bash
 mkdir -p ./log
 docker run --network host --rm --log-driver none \
+  --device /dev/gpiochip0:/dev/gpiochip0 \
   -v "$(pwd)/log:/opt/mskdsp/log" \
   mskdsp:arm64
 ```
 
 注意：`Dockerfile` 基于 `localhost/arm64v8/ubuntu:noble`，确保该基础镜像已存在或按需调整镜像名。
+如果不采集板载 DI，可省略 `--device`；启用 `DigitalInput` 时必须映射实际使用的 GPIO
+character device，并保证容器进程具备读取/申请 line 的权限。
 
 说明：
 - 建议 Docker 场景使用 `--log-driver none`，直接关闭 Docker 对容器标准输出/标准错误的日志收集，避免生成 `/var/lib/docker/containers/<id>/<id>-json.log`。
@@ -156,7 +160,7 @@ docker run --network host --rm --log-driver none \
   - `auto_start_modules`：显式自动加载模块列表
 - 模板：`package/conf/module_manager.jsonc`
 - 建议：使用 `CONFIG_PUSHER` 时，自启动列表仅填写 `ConfigPusher`
-- 默认交付：使用 `UPPER` 模式并显式自动启动全部 9 个业务模块；模块内部链路、控制组和计算组仍按有效持久化配置恢复
+- 默认交付：使用 `UPPER` 模式并显式自动启动全部 10 个业务模块；模块内部链路、控制组和计算组仍按有效持久化配置恢复
 - 安装策略：全新安装、升级或重新安装都会同步默认 `module_manager.jsonc`，但保留现场 `config.db` 及其他业务配置
 - 更完整的模式说明、回退语义与 `UPPER` SQLite 配置痕迹清单，见 `src/core/ModuleManager/doc/README.md`
 
@@ -173,7 +177,8 @@ docker run --network host --rm --log-driver none \
     "DLT645",
     "AGC",
     "AVC",
-    "Calc"
+    "Calc",
+    "DigitalInput"
   ]
 }
 ```
