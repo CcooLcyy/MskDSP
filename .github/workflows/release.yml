@@ -210,7 +210,7 @@ jobs:
 
   arm64-release:
     name: 构建 arm64 正式包并发布
-    runs-on: [self-hosted, Linux, X64, lower-builder]
+    runs-on: ubuntu-24.04
     needs:
       - x64-verify
     env:

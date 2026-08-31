@@ -26,10 +26,12 @@ Beta 自动晋升仍使用 GitHub 托管 runner。
   ```
 
 - 构建机能访问 GitHub、vcpkg 源和 `arm64v8/ubuntu:noble` 镜像源。
+- 如果使用宿主机上的 Clash Verge/Mihomo 代理，代理应提供 HTTP 端口；本方案默认使用
+  `127.0.0.1:7897`。
 
-runner 容器挂载 Docker socket，因此容器中的 workflow 可以控制宿主机 Docker，
-等同于拥有宿主机高权限。只能在专用构建机上运行，且不要调度来自不可信 fork
-或外部贡献者的 pull request。
+runner 容器使用 host 网络并挂载 Docker socket，因此容器中的 workflow 可以控制宿主机
+Docker，并可访问宿主机的 `127.0.0.1:7897` 代理，等同于拥有宿主机高权限。只能在专用
+构建机上运行，且不要调度来自不可信 fork 或外部贡献者的 pull request。
 
 ## 镜像内容
 
@@ -55,11 +57,20 @@ GITHUB_URL=https://github.com/<owner>/<repository>
 RUNNER_TOKEN=<GitHub 页面生成的一次性注册 token>
 RUNNER_NAME=mskdsp-lower-builder-01
 RUNNER_LABELS=lower-builder,x64
+RUNNER_HTTP_PROXY=http://127.0.0.1:7897
+RUNNER_HTTPS_PROXY=http://127.0.0.1:7897
+RUNNER_NO_PROXY=localhost,127.0.0.1,::1
 ```
+
+Compose 使用 host 网络，因此不需要为 runner 发布端口；`127.0.0.1` 代理地址指向宿主机。
+如果不使用代理，可将 `RUNNER_HTTP_PROXY` 和 `RUNNER_HTTPS_PROXY` 设为空。镜像内已将
+Git 固定为 HTTP/1.1，并设置连接与低速传输超时。
 
 构建机访问 GitHub release asset 超时时，可在 `.env` 中将
 `RUNNER_DOWNLOAD_BASE_URL` 改为本机认可的代理地址。该参数只影响镜像构建阶段，
-代理地址属于外部服务，使用前应按本机网络策略评估。
+代理地址属于外部服务，使用前应按本机网络策略评估。镜像默认固定使用 runner
+`2.337.0`，并关闭运行时自动更新，避免更新包下载失败导致正在执行的 job 被取消；
+升级 runner 时先修改 `RUNNER_VERSION` 并重新构建镜像，确认可用后再启动容器。
 
 构建并启动 runner 容器：
 

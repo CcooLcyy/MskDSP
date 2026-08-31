@@ -3,10 +3,11 @@ services:
     build:
       context: .
       args:
-        RUNNER_VERSION: ${RUNNER_VERSION:-2.321.0}
+        RUNNER_VERSION: ${RUNNER_VERSION:-2.337.0}
         RUNNER_DOWNLOAD_BASE_URL: ${RUNNER_DOWNLOAD_BASE_URL:-https://github.com}
     image: mskdsp-lower-runner:ubuntu24.04
     container_name: mskdsp-lower-runner
+    network_mode: host
     environment:
       GITHUB_URL: ${GITHUB_URL:?请在 .env 中设置 GITHUB_URL}
       RUNNER_TOKEN: ${RUNNER_TOKEN:-}
@@ -14,9 +15,15 @@ services:
       RUNNER_LABELS: ${RUNNER_LABELS:-lower-builder,x64}
       RUNNER_GROUP: ${RUNNER_GROUP:-Default}
       RUNNER_EPHEMERAL: "false"
-      RUNNER_DISABLE_UPDATE: "false"
+      RUNNER_DISABLE_UPDATE: ${RUNNER_DISABLE_UPDATE:-true}
       RUNNER_STATE_DIRECTORY: /var/lib/actions-runner
       RUNNER_REMOVE_TOKEN: ${RUNNER_REMOVE_TOKEN:-}
+      HTTP_PROXY: ${RUNNER_HTTP_PROXY-http://127.0.0.1:7897}
+      HTTPS_PROXY: ${RUNNER_HTTPS_PROXY-http://127.0.0.1:7897}
+      http_proxy: ${RUNNER_HTTP_PROXY-http://127.0.0.1:7897}
+      https_proxy: ${RUNNER_HTTPS_PROXY-http://127.0.0.1:7897}
+      NO_PROXY: ${RUNNER_NO_PROXY-localhost,127.0.0.1,::1}
+      no_proxy: ${RUNNER_NO_PROXY-localhost,127.0.0.1,::1}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - lower-runner-state:/var/lib/actions-runner

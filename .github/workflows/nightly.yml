@@ -22,7 +22,7 @@ env:
 jobs:
   arm64-nightly:
     name: 产出 arm64 Nightly 包
-    runs-on: [self-hosted, Linux, X64, lower-builder]
+    runs-on: ubuntu-24.04
     env:
       VCPKG_HOST_BINARY_CACHE_DIR: ${{ github.workspace }}/.cache/vcpkg/x64-linux-dynamic
       VCPKG_BINARY_CACHE_DIR: ${{ github.workspace }}/.cache/vcpkg/arm64-linux-dynamic

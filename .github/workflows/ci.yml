@@ -232,7 +232,7 @@ jobs:
 
   arm64-master-package:
     name: master/main 产出 arm64 测试安装包
-    runs-on: [self-hosted, Linux, X64, lower-builder]
+    runs-on: ubuntu-24.04
     needs:
       - x64-debug-test
     if: ${{ github.event_name == 'push' && (github.ref_name == 'master' || github.ref_name == 'main') }}

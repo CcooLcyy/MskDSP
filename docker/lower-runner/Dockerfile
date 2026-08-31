@@ -1,7 +1,7 @@
 FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG RUNNER_VERSION=2.321.0
+ARG RUNNER_VERSION=2.337.0
 ARG RUNNER_DOWNLOAD_BASE_URL=https://github.com
 
 RUN apt-get update \
@@ -10,7 +10,8 @@ RUN apt-get update \
         curl \
         gnupg \
     && install --mode 0755 --directory /etc/apt/keyrings \
-    && curl --fail --location https://download.docker.com/linux/ubuntu/gpg \
+    && curl --fail --location --retry 5 --retry-all-errors \
+      https://download.docker.com/linux/ubuntu/gpg \
       --output /etc/apt/keyrings/docker.asc \
     && chmod a+r /etc/apt/keyrings/docker.asc \
     && printf '%s\n' \
@@ -46,6 +47,10 @@ RUN apt-get update \
     && update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 140 \
     && update-alternatives --set gcc /usr/bin/gcc-14 \
     && update-alternatives --set g++ /usr/bin/g++-14 \
+    && git config --system http.version HTTP/1.1 \
+    && git config --system http.connectTimeout 30 \
+    && git config --system http.lowSpeedLimit 1000 \
+    && git config --system http.lowSpeedTime 120 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN test "$(dpkg --print-architecture)" = "amd64" \
