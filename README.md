@@ -136,7 +136,7 @@ docker build --platform=linux/arm64 -t mskdsp:arm64 .
 ```bash
 mkdir -p ./log
 docker run --network host --rm --log-driver none \
-  --device /dev/gpiochip0:/dev/gpiochip0 \
+  --device /dev/gpiochip1:/dev/gpiochip1 \
   -v "$(pwd)/log:/opt/mskdsp/log" \
   mskdsp:arm64
 ```

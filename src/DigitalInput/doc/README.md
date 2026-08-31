@@ -47,7 +47,8 @@ DataCenter 会持久化连接和标签，路由由上位机通过通用 DataBus 
 
 ## 运行与权限
 
-- 默认设备节点：`/dev/gpiochip0`，可通过 `MSKDSP_DIGITAL_INPUT_GPIOCHIP` 环境变量覆盖。
+- 默认设备节点：`/dev/gpiochip1`（目标板 0~351 号 GPIO 对应的 `3604000.pinctrl`），可通过
+  `MSKDSP_DIGITAL_INPUT_GPIOCHIP` 环境变量覆盖。
 - 进程需要对 GPIO chip 设备具有读写权限；当前目标设备由 root 运行，设备节点为
   `root:root 0600`。
 - 模块没有业务 gRPC/Proto 接口，但会启动无业务方法的通用 gRPC 监听端点，供模块管理器

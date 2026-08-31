@@ -41,7 +41,9 @@ const std::string& GetSerializedManifest() {
 namespace DigitalInput {
 namespace {
 
-constexpr const char* kDefaultGpioChipPath = "/dev/gpiochip0";
+// 目标板 0~351 号 GPIO 所在的 3604000.pinctrl 对应 gpiochip1；
+// 可通过环境变量覆盖，便于适配其他板卡的设备节点编号。
+constexpr const char* kDefaultGpioChipPath = "/dev/gpiochip1";
 
 std::string ConfiguredGpioChipPath() {
   const char* configured = std::getenv("MSKDSP_DIGITAL_INPUT_GPIOCHIP");
