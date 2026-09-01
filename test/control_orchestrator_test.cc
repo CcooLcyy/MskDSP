@@ -340,14 +340,17 @@ TEST(ControlOrchestratorManagerTest, RetriesCommandUntilVerificationSucceeds) {
       .WillByDefault(::testing::Invoke(
           [&state, &remoteCommands](grpc::ClientContext*, const DataCenterProto::ExecuteCommandRequest &request,
                    DataCenterProto::ExecuteCommandResponse *response) {
+            auto status = state.ExecuteCommand(request, response);
+            if (!status.ok()) {
+              return status;
+            }
             if (request.src().tag() == "remote_close") {
               ++remoteCommands;
               if (remoteCommands >= 2) {
                 PublishBool(&state, 1, "remote_state", true);
               }
             }
-            *response = Accepted();
-            return grpc::Status::OK;
+            return status;
           }));
   ControlOrchestrator::SequenceManager manager(tempDir.path() / "config.db");
   manager.setDataCenterStub(stub);

@@ -414,6 +414,12 @@ grpc::Status SequenceManager::ExecuteSequence(
         return grpc::Status::OK;
       }
 
+      if (attempt == 0) {
+        response->set_executed_steps(response->executed_steps() + 1);
+        LOG_INFO("ControlOrchestrator 步骤命令已接受: name={}, index={}, step={}",
+                 request.sequence_name(), index + 1, step.step_name());
+      }
+
       if (step.has_verification()) {
         const auto &verification = step.verification();
         bool verified = false;
@@ -480,7 +486,6 @@ grpc::Status SequenceManager::ExecuteSequence(
         stepAccepted = true;
       }
     }
-    response->set_executed_steps(response->executed_steps() + 1);
     LOG_INFO("ControlOrchestrator 步骤执行成功: name={}, index={}, step={}",
              request.sequence_name(), index + 1, step.step_name());
     if (step.delay_after_ms() > 0 && index + 1 < config.steps_size()) {

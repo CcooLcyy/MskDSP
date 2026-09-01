@@ -280,6 +280,7 @@ TEST(AvcGroupManagerTest, ControlStateCommandsPublishStateAndGateTargetCommands)
   EXPECT_EQ(response.status(), DataCenterProto::COMMAND_ACCEPTED);
   EXPECT_TRUE(WaitForLatestBool(state, info.conn_id(), "AVC功能投入", false));
 
+  ASSERT_TRUE(WaitForSubscriptionCount(state, info.conn_id(), 1));
   PublishDoublePoint(&state, info.conn_id(), "V_CMD", 1.0);
   PublishDoublePoint(&state, info.conn_id(), "V_MEAS", 0.9);
   PublishDoublePoint(&state, info.conn_id(), "INV1_Q_MEAS", 0.0);
