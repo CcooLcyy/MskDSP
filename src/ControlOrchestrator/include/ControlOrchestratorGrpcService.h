@@ -4,6 +4,7 @@
 #include <grpcpp/support/status.h>
 
 #include "ControlOrchestrator.grpc.pb.h"
+#include "DataCenter.grpc.pb.h"
 
 namespace ControlOrchestrator {
 class SequenceManager;
@@ -31,4 +32,20 @@ public:
 private:
   SequenceManager *manager_{nullptr};
 };
+}  // namespace ControlOrchestrator
+
+namespace ControlOrchestrator {
+
+class CommandExecutorGrpcServiceImpl : public DataCenterProto::CommandExecutor::Service {
+public:
+  void setManager(SequenceManager *manager);
+
+  grpc::Status ExecuteCommand(grpc::ServerContext *context,
+                              const DataCenterProto::ExecuteCommandRequest *request,
+                              DataCenterProto::ExecuteCommandResponse *response) override;
+
+private:
+  SequenceManager *manager_{nullptr};
+};
+
 }  // namespace ControlOrchestrator

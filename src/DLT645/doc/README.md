@@ -13,7 +13,7 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
 ## 接口与协议
 - Protobuf：`protobuf/DLT645.proto`
 - gRPC Service：`DLT645Proto::DLT645Service`
-- 接口规划：当前顶层全局配置仅提供 `UpdateConfig` 写接口；后续建议补充 `GetConfig` 或 `GetGlobalConfig` 回读接口，供上位机做界面回显、配置对账与一致性校验；当前版本尚未实现。
+- 顶层全局配置提供 `UpdateConfig` 写接口与幂等的 `GetConfig` 回读接口，供上位机做界面回显、配置对账与一致性校验；未配置时返回 `configured=false`。
 
 ### UpsertLink 语义
 - `conn_name` 不存在：创建新链路，并向 DataCenter 绑定 `conn_id`。

@@ -129,6 +129,20 @@ grpc::Status DataCenterCore::resolveEndpoint(const DataCenterProto::Endpoint &en
   return grpc::Status::OK;
 }
 
+grpc::Status DataCenterCore::ResolveSourceEndpoint(const DataCenterProto::Endpoint &request,
+                                                   DataCenterProto::Endpoint *out) const {
+  if (out == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
+  }
+  StableEndpointKey stable;
+  auto status = resolveEndpoint(request, &stable, nullptr);
+  if (!status.ok()) {
+    return status;
+  }
+  *out = dumpEndpoint(stable);
+  return grpc::Status::OK;
+}
+
 bool DataCenterCore::tryResolveConnId(const StableEndpointKey &endpoint, uint32_t *outConnId) const {
   ConnKey key{endpoint.moduleName, endpoint.connName};
   auto it = connIdsByKey_.find(key);

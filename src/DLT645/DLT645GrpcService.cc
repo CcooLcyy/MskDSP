@@ -32,6 +32,25 @@ grpc::Status DLT645GrpcServiceImpl::UpdateConfig(grpc::ServerContext*,
   return status;
 }
 
+grpc::Status DLT645GrpcServiceImpl::GetConfig(grpc::ServerContext*,
+                                              const DLT645Proto::Empty* request,
+                                              DLT645Proto::GetConfigResponse* response) {
+  if (module_ == nullptr) {
+    LOG_ERROR("DLT645 服务未就绪");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
+  }
+  if (request == nullptr || response == nullptr) {
+    LOG_ERROR("DLT645 GetConfig 请求/响应为空");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
+  }
+  auto status = module_->linkManager().GetConfig(response);
+  LOG_INFO("DLT645 MQTT 配置查询响应报文: configured={}, message={}", response->configured(), response->message());
+  if (!status.ok()) {
+    LOG_ERROR("DLT645 查询 MQTT 配置失败: 原因={}", status.error_message());
+  }
+  return status;
+}
+
 grpc::Status DLT645GrpcServiceImpl::UpsertLink(grpc::ServerContext*,
                                                const DLT645Proto::UpsertLinkRequest* request,
                                                DLT645Proto::LinkInfo* response) {

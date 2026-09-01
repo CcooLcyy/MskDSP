@@ -43,7 +43,7 @@ extern "C" BOOST_SYMBOL_EXPORT bool GetModuleManifestPb(const uint8_t **data, si
   - 管理器在进程启动时只读取一次 `boot_config_mode`，并固定为本次运行模式；运行中修改配置文件不会立即生效，需重启 `MskDSP`
   - `CONFIG_PUSHER`：允许 `ConfigPusher` 在启动后读取 JSONC 并下发配置；启动模块前会清理受管模块的 SQLite 配置项，避免旧配置与本次下发目标态混用
   - 管理器启动后会先读取 `auto_start_modules` 并自动加载列表中的模块；已运行的模块会安全跳过
-  - 默认交付配置使用 `UPPER` 模式，并在 `auto_start_modules` 中显式列出全部 10 个业务模块，使全新安装、升级或重新安装后即使尚无 SQLite 配置也会启动模块服务
+  - 默认交付配置使用 `UPPER` 模式，并在 `auto_start_modules` 中显式列出全部 11 个业务模块，使全新安装、升级或重新安装后即使尚无 SQLite 配置也会启动模块服务
   - `UPPER`：即使 `auto_start_modules` 中包含 `ConfigPusher`，也会跳过其自动启动；若后续手动启动 `ConfigPusher`，模块仅启动服务，不会执行配置下发
   - `UPPER`：在处理完 `auto_start_modules` 后，管理器还会继续检查 `./conf/config.db` 中的受管模块配置项；只要发现痕迹，就会自动启动对应模块
   - `UPPER`：管理器只做“SQLite row 是否存在”的判断，不会预解析 SQLite payload；配置合法性、对象恢复以及模块内功能是否能自动进入运行态，统一由模块自身负责
@@ -78,6 +78,7 @@ extern "C" BOOST_SYMBOL_EXPORT bool GetModuleManifestPb(const uint8_t **data, si
     "AGC",
     "AVC",
     "Calc",
+    "ControlOrchestrator",
     "DigitalInput"
   ]
 }

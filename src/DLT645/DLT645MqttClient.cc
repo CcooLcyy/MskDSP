@@ -52,6 +52,19 @@ bool MqttClient::hasConfig() const {
   return hasConfig_;
 }
 
+bool MqttClient::getConfig(DLT645Proto::MqttConfig* out) const {
+  if (out == nullptr) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(mu_);
+  if (!hasConfig_) {
+    out->Clear();
+    return false;
+  }
+  *out = config_;
+  return true;
+}
+
 grpc::Status MqttClient::Publish(const std::string& topic, const std::string& payload, std::string* error) {
   LOG_INFO("DLT645 MQTT 发布入口: 主题={}, 负载长度={}", topic, payload.size());
   if (!hasConfig()) {

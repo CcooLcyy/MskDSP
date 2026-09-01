@@ -544,6 +544,36 @@ grpc::Status LinkManager::UpdateConfig(const ModbusRTUProto::UpdateConfigRequest
   return grpc::Status::OK;
 }
 
+grpc::Status LinkManager::GetConfig(ModbusRTUProto::GetConfigResponse* response) const {
+  if (response == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
+  }
+  response->Clear();
+
+  ModbusRTUProto::MqttConfig mqtt;
+  if (!mqttClient_.getConfig(&mqtt)) {
+    response->set_configured(false);
+    response->set_message("MQTT 配置未配置");
+    LOG_INFO("ModbusRTU MQTT 配置查询结果: configured=false, 原因=未配置");
+    return grpc::Status::OK;
+  }
+  if (!hasUsableMqttConfig(mqtt)) {
+    response->set_configured(false);
+    response->set_message("MQTT 配置不完整");
+    LOG_WARNING("ModbusRTU MQTT 配置查询结果: configured=false, 原因=配置不完整");
+    return grpc::Status::OK;
+  }
+
+  *response->mutable_mqtt() = mqtt;
+  response->set_configured(true);
+  response->set_message("MQTT 配置已配置");
+  LOG_INFO("ModbusRTU MQTT 配置查询成功: host={}, port={}, client_id={}",
+           mqtt.host(),
+           mqtt.port(),
+           mqtt.client_id());
+  return grpc::Status::OK;
+}
+
 size_t LinkManager::SerialKeyHash::operator()(const SerialKey& key) const {
   std::hash<std::string> strHash;
   size_t seed = strHash(key.device);

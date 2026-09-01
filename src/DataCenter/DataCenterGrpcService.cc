@@ -932,6 +932,17 @@ grpc::Status DataCenterGrpcServiceImpl::ExecuteCommand(
   }
 
   auto targetReq = *request;
+  DataCenterProto::Endpoint resolvedSrc;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    auto sourceStatus = impl_->core.ResolveSourceEndpoint(request->src(), &resolvedSrc);
+    if (!sourceStatus.ok()) {
+      LOG_ERROR("DataCenter 同步命令源端点补全失败: src={}, 原因={}",
+                formatEndpointForLog(request->src()), sourceStatus.error_message());
+      return sourceStatus;
+    }
+  }
+  *targetReq.mutable_src() = resolvedSrc;
   *targetReq.mutable_dst() = routeResp.dst();
   auto address = buildModuleUnixSocketAddress(routeResp.dst().module_name());
   auto channel = grpc::CreateChannel(address, grpc::InsecureChannelCredentials());

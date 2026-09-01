@@ -1,8 +1,10 @@
 #pragma once
 
 #include <grpcpp/channel.h>
+#include <grpcpp/server_context.h>
 #include <grpcpp/support/status.h>
 
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -18,7 +20,16 @@ public:
   void setStub(std::shared_ptr<DataCenterProto::DataCenterService::StubInterface> stub);
   void setServerAddress(std::string address);
   grpc::Status Execute(const DataCenterProto::ExecuteCommandRequest &request,
-                       DataCenterProto::ExecuteCommandResponse *response);
+                       DataCenterProto::ExecuteCommandResponse *response,
+                       grpc::ServerContext *parentContext = nullptr);
+  grpc::Status GetLatest(const DataCenterProto::Endpoint &endpoint,
+                         DataCenterProto::GetLatestResponse *response,
+                         std::chrono::milliseconds timeout = {},
+                         grpc::ServerContext *parentContext = nullptr);
+  grpc::Status GetSourceLatest(const DataCenterProto::Endpoint &endpoint,
+                               DataCenterProto::GetSourceLatestResponse *response,
+                               std::chrono::milliseconds timeout = {},
+                               grpc::ServerContext *parentContext = nullptr);
 
 private:
   std::shared_ptr<DataCenterProto::DataCenterService::StubInterface> getStub();

@@ -20,6 +20,7 @@ public:
   void setConfig(const ModbusRTUProto::MqttConfig& config);
   void setStub(std::shared_ptr<MQTTManagerProto::MQTTManagerService::StubInterface> stub);
   bool hasConfig() const;
+  bool getConfig(ModbusRTUProto::MqttConfig* out) const;
 
   grpc::Status RequestAndWait(const std::string& requestTopic,
                               const std::string& responseTopic,

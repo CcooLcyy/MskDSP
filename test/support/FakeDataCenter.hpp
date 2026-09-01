@@ -510,6 +510,40 @@ public:
     return grpc::Status::OK;
   }
 
+  grpc::Status GetSourceLatest(const DataCenterProto::GetSourceLatestRequest& request,
+                               DataCenterProto::GetSourceLatestResponse* response) const {
+    if (response == nullptr) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "response 为空");
+    }
+    if (request.conn_id() == 0) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id 不能为空");
+    }
+    response->Clear();
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = latestByConnId_.find(request.conn_id());
+    if (it == latestByConnId_.end()) {
+      return grpc::Status::OK;
+    }
+    const auto append = [&](const DataCenterProto::PointUpdate& update) {
+      auto* output = response->add_updates();
+      output->set_conn_id(request.conn_id());
+      output->set_tag(update.src_tag());
+      output->mutable_value()->CopyFrom(update.value());
+      output->set_ts_ms(update.ts_ms());
+      output->set_quality(update.quality());
+      output->set_sequence(1);
+    };
+    if (request.tags().empty()) {
+      for (const auto& [_, update] : it->second) append(update);
+      return grpc::Status::OK;
+    }
+    for (const auto& tag : request.tags()) {
+      auto tagIt = it->second.find(tag);
+      if (tagIt != it->second.end()) append(tagIt->second);
+    }
+    return grpc::Status::OK;
+  }
+
   std::unique_ptr<grpc::ClientReaderInterface<DataCenterProto::PointUpdate>> Subscribe(
       const DataCenterProto::SubscribeRequest& request) const {
     if (request.conn_id() == 0) {
@@ -625,6 +659,11 @@ inline std::shared_ptr<DataCenterProto::MockDataCenterServiceStub> MakeStub(Fake
   ON_CALL(*stub, GetLatest(::testing::_, ::testing::_, ::testing::_))
       .WillByDefault(::testing::Invoke([state](grpc::ClientContext*, const DataCenterProto::GetLatestRequest& req, DataCenterProto::GetLatestResponse* resp) {
         return state->GetLatest(req, resp);
+      }));
+
+  ON_CALL(*stub, GetSourceLatest(::testing::_, ::testing::_, ::testing::_))
+      .WillByDefault(::testing::Invoke([state](grpc::ClientContext*, const DataCenterProto::GetSourceLatestRequest& req, DataCenterProto::GetSourceLatestResponse* resp) {
+        return state->GetSourceLatest(req, resp);
       }));
 
   ON_CALL(*stub, SubscribeRaw(::testing::_, ::testing::_))

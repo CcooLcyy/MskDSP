@@ -323,6 +323,69 @@ TEST(Dlt645LinkManagerTest, UpdateConfigAcceptsValidMqtt) {
   EXPECT_TRUE(resp.ok());
 }
 
+// 验证：未配置 MQTT 时查询返回 configured=false，且不会把空配置当作有效配置。
+TEST(Dlt645LinkManagerTest, GetConfigReportsMissingMqtt) {
+  ScopedTempDir dir;
+  const auto configDbPath = dir.path() / "config.db";
+  LinkManager mgr("DLT645", configDbPath);
+  DLT645Proto::GetConfigResponse resp;
+
+  const auto status = mgr.GetConfig(&resp);
+  EXPECT_TRUE(status.ok());
+  EXPECT_FALSE(resp.configured());
+  EXPECT_THAT(resp.message(), ::testing::HasSubstr("MQTT 配置未配置"));
+  EXPECT_FALSE(resp.has_mqtt());
+}
+
+// 验证：UpdateConfig 成功后 GetConfig 能回读当前 MQTT 配置的全部字段。
+TEST(Dlt645LinkManagerTest, GetConfigReturnsCurrentMqtt) {
+  ScopedTempDir dir;
+  const auto configDbPath = dir.path() / "config.db";
+  LinkManager mgr("DLT645", configDbPath);
+  auto update = MakeMqttUpdateRequest("mqtt.example", 1884, "dlt645-get-config");
+  update.mutable_mqtt()->set_username("user");
+  update.mutable_mqtt()->set_password("secret");
+
+  DLT645Proto::UpdateConfigResponse updateResp;
+  ASSERT_TRUE(mgr.UpdateConfig(update, &updateResp).ok());
+
+  DLT645Proto::GetConfigResponse resp;
+  const auto status = mgr.GetConfig(&resp);
+  ASSERT_TRUE(status.ok());
+  ASSERT_TRUE(resp.configured());
+  ASSERT_TRUE(resp.has_mqtt());
+  EXPECT_EQ(resp.mqtt().host(), "mqtt.example");
+  EXPECT_EQ(resp.mqtt().port(), 1884u);
+  EXPECT_EQ(resp.mqtt().client_id(), "dlt645-get-config");
+  EXPECT_EQ(resp.mqtt().username(), "user");
+  EXPECT_EQ(resp.mqtt().password(), "secret");
+  EXPECT_EQ(resp.mqtt().keepalive_sec(), 10u);
+  EXPECT_TRUE(resp.mqtt().clean_session());
+  EXPECT_EQ(resp.mqtt().connect_timeout_ms(), 1000u);
+}
+
+// 验证：GetConfig 能从本地 SQLite 持久化配置恢复当前 MQTT 参数。
+TEST(Dlt645LinkManagerTest, GetConfigReturnsPersistedMqttAfterReload) {
+  ScopedTempDir dir;
+  const auto configDbPath = dir.path() / "config.db";
+  auto update = MakeMqttUpdateRequest("persisted.example", 1885, "dlt645-persisted");
+  {
+    LinkManager mgr("DLT645", configDbPath);
+    DLT645Proto::UpdateConfigResponse updateResp;
+    ASSERT_TRUE(mgr.UpdateConfig(update, &updateResp).ok());
+  }
+
+  LinkManager reloaded("DLT645", configDbPath);
+  reloaded.LoadPersistedConfig();
+  DLT645Proto::GetConfigResponse resp;
+  ASSERT_TRUE(reloaded.GetConfig(&resp).ok());
+  ASSERT_TRUE(resp.configured());
+  ASSERT_TRUE(resp.has_mqtt());
+  EXPECT_EQ(resp.mqtt().host(), "persisted.example");
+  EXPECT_EQ(resp.mqtt().port(), 1885u);
+  EXPECT_EQ(resp.mqtt().client_id(), "dlt645-persisted");
+}
+
 // 验证：UpsertLink 响应为空时返回错误。
 TEST(Dlt645LinkManagerTest, UpsertLinkRejectsNullOut) {
   FakeDataCenterState state;

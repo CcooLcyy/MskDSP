@@ -7,6 +7,7 @@
 #include <memory>
 #include <stop_token>
 #include <thread>
+#include <vector>
 
 #include "ControlOrchestratorGrpcService.h"
 #include "ControlOrchestratorLibInfo.h"
@@ -37,6 +38,7 @@ namespace ControlOrchestrator {
 ControlOrchestrator::ControlOrchestrator() :
   ModuleInterface(),
   service_(std::make_shared<GrpcServiceImpl>()),
+  commandService_(std::make_shared<CommandExecutorGrpcServiceImpl>()),
   manager_("./conf/config.db") {
   initLibInfo(ControlOrchestratorLibInfo);
 }
@@ -47,7 +49,8 @@ void ControlOrchestrator::start(std::stop_token stopToken) {
   LOG_INFO("ControlOrchestrator 模块启动");
   LOG_INFO("ControlOrchestrator 依赖模块: DataCenter");
   service_->setManager(&manager_);
-  grpcServerBuilder(service_);
+  commandService_->setManager(&manager_);
+  grpcServerBuilder(std::vector<std::shared_ptr<grpc::Service>>{service_, commandService_});
   auto status = manager_.LoadPersistedConfig();
   if (!status.ok()) {
     LOG_ERROR("ControlOrchestrator 恢复配置失败: {}", status.error_message());

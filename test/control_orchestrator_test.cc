@@ -62,6 +62,16 @@ DataCenterProto::ExecuteCommandResponse Accepted() {
   return response;
 }
 
+void PublishBool(FakeDataCenterState *state, uint32_t connId,
+                 const std::string &tag, bool value) {
+  ASSERT_NE(state, nullptr);
+  DataCenterProto::PublishRequest request;
+  request.set_conn_id(connId);
+  request.set_tag(tag);
+  request.mutable_value()->set_bool_value(value);
+  ASSERT_TRUE(state->Publish(request).ok());
+}
+
 }  // namespace
 
 // 验证：新增编排时拒绝空名称、空步骤、重复步骤名及非法步骤数量。
@@ -137,6 +147,7 @@ TEST(ControlOrchestratorManagerTest, StopsAfterFailedStep) {
   EXPECT_FALSE(response.accepted());
   EXPECT_EQ(response.executed_steps(), 0u);
   EXPECT_EQ(response.failed_step_index(), 1u);
+  EXPECT_EQ(response.failed_command_status(), DataCenterProto::COMMAND_REJECTED);
   EXPECT_EQ(state.GetCommandCount(1, "active_power"), 0u);
 }
 
@@ -237,4 +248,180 @@ TEST(ControlOrchestratorManagerTest, StopsWhenSequenceTimeoutExpires) {
   EXPECT_EQ(response.executed_steps(), 1u);
   EXPECT_EQ(response.failed_step_index(), 2u);
   EXPECT_EQ(response.reason(), "编排总超时");
+}
+
+// 验证：配置遥信确认时，只有状态达到期望值后才执行后续有功遥调。
+TEST(ControlOrchestratorManagerTest, WaitsForVerificationBeforeNextStep) {
+  ScopedTempDir tempDir;
+  FakeDataCenterState state;
+  PublishBool(&state, 1, "remote_state", false);
+  auto stub = MakeStub(&state);
+  std::vector<std::string> order;
+  ON_CALL(*stub, ExecuteCommand(::testing::_, ::testing::_, ::testing::_))
+      .WillByDefault(::testing::Invoke(
+          [&state, &order](grpc::ClientContext*, const DataCenterProto::ExecuteCommandRequest &request,
+                           DataCenterProto::ExecuteCommandResponse *response) {
+            order.push_back(request.src().tag());
+            if (request.src().tag() == "remote_close") {
+              PublishBool(&state, 1, "remote_state", true);
+            }
+            *response = Accepted();
+            return grpc::Status::OK;
+          }));
+
+  ControlOrchestrator::SequenceManager manager(tempDir.path() / "config.db");
+  manager.setDataCenterStub(stub);
+  auto config = MakeSequence();
+  auto *verification = config.mutable_steps(0)->mutable_verification();
+  verification->mutable_status_source()->set_conn_id(1);
+  verification->mutable_status_source()->set_module_name("ModbusRTU");
+  verification->mutable_status_source()->set_conn_name("逆变器1");
+  verification->mutable_status_source()->set_tag("remote_state");
+  verification->mutable_expected_value()->set_bool_value(true);
+  verification->set_wait_timeout_ms(50);
+  verification->set_poll_interval_ms(1);
+  ControlOrchestratorProto::WorkflowConfig out;
+  ASSERT_TRUE(manager.UpsertSequence(config, false, &out).ok());
+
+  ControlOrchestratorProto::ExecuteSequenceRequest request;
+  request.set_sequence_name(config.sequence_name());
+  request.mutable_trigger_value()->set_double_value(12.5);
+  ControlOrchestratorProto::ExecuteSequenceResponse response;
+  ASSERT_TRUE(manager.ExecuteSequence(request, &response).ok());
+  EXPECT_TRUE(response.accepted());
+  EXPECT_EQ(order, (std::vector<std::string>{"remote_close", "active_power"}));
+}
+
+// 验证：遥信确认超时且策略为停止时，不会执行后续有功遥调。
+TEST(ControlOrchestratorManagerTest, StopsWhenVerificationTimesOut) {
+  ScopedTempDir tempDir;
+  FakeDataCenterState state;
+  PublishBool(&state, 1, "remote_state", false);
+  auto stub = MakeStub(&state);
+  ON_CALL(*stub, ExecuteCommand(::testing::_, ::testing::_, ::testing::_))
+      .WillByDefault(::testing::Invoke(
+          [](grpc::ClientContext*, const DataCenterProto::ExecuteCommandRequest &,
+             DataCenterProto::ExecuteCommandResponse *response) {
+            *response = Accepted();
+            return grpc::Status::OK;
+          }));
+  ControlOrchestrator::SequenceManager manager(tempDir.path() / "config.db");
+  manager.setDataCenterStub(stub);
+  auto config = MakeSequence();
+  auto *verification = config.mutable_steps(0)->mutable_verification();
+  verification->mutable_status_source()->set_conn_id(1);
+  verification->mutable_status_source()->set_tag("remote_state");
+  verification->mutable_expected_value()->set_bool_value(true);
+  verification->set_wait_timeout_ms(5);
+  verification->set_poll_interval_ms(1);
+  ControlOrchestratorProto::WorkflowConfig out;
+  ASSERT_TRUE(manager.UpsertSequence(config, false, &out).ok());
+
+  ControlOrchestratorProto::ExecuteSequenceRequest request;
+  request.set_sequence_name(config.sequence_name());
+  request.mutable_trigger_value()->set_double_value(12.5);
+  ControlOrchestratorProto::ExecuteSequenceResponse response;
+  ASSERT_TRUE(manager.ExecuteSequence(request, &response).ok());
+  EXPECT_FALSE(response.accepted());
+  EXPECT_EQ(response.failed_step_index(), 1u);
+  EXPECT_EQ(response.failed_command_status(), DataCenterProto::COMMAND_TIMEOUT);
+  EXPECT_EQ(response.executed_steps(), 1u);
+  EXPECT_EQ(state.GetCommandCount(1, "active_power"), 0u);
+}
+
+// 验证：遥信确认失败时按配置重发前置命令，状态满足后才继续。
+TEST(ControlOrchestratorManagerTest, RetriesCommandUntilVerificationSucceeds) {
+  ScopedTempDir tempDir;
+  FakeDataCenterState state;
+  PublishBool(&state, 1, "remote_state", false);
+  auto stub = MakeStub(&state);
+  size_t remoteCommands = 0;
+  ON_CALL(*stub, ExecuteCommand(::testing::_, ::testing::_, ::testing::_))
+      .WillByDefault(::testing::Invoke(
+          [&state, &remoteCommands](grpc::ClientContext*, const DataCenterProto::ExecuteCommandRequest &request,
+                   DataCenterProto::ExecuteCommandResponse *response) {
+            if (request.src().tag() == "remote_close") {
+              ++remoteCommands;
+              if (remoteCommands >= 2) {
+                PublishBool(&state, 1, "remote_state", true);
+              }
+            }
+            *response = Accepted();
+            return grpc::Status::OK;
+          }));
+  ControlOrchestrator::SequenceManager manager(tempDir.path() / "config.db");
+  manager.setDataCenterStub(stub);
+  auto config = MakeSequence();
+  auto *verification = config.mutable_steps(0)->mutable_verification();
+  verification->mutable_status_source()->set_conn_id(1);
+  verification->mutable_status_source()->set_tag("remote_state");
+  verification->mutable_expected_value()->set_bool_value(true);
+  verification->set_wait_timeout_ms(5);
+  verification->set_poll_interval_ms(1);
+  verification->set_failure_action(ControlOrchestratorProto::StepVerification::RETRY_COMMAND);
+  verification->set_max_retries(1);
+  ControlOrchestratorProto::WorkflowConfig out;
+  ASSERT_TRUE(manager.UpsertSequence(config, false, &out).ok());
+
+  ControlOrchestratorProto::ExecuteSequenceRequest request;
+  request.set_sequence_name(config.sequence_name());
+  request.mutable_trigger_value()->set_double_value(12.5);
+  ControlOrchestratorProto::ExecuteSequenceResponse response;
+  ASSERT_TRUE(manager.ExecuteSequence(request, &response).ok());
+  EXPECT_TRUE(response.accepted());
+  EXPECT_EQ(remoteCommands, 2u);
+  EXPECT_EQ(state.GetCommandCount(1, "active_power"), 1u);
+}
+
+// 验证：前置确认配置必须包含完整端点、BOOL 期望值及有效轮询参数，且触发点不能递归。
+TEST(ControlOrchestratorManagerTest, RejectsInvalidVerificationAndRecursiveTriggerConfig) {
+  ScopedTempDir tempDir;
+  ControlOrchestrator::SequenceManager manager(tempDir.path() / "config.db");
+  auto config = MakeSequence();
+  auto *verification = config.mutable_steps(0)->mutable_verification();
+  verification->mutable_expected_value()->set_double_value(1.0);
+  verification->set_wait_timeout_ms(10);
+  verification->set_poll_interval_ms(1);
+  ControlOrchestratorProto::WorkflowConfig out;
+  EXPECT_EQ(manager.UpsertSequence(config, false, &out).error_code(),
+            grpc::StatusCode::INVALID_ARGUMENT);
+
+  config = MakeSequence();
+  *config.mutable_trigger() = config.steps(0).source();
+  EXPECT_EQ(manager.UpsertSequence(config, false, &out).error_code(),
+            grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+// 验证：DataCenter 转发到编排入口后，触发值会进入绑定编排并完成原有步骤。
+TEST(ControlOrchestratorManagerTest, ExecutesWorkflowFromBoundTrigger) {
+  ScopedTempDir tempDir;
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  ON_CALL(*stub, ExecuteCommand(::testing::_, ::testing::_, ::testing::_))
+      .WillByDefault(::testing::Invoke(
+          [](grpc::ClientContext*, const DataCenterProto::ExecuteCommandRequest &request,
+             DataCenterProto::ExecuteCommandResponse *response) {
+            *response = Accepted();
+            return grpc::Status::OK;
+          }));
+
+  ControlOrchestrator::SequenceManager manager(tempDir.path() / "config.db");
+  manager.setDataCenterStub(stub);
+  auto config = MakeSequence();
+  auto *trigger = config.mutable_trigger();
+  trigger->set_module_name("IEC104");
+  trigger->set_conn_name("line-1");
+  trigger->set_tag("P_SETPOINT");
+  ControlOrchestratorProto::WorkflowConfig out;
+  ASSERT_TRUE(manager.UpsertSequence(config, false, &out).ok());
+
+  DataCenterProto::ExecuteCommandRequest request;
+  request.mutable_src()->set_module_name("IEC104");
+  request.mutable_src()->set_conn_name("line-1");
+  request.mutable_src()->set_tag("P_SETPOINT");
+  request.mutable_value()->set_double_value(10.0);
+  request.set_request_id("trigger-1");
+  DataCenterProto::ExecuteCommandResponse response;
+  ASSERT_TRUE(manager.ExecuteTriggeredCommand(request, &response).ok());
+  EXPECT_EQ(response.status(), DataCenterProto::COMMAND_ACCEPTED);
 }

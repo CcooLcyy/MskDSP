@@ -803,6 +803,13 @@ IEC61850Proto::SclModelSummary SclParser::BuildSummary(
         summary.external_reference_count() +
         static_cast<uint32_t>(ied.ext_refs_size()));
   }
+  for (const auto& connected : model.connected_access_points()) {
+    auto* connectedSummary = summary.add_connected_access_points();
+    connectedSummary->set_ied_name(connected.ied_name());
+    connectedSummary->set_ap_name(connected.ap_name());
+    connectedSummary->set_subnetwork_name(connected.subnetwork_name());
+    connectedSummary->set_network_type(connected.network_type());
+  }
   return summary;
 }
 

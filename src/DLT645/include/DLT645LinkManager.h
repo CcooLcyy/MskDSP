@@ -35,6 +35,7 @@ public:
   ~LinkManager() noexcept;
 
   grpc::Status UpdateConfig(const DLT645Proto::UpdateConfigRequest &request, DLT645Proto::UpdateConfigResponse *response);
+  grpc::Status GetConfig(DLT645Proto::GetConfigResponse *response) const;
   grpc::Status UpsertLink(const DLT645Proto::UpsertLinkRequest &request, DLT645Proto::LinkInfo *out);
   grpc::Status RenameLink(const std::string &oldConnName, const std::string &newConnName, DLT645Proto::LinkInfo *out);
   grpc::Status GetLink(const std::string &connName, DLT645Proto::LinkInfo *out) const;

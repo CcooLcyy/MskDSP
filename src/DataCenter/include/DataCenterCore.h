@@ -39,6 +39,9 @@ public:
   grpc::Status Publish(const DataCenterProto::PublishRequest &request, std::vector<DataCenterProto::PointUpdate> *outUpdates);
   grpc::Status BatchPublish(const DataCenterProto::BatchPublishRequest &request, std::vector<DataCenterProto::PointUpdate> *outUpdates);
   grpc::Status ResolveCommandRoute(const DataCenterProto::ExecuteCommandRequest &request, DataCenterProto::ExecuteCommandResponse *out);
+  // 将命令源端点补全为稳定连接主键，供路由目标模块审计/匹配绑定。
+  grpc::Status ResolveSourceEndpoint(const DataCenterProto::Endpoint &request,
+                                     DataCenterProto::Endpoint *out) const;
   grpc::Status StoreAcceptedCommand(const DataCenterProto::ExecuteCommandRequest &request, const DataCenterProto::Endpoint &dst);
 
   grpc::Status GetLatest(const DataCenterProto::GetLatestRequest &request, DataCenterProto::GetLatestResponse *out) const;

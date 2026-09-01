@@ -22,7 +22,7 @@ ModbusRTU 模块负责管理 ModbusRTU 链路与点表，当前同时支持两�
 - 对外 gRPC：随机 `0.0.0.0:<port>`（17001-17999）
 - 内部 gRPC：`./socket/ModbusRTU.sock`
 - 模块静态依赖：`DataCenter`、`MQTTManager`；通过 ModuleManager 启动时会按依赖拓扑一并拉起。
-- 接口规划：当前顶层全局配置仅提供 `UpdateConfig` 写接口；后续建议补充 `GetConfig` 或 `GetGlobalConfig` 回读接口，供上位机做界面回显、配置对账与一致性校验；当前版本尚未实现。
+- 顶层全局配置提供 `UpdateConfig` 写接口与幂等的 `GetConfig` 回读接口，供上位机做界面回显、配置对账与一致性校验；未配置时返回 `configured=false`。
 
 ## 配置来源
 - 运行时配置既可由上位机直连下发，也可由 ConfigPusher 批量下发；后者更适合作为初始化导入方式。

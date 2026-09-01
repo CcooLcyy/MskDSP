@@ -8,6 +8,7 @@
 
 namespace ControlOrchestrator {
 class GrpcServiceImpl;
+class CommandExecutorGrpcServiceImpl;
 
 class ControlOrchestrator : public ModuleInterface::ModuleInterface {
 public:
@@ -18,6 +19,7 @@ public:
 
 private:
   std::shared_ptr<GrpcServiceImpl> service_;
+  std::shared_ptr<CommandExecutorGrpcServiceImpl> commandService_;
   SequenceManager manager_;
 };
 }  // namespace ControlOrchestrator

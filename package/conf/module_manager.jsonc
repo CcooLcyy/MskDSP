@@ -13,6 +13,7 @@
     "AGC",
     "AVC",
     "Calc",
+    "ControlOrchestrator",
     "DigitalInput"
   ]
 }

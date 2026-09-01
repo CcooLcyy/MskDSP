@@ -23,6 +23,7 @@ public:
   void setConfig(const DLT645Proto::MqttConfig& config);
   void setStub(std::shared_ptr<MQTTManagerProto::MQTTManagerService::StubInterface> stub);
   bool hasConfig() const;
+  bool getConfig(DLT645Proto::MqttConfig* out) const;
 
   grpc::Status Publish(const std::string& topic, const std::string& payload, std::string* error);
   grpc::Status RequestAndWait(const std::string& requestTopic,

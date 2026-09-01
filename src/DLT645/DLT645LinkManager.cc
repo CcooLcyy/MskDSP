@@ -387,6 +387,12 @@ grpc::Status restorePointTableFromProto(const DLT645Proto::PointTable &table, DL
 
 namespace DLT645 {
 
+namespace {
+bool hasUsableMqttConfig(const DLT645Proto::MqttConfig &config) {
+  return !config.host().empty() && config.port() != 0 && !config.client_id().empty();
+}
+}  // namespace
+
 LinkManager::LinkManager(std::string moduleName, std::filesystem::path configDbPath) :
   dataCenter_(moduleName),
   mqttClient_(moduleName),
@@ -722,6 +728,33 @@ grpc::Status LinkManager::UpdateConfig(const DLT645Proto::UpdateConfigRequest &r
   response->set_ok(true);
   response->set_message("MQTT 配置更新成功");
   LOG_INFO("DLT645 MQTT 配置更新成功，当前不会自动启动链路连接功能，等待显式调用 StartLink");
+  return grpc::Status::OK;
+}
+
+grpc::Status LinkManager::GetConfig(DLT645Proto::GetConfigResponse *response) const {
+  if (response == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
+  }
+  response->Clear();
+
+  DLT645Proto::MqttConfig mqtt;
+  if (!mqttClient_.getConfig(&mqtt)) {
+    response->set_configured(false);
+    response->set_message("MQTT 配置未配置");
+    LOG_INFO("DLT645 MQTT 配置查询结果: configured=false, 原因=未配置");
+    return grpc::Status::OK;
+  }
+  if (!hasUsableMqttConfig(mqtt)) {
+    response->set_configured(false);
+    response->set_message("MQTT 配置不完整");
+    LOG_WARNING("DLT645 MQTT 配置查询结果: configured=false, 原因=配置不完整");
+    return grpc::Status::OK;
+  }
+
+  *response->mutable_mqtt() = mqtt;
+  response->set_configured(true);
+  response->set_message("MQTT 配置已配置");
+  LOG_INFO("DLT645 MQTT 配置查询成功: host={}, port={}, client_id={}", mqtt.host(), mqtt.port(), mqtt.client_id());
   return grpc::Status::OK;
 }
 

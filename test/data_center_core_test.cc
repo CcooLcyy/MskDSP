@@ -86,6 +86,23 @@ TEST(DataCenterCoreTest, GetOrCreateConnectionReturnsStableConnIdByKey) {
   EXPECT_EQ(conn2.conn_id(), conn1.conn_id());
 }
 
+// 验证：同步命令路由前可把仅带 conn_id 的源端点补全为稳定连接主键。
+TEST(DataCenterCoreTest, ResolveSourceEndpointFillsStableConnectionKey) {
+  DataCenterCore core;
+  DataCenterProto::GetOrCreateConnectionRequest create;
+  *create.mutable_key() = MakeConnKey("IEC104", "line-1");
+  DataCenterProto::ConnectionInfo info;
+  ASSERT_TRUE(core.GetOrCreateConnection(create, &info).ok());
+
+  DataCenterProto::Endpoint input = MakeEndpoint(info.conn_id(), "P_SETPOINT");
+  DataCenterProto::Endpoint output;
+  ASSERT_TRUE(core.ResolveSourceEndpoint(input, &output).ok());
+  EXPECT_EQ(output.conn_id(), info.conn_id());
+  EXPECT_EQ(output.module_name(), "IEC104");
+  EXPECT_EQ(output.conn_name(), "line-1");
+  EXPECT_EQ(output.tag(), "P_SETPOINT");
+}
+
 // 验证：RenameConnection 保持 conn_id 不变，且旧 key 不再可查询。
 TEST(DataCenterCoreTest, RenameConnectionKeepsConnId) {
   DataCenterCore core;

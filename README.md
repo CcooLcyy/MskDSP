@@ -160,7 +160,7 @@ character device，并保证容器进程具备读取/申请 line 的权限。
   - `auto_start_modules`：显式自动加载模块列表
 - 模板：`package/conf/module_manager.jsonc`
 - 建议：使用 `CONFIG_PUSHER` 时，自启动列表仅填写 `ConfigPusher`
-- 默认交付：使用 `UPPER` 模式并显式自动启动全部 10 个业务模块；模块内部链路、控制组和计算组仍按有效持久化配置恢复
+- 默认交付：使用 `UPPER` 模式并显式自动启动全部 11 个业务模块；模块内部链路、控制组和计算组仍按有效持久化配置恢复
 - 安装策略：全新安装、升级或重新安装都会同步默认 `module_manager.jsonc`，但保留现场 `config.db` 及其他业务配置
 - 更完整的模式说明、回退语义与 `UPPER` SQLite 配置痕迹清单，见 `src/core/ModuleManager/doc/README.md`
 
@@ -178,6 +178,7 @@ character device，并保证容器进程具备读取/申请 line 的权限。
     "AGC",
     "AVC",
     "Calc",
+    "ControlOrchestrator",
     "DigitalInput"
   ]
 }

@@ -68,8 +68,9 @@ grpc::Status IEC61850GrpcServiceImpl::GetModelSummary(
   }
   const auto status = manager_->GetModelSummary(request->model_name(), response);
   if (status.ok()) {
-    LOG_INFO("IEC61850返回模型目录摘要: 模型={}, IED数={}",
-             request->model_name(), response->ieds_size());
+    LOG_INFO("IEC61850返回模型目录摘要: 模型={}, IED数={}, ConnectedAP数={}",
+             request->model_name(), response->ieds_size(),
+             response->connected_access_points_size());
   }
   return status;
 }
@@ -82,7 +83,12 @@ grpc::Status IEC61850GrpcServiceImpl::ListModels(
   }
   const auto status = manager_->ListModels(response);
   if (status.ok()) {
-    LOG_INFO("IEC61850返回模型目录列表: 模型数={}", response->models_size());
+    int connectedApCount = 0;
+    for (const auto& model : response->models()) {
+      connectedApCount += model.connected_access_points_size();
+    }
+    LOG_INFO("IEC61850返回模型目录列表: 模型数={}, ConnectedAP数={}",
+             response->models_size(), connectedApCount);
   }
   return status;
 }

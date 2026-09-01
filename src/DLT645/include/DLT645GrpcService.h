@@ -15,6 +15,9 @@ public:
   grpc::Status UpdateConfig(grpc::ServerContext* context,
                             const DLT645Proto::UpdateConfigRequest* request,
                             DLT645Proto::UpdateConfigResponse* response) override;
+  grpc::Status GetConfig(grpc::ServerContext* context,
+                         const DLT645Proto::Empty* request,
+                         DLT645Proto::GetConfigResponse* response) override;
   grpc::Status UpsertLink(grpc::ServerContext* context,
                           const DLT645Proto::UpsertLinkRequest* request,
                           DLT645Proto::LinkInfo* response) override;

@@ -28,6 +28,24 @@ grpc::Status ModbusRTUGrpcServiceImpl::UpdateConfig(
   return status;
 }
 
+grpc::Status ModbusRTUGrpcServiceImpl::GetConfig(
+    grpc::ServerContext*, const ModbusRTUProto::Empty* request, ModbusRTUProto::GetConfigResponse* response) {
+  if (module_ == nullptr) {
+    LOG_ERROR("ModbusRTU 服务未就绪");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
+  }
+  if (request == nullptr || response == nullptr) {
+    LOG_ERROR("ModbusRTU GetConfig 请求/响应为空");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
+  }
+  auto status = module_->linkManager().GetConfig(response);
+  LOG_INFO("ModbusRTU MQTT 配置查询响应报文: configured={}, message={}", response->configured(), response->message());
+  if (!status.ok()) {
+    LOG_ERROR("ModbusRTU 查询 MQTT 配置失败: 原因={}", status.error_message());
+  }
+  return status;
+}
+
 grpc::Status ModbusRTUGrpcServiceImpl::UpsertLink(
     grpc::ServerContext*, const ModbusRTUProto::UpsertLinkRequest* request, ModbusRTUProto::LinkInfo* response) {
   if (module_ == nullptr) {

@@ -91,6 +91,12 @@ TEST(IEC61850SclParserTest, ParsesMmsGooseSmvAndControlBlocks) {
   const auto& connected = model.connected_access_points(0);
   EXPECT_EQ(connected.subnetwork_name(), "StationBus");
   EXPECT_EQ(connected.network_type(), "8-MMS");
+  const auto summary = IEC61850::SclParser::BuildSummary(model);
+  ASSERT_EQ(summary.connected_access_points_size(), 1);
+  EXPECT_EQ(summary.connected_access_points(0).ied_name(), "IED1");
+  EXPECT_EQ(summary.connected_access_points(0).ap_name(), "AP1");
+  EXPECT_EQ(summary.connected_access_points(0).subnetwork_name(), "StationBus");
+  EXPECT_EQ(summary.connected_access_points(0).network_type(), "8-MMS");
   ASSERT_EQ(connected.address_size(), 3);
   ASSERT_EQ(connected.gse_size(), 1);
   EXPECT_EQ(connected.gse(0).mac_address(), "01-0C-CD-01-00-01");
@@ -118,6 +124,37 @@ TEST(IEC61850SclParserTest, ParsesMmsGooseSmvAndControlBlocks) {
   ASSERT_EQ(ied.sampled_value_controls_size(), 1);
   EXPECT_EQ(ied.sampled_value_controls(0).access_point(), "AP1");
   EXPECT_EQ(ied.sampled_value_controls(0).control_ref(), "IED1LD0/LLN0$MS$smv1");
+}
+
+// 验证：同一IED和AccessPoint下的多个ConnectedAP网段摘要全部保留，供上位机精确筛选。
+TEST(IEC61850SclParserTest, BuildSummaryPreservesMultipleConnectedApNetworks) {
+  IEC61850Proto::NormalizedSclModel model;
+  model.set_model_name("multi-network");
+  model.set_source_name("multi-network.scd");
+
+  auto* neta = model.add_connected_access_points();
+  neta->set_ied_name("IED1");
+  neta->set_ap_name("AP1");
+  neta->set_subnetwork_name("NETA");
+  neta->set_network_type("8-MMS");
+
+  auto* netb = model.add_connected_access_points();
+  netb->set_ied_name("IED1");
+  netb->set_ap_name("AP1");
+  netb->set_subnetwork_name("NETB");
+  netb->set_network_type("8-MMS");
+
+  const auto summary = IEC61850::SclParser::BuildSummary(model);
+
+  ASSERT_EQ(summary.connected_access_points_size(), 2);
+  EXPECT_EQ(summary.connected_access_points(0).ied_name(), "IED1");
+  EXPECT_EQ(summary.connected_access_points(0).ap_name(), "AP1");
+  EXPECT_EQ(summary.connected_access_points(0).subnetwork_name(), "NETA");
+  EXPECT_EQ(summary.connected_access_points(0).network_type(), "8-MMS");
+  EXPECT_EQ(summary.connected_access_points(1).ied_name(), "IED1");
+  EXPECT_EQ(summary.connected_access_points(1).ap_name(), "AP1");
+  EXPECT_EQ(summary.connected_access_points(1).subnetwork_name(), "NETB");
+  EXPECT_EQ(summary.connected_access_points(1).network_type(), "8-MMS");
 }
 
 // 验证：LNodeType、DOType与DAType会展开为可用于点映射的规范化数据引用。

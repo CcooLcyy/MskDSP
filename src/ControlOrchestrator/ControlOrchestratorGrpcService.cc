@@ -62,7 +62,7 @@ grpc::Status GrpcServiceImpl::DeleteSequence(
 }
 
 grpc::Status GrpcServiceImpl::ExecuteSequence(
-    grpc::ServerContext *, const ControlOrchestratorProto::ExecuteSequenceRequest *request,
+    grpc::ServerContext *context, const ControlOrchestratorProto::ExecuteSequenceRequest *request,
     ControlOrchestratorProto::ExecuteSequenceResponse *response) {
   if (manager_ == nullptr) {
     return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
@@ -70,7 +70,23 @@ grpc::Status GrpcServiceImpl::ExecuteSequence(
   if (request == nullptr || response == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求或响应为空");
   }
-  return manager_->ExecuteSequence(*request, response);
+  return manager_->ExecuteSequence(*request, response, context);
+}
+
+void CommandExecutorGrpcServiceImpl::setManager(SequenceManager *manager) {
+  manager_ = manager;
+}
+
+grpc::Status CommandExecutorGrpcServiceImpl::ExecuteCommand(
+    grpc::ServerContext *context, const DataCenterProto::ExecuteCommandRequest *request,
+    DataCenterProto::ExecuteCommandResponse *response) {
+  if (manager_ == nullptr) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
+  }
+  if (request == nullptr || response == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求或响应为空");
+  }
+  return manager_->ExecuteTriggeredCommand(*request, response, context);
 }
 
 }  // namespace ControlOrchestrator

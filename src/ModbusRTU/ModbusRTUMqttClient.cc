@@ -43,6 +43,19 @@ bool MqttClient::hasConfig() const {
   return hasConfig_;
 }
 
+bool MqttClient::getConfig(ModbusRTUProto::MqttConfig* out) const {
+  if (out == nullptr) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(mu_);
+  if (!hasConfig_) {
+    out->Clear();
+    return false;
+  }
+  *out = config_;
+  return true;
+}
+
 grpc::Status MqttClient::RequestAndWait(const std::string& requestTopic,
                                         const std::string& responseTopic,
                                         const std::string& payload,
