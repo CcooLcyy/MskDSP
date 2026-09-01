@@ -25,7 +25,7 @@ grpc::Status notFound(const std::string &name) {
                       std::format("未找到命令编排: {}", name));
 }
 
-constexpr std::string_view kWorkflowPathMarker = "\x1eCO_PATH=";
+constexpr std::string_view kWorkflowPathMarker = "\x1e" "CO_PATH=";
 constexpr auto kInterruptCheckInterval = std::chrono::milliseconds(10);
 constexpr size_t kMaxWorkflowPath = 32;
 
