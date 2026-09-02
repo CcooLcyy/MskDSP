@@ -22,8 +22,29 @@
 #include "ModbusRTUSerialBus.h"
 #include "support/FakeDataCenter.hpp"
 
+namespace ModbusRTU {
+class ModbusRTULinkManagerTestPeer {
+public:
+  using LastErrorSource = LinkManager::LastErrorSource;
+
+  static void SetError(LinkManager& mgr,
+                       const std::string& connName,
+                       const std::string& error,
+                       LastErrorSource source) {
+    mgr.updateLastError(connName, error, source);
+  }
+
+  static void ClearError(LinkManager& mgr,
+                         const std::string& connName,
+                         LastErrorSource source) {
+    mgr.clearLastError(connName, source);
+  }
+};
+}  // namespace ModbusRTU
+
 namespace {
 using ModbusRTU::LinkManager;
+using ModbusRTU::ModbusRTULinkManagerTestPeer;
 
 using ::testing::_;
 using ::testing::HasSubstr;
@@ -88,6 +109,15 @@ ModbusRTUProto::Point MakeCoilPoint(const char* tag, uint32_t address) {
   p.set_function(ModbusRTUProto::FUNCTION_READ_COILS);
   p.set_address(address);
   p.set_type(ModbusRTUProto::DATA_TYPE_BOOL);
+  return p;
+}
+
+ModbusRTUProto::Point MakeHoldingRegisterPoint(const char* tag, uint32_t address) {
+  ModbusRTUProto::Point p;
+  p.set_tag(tag);
+  p.set_function(ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS);
+  p.set_address(address);
+  p.set_type(ModbusRTUProto::DATA_TYPE_UINT16);
   return p;
 }
 
@@ -278,6 +308,90 @@ TEST(ModbusRtuLinkManagerTest, UpsertLinkCreateOnlyReturnsConnId) {
   EXPECT_EQ(info.state(), ModbusRTUProto::LINK_STATE_STOPPED);
   EXPECT_EQ(info.config().conn_name(), "conn-1");
   EXPECT_TRUE(state.HasConnection("ModbusRTU", "conn-1"));
+}
+
+// 验证：轮询恢复只清除轮询错误，不会清除仍需关注的写命令错误。
+TEST(ModbusRtuLinkManagerTest, PollingRecoveryKeepsCommandError) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManagerTestEnv env;
+  auto& mgr = env.mgr;
+  mgr.setDataCenterStub(stub);
+
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("conn-error-source", "/dev/ttyUSB0", 1), &info).ok());
+
+  using Source = ModbusRTULinkManagerTestPeer::LastErrorSource;
+  ModbusRTULinkManagerTestPeer::SetError(mgr, "conn-error-source", "等待响应超时", Source::kPolling);
+  ModbusRTULinkManagerTestPeer::SetError(mgr, "conn-error-source", "写寄存器失败", Source::kCommand);
+  ModbusRTULinkManagerTestPeer::ClearError(mgr, "conn-error-source", Source::kPolling);
+
+  ModbusRTUProto::LinkInfo got;
+  ASSERT_TRUE(mgr.GetLink("conn-error-source", &got).ok());
+  EXPECT_EQ(got.last_error(), "写寄存器失败");
+
+  ModbusRTULinkManagerTestPeer::ClearError(mgr, "conn-error-source", Source::kCommand);
+  ASSERT_TRUE(mgr.GetLink("conn-error-source", &got).ok());
+  EXPECT_TRUE(got.last_error().empty());
+}
+
+// 验证：一次轮询超时后，下一次完整读取并成功上报会立即清除轮询错误。
+TEST(ModbusRtuLinkManagerTest, PollingRecoveryClearsErrorAfterNextSuccessfulCycle) {
+  ScopedPseudoTty pty;
+  ASSERT_TRUE(pty.ok()) << pty.error();
+
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  LinkManagerTestEnv env;
+  auto& mgr = env.mgr;
+  mgr.setDataCenterStub(stub);
+
+  auto request = MakeMinimalLinkReq("conn-poll-recovery", pty.slavePath().c_str(), 1);
+  request.mutable_config()->set_poll_interval_ms(5);
+  request.mutable_config()->mutable_serial()->set_read_timeout_ms(30);
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(request, &info).ok());
+
+  ModbusRTUProto::UpsertPointTableRequest pointRequest;
+  pointRequest.set_conn_name("conn-poll-recovery");
+  *pointRequest.add_points() = MakeHoldingRegisterPoint("recovery-value", 10);
+  pointRequest.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(pointRequest).ok());
+  ASSERT_TRUE(mgr.StartLink("conn-poll-recovery").ok());
+
+  std::jthread responder([&](std::stop_token stopToken) {
+    std::vector<uint8_t> frame;
+    if (!pty.readExact(&frame, 8, 1000)) {
+      return;
+    }
+    frame.clear();
+    if (!pty.readExact(&frame, 8, 1000) || stopToken.stop_requested()) {
+      return;
+    }
+    std::vector<uint8_t> response{1, 3, 2, 0, 42};
+    ModbusRTU::SerialBus::appendCrc(&response);
+    pty.writeAll(response);
+  });
+
+  const auto errorDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  ModbusRTUProto::LinkInfo current;
+  bool sawError = false;
+  while (std::chrono::steady_clock::now() < errorDeadline) {
+    ASSERT_TRUE(mgr.GetLink("conn-poll-recovery", &current).ok());
+    if (!current.last_error().empty()) {
+      sawError = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  ASSERT_TRUE(sawError);
+  ASSERT_TRUE(state.WaitForPublishCount(info.conn_id(), "recovery-value", 1, std::chrono::seconds(2)));
+
+  ASSERT_TRUE(mgr.GetLink("conn-poll-recovery", &current).ok());
+  EXPECT_TRUE(current.last_error().empty());
+  ASSERT_TRUE(mgr.StopLink("conn-poll-recovery").ok());
+  responder.request_stop();
 }
 
 // 验证：当 DataCenter 已存在相同 (module_name, conn_name) 时，create_only UpsertLink 返回 ALREADY_EXISTS。
@@ -717,6 +831,11 @@ TEST(ModbusRtuLinkManagerTest, ExecuteCommandWritesMultipleRegistersAndReturnsAc
   ptReq.set_replace(true);
   ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
   ASSERT_TRUE(mgr.StartLink("conn-command").ok());
+  ModbusRTULinkManagerTestPeer::SetError(
+      mgr,
+      "conn-command",
+      "写寄存器等待响应超时",
+      ModbusRTULinkManagerTestPeer::LastErrorSource::kCommand);
 
   std::vector<uint8_t> requestFrame;
   bool responseWritten = false;
@@ -759,6 +878,9 @@ TEST(ModbusRtuLinkManagerTest, ExecuteCommandWritesMultipleRegistersAndReturnsAc
   EXPECT_EQ(response.dst().conn_id(), info.conn_id());
   EXPECT_DOUBLE_EQ(response.requested_value(), 10.0);
   EXPECT_DOUBLE_EQ(response.accepted_value(), 10.0);
+  ModbusRTUProto::LinkInfo recovered;
+  ASSERT_TRUE(mgr.GetLink("conn-command", &recovered).ok());
+  EXPECT_TRUE(recovered.last_error().empty());
 
   ASSERT_TRUE(mgr.StopLink("conn-command").ok());
 }

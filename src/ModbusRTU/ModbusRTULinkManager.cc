@@ -910,7 +910,7 @@ grpc::Status LinkManager::maybeAutoStartLink(const std::string& connName, std::s
       return makeNotFound(connName);
     }
     if (!isLinkAutoStartReadyLocked(it->second, &reason)) {
-      it->second.lastError = reason;
+      setLastErrorLocked(&it->second, reason, LastErrorSource::kLifecycle);
       LOG_INFO("ModbusRTU 暂不自动启动链路: conn_name={}, 触发来源={}, 原因={}", connName, trigger, reason);
       return grpc::Status::OK;
     }
@@ -1122,11 +1122,13 @@ void LinkManager::startCommandSubscribeLocked(const std::string& connName, LinkR
           }
           auto status = executeWriteCommand(connName, config, it->second, bus, update);
           if (!status.ok()) {
-            updateLastError(connName, status.error_message());
+            updateLastError(connName, status.error_message(), LastErrorSource::kCommand);
             LOG_WARNING("ModbusRTU 写点失败: conn_name={}, tag={}, 原因={}",
                         connName,
                         update.dst_tag(),
                         status.error_message());
+          } else {
+            clearLastError(connName, LastErrorSource::kCommand);
           }
         }
 
@@ -1136,7 +1138,7 @@ void LinkManager::startCommandSubscribeLocked(const std::string& connName, LinkR
                       connName,
                       connId,
                       finishStatus.error_message());
-          updateLastError(connName, finishStatus.error_message());
+          updateLastError(connName, finishStatus.error_message(), LastErrorSource::kCommand);
         }
       });
 }
@@ -1365,7 +1367,7 @@ grpc::Status LinkManager::ExecuteCommand(
            request.request_id());
   auto status = executeWriteCommand(connName, config, point, bus, update);
   if (!status.ok()) {
-    updateLastError(connName, status.error_message());
+    updateLastError(connName, status.error_message(), LastErrorSource::kCommand);
     if (status.error_code() == grpc::StatusCode::INVALID_ARGUMENT ||
         status.error_code() == grpc::StatusCode::OUT_OF_RANGE) {
       response->set_status(DataCenterProto::COMMAND_REJECTED);
@@ -1392,6 +1394,8 @@ grpc::Status LinkManager::ExecuteCommand(
                 status.error_message());
     return grpc::Status::OK;
   }
+
+  clearLastError(connName, LastErrorSource::kCommand);
 
   response->set_status(DataCenterProto::COMMAND_ACCEPTED);
   response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSPECIFIED);
@@ -1451,7 +1455,9 @@ grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& re
       it->second.config = normalized;
       it->second.serialKey = serialKey;
       it->second.mqttKey = mqttKey;
-      it->second.lastError.clear();
+      clearLastErrorLocked(&it->second, LastErrorSource::kLifecycle);
+      clearLastErrorLocked(&it->second, LastErrorSource::kCommand);
+      clearLastErrorLocked(&it->second, LastErrorSource::kPolling);
       linksConfig = dumpLinksConfigLocked();
       pointTablesConfig = dumpPointTablesConfigLocked();
       status = fillLinkInfoLocked(it->second, &info);
@@ -1540,7 +1546,7 @@ grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& re
     link.mqttKey = mqttKey;
     link.connId = connInfo.conn_id();
     link.state = ModbusRTUProto::LINK_STATE_STOPPED;
-    link.lastError.clear();
+    clearLastErrorLocked(&link, LastErrorSource::kLifecycle);
     auto [it, inserted] = linksByName_.emplace(connName, std::move(link));
     if (!inserted) {
       return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name 已存在");
@@ -1790,7 +1796,7 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
     }
     std::string reason;
     if (!isLinkAutoStartReadyLocked(link, &reason)) {
-      link.lastError = reason;
+      setLastErrorLocked(&link, reason, LastErrorSource::kLifecycle);
       return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, reason);
     }
     config = link.config;
@@ -1832,7 +1838,7 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
       }
       auto it = linksByName_.find(connName);
       if (it != linksByName_.end()) {
-        it->second.lastError = errorMessage;
+        setLastErrorLocked(&it->second, errorMessage, LastErrorSource::kLifecycle);
       }
     }
     LOG_ERROR("ModbusRTU 打开链路失败: conn_name={}, 端点={}, 原因={}", connName, endpoint, errorMessage);
@@ -1871,7 +1877,9 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
     }
     link.bus = bus;
     link.state = ModbusRTUProto::LINK_STATE_RUNNING;
-    link.lastError.clear();
+    clearLastErrorLocked(&link, LastErrorSource::kLifecycle);
+    clearLastErrorLocked(&link, LastErrorSource::kCommand);
+    clearLastErrorLocked(&link, LastErrorSource::kPolling);
     link.pollThread = ModuleManager::StartModuleThread(
         ModbusRTULibInfo.LIB_NAME,
         [this, connName, connId, config, pointTable, bus](std::stop_token stopToken) {
@@ -1994,7 +2002,7 @@ grpc::Status LinkManager::DeleteLink(const std::string& connName) {
       auto it = linksByName_.find(connName);
       if (it != linksByName_.end()) {
         it->second.state = ModbusRTUProto::LINK_STATE_PENDING_DELETE;
-        it->second.lastError = dc.error_message();
+        setLastErrorLocked(&it->second, dc.error_message(), LastErrorSource::kLifecycle);
         linksConfig = dumpLinksConfigLocked();
       }
     }
@@ -2122,6 +2130,14 @@ void LinkManager::pollLoop(std::string connName,
 
   if (!useExplicitPlan) {
     while (!stopToken.stop_requested()) {
+      uint64_t pollingErrorRevision = 0;
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto it = linksByName_.find(connName);
+        if (it != linksByName_.end()) {
+          pollingErrorRevision = it->second.pollingErrorRevision;
+        }
+      }
       for (const auto& point : points) {
         if (stopToken.stop_requested()) {
           break;
@@ -2318,6 +2334,15 @@ void LinkManager::pollLoop(std::string connName,
       if (stopToken.stop_requested()) {
         break;
       }
+      bool cycleSucceeded = false;
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto it = linksByName_.find(connName);
+        cycleSucceeded = it != linksByName_.end() && it->second.pollingErrorRevision == pollingErrorRevision;
+      }
+      if (cycleSucceeded) {
+        clearLastError(connName, LastErrorSource::kPolling);
+      }
       std::this_thread::sleep_for(interval);
     }
 
@@ -2426,6 +2451,14 @@ void LinkManager::pollLoop(std::string connName,
   }
 
   while (!stopToken.stop_requested()) {
+    uint64_t pollingErrorRevision = 0;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = linksByName_.find(connName);
+      if (it != linksByName_.end()) {
+        pollingErrorRevision = it->second.pollingErrorRevision;
+      }
+    }
     std::unordered_set<std::string> processedTags;
     processedTags.reserve(registerPoints.size());
 
@@ -2435,6 +2468,7 @@ void LinkManager::pollLoop(std::string connName,
       }
       if (block.function() != ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS &&
           block.function() != ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS) {
+        updateLastError(connName, "显式抄读区间功能码不支持");
         LOG_WARNING("ModbusRTU 显式抄读区间功能码不支持: conn_name={}, function={}",
                     connName,
                     static_cast<int>(block.function()));
@@ -2691,19 +2725,117 @@ void LinkManager::pollLoop(std::string connName,
     if (stopToken.stop_requested()) {
       break;
     }
+    bool cycleSucceeded = false;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = linksByName_.find(connName);
+      cycleSucceeded = it != linksByName_.end() && it->second.pollingErrorRevision == pollingErrorRevision;
+    }
+    if (cycleSucceeded) {
+      clearLastError(connName, LastErrorSource::kPolling);
+    }
     std::this_thread::sleep_for(interval);
   }
 
   LOG_INFO("ModbusRTU 轮询结束: conn_name={}", connName);
 }
 
-void LinkManager::updateLastError(const std::string& connName, const std::string& error) {
+void LinkManager::setLastErrorLocked(LinkRuntime* link,
+                                      const std::string& error,
+                                      LastErrorSource source) {
+  if (link == nullptr) {
+    return;
+  }
+  switch (source) {
+    case LastErrorSource::kPolling:
+      link->pollingError = error;
+      link->pollingErrorRevision += 1;
+      break;
+    case LastErrorSource::kCommand:
+      link->commandError = error;
+      break;
+    case LastErrorSource::kLifecycle:
+      link->lifecycleError = error;
+      break;
+    case LastErrorSource::kNone:
+      return;
+  }
+
+  if (!link->lifecycleError.empty()) {
+    link->lastError = link->lifecycleError;
+  } else if (!link->commandError.empty()) {
+    link->lastError = link->commandError;
+  } else {
+    link->lastError = link->pollingError;
+  }
+}
+
+void LinkManager::clearLastErrorLocked(LinkRuntime* link, LastErrorSource source) {
+  if (link == nullptr) {
+    return;
+  }
+  switch (source) {
+    case LastErrorSource::kPolling:
+      link->pollingError.clear();
+      break;
+    case LastErrorSource::kCommand:
+      link->commandError.clear();
+      break;
+    case LastErrorSource::kLifecycle:
+      link->lifecycleError.clear();
+      break;
+    case LastErrorSource::kNone:
+      return;
+  }
+
+  if (!link->lifecycleError.empty()) {
+    link->lastError = link->lifecycleError;
+  } else if (!link->commandError.empty()) {
+    link->lastError = link->commandError;
+  } else {
+    link->lastError = link->pollingError;
+  }
+}
+
+void LinkManager::updateLastError(const std::string& connName,
+                                   const std::string& error,
+                                   LastErrorSource source) {
   std::lock_guard<std::mutex> lock(mu_);
   auto it = linksByName_.find(connName);
   if (it == linksByName_.end()) {
     return;
   }
-  it->second.lastError = error;
+  setLastErrorLocked(&it->second, error, source);
+}
+
+void LinkManager::clearLastError(const std::string& connName, LastErrorSource source) {
+  std::lock_guard<std::mutex> lock(mu_);
+  auto it = linksByName_.find(connName);
+  if (it == linksByName_.end()) {
+    return;
+  }
+  std::string previous;
+  switch (source) {
+    case LastErrorSource::kPolling:
+      previous = it->second.pollingError;
+      break;
+    case LastErrorSource::kCommand:
+      previous = it->second.commandError;
+      break;
+    case LastErrorSource::kLifecycle:
+      previous = it->second.lifecycleError;
+      break;
+    case LastErrorSource::kNone:
+      break;
+  }
+  clearLastErrorLocked(&it->second, source);
+  if (!previous.empty()) {
+    LOG_INFO("ModbusRTU 错误已恢复: conn_name={}, 错误来源={}, 原因={}",
+             connName,
+             source == LastErrorSource::kPolling ? "轮询" :
+                 source == LastErrorSource::kCommand ? "写命令" : "生命周期",
+             previous);
+  }
 }
 
 }  // namespace ModbusRTU

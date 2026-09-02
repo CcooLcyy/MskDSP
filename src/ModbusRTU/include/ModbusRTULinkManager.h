@@ -59,6 +59,15 @@ public:
                               DataCenterProto::ExecuteCommandResponse* response);
 
 private:
+  friend class ModbusRTULinkManagerTestPeer;
+
+  enum class LastErrorSource {
+    kNone,
+    kPolling,
+    kCommand,
+    kLifecycle,
+  };
+
   struct SerialKey {
     std::string device;
     uint32_t baudRate = 0;
@@ -128,6 +137,10 @@ private:
     uint32_t connId = 0;
     ModbusRTUProto::LinkState state = ModbusRTUProto::LINK_STATE_STOPPED;
     std::string lastError;
+    std::string pollingError;
+    std::string commandError;
+    std::string lifecycleError;
+    uint64_t pollingErrorRevision = 0;
     PointTable pointTable;
     bool pointTableConfigured = false;
     std::shared_ptr<Bus> bus;
@@ -170,7 +183,14 @@ private:
                 PointTable pointTable,
                 std::shared_ptr<Bus> bus,
                 std::stop_token stopToken);
-  void updateLastError(const std::string& connName, const std::string& error);
+  void updateLastError(const std::string& connName,
+                       const std::string& error,
+                       LastErrorSource source = LastErrorSource::kPolling);
+  void clearLastError(const std::string& connName, LastErrorSource source);
+  static void setLastErrorLocked(LinkRuntime* link,
+                                 const std::string& error,
+                                 LastErrorSource source);
+  static void clearLastErrorLocked(LinkRuntime* link, LastErrorSource source);
 
   mutable std::mutex mu_;
   std::unordered_map<std::string, LinkRuntime> linksByName_;
