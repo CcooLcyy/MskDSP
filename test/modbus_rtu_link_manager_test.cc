@@ -365,13 +365,18 @@ TEST(ModbusRtuLinkManagerTest, PollingRecoveryClearsErrorAfterNextSuccessfulCycl
     if (!pty.readExact(&frame, 8, 1000)) {
       return;
     }
-    frame.clear();
-    if (!pty.readExact(&frame, 8, 1000) || stopToken.stop_requested()) {
-      return;
+    while (!stopToken.stop_requested()) {
+      // 首次请求故意不回复，制造一次轮询超时；后续请求持续回复，避免恢复后再次超时。
+      frame.clear();
+      if (!pty.readExact(&frame, 8, 100)) {
+        return;
+      }
+      std::vector<uint8_t> response{1, 3, 2, 0, 42};
+      ModbusRTU::SerialBus::appendCrc(&response);
+      if (!pty.writeAll(response)) {
+        return;
+      }
     }
-    std::vector<uint8_t> response{1, 3, 2, 0, 42};
-    ModbusRTU::SerialBus::appendCrc(&response);
-    pty.writeAll(response);
   });
 
   const auto errorDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
@@ -388,8 +393,17 @@ TEST(ModbusRtuLinkManagerTest, PollingRecoveryClearsErrorAfterNextSuccessfulCycl
   ASSERT_TRUE(sawError);
   ASSERT_TRUE(state.WaitForPublishCount(info.conn_id(), "recovery-value", 1, std::chrono::seconds(2)));
 
-  ASSERT_TRUE(mgr.GetLink("conn-poll-recovery", &current).ok());
-  EXPECT_TRUE(current.last_error().empty());
+  const auto recoveryDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  bool cleared = false;
+  while (std::chrono::steady_clock::now() < recoveryDeadline) {
+    ASSERT_TRUE(mgr.GetLink("conn-poll-recovery", &current).ok());
+    if (current.last_error().empty()) {
+      cleared = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  EXPECT_TRUE(cleared);
   ASSERT_TRUE(mgr.StopLink("conn-poll-recovery").ok());
   responder.request_stop();
 }
