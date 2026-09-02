@@ -1718,20 +1718,27 @@ TEST(IEC61850MmsWorkerTest, CancelsConfirmedControlExchangeWithSharedState) {
 // 验证停止工作器时，正在等待确认的MMS控制交换会观察stop_token并快速收敛。
 TEST(IEC61850MmsWorkerTest, StopsWhileConfirmedControlExchangeIsWaiting) {
   auto state = std::make_shared<FactoryState>();
+  std::atomic_bool writeRequestSent = false;
   std::mutex callbackMutex;
   std::condition_variable callbackCondition;
   std::vector<IEC61850::MmsConnectionEvent> events;
   const auto dropWriteResponse =
-      [](std::span<const std::uint8_t> payload) {
+      [&writeRequestSent](std::span<const std::uint8_t> payload) {
         IEC61850::IsoSessionPduView sessionPdu;
         std::span<const std::uint8_t> mmsPdu;
         IEC61850::MmsConfirmedPduView request;
-        return IEC61850::DecodeIsoSessionPdu(payload, &sessionPdu).ok() &&
-               sessionPdu.type == IEC61850::IsoSessionPduType::DATA &&
-               IEC61850::DecodeMmsPresentationData(sessionPdu.userData, &mmsPdu)
-                   .ok() &&
-               IEC61850::DecodeMmsConfirmedRequest(mmsPdu, &request).ok() &&
-               request.serviceTag == 5;
+        if (!IEC61850::DecodeIsoSessionPdu(payload, &sessionPdu).ok() ||
+            sessionPdu.type != IEC61850::IsoSessionPduType::DATA ||
+            !IEC61850::DecodeMmsPresentationData(sessionPdu.userData, &mmsPdu)
+                 .ok() ||
+            !IEC61850::DecodeMmsConfirmedRequest(mmsPdu, &request).ok()) {
+          return false;
+        }
+        if (request.serviceTag != 5) {
+          return false;
+        }
+        writeRequestSent.store(true, std::memory_order_release);
+        return true;
       };
   IEC61850::ProtocolEventCallbacks callbacks;
   callbacks.onMmsConnection = [&](IEC61850::MmsConnectionEvent event) {
@@ -1758,11 +1765,6 @@ TEST(IEC61850MmsWorkerTest, StopsWhileConfirmedControlExchangeIsWaiting) {
       });
     }));
   }
-  const auto sendsBefore = [&] {
-    std::lock_guard lock(state->mutex);
-    return state->sendCalls;
-  }();
-
   IEC61850::MmsPointControlCommand command;
   command.controlObject = MakeControlObject();
   command.valueType = IEC61850Proto::POINT_VALUE_TYPE_BOOL;
@@ -1775,14 +1777,14 @@ TEST(IEC61850MmsWorkerTest, StopsWhileConfirmedControlExchangeIsWaiting) {
   });
   {
     std::unique_lock lock(state->mutex);
-    const bool sendStarted = state->condition.wait_for(lock, 1s, [&] {
-      return state->sendCalls > sendsBefore;
+    const bool writeStarted = state->condition.wait_for(lock, 1s, [&] {
+      return writeRequestSent.load(std::memory_order_acquire);
     });
-    if (!sendStarted) {
+    if (!writeStarted) {
       lock.unlock();
       worker.Stop();
       commandThread.join();
-      ADD_FAILURE() << "控制请求未进入确认交换发送阶段";
+      ADD_FAILURE() << "控制请求未进入Write确认交换发送阶段";
       return;
     }
   }
