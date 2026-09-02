@@ -25,6 +25,7 @@ public:
                                           uint16_t address,
                                           uint16_t quantity,
                                           std::vector<uint16_t>* out) = 0;
+  virtual grpc::Status WriteSingleCoil(uint8_t deviceId, uint16_t address, bool value) = 0;
   virtual grpc::Status WriteSingleRegister(uint8_t deviceId, uint16_t address, uint16_t value) = 0;
   virtual grpc::Status WriteMultipleRegisters(uint8_t deviceId,
                                               uint16_t address,

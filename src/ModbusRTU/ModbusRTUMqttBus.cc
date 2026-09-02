@@ -18,6 +18,7 @@ namespace {
 constexpr uint8_t kFunctionReadCoils = 0x01;
 constexpr uint8_t kFunctionReadHoldingRegisters = 0x03;
 constexpr uint8_t kFunctionReadInputRegisters = 0x04;
+constexpr uint8_t kFunctionWriteSingleCoil = 0x05;
 constexpr uint8_t kFunctionWriteSingleRegister = 0x06;
 constexpr uint8_t kFunctionWriteMultipleRegisters = 0x10;
 constexpr const char* kAppName = "AGVC";
@@ -191,6 +192,31 @@ grpc::Status MqttBus::ReadInputRegister(uint8_t deviceId, uint16_t address, uint
   }
   *out = values.front();
   return grpc::Status::OK;
+}
+
+grpc::Status MqttBus::WriteSingleCoil(uint8_t deviceId, uint16_t address, bool value) {
+  std::lock_guard<std::mutex> lock(mu_);
+  auto status = ensureOpenLocked();
+  if (!status.ok()) {
+    return status;
+  }
+  std::vector<uint8_t> frame;
+  frame.reserve(8);
+  frame.push_back(deviceId);
+  frame.push_back(kFunctionWriteSingleCoil);
+  frame.push_back(static_cast<uint8_t>((address >> 8) & 0xFF));
+  frame.push_back(static_cast<uint8_t>(address & 0xFF));
+  frame.push_back(value ? 0xFF : 0x00);
+  frame.push_back(0x00);
+  SerialBus::appendCrc(&frame);
+  LOG_INFO("ModbusRTU MQTT 写单线圈请求: 设备={}, 地址={}, 值={}, 报文={}",
+           deviceId, address, value, bytesToHex(frame));
+  std::vector<uint8_t> responseFrame;
+  status = sendFrame(frame, &responseFrame);
+  if (!status.ok()) {
+    return status;
+  }
+  return parseWriteSingleCoilResponse(responseFrame, deviceId, address, value);
 }
 
 grpc::Status MqttBus::ReadInputRegisters(uint8_t deviceId,
@@ -543,6 +569,47 @@ grpc::Status MqttBus::parseWriteSingleRegisterResponse(const std::vector<uint8_t
   }
   if (value != expectedValue) {
     return grpc::Status(grpc::StatusCode::UNAVAILABLE, "写单寄存器响应值不匹配");
+  }
+  return grpc::Status::OK;
+}
+
+grpc::Status MqttBus::parseWriteSingleCoilResponse(const std::vector<uint8_t>& frame,
+                                                   uint8_t expectedDeviceId,
+                                                   uint16_t expectedAddress,
+                                                   bool expectedValue) const {
+  if (frame.size() < 5) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应帧过短");
+  }
+  if (frame[0] != expectedDeviceId) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应设备地址不匹配");
+  }
+  const uint8_t function = frame[1];
+  if (function == static_cast<uint8_t>(kFunctionWriteSingleCoil | 0x80)) {
+    if (frame.size() != 5) {
+      return grpc::Status(grpc::StatusCode::UNAVAILABLE, "异常响应长度异常");
+    }
+    const uint16_t crc = SerialBus::computeCrc(frame.data(), 3);
+    const uint16_t respCrc = static_cast<uint16_t>(frame[3]) | (static_cast<uint16_t>(frame[4]) << 8);
+    if (crc != respCrc) {
+      return grpc::Status(grpc::StatusCode::UNAVAILABLE, "异常响应 CRC 不匹配");
+    }
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("Modbus 异常: {}", frame[2]));
+  }
+  if (function != kFunctionWriteSingleCoil || frame.size() != 8) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "写单线圈响应格式不匹配");
+  }
+  const uint16_t crc = SerialBus::computeCrc(frame.data(), frame.size() - 2);
+  const uint16_t respCrc = static_cast<uint16_t>(frame[6]) | (static_cast<uint16_t>(frame[7]) << 8);
+  if (crc != respCrc) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应 CRC 不匹配");
+  }
+  const uint16_t address = static_cast<uint16_t>((static_cast<uint16_t>(frame[2]) << 8) | frame[3]);
+  const uint16_t value = static_cast<uint16_t>((static_cast<uint16_t>(frame[4]) << 8) | frame[5]);
+  if (address != expectedAddress) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "写单线圈响应地址不匹配");
+  }
+  if (value != (expectedValue ? 0xFF00 : 0x0000)) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "写单线圈响应值不匹配");
   }
   return grpc::Status::OK;
 }

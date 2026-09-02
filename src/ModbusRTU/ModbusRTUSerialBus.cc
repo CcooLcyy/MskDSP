@@ -2,6 +2,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <format>
 #include <vector>
 
@@ -17,6 +18,7 @@ namespace {
 constexpr uint8_t kFunctionReadCoils = 0x01;
 constexpr uint8_t kFunctionReadHoldingRegisters = 0x03;
 constexpr uint8_t kFunctionReadInputRegisters = 0x04;
+constexpr uint8_t kFunctionWriteSingleCoil = 0x05;
 constexpr uint8_t kFunctionWriteSingleRegister = 0x06;
 constexpr uint8_t kFunctionWriteMultipleRegisters = 0x10;
 constexpr char kHexDigits[] = "0123456789ABCDEF";
@@ -192,6 +194,31 @@ grpc::Status SerialBus::ReadInputRegister(uint8_t deviceId, uint16_t address, ui
   }
   *out = values.front();
   return grpc::Status::OK;
+}
+
+grpc::Status SerialBus::WriteSingleCoil(uint8_t deviceId, uint16_t address, bool value) {
+  std::lock_guard<std::mutex> lock(mu_);
+  auto status = ensureOpenLocked();
+  if (!status.ok()) {
+    return status;
+  }
+
+  std::vector<uint8_t> frame;
+  frame.reserve(8);
+  frame.push_back(deviceId);
+  frame.push_back(kFunctionWriteSingleCoil);
+  frame.push_back(static_cast<uint8_t>((address >> 8) & 0xFF));
+  frame.push_back(static_cast<uint8_t>(address & 0xFF));
+  frame.push_back(value ? 0xFF : 0x00);
+  frame.push_back(0x00);
+  appendCrc(&frame);
+  LOG_INFO("ModbusRTU 写单线圈请求: 设备={}, 地址={}, 值={}, 报文={}",
+           config_.device(), address, value, bytesToHex(frame));
+  status = writeRequestLocked(frame);
+  if (!status.ok()) {
+    return status;
+  }
+  return readWriteSingleCoilResponseLocked(deviceId, address, value);
 }
 
 grpc::Status SerialBus::ReadInputRegisters(uint8_t deviceId,
@@ -611,6 +638,54 @@ grpc::Status SerialBus::readWriteSingleRegisterResponseLocked(
   }
   if (value != expectedValue) {
     return grpc::Status(grpc::StatusCode::UNAVAILABLE, "写单寄存器响应值不匹配");
+  }
+  return grpc::Status::OK;
+}
+
+grpc::Status SerialBus::readWriteSingleCoilResponseLocked(
+    uint8_t expectedDeviceId, uint16_t expectedAddress, bool expectedValue) {
+  const auto timeout = std::chrono::milliseconds(config_.read_timeout_ms());
+  std::array<uint8_t, 2> header{};
+  auto status = readExactLocked(header.data(), header.size(), timeout);
+  if (!status.ok()) {
+    return status;
+  }
+  const bool exception = header[1] == static_cast<uint8_t>(kFunctionWriteSingleCoil | 0x80);
+  std::array<uint8_t, 6> body{};
+  const size_t bodySize = exception ? 3 : 6;
+  status = readExactLocked(body.data(), bodySize, timeout);
+  if (!status.ok()) {
+    return status;
+  }
+  std::vector<uint8_t> frame;
+  frame.reserve(2 + bodySize);
+  frame.insert(frame.end(), header.begin(), header.end());
+  frame.insert(frame.end(), body.begin(), body.begin() + static_cast<std::ptrdiff_t>(bodySize));
+  LOG_INFO("ModbusRTU 写单线圈响应: 设备={}, 地址={}, 值={}, 报文={}",
+           config_.device(), expectedAddress, expectedValue, bytesToHex(frame));
+  const uint16_t crc = computeCrc(frame.data(), frame.size() - 2);
+  const uint16_t respCrc = static_cast<uint16_t>(frame[frame.size() - 2]) |
+      (static_cast<uint16_t>(frame[frame.size() - 1]) << 8);
+  if (crc != respCrc) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "写单线圈响应 CRC 不匹配");
+  }
+  if (frame[0] != expectedDeviceId) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "响应设备地址不匹配");
+  }
+  if (exception) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("Modbus 异常: {}", frame[2]));
+  }
+  if (frame[1] != kFunctionWriteSingleCoil) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "写单线圈响应功能码不匹配");
+  }
+  const uint16_t address = static_cast<uint16_t>((static_cast<uint16_t>(frame[2]) << 8) | frame[3]);
+  const uint16_t wireValue = static_cast<uint16_t>((static_cast<uint16_t>(frame[4]) << 8) | frame[5]);
+  if (address != expectedAddress) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "写单线圈响应地址不匹配");
+  }
+  const uint16_t expectedWireValue = expectedValue ? 0xFF00 : 0x0000;
+  if (wireValue != expectedWireValue) {
+    return grpc::Status(grpc::StatusCode::UNAVAILABLE, "写单线圈响应值不匹配");
   }
   return grpc::Status::OK;
 }

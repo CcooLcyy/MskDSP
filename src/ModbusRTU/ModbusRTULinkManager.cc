@@ -51,12 +51,20 @@ bool isWriteSingleRegisterFunction(ModbusRTUProto::FunctionCode function) {
   return function == ModbusRTUProto::FUNCTION_WRITE_SINGLE_REGISTER;
 }
 
+bool isWriteSingleCoilFunction(ModbusRTUProto::FunctionCode function) {
+  return function == ModbusRTUProto::FUNCTION_WRITE_SINGLE_COIL;
+}
+
 bool isWriteMultipleRegistersFunction(ModbusRTUProto::FunctionCode function) {
   return function == ModbusRTUProto::FUNCTION_WRITE_MULTIPLE_REGISTERS;
 }
 
 bool isWriteRegisterFunction(ModbusRTUProto::FunctionCode function) {
   return isWriteSingleRegisterFunction(function) || isWriteMultipleRegistersFunction(function);
+}
+
+bool isWriteFunction(ModbusRTUProto::FunctionCode function) {
+  return isWriteRegisterFunction(function) || isWriteSingleCoilFunction(function);
 }
 
 bool isRegisterBitPoint(const PointTable::Point& point) {
@@ -210,12 +218,19 @@ grpc::Status encodeWriteRegisters(const PointTable::Point& point, double engValu
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "点位不是写寄存器功能码");
   }
 
+  outValues->clear();
+  if (point.type == ModbusRTUProto::DATA_TYPE_BOOL) {
+    if (point.function != ModbusRTUProto::FUNCTION_WRITE_SINGLE_REGISTER) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "BOOL 仅支持写单寄存器");
+    }
+    outValues->push_back(engValue != 0.0 ? 1u : 0u);
+    return grpc::Status::OK;
+  }
+
   double rawValue = 0.0;
   if (!reverseScale(engValue, point.scale, point.offset, &rawValue)) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "工程量反向缩放失败");
   }
-
-  outValues->clear();
   if (point.type == ModbusRTUProto::DATA_TYPE_UINT16) {
     const double minValue = 0.0;
     const double maxValue = static_cast<double>(std::numeric_limits<uint16_t>::max());
@@ -1054,7 +1069,7 @@ void LinkManager::startCommandSubscribeLocked(const std::string& connName, LinkR
 
   std::vector<PointTable::Point> writePoints;
   for (const auto& point : link->pointTable.Points()) {
-    if (isWriteRegisterFunction(point.function)) {
+    if (isWriteFunction(point.function)) {
       writePoints.push_back(point);
     }
   }
@@ -1108,7 +1123,7 @@ void LinkManager::startCommandSubscribeLocked(const std::string& connName, LinkR
           auto status = executeWriteCommand(connName, config, it->second, bus, update);
           if (!status.ok()) {
             updateLastError(connName, status.error_message());
-            LOG_WARNING("ModbusRTU 写寄存器失败: conn_name={}, tag={}, 原因={}",
+            LOG_WARNING("ModbusRTU 写点失败: conn_name={}, tag={}, 原因={}",
                         connName,
                         update.dst_tag(),
                         status.error_message());
@@ -1134,8 +1149,8 @@ grpc::Status LinkManager::executeWriteCommand(const std::string& connName,
   if (!bus) {
     return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "总线未就绪");
   }
-  if (!isWriteRegisterFunction(point.function)) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "点位不是写寄存器功能码");
+  if (!isWriteFunction(point.function)) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "点位不是 ModbusRTU 可写功能码");
   }
 
   uint32_t address = point.address;
@@ -1146,19 +1161,35 @@ grpc::Status LinkManager::executeWriteCommand(const std::string& connName,
     address -= 1;
   }
   if (address > 0xFFFFu) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "写寄存器地址超出范围");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "写点地址超出范围");
   }
   if (point.regCount > 1 && address + point.regCount - 1 > 0xFFFFu) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "写寄存器地址范围超出限制");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "写点地址范围超出限制");
   }
 
   double engValue = 0.0;
   if (!pointValueToDouble(update.value(), &engValue)) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "命令点值类型不支持");
   }
+  if (!std::isfinite(engValue)) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "命令点值必须为有限数值");
+  }
 
   std::vector<uint16_t> values;
-  auto status = encodeWriteRegisters(point, engValue, &values);
+  auto status = grpc::Status::OK;
+  const auto deviceId = static_cast<uint8_t>(config.device_id());
+  if (isWriteSingleCoilFunction(point.function)) {
+    const bool coilValue = engValue != 0.0;
+    LOG_INFO("ModbusRTU 触发写单线圈: conn_name={}, tag={}, device_id={}, address={}, value={}",
+             connName, point.tag, config.device_id(), address, coilValue);
+    status = bus->WriteSingleCoil(deviceId, static_cast<uint16_t>(address), coilValue);
+    if (status.ok()) {
+      LOG_INFO("ModbusRTU 写单线圈成功: conn_name={}, tag={}, address={}, value={}",
+               connName, point.tag, address, coilValue);
+    }
+    return status;
+  }
+  status = encodeWriteRegisters(point, engValue, &values);
   if (!status.ok()) {
     return status;
   }
@@ -1170,7 +1201,6 @@ grpc::Status LinkManager::executeWriteCommand(const std::string& connName,
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "写多寄存器数量不能超过 123");
   }
 
-  const auto deviceId = static_cast<uint8_t>(config.device_id());
   if (point.function == ModbusRTUProto::FUNCTION_WRITE_SINGLE_REGISTER) {
     if (values.size() != 1) {
       return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "写单寄存器编码数量异常");
@@ -1283,10 +1313,10 @@ grpc::Status LinkManager::ExecuteCommand(
     }
 
     auto pointOpt = link.pointTable.FindByTag(request.dst().tag());
-    if (!pointOpt.has_value() || !isWriteRegisterFunction(pointOpt->function)) {
+    if (!pointOpt.has_value() || !isWriteFunction(pointOpt->function)) {
       response->set_status(DataCenterProto::COMMAND_REJECTED);
       response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSUPPORTED_POINT);
-      response->set_reason("目的点不存在或不是 ModbusRTU 写寄存器点");
+      response->set_reason("目的点不存在或不是 ModbusRTU 可写点");
       return grpc::Status::OK;
     }
     config = link.config;
@@ -2096,7 +2126,7 @@ void LinkManager::pollLoop(std::string connName,
         if (stopToken.stop_requested()) {
           break;
         }
-        if (isWriteRegisterFunction(point.function)) {
+        if (isWriteFunction(point.function)) {
           continue;
         }
 
@@ -2338,14 +2368,14 @@ void LinkManager::pollLoop(std::string connName,
     normalized.deadband = point.deadband;
     normalized.bitIndex = point.bitIndex;
 
-        if (isReadRegisterFunction(point.function)) {
-          registerPoints.push_back(std::move(normalized));
-        } else if (point.function == ModbusRTUProto::FUNCTION_READ_COILS) {
-          coilPoints.push_back(std::move(normalized));
-        } else if (!isWriteRegisterFunction(point.function)) {
-          LOG_WARNING("ModbusRTU 点表功能码不支持: conn_name={}, tag={}, function={}",
-                      connName,
-                      point.tag,
+    if (isReadRegisterFunction(point.function)) {
+      registerPoints.push_back(std::move(normalized));
+    } else if (point.function == ModbusRTUProto::FUNCTION_READ_COILS) {
+      coilPoints.push_back(std::move(normalized));
+    } else if (!isWriteFunction(point.function)) {
+      LOG_WARNING("ModbusRTU 点表功能码不支持: conn_name={}, tag={}, function={}",
+                  connName,
+                  point.tag,
                   static_cast<int>(point.function));
     }
   }

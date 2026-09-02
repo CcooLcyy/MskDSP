@@ -33,6 +33,7 @@ public:
                                   uint16_t address,
                                   uint16_t quantity,
                                   std::vector<uint16_t>* out) override;
+  grpc::Status WriteSingleCoil(uint8_t deviceId, uint16_t address, bool value) override;
   grpc::Status WriteSingleRegister(uint8_t deviceId, uint16_t address, uint16_t value) override;
   grpc::Status WriteMultipleRegisters(uint8_t deviceId,
                                       uint16_t address,
@@ -50,6 +51,10 @@ private:
                                                 uint8_t expectedDeviceId,
                                                 uint16_t expectedAddress,
                                                 uint16_t expectedValue) const;
+  grpc::Status parseWriteSingleCoilResponse(const std::vector<uint8_t>& frame,
+                                            uint8_t expectedDeviceId,
+                                            uint16_t expectedAddress,
+                                            bool expectedValue) const;
   grpc::Status parseWriteMultipleRegistersResponse(const std::vector<uint8_t>& frame,
                                                    uint8_t expectedDeviceId,
                                                    uint16_t expectedAddress,

@@ -87,6 +87,39 @@ TEST(ConfigPusherConfigLoaderTest, LoadConfigWithCommentsAndHexFunction) {
   EXPECT_EQ(pointTable.points(2).function(), ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS);
 }
 
+// 验证：加载 ModbusRTU 配置时将十六进制功能码 0x05 转换为写单线圈枚举。
+TEST(ConfigPusherConfigLoaderTest, LoadModbusWriteSingleCoilHexFunction) {
+  InitLoggerOnce();
+  ScopedTempDir dir;
+  const auto path = dir.path() / "modbus_rtu.jsonc";
+  const std::string content = R"json(
+{
+  "modbus_rtu": {
+    "links": [
+      {
+        "point_table": {
+          "points": [
+            { "tag": "coil-command", "function": "0x05", "address": 10, "type": "DATA_TYPE_BOOL" }
+          ]
+        }
+      }
+    ]
+  }
+}
+)json";
+  WriteFile(path, content);
+
+  auto loaded = ConfigPusher::LoadConfigFile(path);
+  ASSERT_TRUE(loaded.has_value());
+  const auto &modbus = loaded->modbus_rtu();
+  ASSERT_EQ(modbus.links_size(), 1);
+  const auto &task = modbus.links(0);
+  ASSERT_TRUE(task.has_point_table());
+  ASSERT_EQ(task.point_table().points_size(), 1);
+  EXPECT_EQ(task.point_table().points(0).function(), ModbusRTUProto::FUNCTION_WRITE_SINGLE_COIL);
+  EXPECT_EQ(task.point_table().points(0).type(), ModbusRTUProto::DATA_TYPE_BOOL);
+}
+
 // 验证：加载 DataCenter 配置时支持 JSONC 注释并解析点表与路由。
 TEST(ConfigPusherConfigLoaderTest, LoadDataCenterConfigWithComments) {
   InitLoggerOnce();

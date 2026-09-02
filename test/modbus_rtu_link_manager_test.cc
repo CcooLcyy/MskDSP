@@ -19,6 +19,7 @@
 
 #include "DataCenter_mock.grpc.pb.h"
 #include "ModbusRTULinkManager.h"
+#include "ModbusRTUSerialBus.h"
 #include "support/FakeDataCenter.hpp"
 
 namespace {
@@ -96,6 +97,24 @@ ModbusRTUProto::Point MakeWriteSingleRegisterPoint(const char* tag, uint32_t add
   p.set_function(ModbusRTUProto::FUNCTION_WRITE_SINGLE_REGISTER);
   p.set_address(address);
   p.set_type(ModbusRTUProto::DATA_TYPE_UINT16);
+  return p;
+}
+
+ModbusRTUProto::Point MakeWriteSingleRegisterBoolPoint(const char* tag, uint32_t address) {
+  ModbusRTUProto::Point p;
+  p.set_tag(tag);
+  p.set_function(ModbusRTUProto::FUNCTION_WRITE_SINGLE_REGISTER);
+  p.set_address(address);
+  p.set_type(ModbusRTUProto::DATA_TYPE_BOOL);
+  return p;
+}
+
+ModbusRTUProto::Point MakeWriteSingleCoilPoint(const char* tag, uint32_t address) {
+  ModbusRTUProto::Point p;
+  p.set_tag(tag);
+  p.set_function(ModbusRTUProto::FUNCTION_WRITE_SINGLE_COIL);
+  p.set_address(address);
+  p.set_type(ModbusRTUProto::DATA_TYPE_BOOL);
   return p;
 }
 
@@ -742,6 +761,154 @@ TEST(ModbusRtuLinkManagerTest, ExecuteCommandWritesMultipleRegistersAndReturnsAc
   EXPECT_DOUBLE_EQ(response.accepted_value(), 10.0);
 
   ASSERT_TRUE(mgr.StopLink("conn-command").ok());
+}
+
+// 验证：同步 BOOL 命令通过 0x05 写单线圈，并按标准发送 true=FF00、false=0000。
+TEST(ModbusRtuLinkManagerTest, ExecuteCommandWritesSingleCoilBoolOnAndOff) {
+  ScopedPseudoTty pty;
+  ASSERT_TRUE(pty.ok()) << pty.error();
+
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  LinkManagerTestEnv env;
+  auto& mgr = env.mgr;
+  mgr.setDataCenterStub(stub);
+
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("conn-coil-command", pty.slavePath().c_str(), 1), &info).ok());
+
+  ModbusRTUProto::UpsertPointTableRequest pointRequest;
+  pointRequest.set_conn_name("conn-coil-command");
+  *pointRequest.add_points() = MakeWriteSingleCoilPoint("coil-command", 10);
+  pointRequest.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(pointRequest).ok());
+  ASSERT_TRUE(mgr.StartLink("conn-coil-command").ok());
+
+  std::vector<std::vector<uint8_t>> requestFrames(2);
+  std::jthread responder([&]() {
+    for (auto& requestFrame : requestFrames) {
+      if (!pty.readExact(&requestFrame, 8, 3000)) {
+        return;
+      }
+      std::vector<uint8_t> responseFrame(requestFrame.begin(), requestFrame.begin() + 6);
+      ModbusRTU::SerialBus::appendCrc(&responseFrame);
+      if (!pty.writeAll(responseFrame)) {
+        return;
+      }
+    }
+  });
+
+  DataCenterProto::ExecuteCommandRequest onRequest;
+  onRequest.mutable_src()->set_conn_id(99);
+  onRequest.mutable_src()->set_tag("control-source");
+  onRequest.mutable_dst()->set_conn_id(info.conn_id());
+  onRequest.mutable_dst()->set_module_name("ModbusRTU");
+  onRequest.mutable_dst()->set_conn_name("conn-coil-command");
+  onRequest.mutable_dst()->set_tag("coil-command");
+  onRequest.mutable_value()->set_bool_value(true);
+  onRequest.set_quality(DataCenterProto::QUALITY_GOOD);
+  DataCenterProto::ExecuteCommandResponse onResponse;
+  ASSERT_TRUE(mgr.ExecuteCommand(onRequest, &onResponse).ok());
+  EXPECT_EQ(onResponse.status(), DataCenterProto::COMMAND_ACCEPTED);
+
+  DataCenterProto::ExecuteCommandRequest offRequest = onRequest;
+  offRequest.mutable_value()->set_bool_value(false);
+  DataCenterProto::ExecuteCommandResponse offResponse;
+  ASSERT_TRUE(mgr.ExecuteCommand(offRequest, &offResponse).ok());
+  EXPECT_EQ(offResponse.status(), DataCenterProto::COMMAND_ACCEPTED);
+  responder.join();
+
+  ASSERT_EQ(requestFrames.size(), 2u);
+  ASSERT_EQ(requestFrames[0].size(), 8u);
+  EXPECT_EQ(requestFrames[0][0], 0x01);
+  EXPECT_EQ(requestFrames[0][1], 0x05);
+  EXPECT_EQ(requestFrames[0][2], 0x00);
+  EXPECT_EQ(requestFrames[0][3], 0x0A);
+  EXPECT_EQ(requestFrames[0][4], 0xFF);
+  EXPECT_EQ(requestFrames[0][5], 0x00);
+  ASSERT_EQ(requestFrames[1].size(), 8u);
+  EXPECT_EQ(requestFrames[1][0], 0x01);
+  EXPECT_EQ(requestFrames[1][1], 0x05);
+  EXPECT_EQ(requestFrames[1][2], 0x00);
+  EXPECT_EQ(requestFrames[1][3], 0x0A);
+  EXPECT_EQ(requestFrames[1][4], 0x00);
+  EXPECT_EQ(requestFrames[1][5], 0x00);
+
+  ASSERT_TRUE(mgr.StopLink("conn-coil-command").ok());
+}
+
+// 验证：同步 BOOL 命令通过 0x06 写单寄存器，并按工程约定发送寄存器值 1/0。
+TEST(ModbusRtuLinkManagerTest, ExecuteCommandWritesSingleRegisterBoolAsOneOrZero) {
+  ScopedPseudoTty pty;
+  ASSERT_TRUE(pty.ok()) << pty.error();
+
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  LinkManagerTestEnv env;
+  auto& mgr = env.mgr;
+  mgr.setDataCenterStub(stub);
+
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("conn-register-bool-command", pty.slavePath().c_str(), 1), &info).ok());
+
+  ModbusRTUProto::UpsertPointTableRequest pointRequest;
+  pointRequest.set_conn_name("conn-register-bool-command");
+  *pointRequest.add_points() = MakeWriteSingleRegisterBoolPoint("register-command", 20);
+  pointRequest.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(pointRequest).ok());
+  ASSERT_TRUE(mgr.StartLink("conn-register-bool-command").ok());
+
+  std::vector<std::vector<uint8_t>> requestFrames(2);
+  std::jthread responder([&]() {
+    for (auto& requestFrame : requestFrames) {
+      if (!pty.readExact(&requestFrame, 8, 3000)) {
+        return;
+      }
+      std::vector<uint8_t> responseFrame(requestFrame.begin(), requestFrame.begin() + 6);
+      ModbusRTU::SerialBus::appendCrc(&responseFrame);
+      if (!pty.writeAll(responseFrame)) {
+        return;
+      }
+    }
+  });
+
+  DataCenterProto::ExecuteCommandRequest onRequest;
+  onRequest.mutable_src()->set_conn_id(99);
+  onRequest.mutable_src()->set_tag("control-source");
+  onRequest.mutable_dst()->set_conn_id(info.conn_id());
+  onRequest.mutable_dst()->set_module_name("ModbusRTU");
+  onRequest.mutable_dst()->set_conn_name("conn-register-bool-command");
+  onRequest.mutable_dst()->set_tag("register-command");
+  onRequest.mutable_value()->set_bool_value(true);
+  onRequest.set_quality(DataCenterProto::QUALITY_GOOD);
+  DataCenterProto::ExecuteCommandResponse onResponse;
+  ASSERT_TRUE(mgr.ExecuteCommand(onRequest, &onResponse).ok());
+  EXPECT_EQ(onResponse.status(), DataCenterProto::COMMAND_ACCEPTED);
+
+  DataCenterProto::ExecuteCommandRequest offRequest = onRequest;
+  offRequest.mutable_value()->set_bool_value(false);
+  DataCenterProto::ExecuteCommandResponse offResponse;
+  ASSERT_TRUE(mgr.ExecuteCommand(offRequest, &offResponse).ok());
+  EXPECT_EQ(offResponse.status(), DataCenterProto::COMMAND_ACCEPTED);
+  responder.join();
+
+  ASSERT_EQ(requestFrames.size(), 2u);
+  ASSERT_EQ(requestFrames[0].size(), 8u);
+  EXPECT_EQ(requestFrames[0][0], 0x01);
+  EXPECT_EQ(requestFrames[0][1], 0x06);
+  EXPECT_EQ(requestFrames[0][2], 0x00);
+  EXPECT_EQ(requestFrames[0][3], 0x14);
+  EXPECT_EQ(requestFrames[0][4], 0x00);
+  EXPECT_EQ(requestFrames[0][5], 0x01);
+  ASSERT_EQ(requestFrames[1].size(), 8u);
+  EXPECT_EQ(requestFrames[1][0], 0x01);
+  EXPECT_EQ(requestFrames[1][1], 0x06);
+  EXPECT_EQ(requestFrames[1][2], 0x00);
+  EXPECT_EQ(requestFrames[1][3], 0x14);
+  EXPECT_EQ(requestFrames[1][4], 0x00);
+  EXPECT_EQ(requestFrames[1][5], 0x00);
+
+  ASSERT_TRUE(mgr.StopLink("conn-register-bool-command").ok());
 }
 
 // 验证：目的 ModbusRTU 链路未运行时，同步命令返回目标不可用且不会尝试写串口。

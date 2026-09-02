@@ -27,6 +27,7 @@ public:
   grpc::Status ReadHoldingRegisters(uint8_t deviceId, uint16_t address, uint16_t quantity, std::vector<uint16_t>* out) override;
   grpc::Status ReadInputRegister(uint8_t deviceId, uint16_t address, uint16_t* out) override;
   grpc::Status ReadInputRegisters(uint8_t deviceId, uint16_t address, uint16_t quantity, std::vector<uint16_t>* out) override;
+  grpc::Status WriteSingleCoil(uint8_t deviceId, uint16_t address, bool value) override;
   grpc::Status WriteSingleRegister(uint8_t deviceId, uint16_t address, uint16_t value) override;
   grpc::Status WriteMultipleRegisters(uint8_t deviceId,
                                       uint16_t address,
@@ -53,6 +54,10 @@ private:
       uint8_t expectedDeviceId,
       uint16_t expectedAddress,
       uint16_t expectedValue);
+  grpc::Status readWriteSingleCoilResponseLocked(
+      uint8_t expectedDeviceId,
+      uint16_t expectedAddress,
+      bool expectedValue);
   grpc::Status readWriteMultipleRegistersResponseLocked(
       uint8_t expectedDeviceId,
       uint16_t expectedAddress,

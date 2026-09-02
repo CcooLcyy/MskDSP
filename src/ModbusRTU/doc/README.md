@@ -10,7 +10,7 @@ ModbusRTU 模块负责管理 ModbusRTU 链路与点表，当前同时支持两�
 ## 能力清单
 - 主站读取线圈（0x01）与保持寄存器（0x03）。
 - 主站读取输入寄存器（0x04）。
-- 主站写单寄存器（0x06）与写多寄存器（0x10），通过 DataCenter 路由触发。
+- 主站写单线圈（0x05）、写单寄存器（0x06）与写多寄存器（0x10），通过 DataCenter 路由触发。
 - 本地串口直连与 MQTT UART 透传两种主站链路可并存。
 - 支持显式区间抄读 `read_plan`。
 - 支持点表 `scale/offset/deadband` 工程量换算。
@@ -46,7 +46,7 @@ ModbusRTU 模块负责管理 ModbusRTU 链路与点表，当前同时支持两�
 ### 1. 本地串口直连
 - `transport_type = TRANSPORT_SERIAL`
 - 使用 `serial.device` 打开本地串口。
-- 链路按主站方式执行轮询与写寄存器。
+- 链路按主站方式执行轮询与写点。
 - 继续沿用原有 `read_timeout_ms` 与串口共享逻辑。
 
 ### 2. MQTT 串口透传
@@ -54,7 +54,7 @@ ModbusRTU 模块负责管理 ModbusRTU 链路与点表，当前同时支持两�
 - `serial_port` 表示远端 `uartManager` 的串口标识，例如 `RS485-1`。
 - `serial` 中只保留远端串口参数：`baud_rate/data_bits/parity/stop_bits`。
 - `serial.device` 在该模式下忽略。
-- 链路按主站方式执行轮询与写寄存器。
+- 链路按主站方式执行轮询与写点。
 
 ## 顶层 MQTT 配置
 仅当存在 `TRANSPORT_MQTT_UART` 链路时需要配置：
@@ -99,17 +99,22 @@ ModbusRTU 模块负责管理 ModbusRTU 链路与点表，当前同时支持两�
 - `FUNCTION_READ_COILS` 仅支持 `DATA_TYPE_BOOL`。
 - `FUNCTION_READ_HOLDING_REGISTERS` 支持 `DATA_TYPE_UINT16/DATA_TYPE_UINT32/DATA_TYPE_INT16/DATA_TYPE_INT32`。
 - `FUNCTION_READ_INPUT_REGISTERS` 支持 `DATA_TYPE_UINT16/DATA_TYPE_UINT32/DATA_TYPE_INT16/DATA_TYPE_INT32`。
-- `FUNCTION_WRITE_SINGLE_REGISTER` 只允许 `DATA_TYPE_UINT16/DATA_TYPE_INT16`、`reg_count=1`。
+- `FUNCTION_WRITE_SINGLE_COIL`（0x05）仅允许 `DATA_TYPE_BOOL`、`reg_count=1`；写入 `true` 使用标准值 `0xFF00`，写入 `false` 使用 `0x0000`。
+- `FUNCTION_WRITE_SINGLE_REGISTER`（0x06）允许 `DATA_TYPE_BOOL/DATA_TYPE_UINT16/DATA_TYPE_INT16`、`reg_count=1`；BOOL 按工程约定写入寄存器值 `1/0`。
 - `FUNCTION_WRITE_MULTIPLE_REGISTERS` 支持 `DATA_TYPE_UINT16/DATA_TYPE_UINT32/DATA_TYPE_INT16/DATA_TYPE_INT32`。
+- `0x0F` 写多线圈当前未实现；如需批量线圈控制，需另行设计点表映射。
+- BOOL 写点忽略 `scale/offset/deadband/word_order/byte_order`；数值写点按配置执行工程量换算。
 - 读寄存器点位按 `value = raw * scale + offset` 做工程量换算；写寄存器点位按 `raw = (value - offset) / scale` 反向换算。
 - `deadband` 仅对读寄存器上报生效；写寄存器点位忽略。
 - `scale=0` 视为 `1`，计算公式为 `value = raw * scale + offset`。
 - `deadband <= 0` 表示不过滤；当 `>0` 时，`|delta| < deadband` 过滤，`|delta| >= deadband` 上报。
 
-## 主站写寄存器闭环
-- 同步命令：IEC104 等需要协议级确认的模块调用 `DataCenter.ExecuteCommand` 后，DataCenter 按 `Route` 将命令同步转交给 ModbusRTU 的 `CommandExecutor.ExecuteCommand`。ModbusRTU 按目的端点的 `conn_id/conn_name + tag` 定位运行中的链路和写点，发送 `0x06/0x10` RTU 报文并等待从站响应。
+## 主站写点闭环
+- 同步命令：IEC104 等需要协议级确认的模块调用 `DataCenter.ExecuteCommand` 后，DataCenter 按 `Route` 将命令同步转交给 ModbusRTU 的 `CommandExecutor.ExecuteCommand`。ModbusRTU 按目的端点的 `conn_id/conn_name + tag` 定位运行中的链路和写点，发送 `0x05/0x06/0x10` RTU 报文并等待从站响应。
 - 同步命令仅在收到并校验通过 Modbus 写响应后返回 `COMMAND_ACCEPTED`；链路未运行时返回目标不可用，目的点不存在或不是写点时返回业务拒绝，通信超时或总线异常时返回对应失败状态，供 IEC104 形成肯定或否定确认。
-- 异步命令：上位机或其他不需要同步确认的模块仍可将命令发布到 DataCenter 源端点，再通过 `Route` 路由到 ModbusRTU。ModbusRTU 主站链路进入运行态后，会按当前 `conn_id + tag` 订阅本连接内所有写点，收到更新后自动编码并发送 `0x06/0x10` RTU 报文。
+- 异步命令：上位机或其他不需要同步确认的模块仍可将命令发布到 DataCenter 源端点，再通过 `Route` 路由到 ModbusRTU。ModbusRTU 主站链路进入运行态后，会按当前 `conn_id + tag` 订阅本连接内所有写点，收到更新后自动编码并发送 `0x05/0x06/0x10` RTU 报文。
+- `0x05` 是标准写单线圈：BOOL 为 `true` 时数据域为 `FF 00`，为 `false` 时数据域为 `00 00`。
+- `0x06 + BOOL` 是工程约定的写单寄存器遥控：BOOL 为 `true` 时寄存器值为 `1`，为 `false` 时寄存器值为 `0`。
 - `FUNCTION_WRITE_SINGLE_REGISTER` 适合单个 16 位设定值。
 - `FUNCTION_WRITE_MULTIPLE_REGISTERS` 适合 32 位设定值，或明确要求用 `0x10` 下发的 16 位设定值。
 - 命令值支持 DataCenter `double/int/bool`；`bool` 会按 `0/1` 处理。
@@ -159,7 +164,7 @@ ModbusRTU 模块负责管理 ModbusRTU 链路与点表，当前同时支持两�
 
 - `TRANSPORT_MQTT_UART` 模式下，顶层 `mqtt` 与链路级 `serial_port`/`serial.*` 必须成组提供。
 - 链路固定按主站方式运行，无需额外引入独立 `mode` 选项。
-- `FUNCTION_WRITE_SINGLE_REGISTER` 仅允许单个 16 位寄存器写入；`FUNCTION_WRITE_MULTIPLE_REGISTERS` 允许 16/32 位寄存器写入。
+- `FUNCTION_WRITE_SINGLE_COIL` 仅允许 BOOL 单线圈写入；`FUNCTION_WRITE_SINGLE_REGISTER` 允许 BOOL、UINT16 或 INT16 单寄存器写入；`FUNCTION_WRITE_MULTIPLE_REGISTERS` 允许 16/32 位寄存器写入。
 - 控制命令通过 DataCenter 路由到 ModbusRTU 的控制点 `tag`；需要协议级同步确认时调用 DataCenter 的通用 `ExecuteCommand`，不需要上位机额外调用 ModbusRTU 私有的“写寄存器 gRPC”。
 
 ## 报文日志

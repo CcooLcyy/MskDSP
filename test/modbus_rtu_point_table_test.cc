@@ -99,6 +99,71 @@ TEST(ModbusRtuPointTableTest, RejectsInvalidPoint) {
   EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
 }
 
+// 验证：写单线圈功能码 0x05 支持 BOOL 点位并保留单线圈映射。
+TEST(ModbusRtuPointTableTest, AcceptsWriteSingleCoilBoolPoint) {
+  PointTable table;
+
+  ModbusRTUProto::UpsertPointTableRequest req;
+  *req.add_points() = MakePoint("coil-command",
+                                ModbusRTUProto::FUNCTION_WRITE_SINGLE_COIL,
+                                10,
+                                ModbusRTUProto::DATA_TYPE_BOOL);
+  req.set_replace(true);
+
+  ASSERT_TRUE(table.Upsert(req.points(), req.replace()).ok());
+
+  auto stored = table.FindByTag("coil-command");
+  ASSERT_TRUE(stored.has_value());
+  EXPECT_EQ(stored->function, ModbusRTUProto::FUNCTION_WRITE_SINGLE_COIL);
+  EXPECT_EQ(stored->type, ModbusRTUProto::DATA_TYPE_BOOL);
+  EXPECT_EQ(stored->regCount, 1u);
+  EXPECT_FALSE(stored->bitIndex.has_value());
+
+  auto byAddress = table.FindByAddress(ModbusRTUProto::FUNCTION_WRITE_SINGLE_COIL, 10);
+  ASSERT_TRUE(byAddress.has_value());
+  EXPECT_EQ(byAddress->tag, "coil-command");
+}
+
+// 验证：写单线圈功能码 0x05 拒绝非 BOOL 点位，避免按线圈协议编码寄存器数据。
+TEST(ModbusRtuPointTableTest, RejectsWriteSingleCoilNonBoolPoint) {
+  PointTable table;
+
+  ModbusRTUProto::UpsertPointTableRequest req;
+  *req.add_points() = MakePoint("coil-command",
+                                ModbusRTUProto::FUNCTION_WRITE_SINGLE_COIL,
+                                10,
+                                ModbusRTUProto::DATA_TYPE_UINT16);
+  req.set_replace(true);
+
+  const auto status = table.Upsert(req.points(), req.replace());
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+// 验证：写单寄存器功能码 0x06 支持 BOOL 点位，用于按 0/1 约定下发遥控。
+TEST(ModbusRtuPointTableTest, AcceptsWriteSingleRegisterBoolPoint) {
+  PointTable table;
+
+  ModbusRTUProto::UpsertPointTableRequest req;
+  *req.add_points() = MakePoint("register-command",
+                                ModbusRTUProto::FUNCTION_WRITE_SINGLE_REGISTER,
+                                20,
+                                ModbusRTUProto::DATA_TYPE_BOOL);
+  req.set_replace(true);
+
+  ASSERT_TRUE(table.Upsert(req.points(), req.replace()).ok());
+
+  auto stored = table.FindByTag("register-command");
+  ASSERT_TRUE(stored.has_value());
+  EXPECT_EQ(stored->function, ModbusRTUProto::FUNCTION_WRITE_SINGLE_REGISTER);
+  EXPECT_EQ(stored->type, ModbusRTUProto::DATA_TYPE_BOOL);
+  EXPECT_EQ(stored->regCount, 1u);
+  EXPECT_FALSE(stored->bitIndex.has_value());
+
+  auto byAddress = table.FindByAddress(ModbusRTUProto::FUNCTION_WRITE_SINGLE_REGISTER, 20);
+  ASSERT_TRUE(byAddress.has_value());
+  EXPECT_EQ(byAddress->tag, "register-command");
+}
+
 // 验证：点表拒绝冲突映射（同 tag 不同地址、同地址不同 tag）。
 TEST(ModbusRtuPointTableTest, RejectsConflictingMappings) {
   PointTable table;

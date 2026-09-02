@@ -17,12 +17,20 @@ bool isWriteSingleRegisterFunction(ModbusRTUProto::FunctionCode function) {
   return function == ModbusRTUProto::FUNCTION_WRITE_SINGLE_REGISTER;
 }
 
+bool isWriteSingleCoilFunction(ModbusRTUProto::FunctionCode function) {
+  return function == ModbusRTUProto::FUNCTION_WRITE_SINGLE_COIL;
+}
+
 bool isWriteMultipleRegistersFunction(ModbusRTUProto::FunctionCode function) {
   return function == ModbusRTUProto::FUNCTION_WRITE_MULTIPLE_REGISTERS;
 }
 
 bool isWriteRegisterFunction(ModbusRTUProto::FunctionCode function) {
   return isWriteSingleRegisterFunction(function) || isWriteMultipleRegistersFunction(function);
+}
+
+bool isWriteFunction(ModbusRTUProto::FunctionCode function) {
+  return isWriteRegisterFunction(function) || isWriteSingleCoilFunction(function);
 }
 
 bool isReadRegisterFunction(ModbusRTUProto::FunctionCode function) {
@@ -122,6 +130,12 @@ grpc::Status PointTable::validatePoint(const ModbusRTUProto::Point &point) const
   if (point.function() == ModbusRTUProto::FUNCTION_READ_COILS && regCount != 1) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "线圈点位 reg_count 只能为 1");
   }
+  if (isWriteSingleCoilFunction(point.function()) && point.type() != ModbusRTUProto::DATA_TYPE_BOOL) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "写单线圈点位需要 BOOL 类型");
+  }
+  if (isWriteSingleCoilFunction(point.function()) && regCount != 1) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "写单线圈点位 reg_count 只能为 1");
+  }
   if (point.type() == ModbusRTUProto::DATA_TYPE_BOOL && isReadRegisterFunction(point.function()) && !point.has_bit_index()) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "寄存器 BOOL 点位必须配置 bit_index");
   }
@@ -132,7 +146,8 @@ grpc::Status PointTable::validatePoint(const ModbusRTUProto::Point &point) const
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "bit_index 超出 reg_count 可用位范围");
   }
   if ((isReadRegisterFunction(point.function()) || isWriteRegisterFunction(point.function())) &&
-      !(point.type() == ModbusRTUProto::DATA_TYPE_BOOL && isReadRegisterFunction(point.function())) &&
+      !(point.type() == ModbusRTUProto::DATA_TYPE_BOOL &&
+        (isReadRegisterFunction(point.function()) || isWriteSingleRegisterFunction(point.function()))) &&
       !is16BitRegisterType(point.type()) &&
       !is32BitRegisterType(point.type())) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "寄存器点位需要 UINT16、UINT32、INT16 或 INT32 类型");
@@ -143,8 +158,9 @@ grpc::Status PointTable::validatePoint(const ModbusRTUProto::Point &point) const
   if (is32BitRegisterType(point.type()) && regCount != 2) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "32 位寄存器点位 reg_count 只能为 2");
   }
-  if (isWriteSingleRegisterFunction(point.function()) && !is16BitRegisterType(point.type())) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "写单寄存器点位需要 UINT16 或 INT16 类型");
+  if (isWriteSingleRegisterFunction(point.function()) &&
+      point.type() != ModbusRTUProto::DATA_TYPE_BOOL && !is16BitRegisterType(point.type())) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "写单寄存器点位需要 BOOL、UINT16 或 INT16 类型");
   }
   if (isWriteSingleRegisterFunction(point.function()) && regCount != 1) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "写单寄存器点位 reg_count 只能为 1");

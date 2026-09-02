@@ -68,7 +68,7 @@ README 这里只保留模块说明、启动方式、配置入口与基础语义�
   - `./conf/configPusher/iec61850.jsonc`
   - `./conf/configPusher/modbus_rtu.jsonc`
 - 使用 Protobuf JSON 映射：枚举需写全名（例如 `ROLE_SERVER`、`POINT_TYPE_FLOAT`、`FUNCTION_READ_COILS`）
-- `modbus_rtu.jsonc` 的 `function` 支持十六进制字符串（`0x01`/`0x03`/`0x04`/`0x06`/`0x10`），解析时会自动转换为枚举值
+- `modbus_rtu.jsonc` 的 `function` 支持十六进制字符串（`0x01`/`0x03`/`0x04`/`0x05`/`0x06`/`0x10`），解析时会自动转换为枚举值
 - `point_table.conn_name` 可省略（默认使用 `link.config.conn_name`）
 - DLT645 的 `point_table` 支持“仅 points”“仅 blocks”或“points + blocks”三种形式；只要存在任一有效点表内容，ConfigPusher 就会下发对应请求
 - DLT645 支持 `device_nos` 批量设备序号展开：一条任务可展开为多条链路下发
