@@ -400,10 +400,12 @@ TEST(ControlOrchestratorManagerTest, ExecutesWorkflowFromBoundTrigger) {
   ScopedTempDir tempDir;
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
+  std::vector<std::string> commandSources;
   ON_CALL(*stub, ExecuteCommand(::testing::_, ::testing::_, ::testing::_))
       .WillByDefault(::testing::Invoke(
-          [](grpc::ClientContext*, const DataCenterProto::ExecuteCommandRequest &request,
+          [&commandSources](grpc::ClientContext*, const DataCenterProto::ExecuteCommandRequest &request,
              DataCenterProto::ExecuteCommandResponse *response) {
+            commandSources.emplace_back(request.src().tag());
             *response = Accepted();
             return grpc::Status::OK;
           }));
@@ -427,4 +429,8 @@ TEST(ControlOrchestratorManagerTest, ExecutesWorkflowFromBoundTrigger) {
   DataCenterProto::ExecuteCommandResponse response;
   ASSERT_TRUE(manager.ExecuteTriggeredCommand(request, &response).ok());
   EXPECT_EQ(response.status(), DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_EQ(commandSources, (std::vector<std::string>{
+      "step:逆变器遥调前置合闸:遥控合",
+      "step:逆变器遥调前置合闸:有功遥调",
+  }));
 }

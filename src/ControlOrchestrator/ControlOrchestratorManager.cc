@@ -28,6 +28,7 @@ grpc::Status notFound(const std::string &name) {
 constexpr std::string_view kWorkflowPathMarker = "\x1e" "CO_PATH=";
 constexpr auto kInterruptCheckInterval = std::chrono::milliseconds(10);
 constexpr size_t kMaxWorkflowPath = 32;
+constexpr std::string_view kInternalOutputPrefix = "step:";
 
 struct RequestIdParts {
   std::string base;
@@ -73,6 +74,11 @@ std::string makeRequestId(const std::string &base, const std::vector<std::string
     requestId.append(std::format("{}:{}", name.size(), name));
   }
   return requestId;
+}
+
+std::string makeInternalOutputTag(const std::string &sequenceName,
+                                  const std::string &stepName) {
+  return std::format("{}{}:{}", kInternalOutputPrefix, sequenceName, stepName);
 }
 
 bool contextCancelled(const grpc::ServerContext *context) {
@@ -362,10 +368,17 @@ grpc::Status SequenceManager::ExecuteSequence(
         return grpc::Status::OK;
       }
       DataCenterProto::ExecuteCommandRequest command;
-      *command.mutable_src() = step.source();
+      if (config.has_trigger()) {
+        auto *internalSource = command.mutable_src();
+        internalSource->set_module_name("ControlOrchestrator");
+        internalSource->set_conn_name("control-orchestrator");
+        internalSource->set_tag(makeInternalOutputTag(request.sequence_name(), step.step_name()));
+      } else {
+        *command.mutable_src() = step.source();
+      }
       LOG_INFO("ControlOrchestrator 开始执行步骤: name={}, index={}, step={}, attempt={}, source={}/{}/{}",
                request.sequence_name(), index + 1, step.step_name(), attempt + 1,
-               step.source().module_name(), step.source().conn_name(), step.source().tag());
+               command.src().module_name(), command.src().conn_name(), command.src().tag());
       if (step.use_trigger_value()) {
         if (request.trigger_value().kind_case() == DataCenterProto::PointValue::KIND_NOT_SET) {
           failStep(index, "步骤使用触发值但请求未提供 trigger_value",
