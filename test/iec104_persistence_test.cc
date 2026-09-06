@@ -136,6 +136,52 @@ TEST(IEC104PersistenceTest, LoadsPersistedLinkAndPointTableAfterRestart) {
   }
 }
 
+// 验证：恢复配置时保留不可用或重复的服务端监听端点及其点表，启动失败不得清理配置。
+TEST(IEC104PersistenceTest, PreservesUnavailableDuplicateServerEndpointsAfterRestart) {
+  ScopedTempDir dir;
+  const auto configDbPath = dir.path() / "config.db";
+  const auto port = AllocateFreeTcpPort();
+
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  {
+    LinkManager mgr("IEC104", configDbPath);
+    mgr.setDataCenterStub(stub);
+
+    for (const auto &connName : {"conn-unavailable-a", "conn-unavailable-b"}) {
+      auto linkReq = MakeServerLinkReq(connName, port);
+      linkReq.mutable_config()->mutable_local()->set_ip("192.0.2.1");
+      IEC104Proto::LinkInfo info;
+      ASSERT_TRUE(mgr.UpsertLink(linkReq, &info).ok());
+
+      IEC104Proto::UpsertPointTableRequest pointReq;
+      pointReq.set_conn_name(connName);
+      pointReq.set_replace(true);
+      *pointReq.add_points() = MakePoint((std::string(connName) + "-point").c_str(), 100);
+      ASSERT_TRUE(mgr.UpsertPointTable(pointReq).ok());
+    }
+  }
+
+  {
+    LinkManager mgr("IEC104", configDbPath);
+    mgr.setDataCenterStub(stub);
+
+    for (const auto &connName : {"conn-unavailable-a", "conn-unavailable-b"}) {
+      IEC104Proto::LinkInfo info;
+      ASSERT_TRUE(mgr.GetLink(connName, &info).ok());
+      EXPECT_EQ(info.config().local().ip(), "192.0.2.1");
+      EXPECT_EQ(info.state(), IEC104Proto::LINK_STATE_STOPPED);
+      EXPECT_FALSE(info.last_error().empty());
+
+      IEC104Proto::PointTable pointTable;
+      ASSERT_TRUE(mgr.GetPointTable(connName, &pointTable).ok());
+      ASSERT_EQ(pointTable.points_size(), 1);
+      EXPECT_EQ(pointTable.points(0).ioa(), 100u);
+    }
+  }
+}
+
 // 验证：DeleteLink 进入 PENDING_DELETE 后会落盘，重启后仍阻止启动链路功能。
 TEST(IEC104PersistenceTest, LoadsPendingDeleteStateAfterRestart) {
   ScopedTempDir dir;

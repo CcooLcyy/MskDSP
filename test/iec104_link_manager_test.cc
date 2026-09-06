@@ -222,8 +222,8 @@ TEST(IEC104LinkManagerTest, DeleteLinkTreatsDataCenterNotFoundAsSuccess) {
   EXPECT_EQ(st.error_code(), grpc::StatusCode::NOT_FOUND);
 }
 
-// 验证：ROLE_SERVER 配置阶段会阻止同模块内端口冲突（无需等到 StartLink）。
-TEST(IEC104LinkManagerTest, UpsertLinkServerRejectsPortConflictBeforeDataCenterCalls) {
+// 验证：ROLE_SERVER 配置阶段允许暂时保留重复监听端点，便于导入后逐条修改地址。
+TEST(IEC104LinkManagerTest, UpsertLinkServerAllowsDuplicateListenEndpoint) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
@@ -236,19 +236,37 @@ TEST(IEC104LinkManagerTest, UpsertLinkServerRejectsPortConflictBeforeDataCenterC
   ASSERT_TRUE(mgr.UpsertLink(req1, &info1).ok());
   EXPECT_TRUE(state.HasConnection("IEC104", "server-1"));
 
-  // 第二条使用相同端口的链路应在任何 DataCenter RPC 之前就被拒绝。
-  EXPECT_CALL(*stub, ListConnections(_, _, _)).Times(0);
-  EXPECT_CALL(*stub, GetOrCreateConnection(_, _, _)).Times(0);
-
   auto req2 = MakeServerLinkReq("server-2", "127.0.0.1", port);
   IEC104Proto::LinkInfo info2;
-  auto st = mgr.UpsertLink(req2, &info2);
-  EXPECT_EQ(st.error_code(), grpc::StatusCode::ALREADY_EXISTS);
-  EXPECT_FALSE(state.HasConnection("IEC104", "server-2"));
+  ASSERT_TRUE(mgr.UpsertLink(req2, &info2).ok());
+  EXPECT_EQ(info1.state(), IEC104Proto::LINK_STATE_STOPPED);
+  EXPECT_EQ(info2.state(), IEC104Proto::LINK_STATE_STOPPED);
+  EXPECT_TRUE(state.HasConnection("IEC104", "server-2"));
+
+  for (const auto &connName : {"server-1", "server-2"}) {
+    IEC104Proto::UpsertPointTableRequest pointReq;
+    pointReq.set_conn_name(connName);
+    pointReq.set_replace(true);
+    *pointReq.add_points() = MakePoint(connName, 100);
+    ASSERT_TRUE(mgr.UpsertPointTable(pointReq).ok());
+  }
+
+  ASSERT_TRUE(mgr.StartLink("server-1").ok());
+  auto secondStart = mgr.StartLink("server-2");
+  EXPECT_EQ(secondStart.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+
+  IEC104Proto::LinkInfo first;
+  IEC104Proto::LinkInfo second;
+  ASSERT_TRUE(mgr.GetLink("server-1", &first).ok());
+  ASSERT_TRUE(mgr.GetLink("server-2", &second).ok());
+  EXPECT_EQ(first.state(), IEC104Proto::LINK_STATE_RUNNING);
+  EXPECT_EQ(second.state(), IEC104Proto::LINK_STATE_STOPPED);
+  EXPECT_EQ(second.last_error(), secondStart.error_message());
+  ASSERT_TRUE(mgr.StopLink("server-1").ok());
 }
 
-// 验证：ROLE_SERVER 配置阶段会检测系统级端口占用（端口已被其他进程 bind 时直接失败）。
-TEST(IEC104LinkManagerTest, UpsertLinkServerRejectsWhenPortIsAlreadyBound) {
+// 验证：ROLE_SERVER 配置阶段允许保存当前被占用的端口，实际启动时才报告绑定失败。
+TEST(IEC104LinkManagerTest, UpsertLinkServerDefersOccupiedPortCheckUntilStart) {
   namespace asio = boost::asio;
   using tcp = asio::ip::tcp;
 
@@ -265,18 +283,50 @@ TEST(IEC104LinkManagerTest, UpsertLinkServerRejectsWhenPortIsAlreadyBound) {
   LinkManager mgr("IEC104");
   mgr.setDataCenterStub(stub);
 
-  EXPECT_CALL(*stub, ListConnections(_, _, _)).Times(0);
-  EXPECT_CALL(*stub, GetOrCreateConnection(_, _, _)).Times(0);
-
   auto req = MakeServerLinkReq("server-occupied", "127.0.0.1", port);
   IEC104Proto::LinkInfo info;
-  auto st = mgr.UpsertLink(req, &info);
+  ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+  EXPECT_TRUE(state.HasConnection("IEC104", "server-occupied"));
+
+  IEC104Proto::UpsertPointTableRequest pointReq;
+  pointReq.set_conn_name("server-occupied");
+  pointReq.set_replace(true);
+  *pointReq.add_points() = MakePoint("occupied-point", 100);
+  ASSERT_TRUE(mgr.UpsertPointTable(pointReq).ok());
+
+  auto st = mgr.StartLink("server-occupied");
   EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
-  EXPECT_FALSE(state.HasConnection("IEC104", "server-occupied"));
+
+  IEC104Proto::LinkInfo got;
+  ASSERT_TRUE(mgr.GetLink("server-occupied", &got).ok());
+  EXPECT_EQ(got.state(), IEC104Proto::LINK_STATE_STOPPED);
+  EXPECT_EQ(got.last_error(), st.error_message());
+  EXPECT_FALSE(got.last_error().empty());
+
+  IEC104Proto::PointTable pointTable;
+  ASSERT_TRUE(mgr.GetPointTable("server-occupied", &pointTable).ok());
+  ASSERT_EQ(pointTable.points_size(), 1);
+  EXPECT_EQ(pointTable.points(0).tag(), "occupied-point");
 }
 
-// 验证：DeleteLink 成功后释放 ROLE_SERVER 端口占用，允许复用同端口创建新连接。
-TEST(IEC104LinkManagerTest, DeleteLinkReleasesReservedServerPort) {
+// 验证：ROLE_SERVER 使用当前机器不存在的 IP 时仍可保存配置并保留原始地址。
+TEST(IEC104LinkManagerTest, UpsertLinkServerAllowsUnassignedLocalIp) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeServerLinkReq("server-unassigned-ip", "192.0.2.1", AllocateFreeTcpPort());
+  IEC104Proto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+  EXPECT_EQ(info.state(), IEC104Proto::LINK_STATE_STOPPED);
+  EXPECT_EQ(info.config().local().ip(), "192.0.2.1");
+  EXPECT_TRUE(state.HasConnection("IEC104", "server-unassigned-ip"));
+}
+
+// 验证：删除服务端链路后，相同监听配置可重新保存。
+TEST(IEC104LinkManagerTest, DeleteLinkAllowsListenEndpointReuse) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 

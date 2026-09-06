@@ -484,23 +484,6 @@ void LinkManager::loadPersistedConfig(std::string_view trigger) {
         continue;
       }
 
-      bool conflicted = false;
-      std::string conflictName;
-      ListenEndpoint conflictListen;
-      for (const auto &[otherName, otherListen] : restoredServerListenByName) {
-        if (listenEndpointsConflict(otherListen, listen)) {
-          conflicted = true;
-          conflictName = otherName;
-          conflictListen = otherListen;
-          break;
-        }
-      }
-      if (conflicted) {
-        ++failedCount;
-        LOG_ERROR("IEC104 恢复链路时监听端点冲突，已跳过: conn_name={}, 对端链路={}, 当前监听={}, 对端监听={}", connName, conflictName, listenEndpointToString(listen), listenEndpointToString(conflictListen));
-        removeLinkRecord(static_cast<size_t>(i), connName);
-        continue;
-      }
     }
 
     DataCenterProto::ConnectionInfo connInfo;
@@ -724,34 +707,8 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
 
       const bool wasServer = (it->second.config.role() == IEC104Proto::ROLE_SERVER);
       if (isServer) {
-        ListenEndpoint currentListen;
-        bool needCheck = true;
-        if (wasServer) {
-          auto rIt = reservedServerListenByName_.find(connName);
-          if (rIt != reservedServerListenByName_.end()) {
-            currentListen = rIt->second;
-            needCheck = !listenEndpointsEqual(currentListen, desiredListen);
-          }
-        }
-
-        if (needCheck) {
-          for (const auto &[otherName, otherListen] : reservedServerListenByName_) {
-            if (otherName == connName) {
-              continue;
-            }
-            if (listenEndpointsConflict(otherListen, desiredListen)) {
-              return grpc::Status(
-                  grpc::StatusCode::ALREADY_EXISTS,
-                  std::format("监听端点 {} 与 {} 冲突 ({})", listenEndpointToString(desiredListen), otherName, listenEndpointToString(otherListen)));
-            }
-          }
-          status = checkSystemListenAvailable(desiredListen);
-          if (!status.ok()) {
-            return status;
-          }
-        }
-
         reservedServerListenByName_[connName] = desiredListen;
+        LOG_INFO("IEC104 服务端监听端点配置已保存，实际可用性检查延后到启动阶段: conn_name={}, 监听={}", connName, listenEndpointToString(desiredListen));
       } else if (wasServer) {
         reservedServerListenByName_.erase(connName);
       }
@@ -774,19 +731,9 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
       }
 
       if (isServer) {
-        for (const auto &[otherName, otherListen] : reservedServerListenByName_) {
-          if (listenEndpointsConflict(otherListen, desiredListen)) {
-            return grpc::Status(
-                grpc::StatusCode::ALREADY_EXISTS,
-                std::format("监听端点 {} 与 {} 冲突 ({})", listenEndpointToString(desiredListen), otherName, listenEndpointToString(otherListen)));
-          }
-        }
-        status = checkSystemListenAvailable(desiredListen);
-        if (!status.ok()) {
-          return status;
-        }
-        // 提前预留，避免调用 DataCenter 时发生竞态。
+        // 仅记录配置端点；实际监听可用性在 StartLink 时检查。
         reservedServerListenByName_[connName] = desiredListen;
+        LOG_INFO("IEC104 服务端监听端点配置已保存，实际可用性检查延后到启动阶段: conn_name={}, 监听={}", connName, listenEndpointToString(desiredListen));
       }
       pendingCreateByName_.emplace(connName);
     }

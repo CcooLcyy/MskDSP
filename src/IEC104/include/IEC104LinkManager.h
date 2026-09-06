@@ -127,7 +127,8 @@ private:
 
   mutable std::mutex mu_;
   std::unordered_map<std::string, LinkRuntime> linksByName_;
-  // 记录 ROLE_SERVER 链路配置预留的端口（含进行中的 UpsertLink 创建）。
+  // 记录 ROLE_SERVER 链路配置的监听端点（含进行中的 UpsertLink 创建）；
+  // 仅用于配置索引与恢复，不代表端点当前已成功监听。
   std::unordered_map<std::string, ListenEndpoint> reservedServerListenByName_;
   // 在调用 DataCenter 期间阻止同一 conn_name 的并发创建。
   std::unordered_set<std::string> pendingCreateByName_;
