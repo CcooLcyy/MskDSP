@@ -750,7 +750,7 @@ ScriptedResponses MakeControlDirectoryResponse(
 ScriptedResponses MakeEnhancedControlResponse(
     std::span<const std::uint8_t> payload, std::size_t /*sendCount*/,
     std::int64_t ctlModel, bool includeTermination, bool includeError,
-    bool includeCancel = true) {
+    bool includeCancel = true, std::uint64_t timeoutMs = 100) {
   IEC61850::IsoSessionPduView sessionPdu;
   if (!IEC61850::DecodeIsoSessionPdu(payload, &sessionPdu).ok() ||
       sessionPdu.type != IEC61850::IsoSessionPduType::DATA) {
@@ -825,7 +825,7 @@ ScriptedResponses MakeEnhancedControlResponse(
     }
     if (read.variables.front().identifier.ends_with("$sboTimeout") ||
         read.variables.front().identifier.ends_with("$operTimeout")) {
-      return {MakeUnsignedReadResponse(invokeId, 100)};
+      return {MakeUnsignedReadResponse(invokeId, timeoutMs)};
     }
     return {MakeBooleanReadResponse(invokeId)};
   }
@@ -2505,7 +2505,7 @@ TEST(IEC61850MmsWorkerTest, EnhancedSboFailureWithoutCancelLocksObject) {
             state,
             [](std::span<const std::uint8_t> payload, std::size_t sendCount) {
               return MakeEnhancedControlResponse(payload, sendCount, 4, true,
-                                                  true, false);
+                                                  true, false, 1000);
             },
             true);
       });
@@ -2522,7 +2522,9 @@ TEST(IEC61850MmsWorkerTest, EnhancedSboFailureWithoutCancelLocksObject) {
   auto select = MakeControlCommand(
       IEC61850::MmsControlOperation::SELECT_WITH_VALUE);
   IEC61850::MmsWriteResponse response;
-  ASSERT_TRUE(worker.WriteMmsControl(select, &response).ok());
+  // 该用例验证拒绝后的状态锁定，放宽请求窗口避免100毫秒保持时间触发排队超时。
+  const auto selectStatus = worker.WriteMmsControl(select, &response);
+  ASSERT_TRUE(selectStatus.ok()) << selectStatus.error_message();
   EXPECT_EQ(worker.WriteMmsControl(MakeControlCommand(), &response)
                 .error_code(),
             grpc::StatusCode::FAILED_PRECONDITION);
