@@ -608,7 +608,7 @@ TEST(IEC104LinkManagerHelperTest, SimulationValuesSetAllSingleValues) {
   IEC104Proto::UpsertPointTableRequest secondSingleRequest;
   auto *secondSingle = secondSingleRequest.add_points();
   secondSingle->set_tag("single-tag-2");
-  secondSingle->set_ioa(201);
+  secondSingle->set_ioa(203);
   secondSingle->set_type(IEC104Proto::POINT_TYPE_SINGLE);
   ASSERT_TRUE(table.Upsert(secondSingleRequest.points(), false).ok());
   runtime.pointTable = std::move(table);
