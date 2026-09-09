@@ -134,7 +134,7 @@ set(MSKDSP_MODULE_TARGETS
   AVC
   Calc
   ControlOrchestrator
-  DigitalInput
+  BoardIO
 )
 
 set(MSKDSP_VCPKG_INSTALL_DIR "")
@@ -194,6 +194,18 @@ install(TARGETS ${PROJECT_NAME}
 install(TARGETS moduleManager dspProto
   LIBRARY DESTINATION lib
 )
+
+# 模块改名后，升级安装时精确移除旧库的版本实体和符号链接，避免被 ModuleManager 重复扫描。
+install(CODE [=[
+  set(_mskdsp_module_install_dir "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/module")
+  file(GLOB _mskdsp_legacy_digital_input_libs
+       LIST_DIRECTORIES false
+       "${_mskdsp_module_install_dir}/libDigitalInput.so*")
+  if(_mskdsp_legacy_digital_input_libs)
+    file(REMOVE ${_mskdsp_legacy_digital_input_libs})
+    message(STATUS "已清理旧 DigitalInput 模块库: ${_mskdsp_legacy_digital_input_libs}")
+  endif()
+]=])
 
 install(TARGETS ${MSKDSP_MODULE_TARGETS}
   LIBRARY DESTINATION module

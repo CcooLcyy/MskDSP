@@ -179,37 +179,56 @@ target_link_libraries(configDatabase_test PRIVATE
 
 mskdsp_add_isolated_test(configDatabase_test)
 
-add_executable(digitalInputEventProcessor_test
-  digital_input_event_processor_test.cc
-  ${CMAKE_SOURCE_DIR}/src/DigitalInput/DigitalInputEventProcessor.cc
+add_executable(boardInputEventProcessor_test
+  board_input_event_processor_test.cc
+  ${CMAKE_SOURCE_DIR}/src/BoardIO/BoardInputEventProcessor.cc
 )
 
-target_include_directories(digitalInputEventProcessor_test PRIVATE
-  ${CMAKE_SOURCE_DIR}/src/DigitalInput/include
+target_include_directories(boardInputEventProcessor_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/BoardIO/include
 )
 
-target_link_libraries(digitalInputEventProcessor_test PRIVATE
+target_link_libraries(boardInputEventProcessor_test PRIVATE
   GTest::gtest_main
 )
 
-mskdsp_add_isolated_test(digitalInputEventProcessor_test)
+mskdsp_add_isolated_test(boardInputEventProcessor_test)
 
-add_executable(digitalInputDataCenterClient_test
-  digital_input_data_center_client_test.cc
-  ${CMAKE_SOURCE_DIR}/src/DigitalInput/DigitalInputDataCenterClient.cc
+add_executable(boardIODataCenterClient_test
+  board_io_data_center_client_test.cc
+  ${CMAKE_SOURCE_DIR}/src/BoardIO/BoardIODataCenterClient.cc
 )
 
-target_include_directories(digitalInputDataCenterClient_test PRIVATE
-  ${CMAKE_SOURCE_DIR}/src/DigitalInput/include
+target_include_directories(boardIODataCenterClient_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/BoardIO/include
 )
 
-target_link_libraries(digitalInputDataCenterClient_test PRIVATE
+target_link_libraries(boardIODataCenterClient_test PRIVATE
   GTest::gtest_main
   GTest::gmock
   dspProto
+  moduleManager
 )
 
-mskdsp_add_isolated_test(digitalInputDataCenterClient_test)
+mskdsp_add_isolated_test(boardIODataCenterClient_test)
+
+add_executable(boardOutputManager_test
+  board_output_manager_test.cc
+  ${CMAKE_SOURCE_DIR}/src/BoardIO/BoardOutputManager.cc
+  ${CMAKE_SOURCE_DIR}/src/BoardIO/GpioOutputDriver.cc
+)
+
+target_include_directories(boardOutputManager_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/BoardIO/include
+)
+
+target_link_libraries(boardOutputManager_test PRIVATE
+  GTest::gtest_main
+  dspProto
+  moduleManager
+)
+
+mskdsp_add_isolated_test(boardOutputManager_test)
 
 add_executable(calc_group_manager_test
   calc_group_manager_test.cc
@@ -1678,8 +1697,9 @@ set(MSKDSP_TEST_TARGETS
   logger_test
   mqtt_manager_test
   configDatabase_test
-  digitalInputEventProcessor_test
-  digitalInputDataCenterClient_test
+  boardInputEventProcessor_test
+  boardIODataCenterClient_test
+  boardOutputManager_test
   dataCenterCore_test
   dataCenterStateStore_test
   dataCenterGrpcService_test

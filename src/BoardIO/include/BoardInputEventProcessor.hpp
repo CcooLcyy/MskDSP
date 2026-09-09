@@ -8,7 +8,7 @@
 #include <string>
 #include <string_view>
 
-namespace DigitalInput {
+namespace BoardIO {
 
 struct GpioEvent {
   uint32_t offset = 0;
@@ -17,18 +17,18 @@ struct GpioEvent {
   bool sequenceGap = false;
 };
 
-struct PublishedDigitalInput {
+struct PublishedBoardInput {
   std::string tag;
   bool value = false;
   int64_t timestampMs = 0;
 };
 
-struct DigitalInputChannel {
+struct BoardInputChannel {
   uint32_t offset;
   std::string_view tag;
 };
 
-inline constexpr std::array<DigitalInputChannel, 4> kChannels = {{
+inline constexpr std::array<BoardInputChannel, 4> kChannels = {{
     {.offset = 114, .tag = "DI1"},
     {.offset = 116, .tag = "DI2"},
     {.offset = 113, .tag = "DI3"},
@@ -38,11 +38,11 @@ inline constexpr std::array<DigitalInputChannel, 4> kChannels = {{
 std::optional<std::string_view> TagForOffset(uint32_t offset);
 bool PhysicalLevelToLogical(bool physicalHigh);
 
-class DigitalInputEventProcessor {
+class BoardInputEventProcessor {
 public:
-  using PublishCallback = std::function<bool(const PublishedDigitalInput&)>;
+  using PublishCallback = std::function<bool(const PublishedBoardInput&)>;
 
-  explicit DigitalInputEventProcessor(PublishCallback publish);
+  explicit BoardInputEventProcessor(PublishCallback publish);
 
   // 处理一条 GPIO 边沿；返回 true 表示产生了一次 SOE 发布。
   bool HandleEvent(const GpioEvent& event);
@@ -53,4 +53,4 @@ private:
   std::array<std::optional<bool>, kChannels.size()> lastValues_;
 };
 
-}  // namespace DigitalInput
+}  // namespace BoardIO

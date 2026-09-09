@@ -2,13 +2,13 @@
 
 #include <vector>
 
-#include "DigitalInputEventProcessor.hpp"
+#include "BoardInputEventProcessor.hpp"
 
-namespace DigitalInput {
+namespace BoardIO {
 namespace {
 
 // 验证：四个 GPIO offset 映射到稳定的 DI 标签。
-TEST(DigitalInputEventProcessorTest, MapsGpioOffsetsToTags) {
+TEST(BoardInputEventProcessorTest, MapsGpioOffsetsToTags) {
   const auto di1 = TagForOffset(114);
   const auto di2 = TagForOffset(116);
   const auto di3 = TagForOffset(113);
@@ -25,15 +25,15 @@ TEST(DigitalInputEventProcessorTest, MapsGpioOffsetsToTags) {
 }
 
 // 验证：物理低电平（短接）转换为业务有效值 true。
-TEST(DigitalInputEventProcessorTest, ConvertsActiveLowPhysicalLevel) {
+TEST(BoardInputEventProcessorTest, ConvertsActiveLowPhysicalLevel) {
   EXPECT_TRUE(PhysicalLevelToLogical(false));
   EXPECT_FALSE(PhysicalLevelToLogical(true));
 }
 
 // 验证：严格 SOE 不发布启动初值，但收到首个边沿后发布该点状态。
-TEST(DigitalInputEventProcessorTest, PublishesFirstEdgeWithoutInitialSnapshot) {
-  std::vector<PublishedDigitalInput> published;
-  DigitalInputEventProcessor processor([&published](const PublishedDigitalInput& event) {
+TEST(BoardInputEventProcessorTest, PublishesFirstEdgeWithoutInitialSnapshot) {
+  std::vector<PublishedBoardInput> published;
+  BoardInputEventProcessor processor([&published](const PublishedBoardInput& event) {
     published.push_back(event);
     return true;
   });
@@ -47,9 +47,9 @@ TEST(DigitalInputEventProcessorTest, PublishesFirstEdgeWithoutInitialSnapshot) {
 }
 
 // 验证：同一电平重复事件不会产生重复 SOE，实际变位仍会发布。
-TEST(DigitalInputEventProcessorTest, PublishesOnlyWhenValueChanges) {
-  std::vector<PublishedDigitalInput> published;
-  DigitalInputEventProcessor processor([&published](const PublishedDigitalInput& event) {
+TEST(BoardInputEventProcessorTest, PublishesOnlyWhenValueChanges) {
+  std::vector<PublishedBoardInput> published;
+  BoardInputEventProcessor processor([&published](const PublishedBoardInput& event) {
     published.push_back(event);
     return true;
   });
@@ -65,9 +65,9 @@ TEST(DigitalInputEventProcessorTest, PublishesOnlyWhenValueChanges) {
 }
 
 // 验证：未知 GPIO offset 被忽略，不会错误发布到其他 DI 标签。
-TEST(DigitalInputEventProcessorTest, IgnoresUnknownOffset) {
-  std::vector<PublishedDigitalInput> published;
-  DigitalInputEventProcessor processor([&published](const PublishedDigitalInput& event) {
+TEST(BoardInputEventProcessorTest, IgnoresUnknownOffset) {
+  std::vector<PublishedBoardInput> published;
+  BoardInputEventProcessor processor([&published](const PublishedBoardInput& event) {
     published.push_back(event);
     return true;
   });
@@ -77,9 +77,9 @@ TEST(DigitalInputEventProcessorTest, IgnoresUnknownOffset) {
 }
 
 // 验证：DataCenter 发布失败时不确认状态，后续同值事件仍可重试发布。
-TEST(DigitalInputEventProcessorTest, RetriesAfterPublishFailure) {
+TEST(BoardInputEventProcessorTest, RetriesAfterPublishFailure) {
   int attempts = 0;
-  DigitalInputEventProcessor processor([&attempts](const PublishedDigitalInput&) {
+  BoardInputEventProcessor processor([&attempts](const PublishedBoardInput&) {
     ++attempts;
     return attempts > 1;
   });
@@ -90,4 +90,4 @@ TEST(DigitalInputEventProcessorTest, RetriesAfterPublishFailure) {
 }
 
 }  // namespace
-}  // namespace DigitalInput
+}  // namespace BoardIO

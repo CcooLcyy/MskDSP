@@ -1,4 +1,4 @@
-set(LIB_NAME DigitalInput)
+set(LIB_NAME BoardIO)
 set(VERSION_MAJOR 0)
 set(VERSION_MINOR 0)
 set(VERSION_PATCH 1)

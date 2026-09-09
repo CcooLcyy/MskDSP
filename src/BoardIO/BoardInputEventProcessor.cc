@@ -1,8 +1,8 @@
-#include "DigitalInputEventProcessor.hpp"
+#include "BoardInputEventProcessor.hpp"
 
 #include <utility>
 
-namespace DigitalInput {
+namespace BoardIO {
 
 std::optional<std::string_view> TagForOffset(uint32_t offset) {
   for (const auto& channel : kChannels) {
@@ -18,10 +18,10 @@ bool PhysicalLevelToLogical(bool physicalHigh) {
   return !physicalHigh;
 }
 
-DigitalInputEventProcessor::DigitalInputEventProcessor(PublishCallback publish) :
+BoardInputEventProcessor::BoardInputEventProcessor(PublishCallback publish) :
   publish_(std::move(publish)) {}
 
-bool DigitalInputEventProcessor::HandleEvent(const GpioEvent& event) {
+bool BoardInputEventProcessor::HandleEvent(const GpioEvent& event) {
   const auto tag = TagForOffset(event.offset);
   if (!tag.has_value()) {
     return false;
@@ -44,7 +44,7 @@ bool DigitalInputEventProcessor::HandleEvent(const GpioEvent& event) {
   }
 
   if (publish_) {
-    const bool published = publish_(PublishedDigitalInput{
+    const bool published = publish_(PublishedBoardInput{
         .tag = std::string(*tag),
         .value = logicalValue,
         .timestampMs = event.timestampMs,
@@ -57,10 +57,10 @@ bool DigitalInputEventProcessor::HandleEvent(const GpioEvent& event) {
   return true;
 }
 
-void DigitalInputEventProcessor::Reset() {
+void BoardInputEventProcessor::Reset() {
   for (auto& value : lastValues_) {
     value.reset();
   }
 }
 
-}  // namespace DigitalInput
+}  // namespace BoardIO

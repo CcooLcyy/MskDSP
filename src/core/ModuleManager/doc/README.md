@@ -79,7 +79,7 @@ extern "C" BOOST_SYMBOL_EXPORT bool GetModuleManifestPb(const uint8_t **data, si
     "AVC",
     "Calc",
     "ControlOrchestrator",
-    "DigitalInput"
+    "BoardIO"
   ]
 }
 ```

@@ -14,15 +14,15 @@
 #include <string_view>
 #include <system_error>
 
-#include "DigitalInputEventProcessor.hpp"
+#include "BoardInputEventProcessor.hpp"
 
-namespace DigitalInput {
+namespace BoardIO {
 namespace {
 
 constexpr int kPollTimeoutMs = 500;
 
 void CopyConsumerLabel(char* destination, std::size_t size) {
-  constexpr std::string_view kConsumer = "MskDSP DigitalInput";
+  constexpr std::string_view kConsumer = "MskDSP BoardIO Input";
   if (destination == nullptr || size == 0) {
     return;
   }
@@ -315,4 +315,4 @@ void GpioEventReader::SetError(std::string error) {
   lastError_ = std::move(error);
 }
 
-}  // namespace DigitalInput
+}  // namespace BoardIO

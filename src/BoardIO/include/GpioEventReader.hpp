@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-namespace DigitalInput {
+namespace BoardIO {
 
 struct GpioEvent;
 
@@ -44,4 +44,4 @@ private:
   std::string lastError_;
 };
 
-}  // namespace DigitalInput
+}  // namespace BoardIO
