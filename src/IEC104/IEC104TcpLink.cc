@@ -181,6 +181,17 @@ void TcpLink::SendSingleCommand(uint32_t ioa, bool value, bool useSelect) {
   s->SendSingleCommand(ioa, value, useSelect);
 }
 
+void TcpLink::SendRemoteControl(uint32_t ioa,
+                                IEC104Proto::RemoteControlType type,
+                                uint8_t value,
+                                IEC104Proto::CommandExecutionMode mode) {
+  auto s = session();
+  if (!s) {
+    return;
+  }
+  s->SendRemoteControl(ioa, type, value, mode);
+}
+
 void TcpLink::SendSetpointCommand(uint32_t ioa, double value) {
   auto s = session();
   if (!s) {

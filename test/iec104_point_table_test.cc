@@ -274,3 +274,50 @@ TEST(IEC104PointTableTest, RejectsConflictingMappings) {
   st = table.Upsert(req3.points(), req3.replace());
   EXPECT_EQ(st.error_code(), grpc::StatusCode::ALREADY_EXISTS);
 }
+
+// 验证：旧遥控点未填写新字段时按单点和选择执行规范化并完整序列化。
+TEST(IEC104PointTableTest, DefaultsLegacyRemoteControlOptions) {
+  PointTable table;
+  IEC104Proto::UpsertPointTableRequest req;
+  auto* point = req.add_points();
+  point->set_tag("legacy-remote-control");
+  point->set_ioa(0x6001);
+  point->set_type(IEC104Proto::POINT_TYPE_SINGLE);
+
+  ASSERT_TRUE(table.Upsert(req.points(), true).ok());
+  const auto stored = table.FindByTag("legacy-remote-control");
+  ASSERT_TRUE(stored.has_value());
+  EXPECT_EQ(stored->remoteControlType, IEC104Proto::REMOTE_CONTROL_TYPE_SINGLE);
+  EXPECT_EQ(stored->commandExecutionMode, IEC104Proto::COMMAND_EXECUTION_MODE_SELECT_EXECUTE);
+
+  IEC104Proto::PointTable out;
+  table.ToProto("conn-1", &out);
+  ASSERT_EQ(out.points_size(), 1);
+  EXPECT_EQ(out.points(0).remote_control_type(), IEC104Proto::REMOTE_CONTROL_TYPE_SINGLE);
+  EXPECT_EQ(out.points(0).command_execution_mode(), IEC104Proto::COMMAND_EXECUTION_MODE_SELECT_EXECUTE);
+}
+
+// 验证：业务类型未填写但 IOA 位于遥控区间时允许配置双点直接执行。
+TEST(IEC104PointTableTest, AcceptsInferredDoubleRemoteControlOptions) {
+  PointTable table;
+  IEC104Proto::UpsertPointTableRequest req;
+  auto* point = req.add_points();
+  point->set_tag("double-direct");
+  point->set_ioa(0x6002);
+  point->set_type(IEC104Proto::POINT_TYPE_SINGLE);
+  point->set_remote_control_type(IEC104Proto::REMOTE_CONTROL_TYPE_DOUBLE);
+  point->set_command_execution_mode(IEC104Proto::COMMAND_EXECUTION_MODE_DIRECT);
+
+  ASSERT_TRUE(table.Upsert(req.points(), true).ok());
+  const auto stored = table.FindByTag("double-direct");
+  ASSERT_TRUE(stored.has_value());
+  EXPECT_EQ(stored->businessType, IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_CONTROL);
+  EXPECT_EQ(stored->remoteControlType, IEC104Proto::REMOTE_CONTROL_TYPE_DOUBLE);
+  EXPECT_EQ(stored->commandExecutionMode, IEC104Proto::COMMAND_EXECUTION_MODE_DIRECT);
+
+  IEC104Proto::PointTable out;
+  table.ToProto("conn-1", &out);
+  ASSERT_EQ(out.points_size(), 1);
+  EXPECT_EQ(out.points(0).remote_control_type(), IEC104Proto::REMOTE_CONTROL_TYPE_DOUBLE);
+  EXPECT_EQ(out.points(0).command_execution_mode(), IEC104Proto::COMMAND_EXECUTION_MODE_DIRECT);
+}

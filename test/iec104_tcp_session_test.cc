@@ -30,6 +30,7 @@ constexpr uint8_t kTypeIdMeasuredValueShort = 13;
 constexpr uint8_t kTypeIdMeasuredValueShortWithTime = 36;
 constexpr uint8_t kTypeIdInterrogationCmd = 100;
 constexpr uint8_t kTypeIdSingleCommand = 45;
+constexpr uint8_t kTypeIdDoubleCommand = 46;
 constexpr uint8_t kTypeIdSetpointShort = 50;
 constexpr uint8_t kCotActivation = 6;
 constexpr uint8_t kCotActivationCon = 7;
@@ -148,6 +149,26 @@ std::vector<uint8_t> BuildSingleCommandAsdu(uint32_t ioa, bool value, bool selec
     sco |= kScoSelectMask;
   }
   asdu.emplace_back(sco);
+  return asdu;
+}
+
+std::vector<uint8_t> BuildDoubleCommandAsdu(uint32_t ioa, uint8_t value, bool select, uint8_t cause) {
+  std::vector<uint8_t> asdu;
+  asdu.reserve(10);
+  asdu.emplace_back(kTypeIdDoubleCommand);
+  asdu.emplace_back(0x01);
+  asdu.emplace_back(static_cast<uint8_t>(cause & 0x3F));
+  asdu.emplace_back(0x00);
+  asdu.emplace_back(0x01);
+  asdu.emplace_back(0x00);
+  asdu.emplace_back(static_cast<uint8_t>(ioa & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>((ioa >> 8) & 0xFF));
+  asdu.emplace_back(static_cast<uint8_t>((ioa >> 16) & 0xFF));
+  uint8_t dco = static_cast<uint8_t>(value & 0x03);
+  if (select) {
+    dco |= kScoSelectMask;
+  }
+  asdu.emplace_back(dco);
   return asdu;
 }
 
@@ -479,7 +500,7 @@ TEST(IEC104TcpSessionTest, SingleCommandSelectExecute) {
   io->stop();
 }
 
-// 验证未预置的遥控执行会返回否定确认且不回调命令。
+// 验证未预置的 S/E=0 单点遥控按直接执行处理并返回正确认和执行结束。
 TEST(IEC104TcpSessionTest, SingleCommandExecuteWithoutSelect) {
   auto io = std::make_shared<boost::asio::io_context>();
   auto sockets = MakeConnectedSockets(*io);
@@ -516,10 +537,227 @@ TEST(IEC104TcpSessionTest, SingleCommandExecuteWithoutSelect) {
   ASSERT_GT(exec_con.size(), 6u);
   EXPECT_EQ(exec_con[6], kTypeIdSingleCommand);
   EXPECT_EQ(static_cast<uint8_t>(exec_con[8] & 0x3F), kCotActivationCon);
-  EXPECT_NE(exec_con[8] & kCotNegative, 0);
+  EXPECT_EQ(exec_con[8] & kCotNegative, 0);
+
+  auto exec_term = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "EXEC_TERM");
+  ASSERT_FALSE(exec_term.empty());
+  EXPECT_EQ(exec_term[6], kTypeIdSingleCommand);
+  EXPECT_EQ(static_cast<uint8_t>(exec_term[8] & 0x3F), kCotActivationTermination);
 
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  EXPECT_TRUE(called.load());
+
+  session->Stop();
+  io->stop();
+}
+
+// 验证双点遥控预置后执行会保留 Type ID 和 DCO 状态并回调命令。
+TEST(IEC104TcpSessionTest, DoubleCommandSelectExecute) {
+  auto io = std::make_shared<boost::asio::io_context>();
+  auto sockets = MakeConnectedSockets(*io);
+
+  auto config = MakeConfig("double-select-execute", IEC104Proto::ROLE_SERVER, 2, 2, 1, 5, 8);
+  auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
+
+  std::promise<IEC104::CommandValue> cmdPromise;
+  session->SetCommandCallback([&](const IEC104::CommandValue& cv) {
+    cmdPromise.set_value(cv);
+    return IEC104::CommandResult{};
+  });
+  session->Start(std::move(sockets.session_socket));
+
+  std::jthread session_thread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [&]() { io->run(); });
+
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildUFrame(kUStartDtAct)));
+  ASSERT_FALSE(ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "STARTDT_CON").empty());
+
+  boost::asio::write(sockets.peer_socket,
+                     boost::asio::buffer(BuildIFrame(0, 0, BuildDoubleCommandAsdu(300, 2, true, kCotActivation))));
+  auto selectCon = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "DOUBLE_SELECT_CON");
+  ASSERT_GE(selectCon.size(), 16u);
+  EXPECT_EQ(selectCon[6], kTypeIdDoubleCommand);
+  EXPECT_EQ(selectCon[15] & 0x83, 0x82);
+
+  boost::asio::write(sockets.peer_socket,
+                     boost::asio::buffer(BuildIFrame(1, 0, BuildDoubleCommandAsdu(300, 2, false, kCotActivation))));
+  auto execCon = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "DOUBLE_EXEC_CON");
+  ASSERT_GE(execCon.size(), 16u);
+  EXPECT_EQ(execCon[6], kTypeIdDoubleCommand);
+  EXPECT_EQ(execCon[15] & 0x83, 0x02);
+  auto execTerm = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "DOUBLE_EXEC_TERM");
+  ASSERT_GE(execTerm.size(), 16u);
+  EXPECT_EQ(execTerm[6], kTypeIdDoubleCommand);
+
+  auto future = cmdPromise.get_future();
+  ASSERT_EQ(future.wait_for(std::chrono::milliseconds(500)), std::future_status::ready);
+  const auto command = future.get();
+  EXPECT_EQ(command.ioa, 300u);
+  EXPECT_EQ(command.type, IEC104Proto::POINT_TYPE_SINGLE);
+  EXPECT_EQ(command.remoteControlType, IEC104Proto::REMOTE_CONTROL_TYPE_DOUBLE);
+  EXPECT_EQ(command.controlValue, 2);
+  EXPECT_TRUE(command.boolValue);
+
+  session->Stop();
+  io->stop();
+}
+
+// 验证未预置的 S/E=0 双点遥控按直接执行处理并回调 DCO 状态。
+TEST(IEC104TcpSessionTest, DoubleCommandDirectExecute) {
+  auto io = std::make_shared<boost::asio::io_context>();
+  auto sockets = MakeConnectedSockets(*io);
+
+  auto config = MakeConfig("double-direct-execute", IEC104Proto::ROLE_SERVER, 2, 2, 1, 5, 8);
+  auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
+
+  std::promise<IEC104::CommandValue> cmdPromise;
+  session->SetCommandCallback([&](const IEC104::CommandValue& cv) {
+    cmdPromise.set_value(cv);
+    return IEC104::CommandResult{};
+  });
+  session->Start(std::move(sockets.session_socket));
+
+  std::jthread session_thread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [&]() { io->run(); });
+
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildUFrame(kUStartDtAct)));
+  ASSERT_FALSE(ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "STARTDT_CON").empty());
+
+  boost::asio::write(sockets.peer_socket,
+                     boost::asio::buffer(BuildIFrame(0, 0, BuildDoubleCommandAsdu(302, 1, false, kCotActivation))));
+  auto execCon = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "DOUBLE_DIRECT_CON");
+  auto execTerm = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "DOUBLE_DIRECT_TERM");
+  ASSERT_GE(execCon.size(), 16u);
+  ASSERT_GE(execTerm.size(), 16u);
+  EXPECT_EQ(execCon[6], kTypeIdDoubleCommand);
+  EXPECT_EQ(execCon[8] & kCotNegative, 0);
+  EXPECT_EQ(execCon[15] & 0x83, 0x01);
+  EXPECT_EQ(static_cast<uint8_t>(execTerm[8] & 0x3F), kCotActivationTermination);
+
+  auto future = cmdPromise.get_future();
+  ASSERT_EQ(future.wait_for(std::chrono::milliseconds(500)), std::future_status::ready);
+  const auto command = future.get();
+  EXPECT_EQ(command.remoteControlType, IEC104Proto::REMOTE_CONTROL_TYPE_DOUBLE);
+  EXPECT_EQ(command.controlValue, 1);
+  EXPECT_FALSE(command.boolValue);
+
+  session->Stop();
+  io->stop();
+}
+
+// 验证双点遥控拒绝 DCO=0/3 非法状态且不会触发业务回调。
+TEST(IEC104TcpSessionTest, DoubleCommandRejectsInvalidState) {
+  auto io = std::make_shared<boost::asio::io_context>();
+  auto sockets = MakeConnectedSockets(*io);
+
+  auto config = MakeConfig("double-invalid-state", IEC104Proto::ROLE_SERVER, 2, 2, 1, 5, 8);
+  auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
+  std::atomic<bool> called{false};
+  session->SetCommandCallback([&](const IEC104::CommandValue&) {
+    called = true;
+    return IEC104::CommandResult{};
+  });
+  session->Start(std::move(sockets.session_socket));
+
+  std::jthread session_thread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [&]() { io->run(); });
+
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildUFrame(kUStartDtAct)));
+  ASSERT_FALSE(ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "STARTDT_CON").empty());
+
+  boost::asio::write(sockets.peer_socket,
+                     boost::asio::buffer(BuildIFrame(0, 0, BuildDoubleCommandAsdu(301, 3, false, kCotActivation))));
+  auto negativeCon = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "DOUBLE_INVALID_CON");
+  ASSERT_GE(negativeCon.size(), 16u);
+  EXPECT_EQ(negativeCon[6], kTypeIdDoubleCommand);
+  EXPECT_NE(negativeCon[8] & kCotNegative, 0);
+  EXPECT_EQ(negativeCon[15] & 0x03, 0x03);
   EXPECT_FALSE(called.load());
+
+  session->Stop();
+  io->stop();
+}
+
+// 验证已预置遥控存在时，值不一致的执行帧被否定且不会降级为直接执行。
+TEST(IEC104TcpSessionTest, RemoteControlRejectsMismatchedSelectedValue) {
+  auto io = std::make_shared<boost::asio::io_context>();
+  auto sockets = MakeConnectedSockets(*io);
+
+  auto config = MakeConfig("remote-control-mismatch", IEC104Proto::ROLE_SERVER, 2, 2, 1, 5, 8);
+  auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
+  std::atomic<bool> called{false};
+  session->SetCommandCallback([&](const IEC104::CommandValue&) {
+    called = true;
+    return IEC104::CommandResult{};
+  });
+  session->Start(std::move(sockets.session_socket));
+
+  std::jthread session_thread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [&]() { io->run(); });
+
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildUFrame(kUStartDtAct)));
+  ASSERT_FALSE(ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "STARTDT_CON").empty());
+  boost::asio::write(sockets.peer_socket,
+                     boost::asio::buffer(BuildIFrame(0, 0, BuildSingleCommandAsdu(303, true, true, kCotActivation))));
+  ASSERT_FALSE(ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "SELECT_CON").empty());
+
+  boost::asio::write(sockets.peer_socket,
+                     boost::asio::buffer(BuildIFrame(1, 0, BuildSingleCommandAsdu(303, false, false, kCotActivation))));
+  auto negativeCon = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "MISMATCH_CON");
+  ASSERT_GE(negativeCon.size(), 16u);
+  EXPECT_NE(negativeCon[8] & kCotNegative, 0);
+  EXPECT_FALSE(called.load());
+
+  session->Stop();
+  io->stop();
+}
+
+// 验证主站按遥控类型和执行方式编码直接双点命令及单点选择执行命令。
+TEST(IEC104TcpSessionTest, SendsConfiguredRemoteControlCommands) {
+  auto io = std::make_shared<boost::asio::io_context>();
+  auto sockets = MakeConnectedSockets(*io);
+
+  auto config = MakeConfig("send-remote-control", IEC104Proto::ROLE_CLIENT, 2, 2, 1, 5, 8);
+  auto session = std::make_shared<IEC104::TcpSession>(*io, config, true);
+  session->Start(std::move(sockets.session_socket));
+
+  std::jthread session_thread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [&]() { io->run(); });
+
+  ASSERT_FALSE(ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "STARTDT_ACT").empty());
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildUFrame(kUStartDtCon)));
+  ASSERT_FALSE(ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "INTERROGATION").empty());
+
+  session->SendRemoteControl(400,
+                             IEC104Proto::REMOTE_CONTROL_TYPE_DOUBLE,
+                             1,
+                             IEC104Proto::COMMAND_EXECUTION_MODE_DIRECT);
+  auto direct = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "DOUBLE_DIRECT");
+  ASSERT_GE(direct.size(), 16u);
+  EXPECT_EQ(direct[6], kTypeIdDoubleCommand);
+  EXPECT_EQ(direct[15] & 0x83, 0x01);
+
+  session->SendRemoteControl(401,
+                             IEC104Proto::REMOTE_CONTROL_TYPE_SINGLE,
+                             1,
+                             IEC104Proto::COMMAND_EXECUTION_MODE_SELECT_EXECUTE);
+  auto select = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "SINGLE_SELECT");
+  ASSERT_GE(select.size(), 16u);
+  EXPECT_EQ(select[6], kTypeIdSingleCommand);
+  EXPECT_EQ(select[15] & 0x81, 0x81);
+  EXPECT_FALSE(WaitReadable(sockets.peer_socket, std::chrono::milliseconds(200)));
+
+  auto selectCon = BuildSingleCommandAsdu(401, true, true, kCotActivationCon);
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildIFrame(0, 0, selectCon)));
+  auto execute = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "SINGLE_EXECUTE");
+  ASSERT_GE(execute.size(), 16u);
+  EXPECT_EQ(execute[6], kTypeIdSingleCommand);
+  EXPECT_EQ(execute[15] & 0x81, 0x01);
 
   session->Stop();
   io->stop();

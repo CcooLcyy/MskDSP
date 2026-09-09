@@ -32,6 +32,9 @@ struct PointValue {
 struct CommandValue {
   uint32_t ioa = 0;
   IEC104Proto::PointType type = IEC104Proto::POINT_TYPE_UNSPECIFIED;
+  IEC104Proto::RemoteControlType remoteControlType =
+      IEC104Proto::REMOTE_CONTROL_TYPE_SINGLE;
+  uint8_t controlValue = 0;
   bool boolValue = false;
   double doubleValue = 0.0;
 };
@@ -61,6 +64,10 @@ public:
   void SendPointValue(const PointValue& value, uint8_t cause);
   void SendTimeSync(int64_t tsMs);
   void SendSingleCommand(uint32_t ioa, bool value, bool useSelect);
+  void SendRemoteControl(uint32_t ioa,
+                         IEC104Proto::RemoteControlType type,
+                         uint8_t value,
+                         IEC104Proto::CommandExecutionMode mode);
   void SendSetpointCommand(uint32_t ioa, double value);
   void SetPointValueCallback(PointValueCallback cb);
   void SetInterrogationSnapshotProvider(SnapshotProvider provider);

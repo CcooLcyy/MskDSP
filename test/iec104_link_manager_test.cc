@@ -844,8 +844,12 @@ TEST(IEC104LinkManagerTest, HandleCommandValueExecutesWhenSlave) {
 
   IEC104Proto::UpsertPointTableRequest ptReq;
   ptReq.set_conn_name("conn-cmd");
-  *ptReq.add_points() = MakePoint("F", 12);
-  *ptReq.add_points() = MakeBoolPoint("C", 13);
+  auto* remoteAdjust = ptReq.add_points();
+  *remoteAdjust = MakePoint("F", 12);
+  remoteAdjust->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_ADJUST);
+  auto* remoteControl = ptReq.add_points();
+  *remoteControl = MakeBoolPoint("C", 13);
+  remoteControl->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_CONTROL);
   ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
 
   CommandValue cv;

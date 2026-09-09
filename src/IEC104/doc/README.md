@@ -3,7 +3,7 @@
 ## 简介
 IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并通过 DataCenter 完成“点值转发/路由”的闭环。
 
-当前实现聚焦：**短浮点遥测（M_ME_NC_1/M_ME_TF_1）**、**单点遥信（M_SP_NA_1/M_SP_TB_1）**、**单点遥控（C_SC_NA_1，选择-执行）** 与 **短浮点设点（C_SE_NC_1）**。
+当前实现聚焦：**短浮点遥测（M_ME_NC_1/M_ME_TF_1）**、**单点遥信（M_SP_NA_1/M_SP_TB_1）**、**单点/双点遥控（C_SC_NA_1/C_DC_NA_1，直接执行或选择执行）** 与 **短浮点设点（C_SE_NC_1）**。
 
 ## 能力清单
 - 传输角色 `role`：Server / Client（决定 TCP 监听/连接）
@@ -21,7 +21,7 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
 - 点值合包：自发点值支持窗口合包与 IOA 顺序打包，连续 IOA 使用 SQ=1 压缩；总召快照按帧大小批量打包
 - 对时：STATION_ROLE_MASTER 可通过 `time_sync_tag` 订阅触发或 gRPC `SendTimeSync` 主动触发；STATION_ROLE_SLAVE 收到对时命令后发布事件到 DataCenter
 - 时标：发送默认使用不带时标类型（`M_SP_NA_1`/`M_ME_NC_1`），可通过 `point_with_time` 切换为带时标；接收兼容带/不带时标类型
-- 遥控/设点：主站通过 DataCenter 订阅命令触发发送 `C_SC_NA_1`（预置+执行）与 `C_SE_NC_1`；从站收到命令后发布到 DataCenter
+- 遥控/设点：主站通过 DataCenter 订阅命令触发发送 `C_SC_NA_1`、`C_DC_NA_1` 与 `C_SE_NC_1`；遥控点可分别配置直接执行或选择执行，从站收到命令后同步转交 DataCenter
 
 ## 接口与协议
 - Protobuf：`protobuf/IEC104.proto`
@@ -60,7 +60,8 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
 - `deadband`：工程量单位；`|value - last_reported| < deadband` 时不上报，<=0 表示不过滤，仅对短浮点生效。
 - `deadband` 同时作用于 STATION_ROLE_MASTER 发布与 STATION_ROLE_SLAVE 自发上送，总召快照不受 deadband 影响。
 - STATION_ROLE_MASTER 收到短浮点后按 `scale/offset` 转为工程量再发布；STATION_ROLE_SLAVE 上送短浮点时按 `scale/offset` 反向换算；单点遥信忽略这些字段。
-- 遥控/设点复用同一张点表：`POINT_TYPE_SINGLE` 作为单点遥控，`POINT_TYPE_FLOAT` 作为短浮点设点；设点按 `scale/offset` 做工程量换算。
+- 遥控/设点复用同一张点表：`POINT_TYPE_SINGLE` 作为遥控布尔业务值，`POINT_TYPE_FLOAT` 作为短浮点设点；遥控通过 `remote_control_type` 区分 `C_SC_NA_1` 单点与 `C_DC_NA_1` 双点，通过 `command_execution_mode` 区分直接执行与选择执行。设点按 `scale/offset` 做工程量换算。
+- 旧点表未填写遥控字段时兼容为 `REMOTE_CONTROL_TYPE_SINGLE` 与 `COMMAND_EXECUTION_MODE_SELECT_EXECUTE`；两个字段仅对 `POINT_BUSINESS_TYPE_REMOTE_CONTROL` 生效。
 
 ConfigPusher 点表示例（含 scale/offset/deadband，字段可省略，默认 scale=1、offset=0、deadband=0）：
 ```jsonc
@@ -85,7 +86,9 @@ ConfigPusher 点表示例（含 scale/offset/deadband，字段可省略，默认
 
 ### 遥控/设点（命令触发）
 - 触发方式：上位机或其他模块通过 DataCenter 路由将命令写入 IEC104 的稳定端点；IEC104 主站按当前 `conn_id + tag` 订阅后发送命令。
-- 单点遥控：`POINT_TYPE_SINGLE`，DataCenter value 使用 `bool`（或 int/double 非 0 视为 true）；IEC104 发送 `C_SC_NA_1`，先预置再执行。
+- 单点遥控：`remote_control_type=REMOTE_CONTROL_TYPE_SINGLE`，DataCenter value 使用 `bool`（或 int/double 非 0 视为 true），IEC104 发送 `C_SC_NA_1`。
+- 双点遥控：`remote_control_type=REMOTE_CONTROL_TYPE_DOUBLE`，DataCenter value 推荐使用 `int64`（`1=分`、`2=合`）；兼容 BOOL 时 `false/true` 分别映射为 `1/2`。IEC104 发送 `C_DC_NA_1`，DCO `0/3` 视为非法状态并拒绝。
+- 执行方式：`COMMAND_EXECUTION_MODE_DIRECT` 只发送 `S/E=0`；`COMMAND_EXECUTION_MODE_SELECT_EXECUTE` 先发送 `S/E=1`，收到选择正确认后再发送 `S/E=0`。从站选择缓存超时为 10 秒，并校验类型、IOA 与命令值。
 - 短浮点设点：`POINT_TYPE_FLOAT`，DataCenter value 使用 `double`（或 int 转换为 double）；IEC104 发送 `C_SE_NC_1`（执行）。
 - 设点工程量：DataCenter 侧提供工程量；IEC104 发送前按 `scale/offset` 反向换算为原始值；从站收到命令后按 `scale/offset` 正向换算再发布到 DataCenter。
 - 从站收到遥控/设点后，通过 DataCenter 同步等待目标模块执行结果，默认等待 `8000ms`，用于覆盖 ModbusRTU MQTT UART 默认 `3000ms` 请求、同总线在途轮询及内部转发开销；目标模块超时或拒绝时返回 IEC104 负确认。
@@ -189,7 +192,7 @@ ctest --test-dir build -R iec104TcpSession_test --output-on-failure
 ```
 
 ## 未实现/后续计划
-- 协议类型：目前支持单点遥信 `M_SP_TB_1`、短浮点遥测 `M_ME_TF_1`、总召 `C_IC_NA_1`、单点遥控 `C_SC_NA_1` 与短浮点设点 `C_SE_NC_1`；双点遥控/归一化设点等未实现
+- 协议类型：目前支持单点遥信 `M_SP_NA_1/M_SP_TB_1`、短浮点遥测 `M_ME_NC_1/M_ME_TF_1`、总召 `C_IC_NA_1`、单点/双点遥控 `C_SC_NA_1/C_DC_NA_1` 与短浮点设点 `C_SE_NC_1`；双点遥信、归一化设点等未实现
 - 链路层完善：已支持 `k/w` 与 `t0–t3`；未实现 I 帧重传策略与更细粒度链路统计
 - 报文打包：当前仅覆盖短浮点与单点遥信类型，其他类型未实现
 - 多主站/多会话：Server 模式当前同一 `conn_name` 只保留一个活动连接；多主站并发、会话级隔离策略未实现

@@ -65,6 +65,10 @@ public:
   void SendPointValue(const PointValue& value, uint8_t cause);
   void SendTimeSync(int64_t tsMs);
   void SendSingleCommand(uint32_t ioa, bool value, bool useSelect);
+  void SendRemoteControl(uint32_t ioa,
+                         IEC104Proto::RemoteControlType type,
+                         uint8_t value,
+                         IEC104Proto::CommandExecutionMode mode);
   void SendSetpointCommand(uint32_t ioa, double value);
 
   void SetPointValueCallback(PointValueCallback cb);
@@ -137,11 +141,14 @@ private:
   bool pointDedupe_ = true;
   bool pointFlushScheduled_ = false;
 
-  struct SingleCommandSelect {
-    bool value = false;
+  struct RemoteControlSelect {
+    IEC104Proto::RemoteControlType type = IEC104Proto::REMOTE_CONTROL_TYPE_SINGLE;
+    uint8_t value = 0;
     std::chrono::steady_clock::time_point time;
   };
-  std::unordered_map<uint32_t, SingleCommandSelect> singleCommandSelectByIoa_;
+  std::unordered_map<uint32_t, RemoteControlSelect> remoteControlSelectByIoa_;
+  std::unordered_map<uint32_t, RemoteControlSelect> outgoingRemoteControlByIoa_;
+  std::unordered_map<uint32_t, std::shared_ptr<boost::asio::steady_timer>> outgoingRemoteControlTimersByIoa_;
   bool pointWithTime_ = false;
 
   void handleRead();
@@ -154,6 +161,9 @@ private:
   void handleMeasuredValue(const std::vector<uint8_t>& asdu, bool withTime);
   void handleSinglePoint(const std::vector<uint8_t>& asdu, bool withTime);
   void handleSingleCommand(const std::vector<uint8_t>& asdu);
+  void handleDoubleCommand(const std::vector<uint8_t>& asdu);
+  void handleRemoteControlCommand(const std::vector<uint8_t>& asdu,
+                                  IEC104Proto::RemoteControlType type);
   void handleSetpointCommand(const std::vector<uint8_t>& asdu);
   void handleTimeSyncCommand(const std::vector<uint8_t>& asdu);
   void handleInterrogation(const std::vector<uint8_t>& asdu);
@@ -201,6 +211,12 @@ private:
                                               bool select,
                                               uint8_t cause,
                                               bool positive) const;
+  std::vector<uint8_t> buildRemoteControlAsdu(uint32_t ioa,
+                                              IEC104Proto::RemoteControlType type,
+                                              uint8_t value,
+                                              bool select,
+                                              uint8_t cause,
+                                              bool positive) const;
   std::vector<uint8_t> buildSetpointCommandAsdu(uint32_t ioa,
                                                 double value,
                                                 bool select,
@@ -219,6 +235,12 @@ private:
   void sendAutoInterrogation(uint8_t qoi);
   void sendTimeSync(int64_t tsMs);
   void sendSingleCommand(uint32_t ioa, bool value, bool select);
+  void sendRemoteControl(uint32_t ioa,
+                         IEC104Proto::RemoteControlType type,
+                         uint8_t value,
+                         bool select);
+  void cancelOutgoingRemoteControl(uint32_t ioa);
+  void clearRemoteControlState();
   void sendSetpointCommand(uint32_t ioa, double value);
   void initPointBatchSettings();
 

@@ -22,6 +22,10 @@ public:
     double scale = 1.0;
     double offset = 0.0;
     double deadband = 0.0;
+    IEC104Proto::RemoteControlType remoteControlType =
+        IEC104Proto::REMOTE_CONTROL_TYPE_SINGLE;
+    IEC104Proto::CommandExecutionMode commandExecutionMode =
+        IEC104Proto::COMMAND_EXECUTION_MODE_SELECT_EXECUTE;
   };
 
   grpc::Status Upsert(const google::protobuf::RepeatedPtrField<IEC104Proto::Point>& points, bool replace);

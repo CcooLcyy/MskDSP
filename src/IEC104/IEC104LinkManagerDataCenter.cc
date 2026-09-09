@@ -112,6 +112,25 @@ bool pointValueToBool(const DataCenterProto::PointValue& v, bool* out) {
   }
 }
 
+bool pointValueToDoubleControl(const DataCenterProto::PointValue& value, uint8_t* out) {
+  if (out == nullptr) {
+    return false;
+  }
+  switch (value.kind_case()) {
+  case DataCenterProto::PointValue::kIntValue:
+    if (value.int_value() != 1 && value.int_value() != 2) {
+      return false;
+    }
+    *out = static_cast<uint8_t>(value.int_value());
+    return true;
+  case DataCenterProto::PointValue::kBoolValue:
+    *out = value.bool_value() ? 2 : 1;
+    return true;
+  default:
+    return false;
+  }
+}
+
 grpc::Status makeNotFound(const std::string& connName) {
   return grpc::Status(grpc::StatusCode::NOT_FOUND, std::format("未找到链路: {}", connName));
 }
@@ -382,29 +401,39 @@ void LinkManager::startCommandSubscribeLocked(const std::string& connName, LinkR
   }
   stopCommandSubscribeLocked(link);
 
-  auto tags = link->pointTable.Tags();
-  const auto timeSyncTag = normalizeTimeSyncTag(link->config);
-  if (!timeSyncTag.empty()) {
-    tags.erase(std::remove(tags.begin(), tags.end(), timeSyncTag), tags.end());
-  }
-  if (tags.empty()) {
-    LOG_INFO("IEC104 命令订阅无可用点: conn_name={}", connName);
-    return;
-  }
-
   struct PointMeta {
     uint32_t ioa = 0;
     IEC104Proto::PointType type = IEC104Proto::POINT_TYPE_UNSPECIFIED;
+    IEC104Proto::PointBusinessType businessType = IEC104Proto::POINT_BUSINESS_TYPE_UNSPECIFIED;
+    IEC104Proto::RemoteControlType remoteControlType = IEC104Proto::REMOTE_CONTROL_TYPE_SINGLE;
+    IEC104Proto::CommandExecutionMode commandExecutionMode =
+        IEC104Proto::COMMAND_EXECUTION_MODE_SELECT_EXECUTE;
     double scale = 1.0;
     double offset = 0.0;
   };
+  std::vector<std::string> tags;
   std::unordered_map<std::string, PointMeta> metaByTag;
-  metaByTag.reserve(tags.size());
-  for (const auto& tag : tags) {
+  const auto pointTags = link->pointTable.Tags();
+  metaByTag.reserve(pointTags.size());
+  tags.reserve(pointTags.size());
+  for (const auto& tag : pointTags) {
     auto p = link->pointTable.FindByTag(tag);
-    if (p) {
-      metaByTag.emplace(tag, PointMeta{p->ioa, p->type, p->scale, p->offset});
+    if (!p || (p->businessType != IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_CONTROL
+               && p->businessType != IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_ADJUST)) {
+      continue;
     }
+    tags.emplace_back(tag);
+    metaByTag.emplace(tag, PointMeta{p->ioa,
+                                     p->type,
+                                     p->businessType,
+                                     p->remoteControlType,
+                                     p->commandExecutionMode,
+                                     p->scale,
+                                     p->offset});
+  }
+  if (tags.empty()) {
+    LOG_INFO("IEC104 命令订阅无遥控或遥调点: conn_name={}", connName);
+    return;
   }
 
   auto* transport = link->transport.get();
@@ -435,7 +464,11 @@ void LinkManager::startCommandSubscribeLocked(const std::string& connName, LinkR
       if (it == metaByTag.end()) {
         continue;
       }
-      if (it->second.type == IEC104Proto::POINT_TYPE_FLOAT) {
+      if (it->second.businessType == IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_ADJUST) {
+        if (it->second.type != IEC104Proto::POINT_TYPE_FLOAT) {
+          LOG_WARNING("IEC104 遥调点协议类型不是浮点: conn_name={}, tag={}", connName, update.dst_tag());
+          continue;
+        }
         double value = 0;
         if (!pointValueToDouble(update.value(), &value)) {
           LOG_DEBUG("IEC104 设点点值类型不匹配: conn_name={}, tag={}", connName, update.dst_tag());
@@ -448,14 +481,34 @@ void LinkManager::startCommandSubscribeLocked(const std::string& connName, LinkR
         }
         LOG_INFO("IEC104 触发设点命令: conn_name={}, tag={}, ioa={}, value={}", connName, update.dst_tag(), it->second.ioa, value);
         transport->SendSetpointCommand(it->second.ioa, rawValue);
-      } else if (it->second.type == IEC104Proto::POINT_TYPE_SINGLE) {
-        bool value = false;
-        if (!pointValueToBool(update.value(), &value)) {
-          LOG_DEBUG("IEC104 遥控点值类型不匹配: conn_name={}, tag={}", connName, update.dst_tag());
+      } else if (it->second.businessType == IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_CONTROL) {
+        if (it->second.type != IEC104Proto::POINT_TYPE_SINGLE) {
+          LOG_WARNING("IEC104 遥控点协议类型不是单点: conn_name={}, tag={}", connName, update.dst_tag());
           continue;
         }
-        LOG_INFO("IEC104 触发遥控命令: conn_name={}, tag={}, ioa={}, value={}", connName, update.dst_tag(), it->second.ioa, value);
-        transport->SendSingleCommand(it->second.ioa, value, true);
+        uint8_t value = 0;
+        if (it->second.remoteControlType == IEC104Proto::REMOTE_CONTROL_TYPE_DOUBLE) {
+          if (!pointValueToDoubleControl(update.value(), &value)) {
+            LOG_WARNING("IEC104 双点遥控值非法，要求 int64 1/2 或 BOOL: conn_name={}, tag={}",
+                        connName, update.dst_tag());
+            continue;
+          }
+        } else {
+          bool boolValue = false;
+          if (!pointValueToBool(update.value(), &boolValue)) {
+            LOG_DEBUG("IEC104 单点遥控值类型不匹配: conn_name={}, tag={}", connName, update.dst_tag());
+            continue;
+          }
+          value = boolValue ? 1 : 0;
+        }
+        LOG_INFO("IEC104 触发遥控命令: conn_name={}, tag={}, ioa={}, type={}, value={}, mode={}",
+                 connName, update.dst_tag(), it->second.ioa,
+                 static_cast<int>(it->second.remoteControlType), value,
+                 static_cast<int>(it->second.commandExecutionMode));
+        transport->SendRemoteControl(it->second.ioa,
+                                     it->second.remoteControlType,
+                                     value,
+                                     it->second.commandExecutionMode);
       }
     }
 
@@ -567,6 +620,8 @@ CommandResult LinkManager::handleCommandValue(const std::string& connName, const
   uint32_t connId = 0;
   std::string tag;
   IEC104Proto::PointType type = IEC104Proto::POINT_TYPE_UNSPECIFIED;
+  IEC104Proto::PointBusinessType businessType = IEC104Proto::POINT_BUSINESS_TYPE_UNSPECIFIED;
+  IEC104Proto::RemoteControlType remoteControlType = IEC104Proto::REMOTE_CONTROL_TYPE_SINGLE;
   double scale = 1.0;
   double offset = 0.0;
   {
@@ -586,6 +641,8 @@ CommandResult LinkManager::handleCommandValue(const std::string& connName, const
     }
     tag = p->tag;
     type = p->type;
+    businessType = p->businessType;
+    remoteControlType = p->remoteControlType;
     scale = p->scale;
     offset = p->offset;
   }
@@ -607,6 +664,11 @@ CommandResult LinkManager::handleCommandValue(const std::string& connName, const
   req.set_request_id(std::format("IEC104:{}:{}", connName, cv.ioa));
 
   if (type == IEC104Proto::POINT_TYPE_FLOAT) {
+    if (businessType != IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_ADJUST) {
+      LOG_WARNING("IEC104 设点命令目标不是遥调点: conn_name={}, tag={}, business_type={}",
+                  connName, tag, static_cast<int>(businessType));
+      return rejectCommand("IEC104 设点命令目标不是遥调点");
+    }
     const double engValue = applyScale(cv.doubleValue, scale, offset);
     req.mutable_value()->set_double_value(engValue);
     DataCenterProto::ExecuteCommandResponse resp;
@@ -636,7 +698,26 @@ CommandResult LinkManager::handleCommandValue(const std::string& connName, const
   }
 
   if (type == IEC104Proto::POINT_TYPE_SINGLE) {
-    req.mutable_value()->set_bool_value(cv.boolValue);
+    if (businessType != IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_CONTROL) {
+      LOG_WARNING("IEC104 遥控命令目标不是遥控点: conn_name={}, tag={}, business_type={}",
+                  connName, tag, static_cast<int>(businessType));
+      return rejectCommand("IEC104 遥控命令目标不是遥控点");
+    }
+    if (cv.remoteControlType != remoteControlType) {
+      LOG_WARNING("IEC104 遥控命令类型不一致: conn_name={}, tag={}, 配置类型={}, 实际类型={}",
+                  connName, tag, static_cast<int>(remoteControlType), static_cast<int>(cv.remoteControlType));
+      return rejectCommand("IEC104 遥控命令类型不一致");
+    }
+    if (remoteControlType == IEC104Proto::REMOTE_CONTROL_TYPE_DOUBLE) {
+      if (cv.controlValue != 1 && cv.controlValue != 2) {
+        LOG_WARNING("IEC104 双点遥控状态非法: conn_name={}, tag={}, value={}",
+                    connName, tag, cv.controlValue);
+        return rejectCommand("IEC104 双点遥控状态非法");
+      }
+      req.mutable_value()->set_int_value(cv.controlValue);
+    } else {
+      req.mutable_value()->set_bool_value(cv.boolValue);
+    }
     DataCenterProto::ExecuteCommandResponse resp;
     auto st = dataCenter_.ExecuteCommand(req, &resp);
     if (!st.ok()) {
@@ -653,13 +734,19 @@ CommandResult LinkManager::handleCommandValue(const std::string& connName, const
       LOG_WARNING("IEC104 遥控被同步命令链路拒绝: conn_name={}, tag={}, value={}, status={}, reject_code={}, 原因={}",
                   connName,
                   tag,
-                  cv.boolValue,
+                  remoteControlType == IEC104Proto::REMOTE_CONTROL_TYPE_DOUBLE
+                      ? static_cast<int>(cv.controlValue)
+                      : static_cast<int>(cv.boolValue),
                   static_cast<int>(resp.status()),
                   static_cast<int>(resp.reject_code()),
                   reason);
       return rejectCommand(reason);
     }
-    LOG_INFO("IEC104 遥控同步执行成功: conn_name={}, tag={}, value={}", connName, tag, cv.boolValue);
+    LOG_INFO("IEC104 遥控同步执行成功: conn_name={}, tag={}, type={}, value={}",
+             connName, tag, static_cast<int>(remoteControlType),
+             remoteControlType == IEC104Proto::REMOTE_CONTROL_TYPE_DOUBLE
+                 ? static_cast<int>(cv.controlValue)
+                 : static_cast<int>(cv.boolValue));
     return CommandResult{};
   }
 

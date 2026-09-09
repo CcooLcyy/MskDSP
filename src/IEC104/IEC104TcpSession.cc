@@ -25,6 +25,7 @@ constexpr uint8_t kTypeIdSinglePointWithTime = 30;         // M_SP_TB_1
 constexpr uint8_t kTypeIdMeasuredValueShort = 13;          // M_ME_NC_1
 constexpr uint8_t kTypeIdMeasuredValueShortWithTime = 36;  // M_ME_TF_1
 constexpr uint8_t kTypeIdSingleCommand = 45;               // C_SC_NA_1
+constexpr uint8_t kTypeIdDoubleCommand = 46;               // C_DC_NA_1
 constexpr uint8_t kTypeIdSetpointShort = 50;               // C_SE_NC_1
 constexpr uint8_t kTypeIdInterrogationCmd = 100;           // C_IC_NA_1
 constexpr uint8_t kTypeIdTimeSyncCmd = 103;                // C_CS_NA_1
@@ -39,6 +40,7 @@ constexpr uint8_t kQoiStation = 20;
 
 constexpr uint8_t kScoSelectMask = 0x80;
 constexpr uint8_t kScoValueMask = 0x01;
+constexpr uint8_t kDcoValueMask = 0x03;
 constexpr uint8_t kQosSelectMask = 0x80;
 
 constexpr char kHexDigits[] = "0123456789ABCDEF";
@@ -53,7 +55,7 @@ constexpr uint32_t kMeasuredValueSq1ObjectSize = 5;
 constexpr uint32_t kCp56Time2aSize = 7;
 constexpr uint32_t kMinMeasuredValueAsduBytes = kAsduHeaderSize + 3 + 4 + 1 + kCp56Time2aSize;
 constexpr uint32_t kDefaultPointBatchWindowMs = 20;
-constexpr std::chrono::seconds kSingleCommandSelectTimeout{10};
+constexpr std::chrono::seconds kRemoteControlSelectTimeout{10};
 
 size_t maxSq0Objects(uint32_t maxAsduBytes, uint32_t objectSize) {
   if (maxAsduBytes <= kAsduHeaderSize) {
@@ -146,6 +148,7 @@ void TcpSession::Start(boost::asio::ip::tcp::socket socket) {
   recvSinceLastAck_ = 0;
   pendingAsdu_.clear();
   writeQueue_.clear();
+  clearRemoteControlState();
   writing_ = false;
 
   LOG_INFO("IEC104 会话启动: conn_name={}, 角色={}, k={}, w={}, t0={}, t1={}, t2={}, t3={}", config_.conn_name(), isClient_ ? "客户端" : "服务端", apci_.k, apci_.w, apci_.t0, apci_.t1, apci_.t2, apci_.t3);
@@ -186,7 +189,7 @@ void TcpSession::Stop() {
     self->pointPendingByKey_.clear();
     self->pointPending_.clear();
     self->pointFlushScheduled_ = false;
-    self->singleCommandSelectByIoa_.clear();
+    self->clearRemoteControlState();
     self->writing_ = false;
     if (onClosed) {
       onClosed();
@@ -233,16 +236,70 @@ void TcpSession::SendTimeSync(int64_t tsMs) {
 }
 
 void TcpSession::SendSingleCommand(uint32_t ioa, bool value, bool useSelect) {
-  boost::asio::post(io_, [self = shared_from_this(), ioa, value, useSelect]() {
+  SendRemoteControl(ioa,
+                    IEC104Proto::REMOTE_CONTROL_TYPE_SINGLE,
+                    value ? 1 : 0,
+                    useSelect ? IEC104Proto::COMMAND_EXECUTION_MODE_SELECT_EXECUTE
+                              : IEC104Proto::COMMAND_EXECUTION_MODE_DIRECT);
+}
+
+void TcpSession::SendRemoteControl(uint32_t ioa,
+                                   IEC104Proto::RemoteControlType type,
+                                   uint8_t value,
+                                   IEC104Proto::CommandExecutionMode mode) {
+  boost::asio::post(io_, [self = shared_from_this(), ioa, type, value, mode]() {
     if (self->closing_) {
       return;
     }
-    if (useSelect) {
-      self->sendSingleCommand(ioa, value, true);
-      self->sendSingleCommand(ioa, value, false);
-    } else {
-      self->sendSingleCommand(ioa, value, false);
+    if (!self->isMasterStation()) {
+      LOG_WARNING("IEC104 非主站发送遥控命令: conn_name={}", self->config_.conn_name());
+      return;
     }
+    if (!self->dataTransferActive_) {
+      LOG_WARNING("IEC104 未激活状态发送遥控命令: conn_name={}", self->config_.conn_name());
+      return;
+    }
+    const bool isSingle = type == IEC104Proto::REMOTE_CONTROL_TYPE_SINGLE && value <= 1;
+    const bool isDouble = type == IEC104Proto::REMOTE_CONTROL_TYPE_DOUBLE && (value == 1 || value == 2);
+    if (!isSingle && !isDouble) {
+      LOG_WARNING("IEC104 遥控命令类型或状态非法: conn_name={}, ioa={}, type={}, value={}",
+                  self->config_.conn_name(), ioa, static_cast<int>(type), value);
+      return;
+    }
+
+    if (mode == IEC104Proto::COMMAND_EXECUTION_MODE_DIRECT) {
+      self->cancelOutgoingRemoteControl(ioa);
+      self->sendRemoteControl(ioa, type, value, false);
+      return;
+    }
+    if (mode != IEC104Proto::COMMAND_EXECUTION_MODE_SELECT_EXECUTE
+        && mode != IEC104Proto::COMMAND_EXECUTION_MODE_UNSPECIFIED) {
+      LOG_WARNING("IEC104 遥控执行方式非法: conn_name={}, ioa={}, mode={}",
+                  self->config_.conn_name(), ioa, static_cast<int>(mode));
+      return;
+    }
+
+    self->cancelOutgoingRemoteControl(ioa);
+    self->outgoingRemoteControlByIoa_[ioa] = RemoteControlSelect{
+        type, value, std::chrono::steady_clock::now()};
+    auto timer = std::make_shared<boost::asio::steady_timer>(self->io_);
+    self->outgoingRemoteControlTimersByIoa_[ioa] = timer;
+    timer->expires_after(kRemoteControlSelectTimeout);
+    timer->async_wait([self, ioa, type, value, timer](const boost::system::error_code &ec) {
+      if (ec) {
+        return;
+      }
+      auto pending = self->outgoingRemoteControlByIoa_.find(ioa);
+      if (pending == self->outgoingRemoteControlByIoa_.end()
+          || pending->second.type != type || pending->second.value != value) {
+        return;
+      }
+      self->outgoingRemoteControlByIoa_.erase(pending);
+      self->outgoingRemoteControlTimersByIoa_.erase(ioa);
+      LOG_WARNING("IEC104 遥控选择确认超时，已取消执行: conn_name={}, ioa={}, type={}, value={}",
+                  self->config_.conn_name(), ioa, static_cast<int>(type), value);
+    });
+    self->sendRemoteControl(ioa, type, value, true);
   });
 }
 
@@ -646,6 +703,9 @@ void TcpSession::processAsdu(const std::vector<uint8_t> &asdu) {
   case kTypeIdSingleCommand:
     handleSingleCommand(asdu);
     break;
+  case kTypeIdDoubleCommand:
+    handleDoubleCommand(asdu);
+    break;
   case kTypeIdSetpointShort:
     handleSetpointCommand(asdu);
     break;
@@ -803,22 +863,28 @@ void TcpSession::handleSinglePoint(const std::vector<uint8_t> &asdu, bool withTi
 }
 
 void TcpSession::handleSingleCommand(const std::vector<uint8_t> &asdu) {
+  handleRemoteControlCommand(asdu, IEC104Proto::REMOTE_CONTROL_TYPE_SINGLE);
+}
+
+void TcpSession::handleDoubleCommand(const std::vector<uint8_t> &asdu) {
+  handleRemoteControlCommand(asdu, IEC104Proto::REMOTE_CONTROL_TYPE_DOUBLE);
+}
+
+void TcpSession::handleRemoteControlCommand(const std::vector<uint8_t> &asdu,
+                                            IEC104Proto::RemoteControlType type) {
   const size_t minSize = 6 + 3 + 1;
   if (asdu.size() < minSize) {
     return;
   }
-  if (isMasterStation()) {
-    LOG_INFO("IEC104 主站收到遥控命令，忽略: conn_name={}", config_.conn_name());
-    return;
-  }
-  if (!dataTransferActive_) {
+  const bool master = isMasterStation();
+  if (!master && !dataTransferActive_) {
     LOG_WARNING("IEC104 未 STARTDT 即收到遥控命令: conn_name={}", config_.conn_name());
     return;
   }
 
   const auto cotRaw = static_cast<uint8_t>(asdu[2]);
   const auto cot = static_cast<uint8_t>(cotRaw & 0x3F);
-  if (cot != kCotActivation) {
+  if ((!master && cot != kCotActivation) || (master && cot != kCotActivationCon)) {
     return;
   }
 
@@ -859,56 +925,103 @@ void TcpSession::handleSingleCommand(const std::vector<uint8_t> &asdu) {
     if (asdu.size() < offset + 1) {
       return;
     }
-    const auto sco = static_cast<uint8_t>(asdu[offset]);
+    const auto qualifier = static_cast<uint8_t>(asdu[offset]);
     offset += 1;
 
-    const bool select = (sco & kScoSelectMask) != 0;
-    const bool value = (sco & kScoValueMask) != 0;
+    const bool select = (qualifier & kScoSelectMask) != 0;
+    const uint8_t value = type == IEC104Proto::REMOTE_CONTROL_TYPE_DOUBLE
+        ? static_cast<uint8_t>(qualifier & kDcoValueMask)
+        : static_cast<uint8_t>(qualifier & kScoValueMask);
 
-    auto sendConfirm = [this, ioa, value, select](uint8_t cause, bool positive) {
-      auto asdu = buildSingleCommandAsdu(ioa, value, select, cause, positive);
+    auto sendConfirm = [this, ioa, type, value, select](uint8_t cause, bool positive) {
+      auto asdu = buildRemoteControlAsdu(ioa, type, value, select, cause, positive);
       if (asdu.empty()) {
         return;
       }
       enqueueAsdu(std::move(asdu));
     };
 
+    if (type == IEC104Proto::REMOTE_CONTROL_TYPE_DOUBLE && value != 1 && value != 2) {
+      LOG_WARNING("IEC104 收到非法双点遥控状态: conn_name={}, ioa={}, value={}",
+                  config_.conn_name(), ioa, value);
+      if (!master) {
+        sendConfirm(kCotActivationCon, false);
+      } else {
+        cancelOutgoingRemoteControl(ioa);
+      }
+      continue;
+    }
+
+    if (master) {
+      auto pending = outgoingRemoteControlByIoa_.find(ioa);
+      if (pending == outgoingRemoteControlByIoa_.end()) {
+        LOG_DEBUG("IEC104 收到无待选命令的遥控确认: conn_name={}, ioa={}, type={}, value={}",
+                  config_.conn_name(), ioa, static_cast<int>(type), value);
+        continue;
+      }
+      const auto selected = pending->second;
+      cancelOutgoingRemoteControl(ioa);
+      if ((cotRaw & kCotNegative) != 0) {
+        LOG_WARNING("IEC104 遥控选择被对端拒绝: conn_name={}, ioa={}, type={}, value={}",
+                    config_.conn_name(), ioa, static_cast<int>(type), value);
+        continue;
+      }
+      if (!select || selected.type != type || selected.value != value) {
+        LOG_WARNING("IEC104 遥控选择确认不匹配: conn_name={}, ioa={}, 预置类型={}, 确认类型={}, 预置值={}, 确认值={}, select={}",
+                    config_.conn_name(), ioa, static_cast<int>(selected.type), static_cast<int>(type),
+                    selected.value, value, select);
+        continue;
+      }
+      if (now - selected.time > kRemoteControlSelectTimeout) {
+        LOG_WARNING("IEC104 遥控选择确认已超时: conn_name={}, ioa={}", config_.conn_name(), ioa);
+        continue;
+      }
+      LOG_INFO("IEC104 遥控选择确认成功，发送执行: conn_name={}, ioa={}, type={}, value={}",
+               config_.conn_name(), ioa, static_cast<int>(type), value);
+      sendRemoteControl(ioa, type, value, false);
+      continue;
+    }
+
     if (select) {
-      singleCommandSelectByIoa_[ioa] = SingleCommandSelect{value, now};
-      LOG_INFO("IEC104 收到遥控预置: conn_name={}, ioa={}, value={}", config_.conn_name(), ioa, value);
+      remoteControlSelectByIoa_[ioa] = RemoteControlSelect{type, value, now};
+      LOG_INFO("IEC104 收到遥控预置: conn_name={}, ioa={}, type={}, value={}",
+               config_.conn_name(), ioa, static_cast<int>(type), value);
       sendConfirm(kCotActivationCon, true);
       continue;
     }
 
-    bool validSelect = false;
-    auto it = singleCommandSelectByIoa_.find(ioa);
-    if (it != singleCommandSelectByIoa_.end()) {
-      const auto elapsed = now - it->second.time;
-      if (elapsed > kSingleCommandSelectTimeout) {
+    bool selectionRejected = false;
+    auto it = remoteControlSelectByIoa_.find(ioa);
+    if (it != remoteControlSelectByIoa_.end()) {
+      const auto selected = it->second;
+      remoteControlSelectByIoa_.erase(it);
+      const auto elapsed = now - selected.time;
+      if (elapsed > kRemoteControlSelectTimeout) {
         LOG_WARNING("IEC104 遥控预置已超时: conn_name={}, ioa={}", config_.conn_name(), ioa);
-        singleCommandSelectByIoa_.erase(it);
-      } else if (it->second.value != value) {
-        LOG_WARNING("IEC104 遥控预置与执行值不一致: conn_name={}, ioa={}, 预置={}, 执行={}", config_.conn_name(), ioa, it->second.value, value);
-        singleCommandSelectByIoa_.erase(it);
-      } else {
-        singleCommandSelectByIoa_.erase(it);
-        validSelect = true;
+        selectionRejected = true;
+      } else if (selected.type != type || selected.value != value) {
+        LOG_WARNING("IEC104 遥控预置与执行不一致: conn_name={}, ioa={}, 预置类型={}, 执行类型={}, 预置值={}, 执行值={}",
+                    config_.conn_name(), ioa, static_cast<int>(selected.type), static_cast<int>(type),
+                    selected.value, value);
+        selectionRejected = true;
       }
     }
 
-    if (!validSelect) {
-      LOG_WARNING("IEC104 遥控执行缺少预置: conn_name={}, ioa={}, value={}", config_.conn_name(), ioa, value);
+    if (selectionRejected) {
       sendConfirm(kCotActivationCon, false);
       continue;
     }
 
-    LOG_INFO("IEC104 收到遥控执行: conn_name={}, ioa={}, value={}", config_.conn_name(), ioa, value);
+    LOG_INFO("IEC104 收到遥控执行: conn_name={}, ioa={}, type={}, value={}",
+             config_.conn_name(), ioa, static_cast<int>(type), value);
     CommandResult commandResult;
     if (onCommand_) {
       CommandValue cv;
       cv.ioa = ioa;
       cv.type = IEC104Proto::POINT_TYPE_SINGLE;
-      cv.boolValue = value;
+      cv.remoteControlType = type;
+      cv.controlValue = value;
+      cv.boolValue = type == IEC104Proto::REMOTE_CONTROL_TYPE_DOUBLE ? value == 2 : value != 0;
       commandResult = onCommand_(cv);
     }
     if (!commandResult.accepted) {
@@ -1488,9 +1601,28 @@ std::vector<uint8_t> TcpSession::buildTimeSyncAsdu(uint8_t cause, int64_t tsMs) 
 }
 
 std::vector<uint8_t> TcpSession::buildSingleCommandAsdu(uint32_t ioa, bool value, bool select, uint8_t cause, bool positive) const {
+  return buildRemoteControlAsdu(ioa,
+                                IEC104Proto::REMOTE_CONTROL_TYPE_SINGLE,
+                                value ? 1 : 0,
+                                select,
+                                cause,
+                                positive);
+}
+
+std::vector<uint8_t> TcpSession::buildRemoteControlAsdu(uint32_t ioa,
+                                                        IEC104Proto::RemoteControlType type,
+                                                        uint8_t value,
+                                                        bool select,
+                                                        uint8_t cause,
+                                                        bool positive) const {
+  const bool isSingle = type == IEC104Proto::REMOTE_CONTROL_TYPE_SINGLE && value <= 1;
+  const bool isDouble = type == IEC104Proto::REMOTE_CONTROL_TYPE_DOUBLE && value <= 3;
+  if (!isSingle && !isDouble) {
+    return {};
+  }
   std::vector<uint8_t> asdu;
   asdu.reserve(kAsduHeaderSize + 3 + 1);
-  asdu.emplace_back(kTypeIdSingleCommand);
+  asdu.emplace_back(isDouble ? kTypeIdDoubleCommand : kTypeIdSingleCommand);
   asdu.emplace_back(0x01);
   asdu.emplace_back(buildCot(cause, positive));
   asdu.emplace_back(static_cast<uint8_t>(config_.oa() & 0xFF));
@@ -1501,11 +1633,12 @@ std::vector<uint8_t> TcpSession::buildSingleCommandAsdu(uint32_t ioa, bool value
   asdu.emplace_back(static_cast<uint8_t>((ioa >> 8) & 0xFF));
   asdu.emplace_back(static_cast<uint8_t>((ioa >> 16) & 0xFF));
 
-  uint8_t sco = value ? kScoValueMask : 0x00;
+  uint8_t qualifier = isDouble ? static_cast<uint8_t>(value & kDcoValueMask)
+                               : static_cast<uint8_t>(value & kScoValueMask);
   if (select) {
-    sco |= kScoSelectMask;
+    qualifier |= kScoSelectMask;
   }
-  asdu.emplace_back(sco);
+  asdu.emplace_back(qualifier);
   return asdu;
 }
 
@@ -1668,6 +1801,7 @@ void TcpSession::setDataTransferActive(bool active, const char *reason) {
   sendUnacked_ = 0;
   sendAckedSeq_ = sendSeq_;
   pendingAsdu_.clear();
+  clearRemoteControlState();
   clearPointQueue();
 }
 
@@ -1709,6 +1843,16 @@ void TcpSession::sendTimeSync(int64_t tsMs) {
 }
 
 void TcpSession::sendSingleCommand(uint32_t ioa, bool value, bool select) {
+  sendRemoteControl(ioa,
+                    IEC104Proto::REMOTE_CONTROL_TYPE_SINGLE,
+                    value ? 1 : 0,
+                    select);
+}
+
+void TcpSession::sendRemoteControl(uint32_t ioa,
+                                   IEC104Proto::RemoteControlType type,
+                                   uint8_t value,
+                                   bool select) {
   if (!isMasterStation()) {
     LOG_WARNING("IEC104 非主站发送遥控命令: conn_name={}", config_.conn_name());
     return;
@@ -1717,13 +1861,34 @@ void TcpSession::sendSingleCommand(uint32_t ioa, bool value, bool select) {
     LOG_WARNING("IEC104 未激活状态发送遥控命令: conn_name={}", config_.conn_name());
     return;
   }
-  auto asdu = buildSingleCommandAsdu(ioa, value, select, kCotActivation, true);
+  auto asdu = buildRemoteControlAsdu(ioa, type, value, select, kCotActivation, true);
   if (asdu.empty()) {
-    LOG_WARNING("IEC104 构造遥控命令失败: conn_name={}, ioa={}", config_.conn_name(), ioa);
+    LOG_WARNING("IEC104 构造遥控命令失败: conn_name={}, ioa={}, type={}, value={}",
+                config_.conn_name(), ioa, static_cast<int>(type), value);
     return;
   }
-  LOG_INFO("IEC104 发送遥控命令: conn_name={}, ioa={}, value={}, select={}", config_.conn_name(), ioa, value, select);
+  LOG_INFO("IEC104 发送遥控命令: conn_name={}, ioa={}, type={}, value={}, select={}",
+           config_.conn_name(), ioa, static_cast<int>(type), value, select);
   enqueueAsdu(std::move(asdu));
+}
+
+void TcpSession::cancelOutgoingRemoteControl(uint32_t ioa) {
+  outgoingRemoteControlByIoa_.erase(ioa);
+  auto timer = outgoingRemoteControlTimersByIoa_.find(ioa);
+  if (timer == outgoingRemoteControlTimersByIoa_.end()) {
+    return;
+  }
+  timer->second->cancel();
+  outgoingRemoteControlTimersByIoa_.erase(timer);
+}
+
+void TcpSession::clearRemoteControlState() {
+  remoteControlSelectByIoa_.clear();
+  outgoingRemoteControlByIoa_.clear();
+  for (const auto &[_, timer] : outgoingRemoteControlTimersByIoa_) {
+    timer->cancel();
+  }
+  outgoingRemoteControlTimersByIoa_.clear();
 }
 
 void TcpSession::sendSetpointCommand(uint32_t ioa, double value) {

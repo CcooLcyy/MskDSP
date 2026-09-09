@@ -53,6 +53,27 @@ PointTable MakePointTable() {
   p2->set_type(IEC104Proto::POINT_TYPE_SINGLE);
   p2->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_TELEINDICATION);
 
+  auto* remoteAdjust = req.add_points();
+  remoteAdjust->set_tag("remote-adjust-tag");
+  remoteAdjust->set_ioa(102);
+  remoteAdjust->set_type(IEC104Proto::POINT_TYPE_FLOAT);
+  remoteAdjust->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_ADJUST);
+  remoteAdjust->set_scale(2.0);
+  remoteAdjust->set_offset(1.0);
+
+  auto* remoteControl = req.add_points();
+  remoteControl->set_tag("remote-control-tag");
+  remoteControl->set_ioa(201);
+  remoteControl->set_type(IEC104Proto::POINT_TYPE_SINGLE);
+  remoteControl->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_CONTROL);
+
+  auto* doubleControl = req.add_points();
+  doubleControl->set_tag("double-control-tag");
+  doubleControl->set_ioa(202);
+  doubleControl->set_type(IEC104Proto::POINT_TYPE_SINGLE);
+  doubleControl->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_CONTROL);
+  doubleControl->set_remote_control_type(IEC104Proto::REMOTE_CONTROL_TYPE_DOUBLE);
+
   table.Upsert(req.points(), true);
   return table;
 }
@@ -277,25 +298,78 @@ TEST(IEC104LinkManagerHelperTest, HandleCommandValueExecutesOnSlave) {
   mgr.linksByName_.emplace("conn", std::move(runtime));
 
   CommandValue cv;
-  cv.ioa = 100;
+  cv.ioa = 102;
   cv.type = IEC104Proto::POINT_TYPE_FLOAT;
   cv.doubleValue = 8.0;
   auto result = mgr.handleCommandValue("conn", cv);
   EXPECT_TRUE(result.accepted);
-  EXPECT_EQ(state.GetCommandCount(connId, "float-tag"), 1u);
+  EXPECT_EQ(state.GetCommandCount(connId, "remote-adjust-tag"), 1u);
 
-  cv.ioa = 200;
+  cv.ioa = 201;
   cv.type = IEC104Proto::POINT_TYPE_SINGLE;
   cv.boolValue = true;
   result = mgr.handleCommandValue("conn", cv);
   EXPECT_TRUE(result.accepted);
-  EXPECT_EQ(state.GetCommandCount(connId, "single-tag"), 1u);
+  EXPECT_EQ(state.GetCommandCount(connId, "remote-control-tag"), 1u);
+}
+
+// 验证：handleCommandValue 将双点遥控状态以 int64 1/2 传给 DataCenter。
+TEST(IEC104LinkManagerHelperTest, HandleCommandValueMapsDoubleControlToInt64) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  EXPECT_CALL(*stub, ExecuteCommand(::testing::_, ::testing::_, ::testing::_))
+      .WillOnce(::testing::Invoke([&state](grpc::ClientContext*,
+                                          const DataCenterProto::ExecuteCommandRequest& request,
+                                          DataCenterProto::ExecuteCommandResponse* response) {
+        EXPECT_EQ(request.src().tag(), "double-control-tag");
+        EXPECT_EQ(request.value().kind_case(), DataCenterProto::PointValue::kIntValue);
+        EXPECT_EQ(request.value().int_value(), 2);
+        return state.ExecuteCommand(request, response);
+      }));
+
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+  LinkManager::LinkRuntime runtime;
+  runtime.connId = 51;
+  runtime.config = MakeClientConfig("conn", IEC104Proto::STATION_ROLE_SLAVE);
+  runtime.pointTable = MakePointTable();
+  mgr.linksByName_.emplace("conn", std::move(runtime));
+
+  CommandValue cv;
+  cv.ioa = 202;
+  cv.type = IEC104Proto::POINT_TYPE_SINGLE;
+  cv.remoteControlType = IEC104Proto::REMOTE_CONTROL_TYPE_DOUBLE;
+  cv.controlValue = 2;
+  cv.boolValue = true;
+  const auto result = mgr.handleCommandValue("conn", cv);
+  EXPECT_TRUE(result.accepted);
+}
+
+// 验证：handleCommandValue 拒绝把遥信点当作遥控命令目标。
+TEST(IEC104LinkManagerHelperTest, HandleCommandValueRejectsTeleindicationTarget) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+  LinkManager::LinkRuntime runtime;
+  runtime.connId = 52;
+  runtime.config = MakeClientConfig("conn", IEC104Proto::STATION_ROLE_SLAVE);
+  runtime.pointTable = MakePointTable();
+  mgr.linksByName_.emplace("conn", std::move(runtime));
+
+  CommandValue cv;
+  cv.ioa = 200;
+  cv.type = IEC104Proto::POINT_TYPE_SINGLE;
+  cv.boolValue = true;
+  const auto result = mgr.handleCommandValue("conn", cv);
+  EXPECT_FALSE(result.accepted);
+  EXPECT_EQ(state.GetCommandCount(52, "single-tag"), 0u);
 }
 
 // 验证：handleCommandValue 会把 DataCenter 同步命令拒绝转换为业务拒绝结果。
 TEST(IEC104LinkManagerHelperTest, HandleCommandValueReturnsRejectedWhenDataCenterRejects) {
   FakeDataCenterState state;
-  state.RejectCommandForTag("float-tag", "总量超过上限");
+  state.RejectCommandForTag("remote-adjust-tag", "总量超过上限");
   auto stub = MakeStub(&state);
 
   LinkManager mgr("IEC104");
@@ -308,7 +382,7 @@ TEST(IEC104LinkManagerHelperTest, HandleCommandValueReturnsRejectedWhenDataCente
   mgr.linksByName_.emplace("conn", std::move(runtime));
 
   CommandValue cv;
-  cv.ioa = 100;
+  cv.ioa = 102;
   cv.type = IEC104Proto::POINT_TYPE_FLOAT;
   cv.doubleValue = 8.0;
   auto result = mgr.handleCommandValue("conn", cv);

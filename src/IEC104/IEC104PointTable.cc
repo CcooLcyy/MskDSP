@@ -81,8 +81,43 @@ grpc::Status PointTable::validatePoint(const IEC104Proto::Point& point) const {
   default:
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "business_type 不支持");
   }
+  if (point.remote_control_type() != IEC104Proto::REMOTE_CONTROL_TYPE_UNSPECIFIED
+      && point.remote_control_type() != IEC104Proto::REMOTE_CONTROL_TYPE_SINGLE
+      && point.remote_control_type() != IEC104Proto::REMOTE_CONTROL_TYPE_DOUBLE) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "remote_control_type 不支持");
+  }
+  if (point.command_execution_mode() != IEC104Proto::COMMAND_EXECUTION_MODE_UNSPECIFIED
+      && point.command_execution_mode() != IEC104Proto::COMMAND_EXECUTION_MODE_DIRECT
+      && point.command_execution_mode() != IEC104Proto::COMMAND_EXECUTION_MODE_SELECT_EXECUTE) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "command_execution_mode 不支持");
+  }
+  const auto effectiveBusinessType = point.business_type() == IEC104Proto::POINT_BUSINESS_TYPE_UNSPECIFIED
+      ? InferBusinessType(point.ioa(), point.type())
+      : point.business_type();
+  if (effectiveBusinessType != IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_CONTROL
+      && point.remote_control_type() == IEC104Proto::REMOTE_CONTROL_TYPE_DOUBLE) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "非遥控点不能配置双点遥控");
+  }
   return grpc::Status::OK;
 }
+
+namespace {
+void applyRemoteControlOptions(const IEC104Proto::Point& source, PointTable::Point* target) {
+  if (target == nullptr) {
+    return;
+  }
+  target->remoteControlType = source.remote_control_type() == IEC104Proto::REMOTE_CONTROL_TYPE_UNSPECIFIED
+      ? IEC104Proto::REMOTE_CONTROL_TYPE_SINGLE
+      : source.remote_control_type();
+  target->commandExecutionMode = source.command_execution_mode() == IEC104Proto::COMMAND_EXECUTION_MODE_UNSPECIFIED
+      ? IEC104Proto::COMMAND_EXECUTION_MODE_SELECT_EXECUTE
+      : source.command_execution_mode();
+  if (target->businessType != IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_CONTROL) {
+    target->remoteControlType = IEC104Proto::REMOTE_CONTROL_TYPE_SINGLE;
+    target->commandExecutionMode = IEC104Proto::COMMAND_EXECUTION_MODE_SELECT_EXECUTE;
+  }
+}
+}  // namespace
 
 grpc::Status PointTable::insertOrUpdatePoint(const IEC104Proto::Point& point) {
   auto existingTag = byTag_.find(point.tag());
@@ -113,6 +148,7 @@ grpc::Status PointTable::insertOrUpdatePoint(const IEC104Proto::Point& point) {
       p.offset = 0.0;
       p.deadband = 0.0;
     }
+    applyRemoteControlOptions(point, &p);
     byTag_.emplace(p.tag, p);
     tagByIoa_.emplace(p.ioa, p.tag);
     return grpc::Status::OK;
@@ -149,6 +185,7 @@ grpc::Status PointTable::insertOrUpdatePoint(const IEC104Proto::Point& point) {
     p.offset = 0.0;
     p.deadband = 0.0;
   }
+  applyRemoteControlOptions(point, &p);
   byTag_[p.tag] = p;
   tagByIoa_[p.ioa] = p.tag;
   return grpc::Status::OK;
@@ -197,6 +234,8 @@ void PointTable::ToProto(const std::string& connName, IEC104Proto::PointTable* o
     dst->set_scale(p.scale);
     dst->set_offset(p.offset);
     dst->set_deadband(p.deadband);
+    dst->set_remote_control_type(p.remoteControlType);
+    dst->set_command_execution_mode(p.commandExecutionMode);
   }
 }
 
