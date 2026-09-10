@@ -45,6 +45,7 @@ const char *groupStateToString(AGCProto::GroupState state) {
 }
 
 constexpr double kValueChangeEps = 1e-6;
+constexpr auto kMemberSetpointRefreshInterval = std::chrono::seconds(30);
 
 bool sameValue(double lhs, double rhs) {
   return std::fabs(lhs - rhs) <= kValueChangeEps;
@@ -76,6 +77,23 @@ GroupManager::GroupManager(std::string moduleName, std::filesystem::path configD
   groupStore_(configDbPath),
   controlProfileStore_(std::move(configDbPath)),
   dataCenter_(std::move(moduleName)) {}
+
+GroupManager::~GroupManager() {
+  std::vector<std::string> groupNames;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    groupNames.reserve(groupsByName_.size());
+    for (const auto &[groupName, _] : groupsByName_) {
+      groupNames.push_back(groupName);
+    }
+  }
+  for (const auto &groupName : groupNames) {
+    const auto status = StopGroup(groupName);
+    if (!status.ok() && status.error_code() != grpc::StatusCode::NOT_FOUND) {
+      LOG_WARNING("AGC 管理器析构时停止控制组失败: group_name={}, 原因={}", groupName, status.error_message());
+    }
+  }
+}
 
 void GroupManager::setDataCenterServerAddress(std::string address) {
   dataCenter_.setServerAddress(std::move(address));
@@ -615,6 +633,25 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
 
         DataCenterProto::PointUpdate update;
         while (reader->Read(&update)) {
+          std::shared_ptr<std::mutex> outputMutex;
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            auto it = groupsByName_.find(groupName);
+            if (it == groupsByName_.end()) {
+              break;
+            }
+            const bool affectsControlTarget =
+                (!it->second.cmdTag.empty() && update.dst_tag() == it->second.cmdTag) ||
+                it->second.baseTags.contains(update.dst_tag());
+            if (affectsControlTarget) {
+              outputMutex = it->second.outputMutex;
+            }
+          }
+          std::unique_lock<std::mutex> outputLock;
+          if (outputMutex) {
+            outputLock = std::unique_lock<std::mutex>(*outputMutex);
+          }
+
           bool publishCommandEcho = false;
           uint32_t commandEchoConnId = 0;
           AGCProto::ValueSpec commandEchoSpec;
@@ -697,7 +734,20 @@ grpc::Status GroupManager::StopGroup(const std::string &groupName) {
   std::jthread controlThread;
   std::jthread tuningThread;
   std::shared_ptr<ControlTrigger> controlTrigger;
+  std::shared_ptr<std::mutex> outputMutex;
   bool pendingDelete = false;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end()) {
+      return makeNotFound(groupName);
+    }
+    outputMutex = it->second.outputMutex;
+  }
+  std::unique_lock<std::mutex> outputLock;
+  if (outputMutex) {
+    outputLock = std::unique_lock<std::mutex>(*outputMutex);
+  }
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = groupsByName_.find(groupName);
@@ -711,11 +761,21 @@ grpc::Status GroupManager::StopGroup(const std::string &groupName) {
     it->second.dcSubscribeContext.reset();
     pendingDelete = (it->second.state == AGCProto::GROUP_STATE_PENDING_DELETE);
     it->second.state = pendingDelete ? AGCProto::GROUP_STATE_PENDING_DELETE : AGCProto::GROUP_STATE_STOPPED;
+    ++it->second.controlRevision;
+    std::fill(it->second.hasLastPublishedMemberSetpoint.begin(),
+              it->second.hasLastPublishedMemberSetpoint.end(),
+              false);
+    std::fill(it->second.lastMemberSetpointPublishedAt.begin(),
+              it->second.lastMemberSetpointPublishedAt.end(),
+              std::chrono::steady_clock::time_point{});
     std::fill(it->second.integralMemoryKw.begin(), it->second.integralMemoryKw.end(), 0.0);
     if (it->second.tuningStatus.state() == AGCProto::TUNING_STATE_RUNNING) {
       it->second.tuningStatus.set_state(AGCProto::TUNING_STATE_STOPPED);
       it->second.tuningStatus.set_last_error("控制组停止导致自动调试中止");
     }
+  }
+  if (outputLock.owns_lock()) {
+    outputLock.unlock();
   }
   if (dcSubscribeThread.joinable()) {
     dcSubscribeThread.request_stop();
@@ -813,6 +873,19 @@ grpc::Status GroupManager::ExecuteCommand(
   const bool isFunctionPoint = request.dst().tag() == functionTag;
   const bool isRemotePoint = request.dst().tag() == remoteTag;
   if (isFunctionPoint || isRemotePoint) {
+    std::shared_ptr<std::mutex> outputMutex;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = groupsByName_.find(groupName);
+      if (it != groupsByName_.end()) {
+        outputMutex = it->second.outputMutex;
+      }
+    }
+    std::unique_lock<std::mutex> outputLock;
+    if (outputMutex) {
+      outputLock = std::unique_lock<std::mutex>(*outputMutex);
+    }
+
     bool publishState = false;
     bool requestControl = false;
     {
@@ -849,6 +922,13 @@ grpc::Status GroupManager::ExecuteCommand(
       if (isFunctionPoint) {
         if (it->second.functionEnabled != value) {
           it->second.functionEnabled = value;
+          ++it->second.controlRevision;
+          std::fill(it->second.hasLastPublishedMemberSetpoint.begin(),
+                    it->second.hasLastPublishedMemberSetpoint.end(),
+                    false);
+          std::fill(it->second.lastMemberSetpointPublishedAt.begin(),
+                    it->second.lastMemberSetpointPublishedAt.end(),
+                    std::chrono::steady_clock::time_point{});
           publishState = true;
           requestControl = value && it->second.state == AGCProto::GROUP_STATE_RUNNING;
         }
@@ -884,9 +964,23 @@ grpc::Status GroupManager::ExecuteCommand(
     return grpc::Status::OK;
   }
 
+  std::shared_ptr<std::mutex> outputMutex;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = groupsByName_.find(groupName);
+    if (it != groupsByName_.end()) {
+      outputMutex = it->second.outputMutex;
+    }
+  }
+  std::unique_lock<std::mutex> outputLock;
+  if (outputMutex) {
+    outputLock = std::unique_lock<std::mutex>(*outputMutex);
+  }
+
   AGCProto::GroupConfig config;
   uint32_t connId = 0;
   ControlInput input;
+  uint64_t controlRevision = 0;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = groupsByName_.find(groupName);
@@ -999,6 +1093,8 @@ grpc::Status GroupManager::ExecuteCommand(
     }
     it->second.cmdRaw = raw;
     it->second.hasCmdRaw = true;
+    ++it->second.controlRevision;
+    controlRevision = it->second.controlRevision;
     it->second.hasLastDesiredTotalKw = output.hasLastDesiredTotalKw;
     it->second.lastDesiredTotalKw = output.nextLastDesiredTotalKw;
     it->second.hasLastMemberTargetKw = output.hasLastMemberTargetKw;
@@ -1025,17 +1121,14 @@ grpc::Status GroupManager::ExecuteCommand(
     }
   }
 
-  const auto memberCount = static_cast<size_t>(config.members_size());
-  for (size_t i = 0; i < memberCount && i < output.memberPublish.size() && i < output.memberPublishKw.size(); ++i) {
-    if (!output.memberPublish[i]) {
-      continue;
-    }
-    const auto &member = config.members(static_cast<int>(i));
-    if (!member.has_p_set() || !member.p_set().has_signal() || member.p_set().signal().tag().empty()) {
-      continue;
-    }
-    (void)dataCenter_.PublishDouble(connId, member.p_set().signal().tag(), output.memberPublishKw[i], quality, 0);
-  }
+  (void)publishMemberSetpoints(groupName,
+                               connId,
+                               config,
+                               output.memberPublish,
+                               output.memberPublishKw,
+                               quality,
+                               controlRevision,
+                               "同步总有功命令");
 
   response->set_status(DataCenterProto::COMMAND_ACCEPTED);
   response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSPECIFIED);
@@ -1121,8 +1214,12 @@ void GroupManager::rebuildTagCache(GroupRuntime *g) {
   g->memberMeasRaw.assign(memberCount, 0.0);
   g->hasLastMemberTargetKw.assign(memberCount, false);
   g->lastMemberTargetKw.assign(memberCount, 0.0);
+  g->hasLastPublishedMemberSetpoint.assign(memberCount, false);
+  g->lastPublishedMemberSetpointKw.assign(memberCount, 0.0);
+  g->lastMemberSetpointPublishedAt.assign(memberCount, std::chrono::steady_clock::time_point{});
   g->hasLastControlMemberMeasKw.assign(memberCount, false);
   g->lastControlMemberMeasKw.assign(memberCount, 0.0);
+  ++g->controlRevision;
 
   if (g->config.has_p_cmd() && g->config.p_cmd().has_signal()) {
     g->cmdTag = g->config.p_cmd().signal().tag();
@@ -1155,6 +1252,7 @@ void GroupManager::rebuildTagCache(GroupRuntime *g) {
 void GroupManager::primeControlInputs(const std::string &groupName) {
   uint32_t connId = 0;
   std::vector<std::string> tags;
+  std::shared_ptr<std::mutex> outputMutex;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = groupsByName_.find(groupName);
@@ -1163,6 +1261,7 @@ void GroupManager::primeControlInputs(const std::string &groupName) {
     }
     connId = it->second.connId;
     tags = it->second.subscribeTags;
+    outputMutex = it->second.outputMutex;
   }
 
   if (connId == 0 || tags.empty()) {
@@ -1185,6 +1284,10 @@ void GroupManager::primeControlInputs(const std::string &groupName) {
   }
 
   size_t changed = 0;
+  std::unique_lock<std::mutex> outputLock;
+  if (outputMutex) {
+    outputLock = std::unique_lock<std::mutex>(*outputMutex);
+  }
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = groupsByName_.find(groupName);
@@ -1295,6 +1398,7 @@ bool GroupManager::handleUpdateLocked(GroupRuntime *g, const DataCenterProto::Po
     g->cmdRaw = raw;
     g->hasCmdRaw = true;
     if (changed) {
+      ++g->controlRevision;
       std::fill(g->integralMemoryKw.begin(), g->integralMemoryKw.end(), 0.0);
       LOG_DEBUG("AGC 收到新的总目标，已清空本次运行积分记忆: group_name={}, tag={}", g->config.group_name(), tag);
     }
@@ -1305,6 +1409,9 @@ bool GroupManager::handleUpdateLocked(GroupRuntime *g, const DataCenterProto::Po
     auto it = g->baseRawByTag.find(tag);
     const auto changed = (it == g->baseRawByTag.end()) || !sameValue(it->second, raw);
     g->baseRawByTag[tag] = raw;
+    if (changed) {
+      ++g->controlRevision;
+    }
     return changed;
   }
 
@@ -1420,11 +1527,127 @@ void GroupManager::publishCommandEchoPoint(
   }
 }
 
+bool GroupManager::publishMemberSetpoints(const std::string &groupName,
+                                          uint32_t connId,
+                                          const AGCProto::GroupConfig &config,
+                                          const std::vector<bool> &memberPublish,
+                                          const std::vector<double> &memberPublishKw,
+                                          DataCenterProto::Quality quality,
+                                          uint64_t expectedRevision,
+                                          std::string_view trigger) {
+  const auto memberCount = static_cast<size_t>(config.members_size());
+  size_t publishedCount = 0;
+  size_t skippedCount = 0;
+  bool allSucceeded = true;
+
+  for (size_t i = 0; i < memberCount && i < memberPublish.size() && i < memberPublishKw.size(); ++i) {
+    if (!memberPublish[i]) {
+      continue;
+    }
+    const auto &member = config.members(static_cast<int>(i));
+    if (!member.has_p_set() || !member.p_set().has_signal() || member.p_set().signal().tag().empty()) {
+      continue;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    bool shouldPublish = false;
+    bool refreshPublish = false;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = groupsByName_.find(groupName);
+      if (it == groupsByName_.end() || it->second.state != AGCProto::GROUP_STATE_RUNNING ||
+          !it->second.functionEnabled || it->second.controlRevision != expectedRevision) {
+        LOG_DEBUG("AGC 中止发布过期成员设点: group_name={}, revision={}, trigger={}", groupName, expectedRevision, trigger);
+        return false;
+      }
+
+      auto &runtime = it->second;
+      if (i >= runtime.hasLastPublishedMemberSetpoint.size() ||
+          i >= runtime.lastPublishedMemberSetpointKw.size() ||
+          i >= runtime.lastMemberSetpointPublishedAt.size()) {
+        LOG_ERROR("AGC 成员设点发布缓存长度异常: group_name={}, member_index={}, 成员数={}", groupName, i, memberCount);
+        allSucceeded = false;
+        continue;
+      }
+
+      const bool valueChanged = !runtime.hasLastPublishedMemberSetpoint[i] ||
+                                !sameValue(runtime.lastPublishedMemberSetpointKw[i], memberPublishKw[i]);
+      refreshPublish = runtime.hasLastPublishedMemberSetpoint[i] &&
+                       now - runtime.lastMemberSetpointPublishedAt[i] >= kMemberSetpointRefreshInterval;
+      shouldPublish = valueChanged || refreshPublish;
+    }
+
+    if (!shouldPublish) {
+      ++skippedCount;
+      continue;
+    }
+
+    const auto &tag = member.p_set().signal().tag();
+    auto status = dataCenter_.PublishDouble(connId, tag, memberPublishKw[i], quality, 0);
+    if (!status.ok()) {
+      allSucceeded = false;
+      LOG_ERROR("AGC 发布成员设点失败: group_name={}, member_name={}, tag={}, value_kw={}, trigger={}, 原因={}",
+                groupName,
+                member.member_name(),
+                tag,
+                memberPublishKw[i],
+                trigger,
+                status.error_message());
+      continue;
+    }
+    const auto publishedAt = std::chrono::steady_clock::now();
+
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = groupsByName_.find(groupName);
+      if (it != groupsByName_.end() && it->second.state == AGCProto::GROUP_STATE_RUNNING &&
+          it->second.controlRevision == expectedRevision && i < it->second.hasLastPublishedMemberSetpoint.size()) {
+        it->second.hasLastPublishedMemberSetpoint[i] = true;
+        it->second.lastPublishedMemberSetpointKw[i] = memberPublishKw[i];
+        it->second.lastMemberSetpointPublishedAt[i] = publishedAt;
+      }
+    }
+    ++publishedCount;
+    LOG_DEBUG("AGC 已发布成员设点: group_name={}, member_name={}, tag={}, value_kw={}, trigger={}, 低频刷新={}",
+              groupName,
+              member.member_name(),
+              tag,
+              memberPublishKw[i],
+              trigger,
+              refreshPublish);
+  }
+
+  if (skippedCount > 0) {
+    LOG_DEBUG("AGC 已跳过未变化成员设点: group_name={}, revision={}, 跳过数={}, 发布数={}, trigger={}",
+              groupName,
+              expectedRevision,
+              skippedCount,
+              publishedCount,
+              trigger);
+  }
+  return allSucceeded;
+}
+
 void GroupManager::controlTick(const std::string &groupName) {
+  std::shared_ptr<std::mutex> outputMutex;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end()) {
+      return;
+    }
+    outputMutex = it->second.outputMutex;
+  }
+  if (!outputMutex) {
+    return;
+  }
+  std::unique_lock<std::mutex> outputLock(*outputMutex);
+
   AGCProto::GroupConfig config;
   uint32_t connId = 0;
   bool functionEnabled = true;
   ControlInput input;
+  uint64_t controlRevision = 0;
 
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -1439,6 +1662,7 @@ void GroupManager::controlTick(const std::string &groupName) {
     config = it->second.config;
     connId = it->second.connId;
     functionEnabled = it->second.functionEnabled;
+    controlRevision = it->second.controlRevision;
     input.hasCmdRaw = it->second.hasCmdRaw;
     input.cmdRaw = it->second.cmdRaw;
     input.baseRawByTag = it->second.baseRawByTag;
@@ -1534,6 +1758,16 @@ void GroupManager::controlTick(const std::string &groupName) {
   }
   const auto &output = *outputOpt;
 
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end() || it->second.state != AGCProto::GROUP_STATE_RUNNING ||
+        !it->second.functionEnabled || it->second.controlRevision != controlRevision) {
+      LOG_DEBUG("AGC 丢弃已过期控制计算结果: group_name={}, revision={}", groupName, controlRevision);
+      return;
+    }
+  }
+
   if (config.has_outputs()) {
     const auto &o = config.outputs();
     if (output.publishTotalTarget) {
@@ -1544,18 +1778,14 @@ void GroupManager::controlTick(const std::string &groupName) {
     }
   }
 
-  // 下发成员设定值。
-  const auto memberCount = static_cast<size_t>(config.members_size());
-  for (size_t i = 0; i < memberCount && i < output.memberPublish.size() && i < output.memberPublishKw.size(); ++i) {
-    if (!output.memberPublish[i]) {
-      continue;
-    }
-    const auto &m = config.members(static_cast<int>(i));
-    if (!m.has_p_set() || !m.p_set().has_signal() || m.p_set().signal().tag().empty()) {
-      continue;
-    }
-    (void)dataCenter_.PublishDouble(connId, m.p_set().signal().tag(), output.memberPublishKw[i], quality, 0);
-  }
+  (void)publishMemberSetpoints(groupName,
+                               connId,
+                               config,
+                               output.memberPublish,
+                               output.memberPublishKw,
+                               quality,
+                               controlRevision,
+                               "事件触发控制");
 
   // 下发后更新状态（尽力而为）。
   bool shouldLogUnallocated = false;
@@ -1568,6 +1798,11 @@ void GroupManager::controlTick(const std::string &groupName) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = groupsByName_.find(groupName);
     if (it == groupsByName_.end()) {
+      return;
+    }
+
+    if (it->second.state != AGCProto::GROUP_STATE_RUNNING || it->second.controlRevision != controlRevision) {
+      LOG_DEBUG("AGC 跳过过期控制状态写回: group_name={}, revision={}", groupName, controlRevision);
       return;
     }
 
@@ -1760,11 +1995,19 @@ grpc::Status GroupManager::StartTuning(
   it->second.tuningEnteredRangeAt = {};
   it->second.tuningInRange = false;
   startThreadsLocked(groupName, &it->second);
+  auto tuningOutputMutex = it->second.outputMutex;
   it->second.tuningThread = ModuleManager::StartModuleThread(
       AGCLibInfo.LIB_NAME,
-      [this, groupName](std::stop_token st) {
+      [this, groupName, tuningOutputMutex](std::stop_token st) {
         while (!st.stop_requested()) {
           std::this_thread::sleep_for(std::chrono::milliseconds(200));
+          if (st.stop_requested()) {
+            break;
+          }
+          std::unique_lock<std::mutex> outputLock;
+          if (tuningOutputMutex) {
+            outputLock = std::unique_lock<std::mutex>(*tuningOutputMutex);
+          }
           bool finish = false;
           {
             std::lock_guard<std::mutex> stateLock(mu_);
@@ -1869,6 +2112,7 @@ grpc::Status GroupManager::StartTuning(
                 if (enough) {
                   group.tuningStatus.set_state(AGCProto::TUNING_STATE_COMPLETED);
                   group.state = AGCProto::GROUP_STATE_STOPPED;
+                  ++group.controlRevision;
                   finish = true;
                 } else {
                   const auto previousTargetKw = group.tuningStatus.current_target_kw();
@@ -1879,6 +2123,7 @@ grpc::Status GroupManager::StartTuning(
                   group.tuningStatus.set_current_target_kw(nextDirection == AGCProto::TUNING_DIRECTION_UP
                                                                 ? group.tuningConfig.target_upper_kw()
                                                                 : group.tuningConfig.target_lower_kw());
+                  ++group.controlRevision;
                   group.tuningPhaseStartedAt = now;
                   group.tuningPreviousTargetKw = previousTargetKw;
                   group.tuningInitialCaptured = false;
@@ -1900,6 +2145,7 @@ grpc::Status GroupManager::StartTuning(
               group.tuningStatus.set_current_target_kw(nextDirection == AGCProto::TUNING_DIRECTION_UP
                                                             ? group.tuningConfig.target_upper_kw()
                                                             : group.tuningConfig.target_lower_kw());
+              ++group.controlRevision;
               group.tuningPhaseStartedAt = now;
               group.tuningInRange = false;
               group.tuningStatus.set_target_entry_elapsed_seconds(0.0);
@@ -1918,6 +2164,7 @@ grpc::Status GroupManager::StartTuning(
                 group.tuningStatus.set_last_error("调试总时间到期但未完成最低上调/下调次数");
               }
               group.state = AGCProto::GROUP_STATE_STOPPED;
+              ++group.controlRevision;
               finish = true;
             }
             if (finish) {
@@ -1957,6 +2204,19 @@ grpc::Status GroupManager::StopTuning(const std::string &groupName, AGCProto::Tu
   if (!status.ok()) {
     return status;
   }
+  std::shared_ptr<std::mutex> outputMutex;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end()) {
+      return makeNotFound(groupName);
+    }
+    outputMutex = it->second.outputMutex;
+  }
+  std::unique_lock<std::mutex> outputLock;
+  if (outputMutex) {
+    outputLock = std::unique_lock<std::mutex>(*outputMutex);
+  }
   bool wasRunning = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -1968,8 +2228,12 @@ grpc::Status GroupManager::StopTuning(const std::string &groupName, AGCProto::Tu
     if (wasRunning) {
       it->second.tuningStatus.set_state(AGCProto::TUNING_STATE_STOPPED);
       it->second.tuningStatus.set_last_error("调试任务由上位机停止");
+      ++it->second.controlRevision;
       LOG_INFO("AGC 已停止自动调试任务: group_name={}", groupName);
     }
+  }
+  if (outputLock.owns_lock()) {
+    outputLock.unlock();
   }
   bool needsCleanup = wasRunning;
   if (!needsCleanup) {

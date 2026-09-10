@@ -39,6 +39,19 @@ public:
                          LastErrorSource source) {
     mgr.clearLastError(connName, source);
   }
+
+  static uint64_t ReplacedCommandCount(const LinkManager& mgr, const std::string& connName) {
+    std::shared_ptr<LinkManager::LatestCommandQueue> queue;
+    {
+      std::lock_guard<std::mutex> lock(mgr.mu_);
+      auto it = mgr.linksByName_.find(connName);
+      if (it == mgr.linksByName_.end()) {
+        return 0;
+      }
+      queue = it->second.dcCommandQueue;
+    }
+    return queue ? queue->replacedCount() : 0;
+  }
 };
 }  // namespace ModbusRTU
 
@@ -290,6 +303,80 @@ private:
 public:
   LinkManager mgr;
 };
+
+DataCenterProto::PointUpdate MakeDeliveredUpdate(uint32_t srcConnId,
+                                                 uint32_t dstConnId,
+                                                 const char* tag,
+                                                 double value) {
+  DataCenterProto::PointUpdate update;
+  update.set_src_conn_id(srcConnId);
+  update.set_src_tag("agc-setpoint");
+  update.set_dst_conn_id(dstConnId);
+  update.set_dst_tag(tag);
+  update.mutable_value()->set_double_value(value);
+  update.set_quality(DataCenterProto::QUALITY_GOOD);
+  return update;
+}
+
+size_t DrainAndEchoWriteFrames(const ScopedPseudoTty& pty, size_t maxFrames, int timeoutMs) {
+  size_t count = 0;
+  for (; count < maxFrames; ++count) {
+    std::vector<uint8_t> frame;
+    if (!pty.readExact(&frame, 8, timeoutMs)) {
+      break;
+    }
+    if (!pty.writeAll(frame)) {
+      break;
+    }
+  }
+  return count;
+}
+
+bool WaitForReplacedCommandCount(const LinkManager& mgr,
+                                 const std::string& connName,
+                                 uint64_t expected) {
+  for (int i = 0; i < 100; ++i) {
+    if (ModbusRTULinkManagerTestPeer::ReplacedCommandCount(mgr, connName) >= expected) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return false;
+}
+
+bool WaitForSubscriptionCount(const FakeDataCenterState& state,
+                              uint32_t connId,
+                              size_t expected) {
+  for (int i = 0; i < 100; ++i) {
+    if (state.GetSubscriptionCount(connId) >= expected) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return false;
+}
+
+bool WaitForSubscriptionCreateCount(const FakeDataCenterState& state,
+                                    uint32_t connId,
+                                    size_t expected) {
+  for (int i = 0; i < 400; ++i) {
+    if (state.GetSubscriptionCreateCount(connId) >= expected) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return false;
+}
+
+bool WaitForNoSubscriptions(const FakeDataCenterState& state, uint32_t connId) {
+  for (int i = 0; i < 100; ++i) {
+    if (state.GetSubscriptionCount(connId) == 0) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return false;
+}
 }  // 命名空间结束
 
 // 验证：create_only UpsertLink 会向 DataCenter 取/建 conn_id，并回填到 LinkInfo。
@@ -822,6 +909,156 @@ TEST(ModbusRtuLinkManagerTest, UpdateConfigKeepsStoppedWhenReadyLinkExists) {
   ASSERT_TRUE(mgr.GetLink("conn-update-config", &got).ok());
   EXPECT_EQ(got.state(), ModbusRTUProto::LINK_STATE_STOPPED);
   EXPECT_TRUE(got.last_error().empty());
+}
+
+// 验证：首个串口写阻塞期间，同一写点连续到达的新命令只执行最新值。
+TEST(ModbusRtuLinkManagerTest, DataCenterCommandSubscriptionUsesLatestValueWhileWriteBlocked) {
+  ScopedPseudoTty pty;
+  ASSERT_TRUE(pty.ok()) << pty.error();
+
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManagerTestEnv env;
+  auto& mgr = env.mgr;
+  mgr.setDataCenterStub(stub);
+
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("conn-latest-command", pty.slavePath().c_str(), 1), &info).ok());
+
+  ModbusRTUProto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-latest-command");
+  *ptReq.add_points() = MakeWriteSingleRegisterPoint("active-power-setpoint", 1);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+  ASSERT_TRUE(mgr.StartLink("conn-latest-command").ok());
+  ASSERT_TRUE(WaitForSubscriptionCount(state, info.conn_id(), 1));
+
+  state.DeliverUpdate(MakeDeliveredUpdate(99, info.conn_id(), "active-power-setpoint", 100.0));
+
+  std::vector<uint8_t> firstFrame;
+  ASSERT_TRUE(pty.readExact(&firstFrame, 8, 3000));
+  ASSERT_EQ(firstFrame.size(), 8u);
+  EXPECT_EQ(firstFrame[1], 0x06);
+  EXPECT_EQ(firstFrame[4], 0x00);
+  EXPECT_EQ(firstFrame[5], 0x64);
+
+  state.DeliverUpdate(MakeDeliveredUpdate(99, info.conn_id(), "active-power-setpoint", 101.0));
+  state.DeliverUpdate(MakeDeliveredUpdate(99, info.conn_id(), "active-power-setpoint", 102.0));
+  state.DeliverUpdate(MakeDeliveredUpdate(99, info.conn_id(), "active-power-setpoint", 1124.0));
+  ASSERT_TRUE(WaitForReplacedCommandCount(mgr, "conn-latest-command", 2));
+  ASSERT_TRUE(pty.writeAll(firstFrame));
+
+  std::vector<uint8_t> latestFrame;
+  ASSERT_TRUE(pty.readExact(&latestFrame, 8, 3000));
+  ASSERT_EQ(latestFrame.size(), 8u);
+  EXPECT_EQ(latestFrame[1], 0x06);
+  EXPECT_EQ(latestFrame[4], 0x04);
+  EXPECT_EQ(latestFrame[5], 0x64);
+  ASSERT_TRUE(pty.writeAll(latestFrame));
+
+  EXPECT_EQ(DrainAndEchoWriteFrames(pty, 1, 100), 0u);
+  ASSERT_TRUE(mgr.StopLink("conn-latest-command").ok());
+}
+
+// 验证：首个串口写阻塞期间，不同写点分别保留最新值，并按首次待执行顺序公平写出。
+TEST(ModbusRtuLinkManagerTest, DataCenterCommandSubscriptionKeepsLatestValuePerTagWhileWriteBlocked) {
+  ScopedPseudoTty pty;
+  ASSERT_TRUE(pty.ok()) << pty.error();
+
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManagerTestEnv env;
+  auto& mgr = env.mgr;
+  mgr.setDataCenterStub(stub);
+
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("conn-latest-per-tag", pty.slavePath().c_str(), 1), &info).ok());
+
+  ModbusRTUProto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-latest-per-tag");
+  *ptReq.add_points() = MakeWriteSingleRegisterPoint("setpoint-a", 1);
+  *ptReq.add_points() = MakeWriteSingleRegisterPoint("setpoint-b", 2);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+  ASSERT_TRUE(mgr.StartLink("conn-latest-per-tag").ok());
+  ASSERT_TRUE(WaitForSubscriptionCount(state, info.conn_id(), 1));
+
+  state.DeliverUpdate(MakeDeliveredUpdate(99, info.conn_id(), "setpoint-a", 10.0));
+
+  std::vector<uint8_t> blockedFrame;
+  ASSERT_TRUE(pty.readExact(&blockedFrame, 8, 3000));
+  ASSERT_EQ(blockedFrame.size(), 8u);
+  EXPECT_EQ(blockedFrame[2], 0x00);
+  EXPECT_EQ(blockedFrame[3], 0x01);
+  EXPECT_EQ(blockedFrame[4], 0x00);
+  EXPECT_EQ(blockedFrame[5], 0x0A);
+
+  state.DeliverUpdate(MakeDeliveredUpdate(99, info.conn_id(), "setpoint-a", 11.0));
+  state.DeliverUpdate(MakeDeliveredUpdate(99, info.conn_id(), "setpoint-b", 20.0));
+  state.DeliverUpdate(MakeDeliveredUpdate(99, info.conn_id(), "setpoint-a", 12.0));
+  state.DeliverUpdate(MakeDeliveredUpdate(99, info.conn_id(), "setpoint-b", 21.0));
+  ASSERT_TRUE(WaitForReplacedCommandCount(mgr, "conn-latest-per-tag", 2));
+  ASSERT_TRUE(pty.writeAll(blockedFrame));
+
+  std::vector<uint8_t> latestAFrame;
+  ASSERT_TRUE(pty.readExact(&latestAFrame, 8, 3000));
+  ASSERT_EQ(latestAFrame.size(), 8u);
+  EXPECT_EQ(latestAFrame[2], 0x00);
+  EXPECT_EQ(latestAFrame[3], 0x01);
+  EXPECT_EQ(latestAFrame[4], 0x00);
+  EXPECT_EQ(latestAFrame[5], 0x0C);
+  ASSERT_TRUE(pty.writeAll(latestAFrame));
+
+  std::vector<uint8_t> latestBFrame;
+  ASSERT_TRUE(pty.readExact(&latestBFrame, 8, 3000));
+  ASSERT_EQ(latestBFrame.size(), 8u);
+  EXPECT_EQ(latestBFrame[2], 0x00);
+  EXPECT_EQ(latestBFrame[3], 0x02);
+  EXPECT_EQ(latestBFrame[4], 0x00);
+  EXPECT_EQ(latestBFrame[5], 0x15);
+  ASSERT_TRUE(pty.writeAll(latestBFrame));
+
+  EXPECT_EQ(DrainAndEchoWriteFrames(pty, 1, 100), 0u);
+  ASSERT_TRUE(mgr.StopLink("conn-latest-per-tag").ok());
+}
+
+// 验证：DataCenter 命令订阅流结束后会自动重连，新设点仍可写入串口。
+TEST(ModbusRtuLinkManagerTest, DataCenterCommandSubscriptionReconnectsAfterStreamEnds) {
+  ScopedPseudoTty pty;
+  ASSERT_TRUE(pty.ok()) << pty.error();
+
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManagerTestEnv env;
+  auto& mgr = env.mgr;
+  mgr.setDataCenterStub(stub);
+
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("conn-command-reconnect", pty.slavePath().c_str(), 1), &info).ok());
+
+  ModbusRTUProto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-command-reconnect");
+  *ptReq.add_points() = MakeWriteSingleRegisterPoint("active-power-setpoint", 1);
+  ptReq.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+  ASSERT_TRUE(mgr.StartLink("conn-command-reconnect").ok());
+  ASSERT_TRUE(WaitForSubscriptionCount(state, info.conn_id(), 1));
+  ASSERT_TRUE(WaitForNoSubscriptions(state, info.conn_id()));
+  state.DeliverUpdate(MakeDeliveredUpdate(99, info.conn_id(), "active-power-setpoint", 1124.0));
+  ASSERT_TRUE(WaitForSubscriptionCreateCount(state, info.conn_id(), 2));
+
+  std::vector<uint8_t> frame;
+  ASSERT_TRUE(pty.readExact(&frame, 8, 3000));
+  ASSERT_EQ(frame.size(), 8u);
+  EXPECT_EQ(frame[1], 0x06);
+  EXPECT_EQ(frame[4], 0x04);
+  EXPECT_EQ(frame[5], 0x64);
+  ASSERT_TRUE(pty.writeAll(frame));
+
+  ASSERT_TRUE(mgr.StopLink("conn-command-reconnect").ok());
 }
 
 // 验证：同步命令会按目的连接与写点发送 0x10 报文，并在收到合法从站响应后返回已接受。

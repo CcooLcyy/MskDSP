@@ -294,6 +294,23 @@ LinkManager::LinkManager(std::string moduleName,
   linkStore_(configDbPath),
   pointTableStore_(std::move(configDbPath)) {}
 
+LinkManager::~LinkManager() {
+  std::vector<std::string> connNames;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    connNames.reserve(linksByName_.size());
+    for (const auto &[connName, _] : linksByName_) {
+      connNames.push_back(connName);
+    }
+  }
+  for (const auto &connName : connNames) {
+    const auto status = StopLink(connName);
+    if (!status.ok() && status.error_code() != grpc::StatusCode::NOT_FOUND) {
+      LOG_WARNING("ModbusRTU 管理器析构时停止链路失败: conn_name={}, 原因={}", connName, status.error_message());
+    }
+  }
+}
+
 void LinkManager::LoadPersistedConfig() {
   LOG_INFO("ModbusRTU 开始加载本地持久化配置");
 
@@ -1046,26 +1063,80 @@ std::shared_ptr<Bus> LinkManager::releaseMqttBusLocked(const MqttKey& key) {
   return nullptr;
 }
 
-void LinkManager::stopCommandSubscribeLocked(LinkRuntime* link) {
-  if (link == nullptr) {
-    return;
+bool LinkManager::LatestCommandQueue::Push(PendingWriteCommand command) {
+  const auto tag = command.update.dst_tag();
+  if (tag.empty()) {
+    return false;
   }
-  if (link->dcCommandContext) {
-    link->dcCommandContext->TryCancel();
+
+  bool replaced = false;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (closed_) {
+      return false;
+    }
+    auto it = pendingByTag_.find(tag);
+    if (it == pendingByTag_.end()) {
+      tagOrder_.push_back(tag);
+      pendingByTag_.emplace(tag, std::move(command));
+    } else {
+      it->second = std::move(command);
+      ++replacedCount_;
+      replaced = true;
+    }
   }
-  if (link->dcCommandThread.joinable()) {
-    LOG_INFO("ModbusRTU 停止 DataCenter 命令订阅: conn_name={}", link->config.conn_name());
-    link->dcCommandThread.request_stop();
-    link->dcCommandThread.join();
+  cv_.notify_one();
+  return replaced;
+}
+
+bool LinkManager::LatestCommandQueue::WaitPop(std::stop_token stopToken, PendingWriteCommand* out) {
+  if (out == nullptr) {
+    return false;
   }
-  link->dcCommandContext.reset();
+
+  std::unique_lock<std::mutex> lock(mu_);
+  if (!cv_.wait(lock, stopToken, [this]() { return closed_ || !tagOrder_.empty(); })) {
+    return false;
+  }
+  while (!tagOrder_.empty()) {
+    auto tag = std::move(tagOrder_.front());
+    tagOrder_.pop_front();
+    auto it = pendingByTag_.find(tag);
+    if (it == pendingByTag_.end()) {
+      continue;
+    }
+    *out = std::move(it->second);
+    pendingByTag_.erase(it);
+    return true;
+  }
+  return false;
+}
+
+void LinkManager::LatestCommandQueue::Close(bool discardPending) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    closed_ = true;
+    if (discardPending) {
+      tagOrder_.clear();
+      pendingByTag_.clear();
+    }
+  }
+  cv_.notify_all();
+}
+
+uint64_t LinkManager::LatestCommandQueue::replacedCount() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return replacedCount_;
 }
 
 void LinkManager::startCommandSubscribeLocked(const std::string& connName, LinkRuntime* link) {
   if (link == nullptr || !link->bus) {
     return;
   }
-  stopCommandSubscribeLocked(link);
+  if (link->dcCommandReadThread.joinable() || link->dcCommandWriteThread.joinable()) {
+    LOG_ERROR("ModbusRTU 启动 DataCenter 命令订阅失败: conn_name={}, 原因=旧命令线程尚未停止", connName);
+    return;
+  }
 
   std::vector<PointTable::Point> writePoints;
   for (const auto& point : link->pointTable.Points()) {
@@ -1095,51 +1166,114 @@ void LinkManager::startCommandSubscribeLocked(const std::string& connName, LinkR
            connId,
            tags.size());
 
-  link->dcCommandContext = std::make_shared<grpc::ClientContext>();
-  auto ctx = link->dcCommandContext;
-  link->dcCommandThread = ModuleManager::StartModuleThread(
+  link->dcCommandContext.reset();
+  link->dcCommandQueue = std::make_shared<LatestCommandQueue>();
+  auto commandQueue = link->dcCommandQueue;
+
+  link->dcCommandWriteThread = ModuleManager::StartModuleThread(
       ModbusRTULibInfo.LIB_NAME,
-      [this, connName, ctx, connId, tags, pointByTag, config, bus](std::stop_token st) {
-        std::stop_callback cb(st, [&ctx]() { ctx->TryCancel(); });
-
-        auto reader = dataCenter_.Subscribe(ctx.get(), connId, tags, false);
-        if (!reader) {
-          LOG_ERROR("ModbusRTU 创建 DataCenter 命令订阅失败: conn_name={}, conn_id={}, tags={}",
-                    connName,
-                    connId,
-                    tags.size());
-          return;
-        }
-
-        DataCenterProto::PointUpdate update;
-        while (reader->Read(&update)) {
-          if (update.src_conn_id() == connId) {
-            continue;
-          }
-          auto it = pointByTag.find(update.dst_tag());
-          if (it == pointByTag.end()) {
-            continue;
-          }
-          auto status = executeWriteCommand(connName, config, it->second, bus, update);
+      [this, connName, config, bus, commandQueue](std::stop_token st) {
+        PendingWriteCommand command;
+        while (commandQueue->WaitPop(st, &command)) {
+          auto status = executeWriteCommand(connName, config, command.point, bus, command.update);
           if (!status.ok()) {
             updateLastError(connName, status.error_message(), LastErrorSource::kCommand);
             LOG_WARNING("ModbusRTU 写点失败: conn_name={}, tag={}, 原因={}",
                         connName,
-                        update.dst_tag(),
+                        command.update.dst_tag(),
                         status.error_message());
           } else {
             clearLastError(connName, LastErrorSource::kCommand);
           }
         }
+        LOG_INFO("ModbusRTU 命令写线程已停止: conn_name={}, 已覆盖旧命令数={}", connName, commandQueue->replacedCount());
+      });
 
-        auto finishStatus = reader->Finish();
-        if (!finishStatus.ok() && !st.stop_requested()) {
-          LOG_WARNING("ModbusRTU DataCenter 命令订阅异常结束: conn_name={}, conn_id={}, 错误={}",
+  link->dcCommandReadThread = ModuleManager::StartModuleThread(
+      ModbusRTULibInfo.LIB_NAME,
+      [this, connName, connId, tags, pointByTag, commandQueue](std::stop_token st) {
+        constexpr auto kSubscribeRetryInterval = std::chrono::milliseconds(500);
+        std::mutex retryMutex;
+        std::condition_variable_any retryCv;
+        bool hasAttemptedSubscribe = false;
+
+        while (!st.stop_requested()) {
+          auto ctx = std::make_shared<grpc::ClientContext>();
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            auto it = linksByName_.find(connName);
+            if (it == linksByName_.end() ||
+                it->second.state != ModbusRTUProto::LINK_STATE_RUNNING ||
+                it->second.dcCommandQueue != commandQueue) {
+              break;
+            }
+            it->second.dcCommandContext = ctx;
+          }
+
+          std::stop_callback cancelOnStop(st, [ctx]() { ctx->TryCancel(); });
+          const bool requestSnapshot = hasAttemptedSubscribe;
+          hasAttemptedSubscribe = true;
+          auto reader = dataCenter_.Subscribe(ctx.get(), connId, tags, requestSnapshot);
+          if (!reader) {
+            {
+              std::lock_guard<std::mutex> lock(mu_);
+              auto it = linksByName_.find(connName);
+              if (it != linksByName_.end() && it->second.dcCommandContext == ctx) {
+                it->second.dcCommandContext.reset();
+              }
+            }
+            if (st.stop_requested()) {
+              break;
+            }
+            const std::string error = "创建 DataCenter 命令订阅失败";
+            LOG_ERROR("ModbusRTU 创建 DataCenter 命令订阅失败，将自动重试: conn_name={}, conn_id={}, tags={}",
                       connName,
                       connId,
-                      finishStatus.error_message());
-          updateLastError(connName, finishStatus.error_message(), LastErrorSource::kCommand);
+                      tags.size());
+            updateLastError(connName, error, LastErrorSource::kSubscription);
+          } else {
+            clearLastError(connName, LastErrorSource::kSubscription);
+            DataCenterProto::PointUpdate update;
+            while (reader->Read(&update)) {
+              if (update.src_conn_id() == connId) {
+                continue;
+              }
+              auto it = pointByTag.find(update.dst_tag());
+              if (it == pointByTag.end()) {
+                continue;
+              }
+              PendingWriteCommand command{.point = it->second, .update = update};
+              if (commandQueue->Push(std::move(command))) {
+                LOG_DEBUG("ModbusRTU 已用最新值覆盖未执行旧命令: conn_name={}, tag={}", connName, update.dst_tag());
+              }
+            }
+
+            auto finishStatus = reader->Finish();
+            {
+              std::lock_guard<std::mutex> lock(mu_);
+              auto it = linksByName_.find(connName);
+              if (it != linksByName_.end() && it->second.dcCommandContext == ctx) {
+                it->second.dcCommandContext.reset();
+              }
+            }
+            if (st.stop_requested()) {
+              break;
+            }
+            if (!finishStatus.ok()) {
+              LOG_WARNING("ModbusRTU DataCenter 命令订阅异常结束，将自动重试: conn_name={}, conn_id={}, 错误={}",
+                          connName,
+                          connId,
+                          finishStatus.error_message());
+              updateLastError(connName, finishStatus.error_message(), LastErrorSource::kSubscription);
+            } else {
+              LOG_INFO("ModbusRTU DataCenter 命令订阅已结束，将自动重试: conn_name={}, conn_id={}", connName, connId);
+            }
+          }
+
+          std::unique_lock<std::mutex> retryLock(retryMutex);
+          (void)retryCv.wait_for(retryLock, st, kSubscribeRetryInterval, []() { return false; });
         }
+        LOG_INFO("ModbusRTU 命令订阅读线程已停止: conn_name={}", connName);
       });
 }
 
@@ -1457,6 +1591,7 @@ grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& re
       it->second.mqttKey = mqttKey;
       clearLastErrorLocked(&it->second, LastErrorSource::kLifecycle);
       clearLastErrorLocked(&it->second, LastErrorSource::kCommand);
+      clearLastErrorLocked(&it->second, LastErrorSource::kSubscription);
       clearLastErrorLocked(&it->second, LastErrorSource::kPolling);
       linksConfig = dumpLinksConfigLocked();
       pointTablesConfig = dumpPointTablesConfigLocked();
@@ -1879,6 +2014,7 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
     link.state = ModbusRTUProto::LINK_STATE_RUNNING;
     clearLastErrorLocked(&link, LastErrorSource::kLifecycle);
     clearLastErrorLocked(&link, LastErrorSource::kCommand);
+    clearLastErrorLocked(&link, LastErrorSource::kSubscription);
     clearLastErrorLocked(&link, LastErrorSource::kPolling);
     link.pollThread = ModuleManager::StartModuleThread(
         ModbusRTULibInfo.LIB_NAME,
@@ -1909,11 +2045,13 @@ grpc::Status LinkManager::StopLink(const std::string& connName) {
   }
 
   std::jthread pollThread;
-  std::jthread commandThread;
+  std::jthread commandReadThread;
+  std::jthread commandWriteThread;
   SerialKey serialKey;
   MqttKey mqttKey;
   std::shared_ptr<Bus> bus;
   std::shared_ptr<grpc::ClientContext> commandContext;
+  std::shared_ptr<LatestCommandQueue> commandQueue;
   std::shared_ptr<CommandGate> commandGate;
   bool pendingDelete = false;
   ModbusRTUProto::LinkConfig config;
@@ -1925,8 +2063,10 @@ grpc::Status LinkManager::StopLink(const std::string& connName) {
       return makeNotFound(connName);
     }
     pendingDelete = (it->second.state == ModbusRTUProto::LINK_STATE_PENDING_DELETE);
-    commandThread = std::move(it->second.dcCommandThread);
+    commandReadThread = std::move(it->second.dcCommandReadThread);
+    commandWriteThread = std::move(it->second.dcCommandWriteThread);
     commandContext = std::move(it->second.dcCommandContext);
+    commandQueue = std::move(it->second.dcCommandQueue);
     pollThread = std::move(it->second.pollThread);
     config = it->second.config;
     serialKey = it->second.serialKey;
@@ -1941,13 +2081,24 @@ grpc::Status LinkManager::StopLink(const std::string& connName) {
     it->second.state = pendingDelete ? ModbusRTUProto::LINK_STATE_PENDING_DELETE : ModbusRTUProto::LINK_STATE_STOPPED;
   }
 
+  if (commandReadThread.joinable()) {
+    LOG_INFO("ModbusRTU 停止 DataCenter 命令订阅: conn_name={}", connName);
+    commandReadThread.request_stop();
+  }
   if (commandContext) {
     commandContext->TryCancel();
   }
-  if (commandThread.joinable()) {
-    LOG_INFO("ModbusRTU 停止 DataCenter 命令订阅: conn_name={}", connName);
-    commandThread.request_stop();
-    commandThread.join();
+  if (commandQueue) {
+    commandQueue->Close(true);
+  }
+  if (commandWriteThread.joinable()) {
+    commandWriteThread.request_stop();
+  }
+  if (commandReadThread.joinable()) {
+    commandReadThread.join();
+  }
+  if (commandWriteThread.joinable()) {
+    commandWriteThread.join();
   }
 
   if (pollThread.joinable()) {
@@ -2754,6 +2905,9 @@ void LinkManager::setLastErrorLocked(LinkRuntime* link,
     case LastErrorSource::kCommand:
       link->commandError = error;
       break;
+    case LastErrorSource::kSubscription:
+      link->subscriptionError = error;
+      break;
     case LastErrorSource::kLifecycle:
       link->lifecycleError = error;
       break;
@@ -2763,6 +2917,8 @@ void LinkManager::setLastErrorLocked(LinkRuntime* link,
 
   if (!link->lifecycleError.empty()) {
     link->lastError = link->lifecycleError;
+  } else if (!link->subscriptionError.empty()) {
+    link->lastError = link->subscriptionError;
   } else if (!link->commandError.empty()) {
     link->lastError = link->commandError;
   } else {
@@ -2781,6 +2937,9 @@ void LinkManager::clearLastErrorLocked(LinkRuntime* link, LastErrorSource source
     case LastErrorSource::kCommand:
       link->commandError.clear();
       break;
+    case LastErrorSource::kSubscription:
+      link->subscriptionError.clear();
+      break;
     case LastErrorSource::kLifecycle:
       link->lifecycleError.clear();
       break;
@@ -2790,6 +2949,8 @@ void LinkManager::clearLastErrorLocked(LinkRuntime* link, LastErrorSource source
 
   if (!link->lifecycleError.empty()) {
     link->lastError = link->lifecycleError;
+  } else if (!link->subscriptionError.empty()) {
+    link->lastError = link->subscriptionError;
   } else if (!link->commandError.empty()) {
     link->lastError = link->commandError;
   } else {
@@ -2822,6 +2983,9 @@ void LinkManager::clearLastError(const std::string& connName, LastErrorSource so
     case LastErrorSource::kCommand:
       previous = it->second.commandError;
       break;
+    case LastErrorSource::kSubscription:
+      previous = it->second.subscriptionError;
+      break;
     case LastErrorSource::kLifecycle:
       previous = it->second.lifecycleError;
       break;
@@ -2833,7 +2997,8 @@ void LinkManager::clearLastError(const std::string& connName, LastErrorSource so
     LOG_INFO("ModbusRTU 错误已恢复: conn_name={}, 错误来源={}, 原因={}",
              connName,
              source == LastErrorSource::kPolling ? "轮询" :
-                 source == LastErrorSource::kCommand ? "写命令" : "生命周期",
+                 source == LastErrorSource::kCommand ? "写命令" :
+                 source == LastErrorSource::kSubscription ? "命令订阅" : "生命周期",
              previous);
   }
 }

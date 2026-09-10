@@ -211,6 +211,12 @@ public:
     return active;
   }
 
+  size_t GetSubscriptionCreateCount(uint32_t connId) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = subscriptionCreateCountByConnId_.find(connId);
+    return it == subscriptionCreateCountByConnId_.end() ? 0 : it->second;
+  }
+
   grpc::Status ListConnections(DataCenterProto::ListConnectionsResponse* response) const {
     if (response == nullptr) {
       return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "response is null");
@@ -421,6 +427,40 @@ public:
     return grpc::Status::OK;
   }
 
+  void DeliverUpdate(const DataCenterProto::PointUpdate& update) {
+    std::vector<std::shared_ptr<SubscriptionState>> subscriptions;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      latestByConnId_[update.dst_conn_id()][update.dst_tag()] = update;
+      auto watchersIt = subscriptionsByConnId_.find(update.dst_conn_id());
+      if (watchersIt == subscriptionsByConnId_.end()) {
+        return;
+      }
+      auto& watchers = watchersIt->second;
+      for (auto it = watchers.begin(); it != watchers.end();) {
+        if (auto sub = it->lock()) {
+          subscriptions.push_back(std::move(sub));
+          ++it;
+        } else {
+          it = watchers.erase(it);
+        }
+      }
+    }
+    for (const auto& sub : subscriptions) {
+      if (!sub->Matches(update.dst_tag())) {
+        continue;
+      }
+      {
+        std::lock_guard<std::mutex> lock(sub->mu);
+        if (sub->closed) {
+          continue;
+        }
+        sub->queue.push_back(update);
+      }
+      sub->cv.notify_one();
+    }
+  }
+
   grpc::Status ExecuteCommand(const DataCenterProto::ExecuteCommandRequest& request,
                               DataCenterProto::ExecuteCommandResponse* response) {
     if (response == nullptr) {
@@ -570,10 +610,12 @@ public:
         }
       }
       subscriptionsByConnId_[request.conn_id()].push_back(subscription);
+      ++subscriptionCreateCountByConnId_[request.conn_id()];
     }
     if (!request.snapshot()) {
       std::lock_guard<std::mutex> lock(mu_);
       subscriptionsByConnId_[request.conn_id()].push_back(subscription);
+      ++subscriptionCreateCountByConnId_[request.conn_id()];
     }
     return std::make_unique<FakePointUpdateReader>(std::move(subscription));
   }
@@ -590,6 +632,7 @@ private:
   std::unordered_map<uint32_t, std::unordered_map<std::string, DataCenterProto::PointUpdate>> latestByConnId_;
   std::unordered_map<uint32_t, std::unordered_map<std::string, size_t>> publishCountByConnId_;
   std::unordered_map<uint32_t, std::unordered_map<std::string, size_t>> commandCountByConnId_;
+  mutable std::unordered_map<uint32_t, size_t> subscriptionCreateCountByConnId_;
   mutable std::unordered_map<uint32_t, std::vector<std::weak_ptr<SubscriptionState>>> subscriptionsByConnId_;
 };
 

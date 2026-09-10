@@ -29,6 +29,7 @@ namespace AGC {
 class GroupManager {
 public:
   explicit GroupManager(std::string moduleName, std::filesystem::path configDbPath = std::filesystem::path("./conf/config.db"));
+  ~GroupManager();
 
   void setDataCenterServerAddress(std::string address);
   void setDataCenterStub(std::shared_ptr<DataCenterProto::DataCenterService::StubInterface> stub);
@@ -68,6 +69,8 @@ private:
     std::jthread controlThread;
     std::jthread tuningThread;
     std::shared_ptr<ControlTrigger> controlTrigger;
+    std::shared_ptr<std::mutex> outputMutex = std::make_shared<std::mutex>();
+    uint64_t controlRevision{0};
 
     // 由配置派生的缓存 tags（供订阅线程使用）。
     std::string cmdTag;
@@ -86,6 +89,9 @@ private:
 
     std::vector<bool> hasLastMemberTargetKw;
     std::vector<double> lastMemberTargetKw;
+    std::vector<bool> hasLastPublishedMemberSetpoint;
+    std::vector<double> lastPublishedMemberSetpointKw;
+    std::vector<std::chrono::steady_clock::time_point> lastMemberSetpointPublishedAt;
     std::vector<bool> hasLastControlMemberMeasKw;
     std::vector<double> lastControlMemberMeasKw;
 
@@ -125,6 +131,14 @@ private:
   void publishControlStatePoints(const std::string &groupName, std::string_view trigger);
   void publishDefaultLimitPoints(const std::string &groupName, std::string_view trigger);
   void publishCommandEchoPoint(uint32_t connId, const AGCProto::ValueSpec &commandSpec, const DataCenterProto::PointUpdate &update);
+  bool publishMemberSetpoints(const std::string &groupName,
+                              uint32_t connId,
+                              const AGCProto::GroupConfig &config,
+                              const std::vector<bool> &memberPublish,
+                              const std::vector<double> &memberPublishKw,
+                              DataCenterProto::Quality quality,
+                              uint64_t expectedRevision,
+                              std::string_view trigger);
 
   bool handleUpdateLocked(GroupRuntime *g, const DataCenterProto::PointUpdate &update);
   void controlTick(const std::string &groupName);

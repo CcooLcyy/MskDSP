@@ -2,6 +2,7 @@
 
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -33,6 +34,7 @@ class LinkManager {
 public:
   explicit LinkManager(std::string moduleName,
                        std::filesystem::path configDbPath = std::filesystem::path("./conf/config.db"));
+  ~LinkManager();
 
   void LoadPersistedConfig();
 
@@ -65,6 +67,7 @@ private:
     kNone,
     kPolling,
     kCommand,
+    kSubscription,
     kLifecycle,
   };
 
@@ -100,6 +103,27 @@ private:
     std::condition_variable cv;
     bool accepting = false;
     size_t active = 0;
+  };
+
+  struct PendingWriteCommand {
+    PointTable::Point point;
+    DataCenterProto::PointUpdate update;
+  };
+
+  class LatestCommandQueue {
+  public:
+    bool Push(PendingWriteCommand command);
+    bool WaitPop(std::stop_token stopToken, PendingWriteCommand* out);
+    void Close(bool discardPending);
+    uint64_t replacedCount() const;
+
+  private:
+    mutable std::mutex mu_;
+    std::condition_variable_any cv_;
+    std::deque<std::string> tagOrder_;
+    std::unordered_map<std::string, PendingWriteCommand> pendingByTag_;
+    bool closed_{false};
+    uint64_t replacedCount_{0};
   };
 
   struct MqttKey {
@@ -139,6 +163,7 @@ private:
     std::string lastError;
     std::string pollingError;
     std::string commandError;
+    std::string subscriptionError;
     std::string lifecycleError;
     uint64_t pollingErrorRevision = 0;
     PointTable pointTable;
@@ -147,7 +172,9 @@ private:
     std::shared_ptr<CommandGate> commandGate = std::make_shared<CommandGate>();
     std::jthread pollThread;
     std::shared_ptr<grpc::ClientContext> dcCommandContext;
-    std::jthread dcCommandThread;
+    std::shared_ptr<LatestCommandQueue> dcCommandQueue;
+    std::jthread dcCommandReadThread;
+    std::jthread dcCommandWriteThread;
   };
 
   static grpc::Status validateConnName(const std::string& connName);
@@ -170,7 +197,6 @@ private:
   std::shared_ptr<Bus> acquireMqttBusLocked(const MqttKey& key, const ModbusRTUProto::LinkConfig& config);
   std::shared_ptr<Bus> releaseMqttBusLocked(const MqttKey& key);
   void startCommandSubscribeLocked(const std::string& connName, LinkRuntime* link);
-  void stopCommandSubscribeLocked(LinkRuntime* link);
   grpc::Status executeWriteCommand(const std::string& connName,
                                    const ModbusRTUProto::LinkConfig& config,
                                    const PointTable::Point& point,

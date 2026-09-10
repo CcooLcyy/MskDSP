@@ -383,6 +383,15 @@ TEST(AgcGroupManagerTest, FunctionDisabledBlocksSubscribedControlOutputButKeepsM
   EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV1_P_SET", 20.0));
   EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV2_P_SET", 40.0));
 
+  ASSERT_EQ(
+      ExecuteBoolCommand(&mgr, "g-function-disabled", info.conn_id(), "AGC功能投入", false).status(),
+      DataCenterProto::COMMAND_ACCEPTED);
+  ASSERT_EQ(
+      ExecuteBoolCommand(&mgr, "g-function-disabled", info.conn_id(), "AGC功能投入", true).status(),
+      DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_TRUE(WaitForPublishCount(state, info.conn_id(), "INV1_P_SET", 2u));
+  EXPECT_TRUE(WaitForPublishCount(state, info.conn_id(), "INV2_P_SET", 2u));
+
   ASSERT_TRUE(mgr.StopGroup("g-function-disabled").ok());
 }
 
@@ -973,12 +982,16 @@ TEST(AgcGroupManagerTest, RuntimeMeasurementUpdateTriggersRecalculation) {
 
   ASSERT_TRUE(mgr.StartGroup("g-runtime-meas").ok());
   ASSERT_TRUE(WaitForPublishCount(state, info.conn_id(), "P_TOTAL", 1u));
+  ASSERT_TRUE(WaitForPublishCount(state, info.conn_id(), "INV1_P_SET", 1u));
+  ASSERT_TRUE(WaitForPublishCount(state, info.conn_id(), "INV2_P_SET", 1u));
   ASSERT_TRUE(WaitForSubscriptionCount(state, info.conn_id(), 1u));
   EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "P_TOTAL", 30.0));
 
   PublishDoublePoint(&state, info.conn_id(), "INV1_P_MEAS", 15.0);
   EXPECT_TRUE(WaitForPublishCount(state, info.conn_id(), "P_TOTAL", 2u));
   EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "P_TOTAL", 35.0));
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV1_P_SET"), 1u);
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV2_P_SET"), 1u);
 
   ASSERT_TRUE(mgr.StopGroup("g-runtime-meas").ok());
 }
