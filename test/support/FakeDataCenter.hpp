@@ -204,7 +204,12 @@ public:
     }
     size_t active = 0;
     for (const auto& weak : it->second) {
-      if (!weak.expired()) {
+      const auto subscription = weak.lock();
+      if (subscription == nullptr) {
+        continue;
+      }
+      std::lock_guard<std::mutex> subscriptionLock(subscription->mu);
+      if (!subscription->closed) {
         ++active;
       }
     }

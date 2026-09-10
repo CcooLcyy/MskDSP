@@ -628,10 +628,12 @@ IEC61850::ProtocolGooseFrameView MakeTripGooseFrame(
   frame.channel = IEC61850Proto::NETWORK_CHANNEL_A;
   frame.appId = 0x1001;
   frame.configRevision = 4;
-  frame.timeAllowedToLiveMs = 100;
+  frame.timeAllowedToLiveMs = 5'000;
   frame.stateNumber = stateNumber;
   frame.sequenceNumber = sequenceNumber;
-  frame.receiveTimestampNs = 1'000'000;
+  frame.receiveTimestampNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                 std::chrono::steady_clock::now().time_since_epoch())
+                                 .count();
   frame.values = values;
   return frame;
 }
