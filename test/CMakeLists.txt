@@ -1655,10 +1655,13 @@ mskdsp_add_isolated_test(agcControlProfileStore_test)
 add_executable(agcControl_test
   agc_control_test.cc
   ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCControl.cc
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCDefaultPoints.cc
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCGroupValidation.cc
 )
 
 target_include_directories(agcControl_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
 )
 
 target_link_libraries(agcControl_test PRIVATE
