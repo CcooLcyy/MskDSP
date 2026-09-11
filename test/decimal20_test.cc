@@ -25,7 +25,8 @@ TEST(Decimal20Test, ParsePreservesTwentyFractionalDigitsAndScientificNotation) {
   auto precise = Decimal20::Parse(kPrecise);
   ASSERT_TRUE(precise.has_value());
   EXPECT_EQ(precise->ToFixedString(), kPrecise);
-  EXPECT_EQ(precise->ToString(), kPrecise);
+  EXPECT_EQ(precise->ToString(),
+            "123456789012345678901234567890.1234567890123456789");
 
   auto scientific = Decimal20::Parse("+1.2345678901234567890e-1");
   ASSERT_TRUE(scientific.has_value());

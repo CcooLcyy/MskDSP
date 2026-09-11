@@ -515,7 +515,7 @@ inline bool ShouldReport(const Decimal20 &current, const Decimal20 &last,
   if (deadband.units_ <= 0) {
     return true;
   }
-  auto difference = current.units_ - last.units_;
+  Decimal20::Integer difference = current.units_ - last.units_;
   if (difference < 0) {
     difference = -difference;
   }
