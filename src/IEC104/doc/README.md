@@ -19,7 +19,7 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
   - STATION_ROLE_SLAVE 支持总召 `C_IC_NA_1`：通过 DataCenter `GetLatest(conn_id)` 拼装快照应答
   - STATION_ROLE_MASTER 在 STARTDT 成功后自动发起总召 `C_IC_NA_1(QOI=20)`
 - 点值合包：自发点值支持窗口合包与 IOA 顺序打包，连续 IOA 使用 SQ=1 压缩；总召快照按帧大小批量打包
-- 对时：STATION_ROLE_MASTER 可通过 `time_sync_tag` 订阅触发或 gRPC `SendTimeSync` 主动触发；STATION_ROLE_SLAVE 收到对时命令后发布事件到 DataCenter
+- 对时：STATION_ROLE_MASTER 可通过 `time_sync_tag` 订阅触发或 gRPC `SendTimeSync` 主动触发；STATION_ROLE_SLAVE 收到对时命令后发布事件到 DataCenter，并可按配置直接设置系统时间
 - 时标：发送默认使用不带时标类型（`M_SP_NA_1`/`M_ME_NC_1`），可通过 `point_with_time` 切换为带时标；接收兼容带/不带时标类型
 - 遥控/设点：主站通过 DataCenter 订阅命令触发发送 `C_SC_NA_1`、`C_DC_NA_1` 与 `C_SE_NC_1`；遥控点可分别配置直接执行或选择执行，从站收到命令后同步转交 DataCenter
 
@@ -96,10 +96,12 @@ ConfigPusher 点表示例（含 scale/offset/deadband，字段可省略，默认
 
 ### 对时触发
 - `time_sync_tag`：STATION_ROLE_MASTER 订阅该 tag 的 DataCenter 更新并发送对时命令 `C_CS_NA_1`；为空时默认 `__time_sync__`。
+- `set_system_time_on_sync`：仅对从站生效；为 `true` 时收到有效 `C_CS_NA_1` 后直接设置本机系统时间，默认 `false`。设置失败返回负确认；设备容器需具备 `CAP_SYS_TIME`（当前发布脚本使用 `--privileged`）。
+- 发布包镜像将容器日历时区固定为 `Asia/Shanghai`（北京时间，UTC+8）；容器默认与宿主机共享时间命名空间，因此设时成功会直接改变宿主机系统时间。若现场额外启用了独立 time namespace，则不会自动同步到宿主机。
 - 触发来源：DataCenter 推送更新时优先使用 `update.ts_ms` 作为对时毫秒时间戳；若 <=0 且 value 为 int/double，则取该数值；仍无效时使用本地当前时间。
 - gRPC 主动对时：上位机调用 `SendTimeSync(conn_name, ts_ms)`，`ts_ms<=0` 时使用本地当前时间。
 - STATION_ROLE_SLAVE 收到对时命令后会发布对时事件到 DataCenter（tag 为 `time_sync_tag`），便于上位机或其他模块订阅。
-- 强调：IEC104 不修改系统时钟，仅发送/转发对时报文并发布事件；如需修改系统时间需由上位机或独立模块负责。
+- 未开启 `set_system_time_on_sync` 时，IEC104 不修改系统时钟，仅发送/转发对时报文并发布事件；开启后由从站容器直接设置系统时钟。
 
 ### 配置示例
 IEC104 链路配置示例（上位机下发的 LinkConfig 内容）：
@@ -119,6 +121,14 @@ IEC104 链路配置示例（上位机下发的 LinkConfig 内容）：
   "point_dedupe": true,
   "point_with_time": false,
   "time_sync_tag": "__time_sync__"
+}
+```
+
+从站如需在收到主站 `C_CS_NA_1` 后直接设置系统时间，在对应从站链路配置中增加：
+```jsonc
+{
+  "station_role": "STATION_ROLE_SLAVE",
+  "set_system_time_on_sync": true
 }
 ```
 

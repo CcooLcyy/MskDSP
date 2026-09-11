@@ -32,6 +32,7 @@ constexpr uint8_t kTypeIdInterrogationCmd = 100;
 constexpr uint8_t kTypeIdSingleCommand = 45;
 constexpr uint8_t kTypeIdDoubleCommand = 46;
 constexpr uint8_t kTypeIdSetpointShort = 50;
+constexpr uint8_t kTypeIdTimeSyncCmd = 103;
 constexpr uint8_t kCotActivation = 6;
 constexpr uint8_t kCotActivationCon = 7;
 constexpr uint8_t kCotActivationTermination = 10;
@@ -209,6 +210,23 @@ std::vector<uint8_t> BuildInterrogationAsdu(uint8_t cause, uint8_t qoi) {
           0x00,
           0x00,
           qoi};
+}
+
+std::vector<uint8_t> BuildTimeSyncAsdu(uint8_t cause) {
+  // 2024-01-01 00:00:00.000，使用有效的 CP56Time2a 作为固定测试输入。
+  return {kTypeIdTimeSyncCmd,
+          0x01,
+          static_cast<uint8_t>(cause & 0x3F),
+          0x01,  // OA
+          0x01,  // CA low
+          0x00,  // CA high
+          0x00, 0x00, 0x00,  // IOA
+          0x00, 0x00,  // milliseconds
+          0x00,        // minute
+          0x00,        // hour
+          0x21,
+          0x01,
+          0x18};
 }
 
 struct SocketPair {
@@ -1061,6 +1079,87 @@ TEST(IEC104TcpSessionTest, SlaveRoleDoesNotSendStartDtWhenClientRole) {
       [&]() { io->run(); });
 
   EXPECT_FALSE(WaitReadable(sockets.peer_socket, std::chrono::milliseconds(300)));
+
+  session->Stop();
+  io->stop();
+}
+
+// 验证：对时业务拒绝时只返回带负号的激活确认，不发送激活终止。
+TEST(IEC104TcpSessionTest, TimeSyncRejectionReturnsNegativeConfirmation) {
+  auto io = std::make_shared<boost::asio::io_context>();
+  auto sockets = MakeConnectedSockets(*io);
+
+  auto config = MakeConfig("time-sync-rejected", IEC104Proto::ROLE_SERVER, 5, 2, 1, 5, 8);
+  config.set_station_role(IEC104Proto::STATION_ROLE_SLAVE);
+  auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
+  session->SetTimeSyncCallback([](int64_t) { return false; });
+  session->Start(std::move(sockets.session_socket));
+
+  std::jthread session_thread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [&]() { io->run(); });
+
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildUFrame(kUStartDtAct)));
+  auto start_con = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "对时启动确认");
+  ASSERT_FALSE(start_con.empty());
+  ASSERT_EQ(FrameTypeOf(start_con), FrameType::U);
+  EXPECT_EQ(start_con[2], kUStartDtCon);
+
+  auto request = BuildIFrame(0, 0, BuildTimeSyncAsdu(kCotActivation));
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(request));
+
+  auto confirmation = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "对时负确认");
+  ASSERT_FALSE(confirmation.empty());
+  ASSERT_EQ(FrameTypeOf(confirmation), FrameType::I);
+  ASSERT_GE(confirmation.size(), 16u);
+  EXPECT_EQ(confirmation[6], kTypeIdTimeSyncCmd);
+  EXPECT_EQ(static_cast<uint8_t>(confirmation[8] & 0x3F), kCotActivationCon);
+  EXPECT_NE(static_cast<uint8_t>(confirmation[8] & kCotNegative), 0);
+  EXPECT_FALSE(WaitReadable(sockets.peer_socket, std::chrono::milliseconds(200)));
+
+  session->Stop();
+  io->stop();
+}
+
+// 验证：对时业务接受时返回激活确认和激活终止两个正确认。
+TEST(IEC104TcpSessionTest, TimeSyncAcceptanceReturnsConfirmationAndTermination) {
+  auto io = std::make_shared<boost::asio::io_context>();
+  auto sockets = MakeConnectedSockets(*io);
+
+  auto config = MakeConfig("time-sync-accepted", IEC104Proto::ROLE_SERVER, 5, 2, 1, 5, 8);
+  config.set_station_role(IEC104Proto::STATION_ROLE_SLAVE);
+  auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
+  session->SetTimeSyncCallback([](int64_t tsMs) { return tsMs > 0; });
+  session->Start(std::move(sockets.session_socket));
+
+  std::jthread session_thread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [&]() { io->run(); });
+
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildUFrame(kUStartDtAct)));
+  auto start_con = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "对时启动确认");
+  ASSERT_FALSE(start_con.empty());
+  ASSERT_EQ(FrameTypeOf(start_con), FrameType::U);
+  EXPECT_EQ(start_con[2], kUStartDtCon);
+
+  auto request = BuildIFrame(0, 0, BuildTimeSyncAsdu(kCotActivation));
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(request));
+
+  auto confirmation = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "对时激活确认");
+  ASSERT_FALSE(confirmation.empty());
+  ASSERT_EQ(FrameTypeOf(confirmation), FrameType::I);
+  ASSERT_GE(confirmation.size(), 16u);
+  EXPECT_EQ(confirmation[6], kTypeIdTimeSyncCmd);
+  EXPECT_EQ(static_cast<uint8_t>(confirmation[8] & 0x3F), kCotActivationCon);
+  EXPECT_EQ(static_cast<uint8_t>(confirmation[8] & kCotNegative), 0);
+
+  auto termination = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "对时激活终止");
+  ASSERT_FALSE(termination.empty());
+  ASSERT_EQ(FrameTypeOf(termination), FrameType::I);
+  ASSERT_GE(termination.size(), 16u);
+  EXPECT_EQ(termination[6], kTypeIdTimeSyncCmd);
+  EXPECT_EQ(static_cast<uint8_t>(termination[8] & 0x3F), kCotActivationTermination);
+  EXPECT_EQ(static_cast<uint8_t>(termination[8] & kCotNegative), 0);
 
   session->Stop();
   io->stop();

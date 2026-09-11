@@ -208,7 +208,7 @@ private:
                                                uint8_t cause,
                                                bool withTime) const;
   std::vector<uint8_t> buildInterrogationAsdu(uint8_t cause, uint8_t qoi) const;
-  std::vector<uint8_t> buildTimeSyncAsdu(uint8_t cause, int64_t tsMs) const;
+  std::vector<uint8_t> buildTimeSyncAsdu(uint8_t cause, int64_t tsMs, bool positive = true) const;
   std::vector<uint8_t> buildSingleCommandAsdu(uint32_t ioa,
                                               bool value,
                                               bool select,

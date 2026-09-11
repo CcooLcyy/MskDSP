@@ -1209,17 +1209,20 @@ void TcpSession::handleTimeSyncCommand(const std::vector<uint8_t> &asdu) {
     LOG_INFO("IEC104 接收对时激活: conn_name={}, ts_ms={}", config_.conn_name(), tsMs);
   }
 
-  if (onTimeSync_ && tsMs > 0) {
-    onTimeSync_(tsMs);
+  bool accepted = tsMs > 0;
+  if (accepted && onTimeSync_) {
+    accepted = onTimeSync_(tsMs);
   }
 
-  auto actCon = buildTimeSyncAsdu(kCotActivationCon, tsMs);
+  auto actCon = buildTimeSyncAsdu(kCotActivationCon, tsMs, accepted);
   if (!actCon.empty()) {
     enqueueAsdu(std::move(actCon));
   }
-  auto actTerm = buildTimeSyncAsdu(kCotActivationTermination, tsMs);
-  if (!actTerm.empty()) {
-    enqueueAsdu(std::move(actTerm));
+  if (accepted) {
+    auto actTerm = buildTimeSyncAsdu(kCotActivationTermination, tsMs, true);
+    if (!actTerm.empty()) {
+      enqueueAsdu(std::move(actTerm));
+    }
   }
 }
 
@@ -1593,12 +1596,12 @@ std::vector<uint8_t> TcpSession::buildInterrogationAsdu(uint8_t cause, uint8_t q
   return asdu;
 }
 
-std::vector<uint8_t> TcpSession::buildTimeSyncAsdu(uint8_t cause, int64_t tsMs) const {
+std::vector<uint8_t> TcpSession::buildTimeSyncAsdu(uint8_t cause, int64_t tsMs, bool positive) const {
   std::vector<uint8_t> asdu;
   asdu.reserve(kAsduHeaderSize + 3 + kCp56Time2aSize);
   asdu.emplace_back(kTypeIdTimeSyncCmd);
   asdu.emplace_back(0x01);
-  asdu.emplace_back(cause & 0x3F);
+  asdu.emplace_back(buildCot(cause, positive));
   asdu.emplace_back(static_cast<uint8_t>(config_.oa() & 0xFF));
   asdu.emplace_back(static_cast<uint8_t>(config_.ca() & 0xFF));
   asdu.emplace_back(static_cast<uint8_t>((config_.ca() >> 8) & 0xFF));

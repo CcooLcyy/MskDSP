@@ -372,7 +372,7 @@ start_container() {
   if [[ "${1:-}" == "--" ]]; then
     shift
   fi
-  echo "运行容器仅映射 conf/module/log 目录，并关闭 Docker 日志收集"
+  echo "运行容器固定使用 Asia/Shanghai（北京时间，UTC+8），并关闭 Docker 日志收集"
   docker run -d \
     --name "${CONTAINER_NAME}" \
     --privileged \

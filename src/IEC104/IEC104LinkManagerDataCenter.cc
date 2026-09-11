@@ -1,12 +1,16 @@
 #include "IEC104LinkManager.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <cstring>
+#include <ctime>
 #include <format>
 #include <optional>
 #include <random>
 #include <string>
+#include <time.h>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -754,6 +758,19 @@ CommandResult LinkManager::handleCommandValue(const std::string& connName, const
   return rejectCommand("IEC104 点类型不支持命令执行");
 }
 
+grpc::Status LinkManager::setSystemClock(int64_t tsMs) {
+  timespec requested{};
+  requested.tv_sec = static_cast<time_t>(tsMs / 1000);
+  requested.tv_nsec = static_cast<long>((tsMs % 1000) * 1'000'000);
+  if (::clock_settime(CLOCK_REALTIME, &requested) == 0) {
+    return grpc::Status::OK;
+  }
+
+  const auto error = errno;
+  return grpc::Status(grpc::StatusCode::PERMISSION_DENIED,
+                      std::format("errno={}: {}", error, std::strerror(error)));
+}
+
 grpc::Status LinkManager::handleTimeSyncCommand(const std::string& connName, int64_t tsMs) {
   if (tsMs <= 0) {
     LOG_WARNING("IEC104 对时时间戳无效: conn_name={}", connName);
@@ -762,6 +779,7 @@ grpc::Status LinkManager::handleTimeSyncCommand(const std::string& connName, int
 
   uint32_t connId = 0;
   std::string tag;
+  bool shouldSetSystemTime = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = linksByName_.find(connName);
@@ -774,6 +792,22 @@ grpc::Status LinkManager::handleTimeSyncCommand(const std::string& connName, int
     }
     connId = it->second.connId;
     tag = normalizeTimeSyncTag(it->second.config);
+    shouldSetSystemTime = it->second.config.set_system_time_on_sync();
+  }
+
+  if (shouldSetSystemTime) {
+    auto status = systemTimeSetter_(tsMs);
+    if (!status.ok()) {
+      LOG_ERROR("IEC104 设置系统时间失败: conn_name={}, ts_ms={}, 原因={}",
+                connName, tsMs, status.error_message());
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = linksByName_.find(connName);
+      if (it != linksByName_.end()) {
+        it->second.lastError = status.error_message();
+      }
+      return status;
+    }
+    LOG_INFO("IEC104 已设置系统时间: conn_name={}, ts_ms={}", connName, tsMs);
   }
 
   if (tag.empty()) {
@@ -792,7 +826,9 @@ grpc::Status LinkManager::handleTimeSyncCommand(const std::string& connName, int
   } else {
     LOG_INFO("IEC104 已发布对时事件: conn_name={}, tag={}, ts_ms={}", connName, tag, tsMs);
   }
-  return st;
+  // DataCenter 事件发布属于旁路通知，不应影响 IEC104 对时本身的协议确认。
+  // 只有系统时钟设置失败才返回 false，由传输层生成负确认。
+  return grpc::Status::OK;
 }
 
 std::vector<PointValue> LinkManager::buildInterrogationSnapshot(const std::string& connName) {

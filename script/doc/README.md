@@ -48,6 +48,7 @@ images/mskdsp-<version>
   - `--privileged`
   - `--restart unless-stopped`
   - `--network host`
+  - 镜像内固定 `TZ=Asia/Shanghai`，并设置 `/etc/localtime` 为北京时间，保证 IEC104 CP56Time2a 日历时间统一按 UTC+8 解析
   - `-v /data/mskdsp:/opt/mskdsp`
   - `--name mskdsp`
 - 额外参数透传到 `docker run`，需用 `--` 分隔，例如：
@@ -58,6 +59,7 @@ images/mskdsp-<version>
 ### 依赖与注意事项
 - 运行环境需具备 `docker` 与 `python3`。
 - `--privileged` 赋予容器更高权限，后续可按需改为 `--device` 等更细粒度配置。
+- 发布包默认未启用独立 time namespace；因此容器内通过 `clock_settime(CLOCK_REALTIME, ...)` 设置的 Unix 系统时钟会作用于宿主机。容器日历时区固定为 Asia/Shanghai；若额外传入时间命名空间隔离参数，需另行设计宿主机同步方案。
 - 若你修改了 tar，请重新执行 `make_exe.sh` 生成新的 `images/mskdsp-<version>`。
 - 使用版本号模式时会调用 `make_image.sh`，因此需要 `podman`、`podman buildx` 及相关构建环境。
 

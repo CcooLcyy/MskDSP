@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -118,6 +119,7 @@ private:
 
   grpc::Status handleClientPointValue(const std::string &connName, const PointValue &pv);
   CommandResult handleCommandValue(const std::string &connName, const CommandValue &cv);
+  static grpc::Status setSystemClock(int64_t tsMs);
   grpc::Status handleTimeSyncCommand(const std::string &connName, int64_t tsMs);
   std::vector<PointValue> buildInterrogationSnapshot(const std::string &connName);
   bool isSimulationValueActive(const std::string &connName, const std::string &tag) const;
@@ -135,6 +137,7 @@ private:
   std::unique_ptr<IEC104LinkStore> linkStore_;
   std::unique_ptr<IEC104PointTableStore> pointTableStore_;
   DataCenterClient dataCenter_;
+  std::function<grpc::Status(int64_t)> systemTimeSetter_{setSystemClock};
 };
 
 }  // namespace IEC104

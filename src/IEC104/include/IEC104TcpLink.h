@@ -48,7 +48,8 @@ class TcpLink {
 public:
   using PointValueCallback = std::function<void(const PointValue&)>;
   using SnapshotProvider = std::function<std::vector<PointValue>()>;
-  using TimeSyncCallback = std::function<void(int64_t)>;
+  // 返回 true 表示对时已被业务接受，false 表示应回负确认。
+  using TimeSyncCallback = std::function<bool(int64_t)>;
   using CommandCallback = std::function<CommandResult(const CommandValue&)>;
   using CommandExecutionModeCallback =
       std::function<std::optional<IEC104Proto::CommandExecutionMode>(uint32_t)>;

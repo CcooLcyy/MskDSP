@@ -1056,7 +1056,7 @@ void LinkManager::configureTransportCallbacksLocked(const std::string &connName,
     link->transport->SetInterrogationSnapshotProvider([this, connName]() { return buildInterrogationSnapshot(connName); });
   }
   link->transport->SetTimeSyncCallback([this, connName](int64_t tsMs) {
-    (void)handleTimeSyncCommand(connName, tsMs);
+    return handleTimeSyncCommand(connName, tsMs).ok();
   });
   link->transport->SetCommandCallback([this, connName](const CommandValue &cv) {
     return handleCommandValue(connName, cv);
