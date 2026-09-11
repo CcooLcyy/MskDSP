@@ -22,9 +22,8 @@ env:
 jobs:
   arm64-nightly:
     name: 产出 arm64 Nightly 包
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     env:
-      VCPKG_HOST_BINARY_CACHE_DIR: ${{ github.workspace }}/.cache/vcpkg/x64-linux-dynamic
       VCPKG_BINARY_CACHE_DIR: ${{ github.workspace }}/.cache/vcpkg/arm64-linux-dynamic
       CCACHE_DIR: ${{ github.workspace }}/.cache/ccache/arm64-linux-dynamic
     steps:
@@ -34,15 +33,6 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
           submodules: false
-
-      - name: 恢复 vcpkg host 二进制缓存
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.VCPKG_HOST_BINARY_CACHE_DIR }}
-          key: vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-mainline-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
-          restore-keys: |
-            vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-mainline-
-            vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-
 
       - name: 恢复 vcpkg 二进制缓存
         uses: actions/cache@v4
@@ -65,11 +55,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "${VCPKG_HOST_BINARY_CACHE_DIR}"
           mkdir -p "${VCPKG_BINARY_CACHE_DIR}"
           mkdir -p "${CCACHE_DIR}"
           echo "VCPKG_DEFAULT_BINARY_CACHE=${VCPKG_BINARY_CACHE_DIR}" >> "${GITHUB_ENV}"
-          echo "VCPKG_BINARY_SOURCES=clear;files,${VCPKG_HOST_BINARY_CACHE_DIR},read;files,${VCPKG_BINARY_CACHE_DIR},readwrite" >> "${GITHUB_ENV}"
+          echo "VCPKG_BINARY_SOURCES=clear;files,${VCPKG_BINARY_CACHE_DIR},readwrite" >> "${GITHUB_ENV}"
           echo "CCACHE_DIR=${CCACHE_DIR}" >> "${GITHUB_ENV}"
           echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}" >> "${GITHUB_ENV}"
           echo "CCACHE_COMPILERCHECK=content" >> "${GITHUB_ENV}"
@@ -129,10 +118,7 @@ jobs:
             ninja-build \
             ccache \
             gcc-14 \
-            g++-14 \
-            gcc-aarch64-linux-gnu \
-            g++-aarch64-linux-gnu \
-            binutils-aarch64-linux-gnu
+            g++-14
 
       - name: 安装 vcpkg
         shell: bash
@@ -156,23 +142,18 @@ jobs:
           set -euo pipefail
           cmake -S . -B build-arm64 -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DCMAKE_SYSTEM_NAME=Linux \
-            -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+            -DCMAKE_C_COMPILER=gcc-14 \
+            -DCMAKE_CXX_COMPILER=g++-14 \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
-            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
             -DCMAKE_CXX_SCAN_FOR_MODULES=OFF \
             -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
-            -DMSKDSP_BUILD_TESTS=OFF \
+            -DMSKDSP_BUILD_TESTS=ON \
             -DMSKDSP_STRIP_DEBUG=ON \
-            -DCMAKE_STRIP=/usr/bin/aarch64-linux-gnu-strip \
-            -DCMAKE_OBJDUMP=/usr/bin/aarch64-linux-gnu-objdump \
-            -DCMAKE_OBJCOPY=/usr/bin/aarch64-linux-gnu-objcopy \
-            -DVCPKG_HOST_TRIPLET=x64-linux-dynamic \
+            -DVCPKG_HOST_TRIPLET=arm64-linux-dynamic \
             -DVCPKG_TARGET_TRIPLET=arm64-linux-dynamic \
-            -DProtobuf_PROTOC_EXECUTABLE="${GITHUB_WORKSPACE}/build-arm64/vcpkg_installed/x64-linux-dynamic/tools/protobuf/protoc" \
-            -DgRPC_CPP_PLUGIN_EXECUTABLE="${GITHUB_WORKSPACE}/build-arm64/vcpkg_installed/x64-linux-dynamic/tools/grpc/grpc_cpp_plugin"
+            -DProtobuf_PROTOC_EXECUTABLE="${GITHUB_WORKSPACE}/build-arm64/vcpkg_installed/arm64-linux-dynamic/tools/protobuf/protoc" \
+            -DgRPC_CPP_PLUGIN_EXECUTABLE="${GITHUB_WORKSPACE}/build-arm64/vcpkg_installed/arm64-linux-dynamic/tools/grpc/grpc_cpp_plugin"
 
       - name: 清零 ccache 统计
         shell: bash
@@ -186,6 +167,12 @@ jobs:
           set -euo pipefail
           cmake --build build-arm64 --parallel
 
+      - name: 运行 ARM64 单元测试
+        shell: bash
+        run: |
+          set -euo pipefail
+          ctest --test-dir build-arm64 --output-on-failure --parallel "$(nproc)"
+
       - name: 输出 ccache 统计
         if: always()
         shell: bash
@@ -198,6 +185,7 @@ jobs:
         run: |
           set -euo pipefail
           cmake --install build-arm64
+          find package -maxdepth 1 -type f -name '*_test' -delete
 
       - name: 检查 ARM64 IEC61850 交付包
         shell: bash

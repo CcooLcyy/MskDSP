@@ -11,21 +11,21 @@
 - `ci.yml`
   - 触发：`pull_request`；`push` 到 `master`、`main`、`beta/**`
   - 作用：
-    - 所有触发场景都执行 `x64 Debug` 编译与单元测试
-    - 当 `push` 到 `master/main` 时，在 `x64 Debug` 校验通过后继续产出 `arm64` 测试安装包
+    - 所有触发场景都在 GitHub 托管 ARM64 runner 上执行 `arm64 RelWithDebInfo` 编译与单元测试
+    - 当 `push` 到 `master/main` 时，在 ARM64 单元测试通过后继续产出测试安装包
 - `nightly.yml`
   - 触发：每日定时 + `workflow_dispatch`
   - 来源：仓库当前 `default_branch`
   - 作用：产出 `arm64 Nightly` 自解压安装包、调试符号包与校验文件
 - `beta.yml`
   - 触发：`push` 到 `beta/**`；`workflow_dispatch`
-  - 作用：先执行 `x64 Debug` 校验，再产出 `arm64 Beta` 自解压安装包；同时创建 GitHub 预发布页面
+  - 作用：执行 ARM64 原生编译与单元测试，再产出 `arm64 Beta` 自解压安装包；同时创建 GitHub 预发布页面
 - `beta-promote.yml`
   - 触发：定时；`workflow_dispatch`
   - 作用：扫描所有 `beta/*` 分支，选出最近有新提交的最新 Beta；若其静默超过 72 小时且对应正式 tag 不存在，则自动创建 `v*` tag，并显式触发正式发布链路
 - `release.yml`
   - 触发：`push` tag `v*`；`workflow_dispatch`
-  - 作用：先执行发布前 `x64 Debug` 校验，再产出 `arm64` 正式安装包并创建/更新 GitHub Release
+  - 作用：执行发布前 ARM64 原生编译与单元测试，再产出 `arm64` 正式安装包并创建/更新 GitHub Release
 
 ## 3. 统一实现约定
 
@@ -37,28 +37,30 @@
   - 其次使用 `MSKDSP_PROTO_TOKEN`
   - 若均未配置，则回退为 HTTPS 方式拉取
 - `vcpkg` 不直接使用固定仓库分支，而是读取 `vcpkg-configuration.json` 中的 baseline，再 clone/checkout 对应版本
-- 所有 workflow 都启用了两层缓存：
+- 所有构建型 workflow 都启用了两层缓存：
   - `vcpkg` 二进制缓存
   - `ccache` 编译缓存
-- `x64` 构建统一使用：
-  - `ubuntu-24.04`
+- `arm64` 构建统一使用：
+  - GitHub 托管 `ubuntu-24.04-arm` runner
   - `gcc-14/g++-14`
   - `Ninja`
-  - `MSKDSP_BUILD_TESTS=ON`
-- `x64` 校验通过后会执行 `cmake --install build`，清理 `package/` 根目录下的测试可执行文件，打包并上传可运行的 x64 Debug artifact。
-- `arm64` 打包链路统一使用交叉编译：
   - `RelWithDebInfo`
-  - `aarch64-linux-gnu-gcc/g++`
-  - `MSKDSP_BUILD_TESTS=OFF`
+  - `MSKDSP_BUILD_TESTS=ON`
+- `arm64` 构建使用 `VCPKG_HOST_TRIPLET=arm64-linux-dynamic` 和 `VCPKG_TARGET_TRIPLET=arm64-linux-dynamic`。
+- 编译后直接在 ARM64 runner 上执行 `ctest --test-dir build-arm64 --output-on-failure --parallel "$(nproc)"`。
+- 当前构建型 workflow 不再包含独立 x64 编译、测试或 x64 artifact。
+- `arm64` 打包链路统一使用原生编译：
+  - `gcc-14/g++-14`
   - `MSKDSP_STRIP_DEBUG=ON`
 - `arm64` 交付包的生成流程统一为：
-  1. `cmake --install build-arm64` 将运行产物落到 `package/`
-  2. 单独打包 `package/debug` 为调试符号包
-  3. 使用 `Dockerfile` 构建 `arm64` 镜像
-  4. 读取 Docker image config ID，写入下位机 `latest.json` 的 `image_id`
-  5. `docker save` 导出镜像 tar
-  6. 调用 `script/make_exe.sh` 生成自解压安装包
-  7. 生成 `SHA256SUMS`
+  1. ARM64 单元测试通过后，通过 `cmake --install build-arm64` 将运行产物落到 `package/`
+  2. 清理 `package/` 根目录下的 `*_test` 测试可执行文件
+  3. 单独打包 `package/debug` 为调试符号包
+  4. 使用 `Dockerfile` 构建 `arm64` 镜像
+  5. 读取 Docker image config ID，写入下位机 `latest.json` 的 `image_id`
+  6. `docker save` 导出镜像 tar
+  7. 调用 `script/make_exe.sh` 生成自解压安装包
+  8. 生成 `SHA256SUMS`
 
 需要注意：
 
@@ -103,21 +105,14 @@
 
 ### 5.2 当前行为
 
-- `x64-debug-test`
-  - 配置 `x64 Debug`
-  - 编译全部目标
-  - 执行 `ctest --test-dir build --output-on-failure --parallel "$(nproc)"`
-  - 测试通过后安装并上传 `mskdsp-x64-debug-<run_id>.tar.gz`，内容为可直接运行的 `package/` 目录
-  - 失败时上传 `CMakeCache.txt`、`CMakeConfigureLog.yaml` 与 `build/Testing`
 - `arm64-master-package`
-  - 仅在 `push` 到 `master/main` 时运行
-  - 交叉编译 `arm64 RelWithDebInfo`
-  - 生成自解压测试安装包、调试符号包与 `SHA256SUMS`
-  - 通过 artifact 上传，不创建 GitHub Release
+  - 所有触发场景都原生编译 `arm64 RelWithDebInfo` 并运行 ARM64 单元测试
+  - `pull_request` 和 `beta/**` push 只执行编译与测试，不生成交付包
+  - 仅在 `push` 到 `master/main` 时生成自解压测试安装包、调试符号包与 `SHA256SUMS`
+  - 主分支产物通过 artifact 上传，不创建 GitHub Release
 
 ### 5.3 产物命名
 
-- x64 Debug 运行包：`mskdsp-x64-debug-<run_id>.tar.gz`
 - 测试安装包：`mskdsp-<VERSION>-<branch>-ci-<YYYYMMDD>-<sha>-linux-arm64`
 - 调试符号包：`mskdsp-<VERSION>-<branch>-ci-<YYYYMMDD>-<sha>-debugsymbols-linux-arm64.tar.gz`
 
@@ -139,7 +134,7 @@
 ### 6.2 当前行为
 
 - checkout 仓库 `default_branch`
-- 交叉编译 `arm64 RelWithDebInfo`
+- 原生编译 `arm64 RelWithDebInfo` 并运行 ARM64 单元测试
 - 生成自解压 Nightly 安装包
 - 打包独立调试符号
 - 生成 `SHA256SUMS`
@@ -171,9 +166,8 @@
 
 ### 7.3 当前行为
 
-- 先执行 `x64 Debug` 校验
-- 校验通过后上传 x64 Debug 运行包 artifact
-- 校验通过后再执行 `arm64` 交付链路
+- 原生编译 `arm64 RelWithDebInfo` 并运行 ARM64 单元测试
+- 单元测试通过后执行 `arm64` 交付链路
 - 上传 Beta 包 artifact
 - 删除当前 Beta 线旧的 GitHub prerelease
 - 创建新的 GitHub prerelease 页面
@@ -279,9 +273,8 @@
 
 ### 9.3 当前行为
 
-- 先执行 `x64 Debug` 发布前校验
-- 校验通过后上传 x64 Debug 运行包 artifact
-- 校验通过后交叉编译 `arm64 RelWithDebInfo`
+- 原生编译 `arm64 RelWithDebInfo` 并运行发布前 ARM64 单元测试
+- ARM64 单元测试通过后生成交付包
 - 生成正式自解压安装包、调试符号包与 `SHA256SUMS`
 - 若 GitHub Release 已存在，则执行 `gh release upload --clobber`
 - 若 GitHub Release 不存在，则执行 `gh release create --verify-tag --generate-notes`
@@ -298,7 +291,8 @@
 当前各渠道的产物去向如下：
 
 - `CI`
-  - 上传 x64 Debug 运行包和 arm64 测试安装包等 GitHub Actions artifact
+  - PR 与 `beta/**` push 仅执行 ARM64 编译和单元测试
+  - `master/main` push 上传 arm64 测试安装包等 GitHub Actions artifact
   - 不创建 Release 页面
 - `Nightly`
   - 上传 GitHub Actions artifact
@@ -311,10 +305,6 @@
 
 ## 11. 当前命名与交付清单
 
-当前 x64 校验默认包含以下资产：
-
-- x64 Debug 运行包 artifact（解压后从 `package/` 目录启动）
-
 当前 `arm64` 交付默认包含以下资产：
 
 - 自解压安装包
@@ -326,7 +316,7 @@
 
 - 交付主包不是直接上传 `package/` 目录，而是上传由 `script/make_exe.sh` 生成的自解压安装包
 - `latest.json` 同时记录 Docker `image_id`，供上位机校验目标机实际运行的镜像构建
-- 测试与发布流程都保留了独立调试符号包，便于问题定位
+- 生成交付包的流程都保留了独立调试符号包，便于问题定位
 
 ## 12. 维护建议
 

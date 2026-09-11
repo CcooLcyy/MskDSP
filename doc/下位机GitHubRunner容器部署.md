@@ -1,17 +1,20 @@
-# 下位机 GitHub Runner 容器部署
+# 下位机自托管 GitHub Runner 容器部署（备用）
 
 ## 目标与边界
 
-本目录中的 runner 镜像用于在本地 x86_64 Linux 构建机上执行下位机
-`mskdsp` 的 GitHub Actions job。它复刻当前 workflow 使用的 Ubuntu 24.04、
-GCC 14、ARM64 交叉编译和 Docker Buildx 环境。
+当前 `mskdsp` 构建型 workflow 已统一使用 GitHub 托管的 `ubuntu-24.04-arm`
+runner，直接进行 ARM64 编译与单元测试，不再引用本目录的自托管 runner。
+
+本目录中的 runner 镜像仅作为备用方案，用于需要在本地 x86_64 Linux 构建机上
+恢复 ARM64 交叉编译时提供 Ubuntu 24.04、GCC 14、ARM64 交叉编译和 Docker
+Buildx 环境。
 
 镜像不替代下位机运行镜像，也不把下位机模块部署在 runner 容器内。workflow
 仍会使用仓库根目录的 `Dockerfile` 构建 ARM64 下位机业务镜像，再导出为自解压
 安装包。
 
-ARM64 构建与发布 job 使用 `lower-builder` 自托管标签；x64 Debug 校验、PR 校验和
-Beta 自动晋升仍使用 GitHub 托管 runner。
+若重新启用该方案，需要单独修改 workflow 的 `runs-on` 及交叉编译配置；当前 CI、
+Nightly、Beta 和 Release 的 ARM64 构建与测试都由 GitHub 托管 runner 执行。
 
 ## 运行前提
 
@@ -106,14 +109,15 @@ docker compose --env-file docker/lower-runner/.env \
   -f docker/lower-runner/compose.yml logs -f
 ```
 
-目标 ARM64 job 已使用以下标签：
+如未来重新启用自托管交叉编译，可将目标 ARM64 job 改为以下标签：
 
 ```yaml
 runs-on: [self-hosted, linux, x64, lower-builder]
 ```
 
-建议仅把 `main`、`beta/**`、nightly 与 release 的 ARM64 打包 job 切换到这个标签；
-面向外部 pull request 的校验继续使用 GitHub 托管 runner。
+切换时还必须恢复 x64 host triplet、ARM64 交叉编译器和对应的构建工具路径。面向
+外部 pull request 的校验应继续使用 GitHub 托管 runner，避免在高权限自托管机器上
+执行不可信代码。
 
 ## 失败处理
 

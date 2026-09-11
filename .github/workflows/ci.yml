@@ -23,221 +23,10 @@ env:
   STATIC_UPDATE_REMOTE_ROOT: ${{ vars.LOWER_UPDATE_STATIC_REMOTE_ROOT || vars.UPDATE_STATIC_REMOTE_ROOT || '/home/daniel/update-server/www/mskdsp-lower' }}
 
 jobs:
-  x64-debug-test:
-    name: x64 Debug 编译与单测
-    runs-on: ubuntu-24.04
-    env:
-      VCPKG_BINARY_CACHE_DIR: ${{ github.workspace }}/.cache/vcpkg/x64-linux-dynamic
-      CCACHE_DIR: ${{ github.workspace }}/.cache/ccache/x64-linux-dynamic
-    steps:
-      - name: 拉取主仓库
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          submodules: false
-
-      - name: 验证下位机更新清单生成器
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 script/workflow/test_write_lower_update_manifest.py
-
-      - name: 计算 vcpkg 缓存作用域
-        id: cache_scope
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          REF_NAME: ${{ github.ref_name }}
-          BASE_REF: ${{ github.base_ref }}
-        run: |
-          set -euo pipefail
-          TARGET_REF="${REF_NAME}"
-          if [ "${EVENT_NAME}" = "pull_request" ] && [ -n "${BASE_REF:-}" ]; then
-            TARGET_REF="${BASE_REF}"
-          fi
-
-          if [[ "${TARGET_REF}" =~ ^beta/ ]]; then
-            BETA_LINE="${TARGET_REF#beta/}"
-            CACHE_SCOPE="beta-$(printf '%s' "${BETA_LINE}" | tr '/' '-')"
-          else
-            CACHE_SCOPE="mainline"
-          fi
-
-          echo "scope=${CACHE_SCOPE}" >> "${GITHUB_OUTPUT}"
-          echo "本次使用的 vcpkg 缓存作用域: ${CACHE_SCOPE}（来源引用: ${TARGET_REF}）"
-
-      - name: 恢复 vcpkg 二进制缓存
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.VCPKG_BINARY_CACHE_DIR }}
-          key: vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-${{ steps.cache_scope.outputs.scope }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
-          restore-keys: |
-            vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-${{ steps.cache_scope.outputs.scope }}-
-            vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-mainline-
-            vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-
-
-      - name: 恢复 ccache 编译缓存
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.CCACHE_DIR }}
-          key: ccache-${{ runner.os }}-gcc14-x64-linux-dynamic-v2-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: |
-            ccache-${{ runner.os }}-gcc14-x64-linux-dynamic-v2-
-
-      - name: 准备 vcpkg 二进制缓存环境
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "${VCPKG_BINARY_CACHE_DIR}"
-          mkdir -p "${CCACHE_DIR}"
-          echo "VCPKG_DEFAULT_BINARY_CACHE=${VCPKG_BINARY_CACHE_DIR}" >> "${GITHUB_ENV}"
-          echo "VCPKG_BINARY_SOURCES=clear;files,${VCPKG_BINARY_CACHE_DIR},readwrite" >> "${GITHUB_ENV}"
-          echo "CCACHE_DIR=${CCACHE_DIR}" >> "${GITHUB_ENV}"
-          echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}" >> "${GITHUB_ENV}"
-          echo "CCACHE_COMPILERCHECK=content" >> "${GITHUB_ENV}"
-          echo "CCACHE_MAXSIZE=1G" >> "${GITHUB_ENV}"
-
-      - name: 准备 protobuf 子模块访问
-        shell: bash
-        env:
-          MSKDSP_PROTO_SSH_KEY: ${{ secrets.MSKDSP_PROTO_SSH_KEY }}
-          MSKDSP_PROTO_TOKEN: ${{ secrets.MSKDSP_PROTO_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -n "${MSKDSP_PROTO_SSH_KEY:-}" ]; then
-            install -m 700 -d "${HOME}/.ssh"
-            printf '%s\n' "${MSKDSP_PROTO_SSH_KEY}" > "${HOME}/.ssh/id_ed25519"
-            chmod 600 "${HOME}/.ssh/id_ed25519"
-            ssh-keyscan github.com >> "${HOME}/.ssh/known_hosts"
-            echo "已启用 SSH key 访问 protobuf 子模块"
-          elif [ -n "${MSKDSP_PROTO_TOKEN:-}" ]; then
-            git config --global url."https://${MSKDSP_PROTO_TOKEN}@github.com/".insteadOf "git@github.com:"
-            echo "已启用 Token 访问 protobuf 子模块"
-          else
-            git config --global url."https://github.com/".insteadOf "git@github.com:"
-            echo "未配置子模块凭据，已切换为 HTTPS 拉取 protobuf 子模块"
-          fi
-
-      - name: 拉取 protobuf 子模块
-        shell: bash
-        run: |
-          set -euo pipefail
-          git submodule sync --recursive
-          git submodule update --init --recursive
-
-      - name: 安装构建依赖
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y \
-            cmake \
-            ninja-build \
-            gcc-14 \
-            g++-14 \
-            ccache
-
-      - name: 安装 vcpkg
-        id: vcpkg
-        shell: bash
-        run: |
-          set -euo pipefail
-          VCPKG_ROOT="${RUNNER_TEMP}/vcpkg"
-          VCPKG_BASELINE="$(python3 - <<'PY'
-          import json
-          with open('vcpkg-configuration.json', 'r', encoding='utf-8') as fh:
-              print(json.load(fh)['default-registry']['baseline'])
-          PY
-          )"
-          git clone https://github.com/microsoft/vcpkg.git "${VCPKG_ROOT}"
-          git -C "${VCPKG_ROOT}" checkout "${VCPKG_BASELINE}"
-          "${VCPKG_ROOT}/bootstrap-vcpkg.sh" -disableMetrics
-          echo "VCPKG_ROOT=${VCPKG_ROOT}" >> "${GITHUB_ENV}"
-          echo "vcpkg_root=${VCPKG_ROOT}" >> "${GITHUB_OUTPUT}"
-
-      - name: 配置 x64 Debug
-        shell: bash
-        run: |
-          set -euo pipefail
-          cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_C_COMPILER=gcc-14 \
-            -DCMAKE_CXX_COMPILER=g++-14 \
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
-            -DVCPKG_TARGET_TRIPLET=x64-linux-dynamic \
-            -DMSKDSP_BUILD_TESTS=ON \
-            -DMSKDSP_ENABLE_SANITIZERS=OFF \
-            -DMSKDSP_ENABLE_TSAN=OFF \
-            -DCMAKE_CXX_SCAN_FOR_MODULES=OFF \
-            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-
-      - name: 清零 ccache 统计
-        shell: bash
-        run: |
-          set -euo pipefail
-          ccache --zero-stats
-
-      - name: 编译 x64 Debug
-        shell: bash
-        run: |
-          set -euo pipefail
-          cmake --build build --parallel
-
-      - name: 输出 ccache 统计
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          ccache --show-stats
-
-      - name: 运行单元测试
-        shell: bash
-        run: |
-          set -euo pipefail
-          ctest --test-dir build --output-on-failure --parallel "$(nproc)"
-
-      - name: 安装 x64 运行产物
-        shell: bash
-        run: |
-          set -euo pipefail
-          cmake --install build
-          find package -maxdepth 1 -type f -name '*_test' -delete
-          test -x package/MskDSP
-
-      - name: 打包 x64 运行产物
-        shell: bash
-        run: |
-          set -euo pipefail
-          tar -czf "mskdsp-x64-debug-${GITHUB_RUN_ID}.tar.gz" package
-
-      - name: 上传 x64 运行产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: mskdsp-x64-debug-${{ github.run_id }}
-          if-no-files-found: error
-          path: mskdsp-x64-debug-${{ github.run_id }}.tar.gz
-
-      - name: 上传失败现场
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-x64-debug-${{ github.run_id }}
-          if-no-files-found: ignore
-          path: |
-            build/CMakeCache.txt
-            build/CMakeFiles/CMakeConfigureLog.yaml
-            build/Testing
-
   arm64-master-package:
-    name: master/main 产出 arm64 测试安装包
-    runs-on: ubuntu-24.04
-    needs:
-      - x64-debug-test
-    if: ${{ github.event_name == 'push' && (github.ref_name == 'master' || github.ref_name == 'main') }}
+    name: ARM64 编译与单测（主分支产出安装包）
+    runs-on: ubuntu-24.04-arm
     env:
-      VCPKG_HOST_BINARY_CACHE_DIR: ${{ github.workspace }}/.cache/vcpkg/x64-linux-dynamic
       VCPKG_BINARY_CACHE_DIR: ${{ github.workspace }}/.cache/vcpkg/arm64-linux-dynamic
       CCACHE_DIR: ${{ github.workspace }}/.cache/ccache/arm64-linux-dynamic
     steps:
@@ -246,15 +35,6 @@ jobs:
         with:
           fetch-depth: 0
           submodules: false
-
-      - name: 恢复 vcpkg host 二进制缓存
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.VCPKG_HOST_BINARY_CACHE_DIR }}
-          key: vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-mainline-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
-          restore-keys: |
-            vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-mainline-
-            vcpkg-bin-${{ runner.os }}-gcc14-x64-linux-dynamic-
 
       - name: 恢复 vcpkg 二进制缓存
         uses: actions/cache@v4
@@ -277,11 +57,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "${VCPKG_HOST_BINARY_CACHE_DIR}"
           mkdir -p "${VCPKG_BINARY_CACHE_DIR}"
           mkdir -p "${CCACHE_DIR}"
           echo "VCPKG_DEFAULT_BINARY_CACHE=${VCPKG_BINARY_CACHE_DIR}" >> "${GITHUB_ENV}"
-          echo "VCPKG_BINARY_SOURCES=clear;files,${VCPKG_HOST_BINARY_CACHE_DIR},read;files,${VCPKG_BINARY_CACHE_DIR},readwrite" >> "${GITHUB_ENV}"
+          echo "VCPKG_BINARY_SOURCES=clear;files,${VCPKG_BINARY_CACHE_DIR},readwrite" >> "${GITHUB_ENV}"
           echo "CCACHE_DIR=${CCACHE_DIR}" >> "${GITHUB_ENV}"
           echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}" >> "${GITHUB_ENV}"
           echo "CCACHE_COMPILERCHECK=content" >> "${GITHUB_ENV}"
@@ -341,10 +120,7 @@ jobs:
             ninja-build \
             ccache \
             gcc-14 \
-            g++-14 \
-            gcc-aarch64-linux-gnu \
-            g++-aarch64-linux-gnu \
-            binutils-aarch64-linux-gnu
+            g++-14
 
       - name: 安装 vcpkg
         shell: bash
@@ -362,29 +138,24 @@ jobs:
           "${VCPKG_ROOT}/bootstrap-vcpkg.sh" -disableMetrics
           echo "VCPKG_ROOT=${VCPKG_ROOT}" >> "${GITHUB_ENV}"
 
-      - name: 配置 arm64 RelWithDebInfo
+      - name: 配置 ARM64 RelWithDebInfo
         shell: bash
         run: |
           set -euo pipefail
           cmake -S . -B build-arm64 -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DCMAKE_SYSTEM_NAME=Linux \
-            -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-            -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
-            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+            -DCMAKE_C_COMPILER=gcc-14 \
+            -DCMAKE_CXX_COMPILER=g++-14 \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_SCAN_FOR_MODULES=OFF \
             -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
-            -DMSKDSP_BUILD_TESTS=OFF \
+            -DMSKDSP_BUILD_TESTS=ON \
             -DMSKDSP_STRIP_DEBUG=ON \
-            -DCMAKE_STRIP=/usr/bin/aarch64-linux-gnu-strip \
-            -DCMAKE_OBJDUMP=/usr/bin/aarch64-linux-gnu-objdump \
-            -DCMAKE_OBJCOPY=/usr/bin/aarch64-linux-gnu-objcopy \
-            -DVCPKG_HOST_TRIPLET=x64-linux-dynamic \
+            -DVCPKG_HOST_TRIPLET=arm64-linux-dynamic \
             -DVCPKG_TARGET_TRIPLET=arm64-linux-dynamic \
-            -DProtobuf_PROTOC_EXECUTABLE="${GITHUB_WORKSPACE}/build-arm64/vcpkg_installed/x64-linux-dynamic/tools/protobuf/protoc" \
-            -DgRPC_CPP_PLUGIN_EXECUTABLE="${GITHUB_WORKSPACE}/build-arm64/vcpkg_installed/x64-linux-dynamic/tools/grpc/grpc_cpp_plugin"
+            -DProtobuf_PROTOC_EXECUTABLE="${GITHUB_WORKSPACE}/build-arm64/vcpkg_installed/arm64-linux-dynamic/tools/protobuf/protoc" \
+            -DgRPC_CPP_PLUGIN_EXECUTABLE="${GITHUB_WORKSPACE}/build-arm64/vcpkg_installed/arm64-linux-dynamic/tools/grpc/grpc_cpp_plugin"
 
       - name: 清零 ccache 统计
         shell: bash
@@ -392,11 +163,17 @@ jobs:
           set -euo pipefail
           ccache --zero-stats
 
-      - name: 编译 arm64 RelWithDebInfo
+      - name: 编译 ARM64 RelWithDebInfo
         shell: bash
         run: |
           set -euo pipefail
           cmake --build build-arm64 --parallel
+
+      - name: 运行 ARM64 单元测试
+        shell: bash
+        run: |
+          set -euo pipefail
+          ctest --test-dir build-arm64 --output-on-failure --parallel "$(nproc)"
 
       - name: 输出 ccache 统计
         if: always()
@@ -406,18 +183,22 @@ jobs:
           ccache --show-stats
 
       - name: 安装运行产物到 package
+        if: ${{ github.event_name == 'push' && (github.ref_name == 'master' || github.ref_name == 'main') }}
         shell: bash
         run: |
           set -euo pipefail
           cmake --install build-arm64
+          find package -maxdepth 1 -type f -name '*_test' -delete
 
       - name: 检查 ARM64 IEC61850 交付包
+        if: ${{ github.event_name == 'push' && (github.ref_name == 'master' || github.ref_name == 'main') }}
         shell: bash
         run: |
           set -euo pipefail
           bash script/check_iec61850_package.sh package aarch64 false true
 
       - name: 打包调试符号
+        if: ${{ github.event_name == 'push' && (github.ref_name == 'master' || github.ref_name == 'main') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -426,9 +207,11 @@ jobs:
           fi
 
       - name: 准备 Docker Buildx
+        if: ${{ github.event_name == 'push' && (github.ref_name == 'master' || github.ref_name == 'main') }}
         uses: docker/setup-buildx-action@v3
 
       - name: 生成自解压测试包
+        if: ${{ github.event_name == 'push' && (github.ref_name == 'master' || github.ref_name == 'main') }}
         id: lower_image
         shell: bash
         run: |
@@ -455,6 +238,7 @@ jobs:
           rm -f "${IMAGE_TAR}"
 
       - name: 生成校验文件
+        if: ${{ github.event_name == 'push' && (github.ref_name == 'master' || github.ref_name == 'main') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -465,6 +249,7 @@ jobs:
           sha256sum "${ASSETS[@]}" > SHA256SUMS
 
       - name: 生成静态更新清单
+        if: ${{ github.event_name == 'push' && (github.ref_name == 'master' || github.ref_name == 'main') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -483,6 +268,7 @@ jobs:
             --source-sha "${SOURCE_SHA}"
 
       - name: 上传 arm64 测试安装包
+        if: ${{ github.event_name == 'push' && (github.ref_name == 'master' || github.ref_name == 'main') }}
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.meta.outputs.archive_name }}
@@ -494,6 +280,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: 同步 CI 静态更新源
+        if: ${{ github.event_name == 'push' && (github.ref_name == 'master' || github.ref_name == 'main') }}
         shell: bash
         env:
           STATIC_UPDATE_SSH_KEY: ${{ secrets.LOWER_UPDATE_STATIC_SSH_KEY || secrets.UPDATE_STATIC_SSH_KEY }}
