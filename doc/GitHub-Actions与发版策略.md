@@ -47,6 +47,7 @@
   - `RelWithDebInfo`
   - `MSKDSP_BUILD_TESTS=ON`
 - `arm64` 构建使用 `VCPKG_HOST_TRIPLET=arm64-linux-dynamic` 和 `VCPKG_TARGET_TRIPLET=arm64-linux-dynamic`。
+- `arm64-linux-dynamic` 由仓库内 `cmake/vcpkg-triplets/arm64-linux-dynamic.cmake` 覆盖，并设置 `VCPKG_BUILD_TYPE=release`，因此 vcpkg 依赖只编译 Release；项目本体仍使用 `RelWithDebInfo` 并保留独立调试符号包。
 - 编译后直接在 ARM64 runner 上执行 `ctest --test-dir build-arm64 --output-on-failure --parallel "$(nproc)"`。
 - 当前构建型 workflow 不再包含独立 x64 编译、测试或 x64 artifact。
 - `arm64` 打包链路统一使用原生编译：
@@ -327,3 +328,4 @@
 - 正式发布是否仍要求 tag 来源于 `beta/*`
 - 安装包命名规则、自解压脚本行为与 Release 页面资产是否同步变化
 - `protobuf` 子模块访问方式与密钥命名是否变化
+- vcpkg triplet 或其引用文件变化时，是否同步纳入 vcpkg 缓存 key 的 `hashFiles`

@@ -24,7 +24,8 @@ jobs:
     name: 产出 arm64 Nightly 包
     runs-on: ubuntu-24.04-arm
     env:
-      VCPKG_BINARY_CACHE_DIR: ${{ github.workspace }}/.cache/vcpkg/arm64-linux-dynamic
+      VCPKG_BINARY_CACHE_DIR: ${{ github.workspace }}/.cache/vcpkg/arm64-linux-dynamic-release
+      VCPKG_OVERLAY_TRIPLETS: ${{ github.workspace }}/cmake/vcpkg-triplets
       CCACHE_DIR: ${{ github.workspace }}/.cache/ccache/arm64-linux-dynamic
     steps:
       - name: 拉取主仓库
@@ -38,10 +39,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.VCPKG_BINARY_CACHE_DIR }}
-          key: vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-mainline-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          key: vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-release-mainline-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/vcpkg-triplets/arm64-linux-dynamic.cmake') }}
           restore-keys: |
-            vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-mainline-
-            vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-
+            vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-release-mainline-
+            vcpkg-bin-${{ runner.os }}-gcc14-arm64-linux-dynamic-release-
 
       - name: 恢复 ccache 编译缓存
         uses: actions/cache@v4

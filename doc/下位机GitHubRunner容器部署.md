@@ -46,9 +46,10 @@ Docker，并可访问宿主机的 `127.0.0.1:7897` 代理，等同于拥有宿�
 - ARM64 交叉编译器与 binutils
 - Docker CLI 与 Buildx 插件
 
-workflow 仍会执行 `sudo apt-get install` 和按仓库 baseline 初始化 vcpkg；镜像预装
-工具只是避免每个 job 从空系统开始。runner 用户具有免密码 sudo 权限，以兼容现有
-workflow。
+workflow 仍会执行 `sudo apt-get install` 和按仓库 baseline 初始化 vcpkg；当前 GitHub
+托管 ARM64 构建还会加载仓库内 `cmake/vcpkg-triplets/arm64-linux-dynamic.cmake`，使
+vcpkg 依赖仅构建 Release。镜像预装工具只是避免每个 job 从空系统开始。runner 用户
+具有免密码 sudo 权限，以兼容现有 workflow。
 
 ## 构建与注册
 
@@ -115,9 +116,9 @@ docker compose --env-file docker/lower-runner/.env \
 runs-on: [self-hosted, linux, x64, lower-builder]
 ```
 
-切换时还必须恢复 x64 host triplet、ARM64 交叉编译器和对应的构建工具路径。面向
-外部 pull request 的校验应继续使用 GitHub 托管 runner，避免在高权限自托管机器上
-执行不可信代码。
+切换时还必须恢复 x64 host triplet、ARM64 交叉编译器和对应的构建工具路径，并确认
+release-only overlay triplet 是否仍适用于交叉编译链路。面向外部 pull request 的校验
+应继续使用 GitHub 托管 runner，避免在高权限自托管机器上执行不可信代码。
 
 ## 失败处理
 
