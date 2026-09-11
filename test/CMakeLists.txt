@@ -2,6 +2,10 @@ enable_testing()
 
 find_package(GTest CONFIG REQUIRED)
 
+# 测试目标会直接编译部分模块源文件，统一继承公共头文件目录，确保模块头文件
+# 引用 mskdsp/Decimal20.hpp 等公共接口时与正式目标保持一致。
+include_directories(${MSKDSP_COMMON_INCLUDE_DIR})
+
 set(MSKDSP_TEST_RUNNER "${CMAKE_CURRENT_SOURCE_DIR}/RunIsolatedTest.cmake")
 
 function(mskdsp_add_isolated_test test_name)
