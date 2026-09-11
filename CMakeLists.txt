@@ -129,12 +129,14 @@ set(MSKDSP_MODULE_TARGETS
   IEC104
   DLT645
   ModbusRTU
+  ModbusTCP
   MQTTManager
   AGC
   AVC
   Calc
   ControlOrchestrator
   BoardIO
+  DeviceInfo
 )
 
 set(MSKDSP_VCPKG_INSTALL_DIR "")

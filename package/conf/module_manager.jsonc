@@ -9,11 +9,13 @@
     "IEC104",
     "IEC61850",
     "ModbusRTU",
+    "ModbusTCP",
     "DLT645",
     "AGC",
     "AVC",
     "Calc",
     "ControlOrchestrator",
-    "BoardIO"
+    "BoardIO",
+    "DeviceInfo"
   ]
 }

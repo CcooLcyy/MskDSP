@@ -179,6 +179,20 @@ target_link_libraries(configDatabase_test PRIVATE
 
 mskdsp_add_isolated_test(configDatabase_test)
 
+add_executable(decimal20_test
+  decimal20_test.cc
+)
+
+target_include_directories(decimal20_test PRIVATE
+  ${MSKDSP_COMMON_INCLUDE_DIR}
+)
+
+target_link_libraries(decimal20_test PRIVATE
+  GTest::gtest_main
+)
+
+mskdsp_add_isolated_test(decimal20_test)
+
 add_executable(boardInputEventProcessor_test
   board_input_event_processor_test.cc
   ${CMAKE_SOURCE_DIR}/src/BoardIO/BoardInputEventProcessor.cc
@@ -193,6 +207,21 @@ target_link_libraries(boardInputEventProcessor_test PRIVATE
 )
 
 mskdsp_add_isolated_test(boardInputEventProcessor_test)
+
+add_executable(device_metrics_test
+  device_metrics_test.cc
+  ${CMAKE_SOURCE_DIR}/src/DeviceInfo/DeviceMetrics.cc
+)
+
+target_include_directories(device_metrics_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/DeviceInfo/include
+)
+
+target_link_libraries(device_metrics_test PRIVATE
+  GTest::gtest_main
+)
+
+mskdsp_add_isolated_test(device_metrics_test)
 
 add_executable(boardIODataCenterClient_test
   board_io_data_center_client_test.cc
@@ -1093,6 +1122,7 @@ add_executable(modbusRtuPointTable_test
 
 target_include_directories(modbusRtuPointTable_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/ModbusRTU/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
   ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
 )
 
@@ -1139,6 +1169,7 @@ add_executable(dlt645PointTable_test
 
 target_include_directories(dlt645PointTable_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/DLT645/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
   ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
 )
 
@@ -1360,6 +1391,7 @@ add_executable(iec104LinkManager_test
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104LinkStore.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104PointTable.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104PointTableStore.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104SoeStore.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104TcpLink.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104TcpSession.cc
 )
@@ -1388,6 +1420,7 @@ add_executable(iec104Persistence_test
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104LinkStore.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104PointTable.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104PointTableStore.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104SoeStore.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104TcpLink.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104TcpSession.cc
 )
@@ -1407,6 +1440,24 @@ target_link_libraries(iec104Persistence_test PRIVATE
 )
 
 mskdsp_add_isolated_test(iec104Persistence_test)
+
+add_executable(iec104SoeStore_test
+  iec104_soe_store_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104SoeStore.cc
+)
+
+target_include_directories(iec104SoeStore_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC104/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
+)
+
+target_link_libraries(iec104SoeStore_test PRIVATE
+  GTest::gtest_main
+  moduleManager
+  unofficial::sqlite3::sqlite3
+)
+
+mskdsp_add_isolated_test(iec104SoeStore_test)
 
 add_executable(modbusRtuLinkManager_test
   modbus_rtu_data_center_client_test.cc
@@ -1439,6 +1490,27 @@ target_link_libraries(modbusRtuLinkManager_test PRIVATE
 )
 
 mskdsp_add_isolated_test(modbusRtuLinkManager_test)
+
+add_executable(modbusTcpBus_test
+  modbus_tcp_bus_test.cc
+  ${CMAKE_SOURCE_DIR}/src/ModbusTCP/ModbusTCPTcpBus.cc
+)
+
+target_include_directories(modbusTcpBus_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/ModbusTCP/include
+  ${CMAKE_SOURCE_DIR}/src/ModbusRTU/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+)
+
+target_link_libraries(modbusTcpBus_test PRIVATE
+  GTest::gtest_main
+  dspProto
+  Boost::asio
+  moduleManager
+)
+
+mskdsp_add_isolated_test(modbusTcpBus_test)
 
 add_executable(configPusherApplyModbusRtu_test
   config_pusher_apply_modbus_rtu_test.cc
@@ -1475,6 +1547,26 @@ target_link_libraries(iec104TcpSession_test PRIVATE
 )
 
 mskdsp_add_isolated_test(iec104TcpSession_test)
+
+add_executable(iec104TcpLink_test
+  iec104_tcp_link_test.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104TcpLink.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104TcpSession.cc
+)
+
+target_include_directories(iec104TcpLink_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/IEC104/include
+  ${CMAKE_SOURCE_DIR}/src/core/ModuleManager/include
+)
+
+target_link_libraries(iec104TcpLink_test PRIVATE
+  GTest::gtest_main
+  Boost::asio
+  dspProto
+  moduleManager
+)
+
+mskdsp_add_isolated_test(iec104TcpLink_test)
 
 add_executable(agvcStrategy_test
   agvc_strategy_test.cc
@@ -1694,9 +1786,11 @@ mskdsp_add_isolated_test(configPusherModuleManager_test)
 set(MSKDSP_TEST_TARGETS
   moduleManager_test
   moduleInterface_test
+  modbusTcpBus_test
   logger_test
   mqtt_manager_test
   configDatabase_test
+  decimal20_test
   boardInputEventProcessor_test
   boardIODataCenterClient_test
   boardOutputManager_test
@@ -1739,8 +1833,10 @@ set(MSKDSP_TEST_TARGETS
   iec104GrpcService_test
   iec104LinkManager_test
   iec104Persistence_test
+  iec104SoeStore_test
   modbusRtuLinkManager_test
   iec104TcpSession_test
+  iec104TcpLink_test
   agvcStrategy_test
   agcGroupManager_test
   agcGroupStore_test
