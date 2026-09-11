@@ -232,6 +232,14 @@ void TcpLink::SetCommandCallback(CommandCallback cb) {
   }
 }
 
+void TcpLink::SetCommandExecutionModeCallback(CommandExecutionModeCallback cb) {
+  std::lock_guard<std::mutex> lock(mu_);
+  onCommandExecutionMode_ = std::move(cb);
+  if (session_) {
+    session_->SetCommandExecutionModeCallback(onCommandExecutionMode_);
+  }
+}
+
 void TcpLink::run(std::stop_token st) {
   boost::asio::executor_work_guard<boost::asio::io_context::executor_type> guard(io_.get_executor());
   std::stop_callback cb(st, [this]() {
@@ -294,6 +302,7 @@ void TcpLink::startAccept() {
       session_->SetInterrogationSnapshotProvider(interrogationSnapshotProvider_);
       session_->SetTimeSyncCallback(onTimeSync_);
       session_->SetCommandCallback(onCommand_);
+      session_->SetCommandExecutionModeCallback(onCommandExecutionMode_);
     }
     newSession->Start(std::move(socket));
 
@@ -363,6 +372,7 @@ void TcpLink::startConnect() {
       session_->SetInterrogationSnapshotProvider(interrogationSnapshotProvider_);
       session_->SetTimeSyncCallback(onTimeSync_);
       session_->SetCommandCallback(onCommand_);
+      session_->SetCommandExecutionModeCallback(onCommandExecutionMode_);
     }
       newSession->Start(std::move(*sock));
     });

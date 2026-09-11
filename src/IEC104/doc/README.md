@@ -88,7 +88,7 @@ ConfigPusher 点表示例（含 scale/offset/deadband，字段可省略，默认
 - 触发方式：上位机或其他模块通过 DataCenter 路由将命令写入 IEC104 的稳定端点；IEC104 主站按当前 `conn_id + tag` 订阅后发送命令。
 - 单点遥控：`remote_control_type=REMOTE_CONTROL_TYPE_SINGLE`，DataCenter value 使用 `bool`（或 int/double 非 0 视为 true），IEC104 发送 `C_SC_NA_1`。
 - 双点遥控：`remote_control_type=REMOTE_CONTROL_TYPE_DOUBLE`，DataCenter value 推荐使用 `int64`（`1=分`、`2=合`）；兼容 BOOL 时 `false/true` 分别映射为 `1/2`。IEC104 发送 `C_DC_NA_1`，DCO `0/3` 视为非法状态并拒绝。
-- 执行方式：`COMMAND_EXECUTION_MODE_DIRECT` 只发送 `S/E=0`；`COMMAND_EXECUTION_MODE_SELECT_EXECUTE` 先发送 `S/E=1`，收到选择正确认后再发送 `S/E=0`。从站选择缓存超时为 10 秒，并校验类型、IOA 与命令值。
+- 执行方式：主站配置为 `COMMAND_EXECUTION_MODE_DIRECT` 时默认发送 `S/E=0`，但从站同时允许完整的 `S/E=1 -> S/E=0` 流程；配置为 `COMMAND_EXECUTION_MODE_SELECT_EXECUTE` 时必须先收到匹配的 `S/E=1` 预置，裸 `S/E=0` 直接返回否定确认且不调用业务。两种模式的选择缓存均校验类型、IOA 与命令值，超时为 10 秒。
 - 短浮点设点：`POINT_TYPE_FLOAT`，DataCenter value 使用 `double`（或 int 转换为 double）；IEC104 发送 `C_SE_NC_1`（执行）。
 - 设点工程量：DataCenter 侧提供工程量；IEC104 发送前按 `scale/offset` 反向换算为原始值；从站收到命令后按 `scale/offset` 正向换算再发布到 DataCenter。
 - 从站收到遥控/设点后，通过 DataCenter 同步等待目标模块执行结果，默认等待 `8000ms`，用于覆盖 ModbusRTU MQTT UART 默认 `3000ms` 请求、同总线在途轮询及内部转发开销；目标模块超时或拒绝时返回 IEC104 负确认。

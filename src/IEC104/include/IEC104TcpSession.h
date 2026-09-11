@@ -55,6 +55,7 @@ public:
   using SnapshotProvider = TcpLink::SnapshotProvider;
   using TimeSyncCallback = TcpLink::TimeSyncCallback;
   using CommandCallback = TcpLink::CommandCallback;
+  using CommandExecutionModeCallback = TcpLink::CommandExecutionModeCallback;
 
   TcpSession(boost::asio::io_context& io, IEC104Proto::LinkConfig config, bool isClient);
   ~TcpSession();
@@ -75,6 +76,7 @@ public:
   void SetInterrogationSnapshotProvider(SnapshotProvider provider);
   void SetTimeSyncCallback(TimeSyncCallback cb);
   void SetCommandCallback(CommandCallback cb);
+  void SetCommandExecutionModeCallback(CommandExecutionModeCallback cb);
   void SetClosedCallback(std::function<void()> cb);
 
 private:
@@ -127,6 +129,7 @@ private:
   SnapshotProvider interrogationSnapshotProvider_;
   TimeSyncCallback onTimeSync_;
   CommandCallback onCommand_;
+  CommandExecutionModeCallback onCommandExecutionMode_;
   std::function<void()> onClosed_;
 
   struct PendingPointValue {

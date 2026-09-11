@@ -213,6 +213,10 @@ void TcpSession::SetCommandCallback(CommandCallback cb) {
   onCommand_ = std::move(cb);
 }
 
+void TcpSession::SetCommandExecutionModeCallback(CommandExecutionModeCallback cb) {
+  onCommandExecutionMode_ = std::move(cb);
+}
+
 void TcpSession::SetClosedCallback(std::function<void()> cb) {
   onClosed_ = std::move(cb);
 }
@@ -991,8 +995,10 @@ void TcpSession::handleRemoteControlCommand(const std::vector<uint8_t> &asdu,
     }
 
     bool selectionRejected = false;
+    bool hasSelection = false;
     auto it = remoteControlSelectByIoa_.find(ioa);
     if (it != remoteControlSelectByIoa_.end()) {
+      hasSelection = true;
       const auto selected = it->second;
       remoteControlSelectByIoa_.erase(it);
       const auto elapsed = now - selected.time;
@@ -1003,6 +1009,15 @@ void TcpSession::handleRemoteControlCommand(const std::vector<uint8_t> &asdu,
         LOG_WARNING("IEC104 遥控预置与执行不一致: conn_name={}, ioa={}, 预置类型={}, 执行类型={}, 预置值={}, 执行值={}",
                     config_.conn_name(), ioa, static_cast<int>(selected.type), static_cast<int>(type),
                     selected.value, value);
+        selectionRejected = true;
+      }
+    }
+
+    if (!selectionRejected && !hasSelection && onCommandExecutionMode_) {
+      const auto mode = onCommandExecutionMode_(ioa);
+      if (mode.has_value() && *mode == IEC104Proto::COMMAND_EXECUTION_MODE_SELECT_EXECUTE) {
+        LOG_WARNING("IEC104 选择执行点位缺少预置，拒绝直接执行: conn_name={}, ioa={}, type={}, value={}",
+                    config_.conn_name(), ioa, static_cast<int>(type), value);
         selectionRejected = true;
       }
     }

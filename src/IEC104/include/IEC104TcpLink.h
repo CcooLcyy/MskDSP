@@ -50,6 +50,8 @@ public:
   using SnapshotProvider = std::function<std::vector<PointValue>()>;
   using TimeSyncCallback = std::function<void(int64_t)>;
   using CommandCallback = std::function<CommandResult(const CommandValue&)>;
+  using CommandExecutionModeCallback =
+      std::function<std::optional<IEC104Proto::CommandExecutionMode>(uint32_t)>;
 
   explicit TcpLink(IEC104Proto::LinkConfig config);
   ~TcpLink();
@@ -73,6 +75,7 @@ public:
   void SetInterrogationSnapshotProvider(SnapshotProvider provider);
   void SetTimeSyncCallback(TimeSyncCallback cb);
   void SetCommandCallback(CommandCallback cb);
+  void SetCommandExecutionModeCallback(CommandExecutionModeCallback cb);
 
 private:
   void run(std::stop_token st);
@@ -100,6 +103,7 @@ private:
   SnapshotProvider interrogationSnapshotProvider_;
   TimeSyncCallback onTimeSync_;
   CommandCallback onCommand_;
+  CommandExecutionModeCallback onCommandExecutionMode_;
 };
 
 }  // namespace IEC104

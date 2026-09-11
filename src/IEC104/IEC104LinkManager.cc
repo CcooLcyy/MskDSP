@@ -1061,6 +1061,19 @@ void LinkManager::configureTransportCallbacksLocked(const std::string &connName,
   link->transport->SetCommandCallback([this, connName](const CommandValue &cv) {
     return handleCommandValue(connName, cv);
   });
+  link->transport->SetCommandExecutionModeCallback(
+      [this, connName](uint32_t ioa) -> std::optional<IEC104Proto::CommandExecutionMode> {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto it = linksByName_.find(connName);
+        if (it == linksByName_.end()) {
+          return std::nullopt;
+        }
+        auto point = it->second.pointTable.FindByIoa(ioa);
+        if (!point) {
+          return std::nullopt;
+        }
+        return point->commandExecutionMode;
+      });
 }
 
 grpc::Status LinkManager::StartLink(const std::string &connName) {
