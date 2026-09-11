@@ -1721,10 +1721,13 @@ mskdsp_add_isolated_test(avcGroupStore_test)
 add_executable(avcControl_test
   avc_control_test.cc
   ${CMAKE_SOURCE_DIR}/src/AGVC/AVC/AVCControl.cc
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AVC/AVCDefaultPoints.cc
+  ${CMAKE_SOURCE_DIR}/src/AGVC/AVC/AVCGroupValidation.cc
 )
 
 target_include_directories(avcControl_test PRIVATE
   ${CMAKE_SOURCE_DIR}/src/AGVC/AVC/include
+  ${MSKDSP_COMMON_INCLUDE_DIR}
 )
 
 target_link_libraries(avcControl_test PRIVATE
