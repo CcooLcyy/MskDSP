@@ -251,7 +251,8 @@ TEST(IEC61850SvRuntimeTest, DeduplicatesCompletedFrameAcrossNetworks) {
   auto conflict = first;
   conflict.channel = IEC61850Proto::NETWORK_CHANNEL_B;
   conflict.appId = 0x1002;
-  conflict.values = std::array{MakeValue(999)};
+  const std::array conflictValues{MakeValue(999)};
+  conflict.values = conflictValues;
   EXPECT_EQ(engine.TryProcess(conflict, nullptr),
             IEC61850::SvRealtimeProcessResult::CONFLICT);
 }

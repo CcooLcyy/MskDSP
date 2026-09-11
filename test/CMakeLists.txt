@@ -119,7 +119,7 @@ mskdsp_add_isolated_test(moduleManager_test
   WORKING_DIRECTORY "${MSKDSP_MODULE_MANAGER_TEST_ENV_DIR}"
 )
 
-set(MSKDSP_MODULE_INTERFACE_TEST_ENV_DIR "${CMAKE_BINARY_DIR}/test_env/moduleInterface")
+set(MSKDSP_MODULE_INTERFACE_TEST_ENV_DIR "${CMAKE_BINARY_DIR}/mi")
 
 add_executable(moduleInterface_test
   module_interface_test.cc

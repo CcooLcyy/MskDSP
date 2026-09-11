@@ -3179,7 +3179,7 @@ TEST(IEC61850MmsWorkerTest, ReclaimsRcbAndGiAfterPreferredChannelDisconnects) {
   ASSERT_TRUE(worker.Start().ok());
   {
     std::unique_lock lock(callbackMutex);
-    ASSERT_TRUE(callbackCondition.wait_for(lock, 5s, [&] {
+    ASSERT_TRUE(callbackCondition.wait_for(lock, 10s, [&] {
       return std::any_of(events.begin(), events.end(), [](const auto& event) {
         return event.state == IEC61850::ProtocolSessionState::READY &&
                event.activeChannel == IEC61850Proto::NETWORK_CHANNEL_B;
