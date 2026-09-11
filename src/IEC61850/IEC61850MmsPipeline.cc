@@ -10,6 +10,7 @@
 
 #include "Logger.h"
 #include "ThreadUtil.hpp"
+#include "IEC61850Decimal.hpp"
 #include "mskdsp/IEC61850Limits.hpp"
 
 namespace IEC61850 {
@@ -180,6 +181,23 @@ grpc::Status MmsEventPipeline::ConfigureIed(MmsPublishConfig config,
         mskdsp::kIec61850DefaultPublishBatchWindowMs);
   }
 
+  for (const auto& mapping : config.mappings.points()) {
+    if (mapping.source() != IEC61850Proto::POINT_SOURCE_MMS) {
+      continue;
+    }
+    const auto engineering = ParsePointEngineeringDecimal(mapping);
+    if (!engineering.has_value()) {
+      LOG_WARNING("IEC61850 MMS点映射工程量配置解析失败: IED={}, tag={}, 原因={}",
+                  config.connName, mapping.tag(),
+                  mskdsp::numeric::DecimalErrorMessage(engineering.error()));
+      return grpc::Status(
+          grpc::StatusCode::INVALID_ARGUMENT,
+          std::format("MMS点映射工程量配置非法: tag={}, 原因={}", mapping.tag(),
+                      mskdsp::numeric::DecimalErrorMessage(
+                          engineering.error())));
+    }
+  }
+
   std::shared_ptr<IedPipelineState> state;
   {
     std::lock_guard lock(statesMutex_);
@@ -224,6 +242,26 @@ grpc::Status MmsEventPipeline::ConfigureIed(MmsPublishConfig config,
       auto& mappingState =
           state->mappings[MappingKey(mapping.data_ref(), mapping.fc())];
       mappingState.mapping = mapping;
+      const auto engineering = ParsePointEngineeringDecimal(mapping);
+      mappingState.scale = engineering->scale;
+      mappingState.offset = engineering->offset;
+      mappingState.deadband = engineering->deadband;
+      const auto logOverride = [&](std::string_view field,
+                                   std::string_view decimalText,
+                                   double legacyValue) {
+        if (decimalText.empty()) {
+          return;
+        }
+        const auto legacy = mskdsp::numeric::Decimal20::FromDouble(legacyValue);
+        const auto decimal = mskdsp::numeric::Decimal20::Parse(decimalText);
+        if (legacy.has_value() && decimal.has_value() && *legacy != *decimal) {
+          LOG_WARNING("IEC61850 MMS点映射十进制文本覆盖旧double字段: IED={}, tag={}, 字段={}",
+                      config.connName, mapping.tag(), field);
+        }
+      };
+      logOverride("scale", mapping.scale_decimal(), mapping.scale());
+      logOverride("offset", mapping.offset_decimal(), mapping.offset());
+      logOverride("deadband", mapping.deadband_decimal(), mapping.deadband());
     }
     mappingCount = state->mappings.size();
     EnsureWorkerLocked(config.connName, state);
@@ -533,16 +571,13 @@ MmsEventPipeline::ConversionResult MmsEventPipeline::ConvertValue(
   }
   value->Clear();
   const auto& config = mapping.mapping;
-  const auto acceptNumeric = [&](long double engineered) {
-    if (!std::isfinite(engineered)) {
-      return ConversionResult::INVALID_VALUE;
-    }
+  const auto acceptNumeric =
+      [&](const mskdsp::numeric::Decimal20& engineered) {
     const bool sameQuality =
         !candidate->hasQuality || candidate->quality == quality;
-    if (config.deadband() > 0.0 && candidate->hasNumericValue &&
-        sameQuality &&
-        std::abs(engineered - candidate->numericValue) <=
-            static_cast<long double>(config.deadband())) {
+    if (candidate->hasNumericValue && sameQuality &&
+        !mskdsp::numeric::ShouldReport(engineered, candidate->numericValue,
+                                       mapping.deadband)) {
       return ConversionResult::DEADBAND_FILTERED;
     }
     candidate->hasNumericValue = true;
@@ -570,53 +605,54 @@ MmsEventPipeline::ConversionResult MmsEventPipeline::ConvertValue(
     if (integer == nullptr && number == nullptr) {
       return ConversionResult::TYPE_MISMATCH;
     }
-    const long double scale =
-        config.scale() == 0.0 ? 1.0L
-                              : static_cast<long double>(config.scale());
-    const long double offset = static_cast<long double>(config.offset());
-    int64_t converted = 0;
-    if (integer != nullptr && scale == 1.0L && offset == 0.0L) {
-      converted = *integer;
-    } else {
-      const long double raw =
-          integer != nullptr ? static_cast<long double>(*integer)
-                             : static_cast<long double>(*number);
-      const long double rounded = std::round(raw * scale + offset);
-      constexpr long double kInt64Minimum = -9223372036854775808.0L;
-      constexpr long double kInt64UpperExclusive = 9223372036854775808.0L;
-      if (!std::isfinite(rounded) || rounded < kInt64Minimum ||
-          rounded >= kInt64UpperExclusive) {
-        return ConversionResult::INVALID_VALUE;
-      }
-      converted = static_cast<int64_t>(rounded);
+    const auto raw = integer != nullptr
+                         ? mskdsp::numeric::Decimal20::FromInt64(*integer)
+                         : mskdsp::numeric::Decimal20::FromDouble(*number);
+    if (!raw.has_value()) {
+      return ConversionResult::INVALID_VALUE;
     }
-    const auto result = acceptNumeric(static_cast<long double>(converted));
+    const auto converted = mskdsp::numeric::ApplyEngineering(
+        *raw, mapping.scale, mapping.offset);
+    if (!converted.has_value()) {
+      return ConversionResult::INVALID_VALUE;
+    }
+    const auto integerValue = converted->ToInteger<std::int64_t>(
+        mskdsp::numeric::RoundingMode::kHalfAwayFromZero);
+    if (!integerValue.has_value()) {
+      return ConversionResult::INVALID_VALUE;
+    }
+    const auto quantized =
+        mskdsp::numeric::Decimal20::FromInt64(*integerValue);
+    if (!quantized.has_value()) {
+      return ConversionResult::INVALID_VALUE;
+    }
+    const auto result = acceptNumeric(*quantized);
     if (result == ConversionResult::PUBLISHED) {
-      value->set_int_value(converted);
+      value->set_int_value(*integerValue);
     }
     return result;
   }
   case IEC61850Proto::POINT_VALUE_TYPE_DOUBLE: {
-    long double raw = 0.0L;
+    std::expected<mskdsp::numeric::Decimal20, mskdsp::numeric::DecimalError>
+        raw = std::unexpected(mskdsp::numeric::DecimalError::kInvalidFormat);
     if (const auto* number = std::get_if<double>(&source.value)) {
-      raw = static_cast<long double>(*number);
+      raw = mskdsp::numeric::Decimal20::FromDouble(*number);
     } else if (const auto* integer = std::get_if<int64_t>(&source.value)) {
-      raw = static_cast<long double>(*integer);
+      raw = mskdsp::numeric::Decimal20::FromInt64(*integer);
     } else {
       return ConversionResult::TYPE_MISMATCH;
     }
-    const long double scale =
-        config.scale() == 0.0 ? 1.0L
-                              : static_cast<long double>(config.scale());
-    const long double engineered =
-        raw * scale + static_cast<long double>(config.offset());
-    const double converted = static_cast<double>(engineered);
-    if (!std::isfinite(engineered) || !std::isfinite(converted)) {
+    if (!raw.has_value()) {
       return ConversionResult::INVALID_VALUE;
     }
-    const auto result = acceptNumeric(static_cast<long double>(converted));
+    const auto converted = mskdsp::numeric::ApplyEngineering(
+        *raw, mapping.scale, mapping.offset);
+    if (!converted.has_value()) {
+      return ConversionResult::INVALID_VALUE;
+    }
+    const auto result = acceptNumeric(*converted);
     if (result == ConversionResult::PUBLISHED) {
-      value->set_double_value(converted);
+      value->set_decimal_value(converted->ToFixedString());
     }
     return result;
   }

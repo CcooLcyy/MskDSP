@@ -8,9 +8,11 @@
 #include <limits>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 #include "AGCGroupManager.h"
 #include "DataCenter_mock.grpc.pb.h"
@@ -93,6 +95,56 @@ void PublishDoublePoint(FakeDataCenterState *state, uint32_t connId, const char 
   ASSERT_TRUE(state->Publish(req).ok());
 }
 
+void PublishDecimalPoint(FakeDataCenterState *state, uint32_t connId, const char *tag, std::string value) {
+  ASSERT_NE(state, nullptr);
+  DataCenterProto::PublishRequest req;
+  req.set_conn_id(connId);
+  req.set_tag(tag);
+  req.mutable_value()->set_decimal_value(std::move(value));
+  req.set_quality(DataCenterProto::QUALITY_GOOD);
+  ASSERT_TRUE(state->Publish(req).ok());
+}
+
+bool PointValueToDoubleForTest(const DataCenterProto::PointValue &value, double *out) {
+  if (out == nullptr) {
+    return false;
+  }
+  if (value.has_double_value()) {
+    *out = value.double_value();
+    return true;
+  }
+  if (!value.has_decimal_value()) {
+    return false;
+  }
+  auto decimal = mskdsp::numeric::Decimal20::Parse(value.decimal_value());
+  if (!decimal.has_value()) {
+    return false;
+  }
+  auto boundary = decimal->ToDouble();
+  if (!boundary.has_value()) {
+    return false;
+  }
+  *out = *boundary;
+  return true;
+}
+
+bool WaitForLatestDecimal(const FakeDataCenterState &state, uint32_t connId, const char *tag, std::string_view expected) {
+  for (int i = 0; i < 50; ++i) {
+    DataCenterProto::GetLatestRequest req;
+    req.set_conn_id(connId);
+    req.add_tags(tag);
+
+    DataCenterProto::GetLatestResponse resp;
+    if (state.GetLatest(req, &resp).ok() && resp.updates_size() == 1 &&
+        resp.updates(0).value().has_decimal_value() &&
+        resp.updates(0).value().decimal_value() == expected) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return false;
+}
+
 bool WaitForLatestDouble(const FakeDataCenterState &state, uint32_t connId, const char *tag, double expected) {
   for (int i = 0; i < 50; ++i) {
     DataCenterProto::GetLatestRequest req;
@@ -100,8 +152,10 @@ bool WaitForLatestDouble(const FakeDataCenterState &state, uint32_t connId, cons
     req.add_tags(tag);
 
     DataCenterProto::GetLatestResponse resp;
-    if (state.GetLatest(req, &resp).ok() && resp.updates_size() == 1 && resp.updates(0).value().has_double_value()) {
-      if (std::fabs(resp.updates(0).value().double_value() - expected) <= 1e-6) {
+    double actual = 0.0;
+    if (state.GetLatest(req, &resp).ok() && resp.updates_size() == 1 &&
+        PointValueToDoubleForTest(resp.updates(0).value(), &actual)) {
+      if (std::fabs(actual - expected) <= 1e-6) {
         return true;
       }
     }
@@ -154,6 +208,20 @@ DataCenterProto::ExecuteCommandResponse ExecuteDoubleCommand(
   return response;
 }
 
+DataCenterProto::ExecuteCommandResponse ExecuteDecimalCommand(
+    GroupManager *manager, const std::string &groupName, uint32_t connId, const char *tag, std::string value) {
+  DataCenterProto::ExecuteCommandRequest request;
+  request.mutable_dst()->set_conn_id(connId);
+  request.mutable_dst()->set_conn_name(groupName);
+  request.mutable_dst()->set_tag(tag);
+  request.mutable_value()->set_decimal_value(std::move(value));
+  request.set_quality(DataCenterProto::QUALITY_GOOD);
+
+  DataCenterProto::ExecuteCommandResponse response;
+  EXPECT_TRUE(manager->ExecuteCommand(request, &response).ok());
+  return response;
+}
+
 bool WaitForLatestDoubleWithQuality(
     const FakeDataCenterState &state, uint32_t connId, const char *tag, double expected, DataCenterProto::Quality quality) {
   for (int i = 0; i < 50; ++i) {
@@ -162,8 +230,10 @@ bool WaitForLatestDoubleWithQuality(
     req.add_tags(tag);
 
     DataCenterProto::GetLatestResponse resp;
-    if (state.GetLatest(req, &resp).ok() && resp.updates_size() == 1 && resp.updates(0).value().has_double_value()) {
-      if (std::fabs(resp.updates(0).value().double_value() - expected) <= 1e-6 && resp.updates(0).quality() == quality) {
+    double actual = 0.0;
+    if (state.GetLatest(req, &resp).ok() && resp.updates_size() == 1 &&
+        PointValueToDoubleForTest(resp.updates(0).value(), &actual)) {
+      if (std::fabs(actual - expected) <= 1e-6 && resp.updates(0).quality() == quality) {
         return true;
       }
     }
@@ -180,8 +250,10 @@ bool WaitForLatestDoubleWithQualityAndTs(
     req.add_tags(tag);
 
     DataCenterProto::GetLatestResponse resp;
-    if (state.GetLatest(req, &resp).ok() && resp.updates_size() == 1 && resp.updates(0).value().has_double_value()) {
-      if (std::fabs(resp.updates(0).value().double_value() - expected) <= 1e-6 && resp.updates(0).quality() == quality &&
+    double actual = 0.0;
+    if (state.GetLatest(req, &resp).ok() && resp.updates_size() == 1 &&
+        PointValueToDoubleForTest(resp.updates(0).value(), &actual)) {
+      if (std::fabs(actual - expected) <= 1e-6 && resp.updates(0).quality() == quality &&
           resp.updates(0).ts_ms() == tsMs) {
         return true;
       }
@@ -211,6 +283,63 @@ bool WaitForSubscriptionCount(const FakeDataCenterState &state, uint32_t connId,
   return false;
 }
 }  // namespace
+
+// 验证：十进制配置和 PointValue 经 GroupManager 控制链后仍发布固定 20 位 decimal_value。
+TEST(AgcGroupManagerTest, DecimalPointValueRemainsExactThroughRealControlChain) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  GroupManager manager("AGC");
+  manager.setDataCenterStub(stub);
+  auto request = MakeGroupReq("g-decimal-chain");
+  auto *config = request.mutable_config();
+  config->mutable_members(0)->set_capacity_kw_decimal("1");
+  config->mutable_members(0)->set_weight_decimal("1");
+  config->mutable_members(1)->set_capacity_kw_decimal("1");
+  config->mutable_members(1)->set_weight_decimal("2");
+  config->mutable_outputs()->mutable_p_total_target()->set_tag("P_TARGET");
+  config->mutable_outputs()->mutable_p_total_error()->set_tag("P_ERROR");
+
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(manager.UpsertGroup(request, &info).ok());
+  ASSERT_TRUE(WaitForSubscriptionCount(state, info.conn_id(), 1u));
+  PublishDecimalPoint(&state, info.conn_id(), "INV1_P_MEAS", "0.1");
+  PublishDecimalPoint(&state, info.conn_id(), "INV2_P_MEAS", "0.2");
+  PublishDecimalPoint(&state, info.conn_id(), "P_CMD", "0.3");
+
+  EXPECT_TRUE(WaitForLatestDecimal(state, info.conn_id(), "P_TOTAL", "0.30000000000000000000"));
+  EXPECT_TRUE(WaitForLatestDecimal(state, info.conn_id(), "INV1_P_SET", "0.10000000000000000000"));
+  EXPECT_TRUE(WaitForLatestDecimal(state, info.conn_id(), "INV2_P_SET", "0.20000000000000000000"));
+  EXPECT_TRUE(WaitForLatestDecimal(state, info.conn_id(), "P_TARGET", "0.30000000000000000000"));
+
+  ASSERT_TRUE(manager.StopGroup("g-decimal-chain").ok());
+}
+
+// 验证：同步十进制命令响应同时返回精确文本和兼容 double 字段，限值文本不丢失精度。
+TEST(AgcGroupManagerTest, DecimalExecuteCommandReturnsExactAndCompatibilityFields) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  GroupManager manager("AGC");
+  manager.setDataCenterStub(stub);
+  auto request = MakeGroupReq("g-decimal-command");
+  request.mutable_config()->mutable_members(0)->set_capacity_kw_decimal("0.1");
+  request.mutable_config()->mutable_members(0)->set_weight_decimal("1");
+  request.mutable_config()->mutable_members(1)->set_capacity_kw_decimal("0.2");
+  request.mutable_config()->mutable_members(1)->set_weight_decimal("2");
+
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(manager.UpsertGroup(request, &info).ok());
+  const auto response = ExecuteDecimalCommand(
+      &manager, "g-decimal-command", info.conn_id(), "P_CMD", "0.3");
+  EXPECT_EQ(response.status(), DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_EQ(response.requested_value_decimal(), "0.30000000000000000000");
+  EXPECT_EQ(response.accepted_value_decimal(), "0.30000000000000000000");
+  EXPECT_EQ(response.lower_limit_decimal(), "0.00000000000000000000");
+  EXPECT_EQ(response.upper_limit_decimal(), "0.30000000000000000000");
+  EXPECT_DOUBLE_EQ(response.requested_value(), 0.3);
+  EXPECT_DOUBLE_EQ(response.accepted_value(), 0.3);
+
+  ASSERT_TRUE(manager.StopGroup("g-decimal-command").ok());
+}
 
 // 验证：create_only UpsertGroup 会向 DataCenter 取/建 conn_id，并在配置合法时自动启动控制组内功能。
 TEST(AgcGroupManagerTest, UpsertGroupCreateOnlyReturnsConnIdAndAutoStartsReadyGroup) {

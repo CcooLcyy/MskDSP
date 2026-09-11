@@ -1,5 +1,6 @@
 #include "CalcDataCenterClient.h"
 
+#include <chrono>
 #include <filesystem>
 #include <format>
 #include <utility>
@@ -10,6 +11,7 @@
 namespace Calc {
 namespace {
 constexpr const char *kDefaultDataCenterModuleName = "DataCenter";
+constexpr auto kPublishTimeout = std::chrono::seconds(3);
 }  // namespace
 
 DataCenterClient::DataCenterClient(std::string moduleName) :
@@ -161,6 +163,7 @@ grpc::Status DataCenterClient::PublishValue(uint32_t connId,
   req.set_quality(quality);
 
   grpc::ClientContext ctx;
+  ctx.set_deadline(std::chrono::system_clock::now() + kPublishTimeout);
   DataCenterProto::Empty resp;
   return stub->Publish(&ctx, req, &resp);
 }

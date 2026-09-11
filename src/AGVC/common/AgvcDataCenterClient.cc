@@ -7,6 +7,8 @@
 #include <grpcpp/create_channel.h>
 #include <grpcpp/security/credentials.h>
 
+#include "mskdsp/Decimal20.hpp"
+
 namespace AGVC {
 namespace {
 constexpr const char* kDefaultDataCenterModuleName = "DataCenter";
@@ -166,6 +168,20 @@ grpc::Status DataCenterClient::PublishDouble(
     uint32_t connId, const std::string& tag, double value, DataCenterProto::Quality quality, int64_t tsMs) {
   DataCenterProto::PointValue pointValue;
   pointValue.set_double_value(value);
+  return PublishValue(connId, tag, pointValue, quality, tsMs);
+}
+
+grpc::Status DataCenterClient::PublishDecimal(
+    uint32_t connId, const std::string& tag, std::string value,
+    DataCenterProto::Quality quality, int64_t tsMs) {
+  auto decimal = mskdsp::numeric::Decimal20::Parse(value);
+  if (!decimal.has_value()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                        std::string("decimal_value 解析失败: ") +
+                            std::string(mskdsp::numeric::DecimalErrorMessage(decimal.error())));
+  }
+  DataCenterProto::PointValue pointValue;
+  pointValue.set_decimal_value(decimal->ToFixedString());
   return PublishValue(connId, tag, pointValue, quality, tsMs);
 }
 

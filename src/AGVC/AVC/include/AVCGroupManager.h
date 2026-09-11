@@ -4,6 +4,7 @@
 #include <grpcpp/support/status.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -19,6 +20,7 @@
 
 #include "AVC.pb.h"
 #include "AVCGroupStore.h"
+#include "AVCNumeric.hpp"
 #include "AgvcDataCenterClient.h"
 #include "AgvcStrategy.h"
 
@@ -43,6 +45,8 @@ public:
   void TryAutoStartReadyGroups(std::string_view trigger);
 
 private:
+  using Decimal = mskdsp::numeric::Decimal20;
+
   struct ControlTrigger {
     std::atomic<bool> pending{false};
     std::counting_semaphore<1024> signal{0};
@@ -70,26 +74,34 @@ private:
     std::vector<std::string> subscribeTags;
 
     bool hasVoltageMeasRaw{false};
-    double voltageMeasRaw{0.0};
+    Decimal voltageMeasRaw;
 
     bool hasVoltageCmdRaw{false};
-    double voltageCmdRaw{0.0};
+    Decimal voltageCmdRaw;
 
     bool hasQTotalCmdRaw{false};
-    double qTotalCmdRaw{0.0};
+    Decimal qTotalCmdRaw;
+    uint64_t commandRevision{0};
+    uint64_t directResolvedCommandRevision{0};
+    bool hasDirectResolvedDesiredTotalQKvar{false};
+    Decimal directResolvedDesiredTotalQKvar;
 
-    std::unordered_map<std::string, double> baseRawByTag;
+    std::unordered_map<std::string, Decimal> baseRawByTag;
     std::vector<bool> hasMemberQMeasRaw;
-    std::vector<double> memberQMeasRaw;
+    std::vector<Decimal> memberQMeasRaw;
 
     bool hasLastDesiredTotalQKvar{false};
-    double lastDesiredTotalQKvar{0.0};
+    Decimal lastDesiredTotalQKvar;
 
     std::vector<bool> hasLastMemberTargetQKvar;
-    std::vector<double> lastMemberTargetQKvar;
+    std::vector<Decimal> lastMemberTargetQKvar;
+
+    // 周期直分配模式的命令节流状态；PI_EVENT 模式不使用。
+    std::chrono::steady_clock::time_point lastCommandPublishedAt{};
+    bool hasLastCommandPublishedAt{false};
 
     bool hasLastUnallocatedQKvar{false};
-    double lastUnallocatedQKvar{0.0};
+    Decimal lastUnallocatedQKvar;
   };
 
   grpc::Status validateGroupName(const std::string& groupName) const;
@@ -115,7 +127,7 @@ private:
   bool handleUpdateLocked(GroupRuntime* group, const DataCenterProto::PointUpdate& update);
   void controlTick(const std::string& groupName);
 
-  static bool pointValueToDouble(const DataCenterProto::PointValue& value, double* out);
+  static bool pointValueToDecimal(const DataCenterProto::PointValue& value, Decimal* out);
   static std::unordered_set<std::string> collectAllTags(const AVCProto::GroupConfig& config);
   static void rebuildTagCache(GroupRuntime* group);
 

@@ -39,6 +39,7 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
 - `conn_id`：DataCenter 分配的连接 ID（稳定且可持久化），上位机后续用它在 DataCenter 配路由/订阅
 - `role`：传输角色（Server/Client），只影响 TCP 监听/连接行为
 - `station_role`：站点角色（Master/Slave），决定业务语义；未设置时默认 `ROLE_CLIENT -> MASTER`、`ROLE_SERVER -> SLAVE`；可与 `role` 任意组合
+- `remote.ip`：`ROLE_SERVER` 下作为唯一允许接入的主站 client IP；留空或填写 `0.0.0.0`/`::` 表示允许任意来源，`remote.port` 不参与校验
 
 ### DataCenter 交互与路由配置
 - DataCenter 路由配置优先以 `module_name + conn_name + tag` 作为稳定端点；`conn_id + tag` 仍用于 IEC104 运行期 Publish/Subscribe 和旧路由请求兼容。上位机负责下发连接/连接标签注册表/路由配置，IEC104 仅负责 Publish/Subscribe 与协议互操作。
@@ -57,7 +58,7 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
 
 ### 点表字段
 - `scale/offset`：工程量换算 `value = raw * scale + offset`（`scale=0` 视为 1），仅对短浮点生效。
-- `deadband`：工程量单位；`|value - last_reported| < deadband` 时不上报，<=0 表示不过滤，仅对短浮点生效。
+- `deadband`：工程量单位；数值、品质和时标均未变化到上报条件，且 `|value - last_reported| < deadband` 时不上报；品质或时标变化会绕过死区，<=0 表示不过滤，仅对短浮点生效。
 - `deadband` 同时作用于 STATION_ROLE_MASTER 发布与 STATION_ROLE_SLAVE 自发上送，总召快照不受 deadband 影响。
 - STATION_ROLE_MASTER 收到短浮点后按 `scale/offset` 转为工程量再发布；STATION_ROLE_SLAVE 上送短浮点时按 `scale/offset` 反向换算；单点遥信忽略这些字段。
 - 遥控/设点复用同一张点表：`POINT_TYPE_SINGLE` 作为遥控布尔业务值，`POINT_TYPE_FLOAT` 作为短浮点设点；遥控通过 `remote_control_type` 区分 `C_SC_NA_1` 单点与 `C_DC_NA_1` 双点，通过 `command_execution_mode` 区分直接执行与选择执行。设点按 `scale/offset` 做工程量换算。
@@ -177,7 +178,7 @@ IEC104 会将本地链路配置与点表配置落盘到工作目录下的 `./con
 - IEC104 当前采用的“可运行最小条件”为：链路对象处于可启动状态、链路不在 `PENDING_DELETE`，并且该链路对应的点表对象已经成功恢复或下发并通过现有点表校验。
 - 模块启动完成后，若恢复出的链路满足上述最小条件，会自动启动模块内的链路连接功能；`PENDING_DELETE` 链路不会自动启动。
 - 若恢复阶段发现点表非法、链路与点表不匹配、DataCenter 连接恢复失败或自动启动失败，IEC104 仅记录中文日志并保持模块服务在线，等待上位机后续重新下发修正配置。
-- `transport`、订阅线程、`last_error`、运行中的会话状态不会持久化；`StartLink` 是显式启动模块内链路连接功能的唯一入口，对于已运行链路按幂等成功处理。
+- `transport`、订阅线程、`last_error`、运行中的会话帧序号不会持久化；SOE 历史与确认进度独立持久化。`StartLink` 是显式启动模块内链路连接功能的唯一入口，对于已运行链路按幂等成功处理。
 
 ## 日志
 - 日志前缀包含模块名 `[IEC104]`，便于与其他模块混合排查。
@@ -191,15 +192,27 @@ IEC104 会将本地链路配置与点表配置落盘到工作目录下的 `./con
 - `iec104PointTable_test`：覆盖点表更新、双向查询、冲突校验与序列化输出稳定性。
 - `iec104LinkManager_test`：覆盖 LinkManager 与 DataCenter 的交互语义（使用 gMock stub），以及配置校验、点表下发合并、删除语义等边界。
 - `iec104Persistence_test`：覆盖 IEC104 链路配置/点表的本地落盘与重启恢复语义。
-- `iec104TcpSession_test`：覆盖链路层 STARTDT 握手、自动总召与 t2 延迟确认行为。
+- `iec104SoeStore_test`：覆盖每连接 8000 条 SOE 容量、覆盖、确认状态、重启恢复、改名与删除语义。
+- `iec104TcpSession_test`：覆盖链路层 STARTDT 握手、自动总召、t2 延迟确认，以及 SOE 回放与 I/S 帧累计确认行为。
 
 运行方式：
 ```bash
 ctest --test-dir build -R iec104PointTable_test --output-on-failure
 ctest --test-dir build -R iec104LinkManager_test --output-on-failure
 ctest --test-dir build -R iec104Persistence_test --output-on-failure
+ctest --test-dir build -R iec104SoeStore_test --output-on-failure
 ctest --test-dir build -R iec104TcpSession_test --output-on-failure
 ```
+
+## SOE 本地缓存与补传
+
+- “每个通道”按每条 IEC104 连接（`conn_name`）计算，每条连接独立保留最近 8000 条单点遥信事件。
+- 遥信事件先写入 SQLite，再通过带 CP56Time2a 时标的 `M_SP_TB_1` 自发上送；SOE 不进入普通点值合包和 IOA 去重队列。
+- I 帧和 S 帧携带的 `N(R)` 作为累计确认依据。已确认事件保留在历史中但不再补传，未确认事件在新会话激活后按本地事件序号升序补传。
+- 缓存满后覆盖本连接最旧记录；覆盖未确认事件时输出告警。事件内容、连接内序号和确认状态在设备重启后保留。
+- IEC104 无法在连接中断时判断最后的未确认 I 帧是否已被主站业务处理，因此未确认事件可能重复到达，交付语义为至少一次。
+
+详细设计与边界见 [SOE缓存与断线补传设计](./SOE缓存与断线补传设计.md)。
 
 ## 未实现/后续计划
 - 协议类型：目前支持单点遥信 `M_SP_NA_1/M_SP_TB_1`、短浮点遥测 `M_ME_NC_1/M_ME_TF_1`、总召 `C_IC_NA_1`、单点/双点遥控 `C_SC_NA_1/C_DC_NA_1` 与短浮点设点 `C_SE_NC_1`；双点遥信、归一化设点等未实现
@@ -207,11 +220,10 @@ ctest --test-dir build -R iec104TcpSession_test --output-on-failure
 - 报文打包：当前仅覆盖短浮点与单点遥信类型，其他类型未实现
 - 多主站/多会话：Server 模式当前同一 `conn_name` 只保留一个活动连接；多主站并发、会话级隔离策略未实现
 - 点表扩展：当前仅支持短浮点与单点遥信；后续可扩展更多类型与双向映射校验
-- 配置持久化增强：当前已持久化连接配置、点表配置与 `PENDING_DELETE` 控制面状态；运行态统计与会话状态未持久化
+- 配置持久化增强：当前已持久化连接配置、点表配置、`PENDING_DELETE` 控制面状态以及 SOE 历史/确认进度；运行态统计与会话帧状态未持久化
 - 观测性：已补充逐帧日志，但仍缺少链路状态统计（收发计数、最近一次总召、重连次数等）与可配置采样/汇总
-- 安全：gRPC 与 IEC104 TCP 目前均为明文/无鉴权；TLS、鉴权、白名单等未实现
+- 安全：gRPC 与 IEC104 TCP 目前均为明文/无鉴权；IEC104 服务端可通过 `remote.ip` 限制允许接入的主站 client IP，留空表示不启用来源 IP 限制；TLS、鉴权等未实现
 - 测试：当前以单元测试覆盖点表与 LinkManager 语义；缺少端到端“主站↔从站”协议互操作测试
-- SOE/COS：遥信变位/事件相关语义与时序处理尚未实现；后续需独立队列与不去重策略
 
 ## grpc接口
 ### 删除语义（最佳实践）
@@ -224,7 +236,8 @@ ctest --test-dir build -R iec104TcpSession_test --output-on-failure
 主动对时时，调用 `SendTimeSync(conn_name, ts_ms)`：
 - 仅 STATION_ROLE_MASTER 允许主动对时；非主站会返回 `FAILED_PRECONDITION`
 - `ts_ms<=0` 时使用当前本地时间
-- IEC104 会发送 `C_CS_NA_1` 并记录日志；不会修改系统时间
+- IEC104 会发送 `C_CS_NA_1` 并记录日志；主站发送对时时不会修改本机系统时间
+- 从站可通过 `set_system_time_on_sync=true` 在收到有效对时后直接设置系统时间；设置失败返回负确认。
 
 ### 请求示例
 IEC104 `UpsertLink`（ROLE_CLIENT + STATION_ROLE_MASTER）：

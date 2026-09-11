@@ -1,10 +1,6 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include <boost/asio/io_context.hpp>
-#include <boost/asio/ip/address_v4.hpp>
-#include <boost/asio/ip/tcp.hpp>
-
 #include <cstdint>
 #include <filesystem>
 #include <mutex>
@@ -12,6 +8,10 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/ip/address_v4.hpp>
+#include <boost/asio/ip/tcp.hpp>
 
 #include "DataCenter_mock.grpc.pb.h"
 #include "IEC104LinkManager.h"
@@ -787,6 +787,76 @@ TEST(IEC104LinkManagerTest, HandleClientPointValueDeadbandAndQuality) {
   EXPECT_EQ(resp.updates(0).quality(), DataCenterProto::QUALITY_GOOD);
 }
 
+// 验证：十进制变化量精确等于死区时必须上报，不能被二进制浮点残差误过滤。
+TEST(IEC104LinkManagerTest, HandleClientPointValueReportsAtExactDecimalDeadbandBoundary) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeServerLinkReq("conn-decimal-deadband", "0.0.0.0", AllocateFreeTcpPort());
+  IEC104Proto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+
+  IEC104Proto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-decimal-deadband");
+  auto *point = ptReq.add_points();
+  *point = MakePoint("decimal-boundary", 20);
+  point->set_deadband(1.0);
+  point->set_deadband_decimal("0.2");
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+
+  PointValue value;
+  value.ioa = 20;
+  value.type = IEC104Proto::POINT_TYPE_FLOAT;
+  value.doubleValue = 0.1;
+  value.quality = 0;
+  ASSERT_TRUE(IEC104LinkManagerTestPeer::HandleClientPointValue(
+                  mgr, "conn-decimal-deadband", value)
+                  .ok());
+  ASSERT_EQ(state.GetPublishCount(info.conn_id(), "decimal-boundary"), 1u);
+
+  value.doubleValue = 0.3;
+  ASSERT_TRUE(IEC104LinkManagerTestPeer::HandleClientPointValue(
+                  mgr, "conn-decimal-deadband", value)
+                  .ok());
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "decimal-boundary"), 2u);
+  const auto published =
+      state.GetPublishedUpdates(info.conn_id(), "decimal-boundary");
+  ASSERT_EQ(published.size(), 2u);
+  EXPECT_EQ(published[0].value().kind_case(),
+            DataCenterProto::PointValue::kDecimalValue);
+  EXPECT_EQ(published[0].value().decimal_value(),
+            "0.10000000000000000000");
+  EXPECT_EQ(published[1].value().decimal_value(),
+            "0.30000000000000000000");
+}
+
+// 验证：IEC104 点表中的非法十进制倍率配置会被拒绝，不能回退旧 double。
+TEST(IEC104LinkManagerTest, UpsertPointTableRejectsInvalidDecimalScale) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeServerLinkReq("conn-invalid-decimal", "0.0.0.0", AllocateFreeTcpPort());
+  IEC104Proto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+
+  IEC104Proto::UpsertPointTableRequest pointTable;
+  pointTable.set_conn_name("conn-invalid-decimal");
+  auto *point = pointTable.add_points();
+  *point = MakePoint("invalid-scale", 21);
+  point->set_scale(1.0);
+  point->set_scale_decimal("1.2.3");
+
+  const auto status = mgr.UpsertPointTable(pointTable);
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  EXPECT_NE(status.error_message().find("十进制"), std::string::npos);
+}
+
 // 验证：handleClientPointValue 支持 BOOL 点上送与错误质量。
 TEST(IEC104LinkManagerTest, HandleClientPointValuePublishesBool) {
   FakeDataCenterState state;
@@ -832,6 +902,12 @@ TEST(IEC104LinkManagerTest, HandleCommandValueExecutesWhenSlave) {
                                      const DataCenterProto::ExecuteCommandRequest& request,
                                      DataCenterProto::ExecuteCommandResponse* response) {
         EXPECT_EQ(request.timeout_ms(), 8000u);
+        if (request.src().tag() == "F") {
+          EXPECT_EQ(request.value().kind_case(),
+                    DataCenterProto::PointValue::kDecimalValue);
+          EXPECT_EQ(request.value().decimal_value(),
+                    "3.50000000000000000000");
+        }
         return state.ExecuteCommand(request, response);
       }));
 

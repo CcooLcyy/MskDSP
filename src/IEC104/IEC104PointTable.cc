@@ -1,10 +1,56 @@
 #include "IEC104PointTable.h"
 
 #include <algorithm>
+#include <format>
 
 #include "Logger.h"
 
 namespace IEC104 {
+namespace {
+
+std::expected<mskdsp::numeric::Decimal20, mskdsp::numeric::DecimalError>
+pointDecimal(std::string_view decimalText, double legacyValue) {
+  return mskdsp::numeric::ParseConfiguredDecimal(decimalText, legacyValue);
+}
+
+grpc::Status validateDecimalField(std::string_view fieldName,
+                                  std::string_view decimalText,
+                                  double legacyValue) {
+  auto value = pointDecimal(decimalText, legacyValue);
+  if (value) {
+    return grpc::Status::OK;
+  }
+  return grpc::Status(
+      grpc::StatusCode::INVALID_ARGUMENT,
+      std::format("{} 的十进制配置非法: {}", fieldName,
+                  mskdsp::numeric::DecimalErrorMessage(value.error())));
+}
+
+void applyEngineeringConfig(const IEC104Proto::Point& source,
+                            PointTable::Point* target) {
+  if (target == nullptr) {
+    return;
+  }
+  if (source.type() != IEC104Proto::POINT_TYPE_FLOAT) {
+    target->scale = mskdsp::numeric::Decimal20::FromInt64(1).value();
+    target->offset = mskdsp::numeric::Decimal20{};
+    target->deadband = mskdsp::numeric::Decimal20{};
+    return;
+  }
+  target->scale = pointDecimal(source.scale_decimal(), source.scale()).value();
+  if (target->scale.IsZero()) {
+    target->scale = mskdsp::numeric::Decimal20::FromInt64(1).value();
+  }
+  target->offset = pointDecimal(source.offset_decimal(), source.offset()).value();
+  target->deadband = pointDecimal(source.deadband_decimal(), source.deadband()).value();
+  if (!source.scale_decimal().empty() || !source.offset_decimal().empty() ||
+      !source.deadband_decimal().empty()) {
+    LOG_INFO("IEC104 点表优先使用精确十进制工程量配置: tag={}, ioa={}",
+             source.tag(), source.ioa());
+  }
+}
+
+}  // namespace
 
 IEC104Proto::PointBusinessType PointTable::InferBusinessType(
     uint32_t ioa, IEC104Proto::PointType type) {
@@ -67,8 +113,17 @@ grpc::Status PointTable::validatePoint(const IEC104Proto::Point& point) const {
   if (point.type() != IEC104Proto::POINT_TYPE_FLOAT && point.type() != IEC104Proto::POINT_TYPE_SINGLE) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "point_type 不支持");
   }
-  if (point.deadband() < 0) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "死区不能为负");
+  auto status = validateDecimalField("scale_decimal", point.scale_decimal(), point.scale());
+  if (!status.ok()) {
+    return status;
+  }
+  status = validateDecimalField("offset_decimal", point.offset_decimal(), point.offset());
+  if (!status.ok()) {
+    return status;
+  }
+  status = validateDecimalField("deadband_decimal", point.deadband_decimal(), point.deadband());
+  if (!status.ok()) {
+    return status;
   }
   switch (point.business_type()) {
   case IEC104Proto::POINT_BUSINESS_TYPE_UNSPECIFIED:
@@ -136,18 +191,7 @@ grpc::Status PointTable::insertOrUpdatePoint(const IEC104Proto::Point& point) {
       LOG_DEBUG("IEC104 按 IOA 推导点表业务类型: tag={}, ioa=0x{:06X}, business_type={}",
                 p.tag, p.ioa, static_cast<int>(p.businessType));
     }
-    if (p.type == IEC104Proto::POINT_TYPE_FLOAT) {
-      p.scale = point.scale();
-      if (p.scale == 0.0) {
-        p.scale = 1.0;
-      }
-      p.offset = point.offset();
-      p.deadband = point.deadband();
-    } else {
-      p.scale = 1.0;
-      p.offset = 0.0;
-      p.deadband = 0.0;
-    }
+    applyEngineeringConfig(point, &p);
     applyRemoteControlOptions(point, &p);
     byTag_.emplace(p.tag, p);
     tagByIoa_.emplace(p.ioa, p.tag);
@@ -173,18 +217,7 @@ grpc::Status PointTable::insertOrUpdatePoint(const IEC104Proto::Point& point) {
     LOG_DEBUG("IEC104 按 IOA 推导点表业务类型: tag={}, ioa=0x{:06X}, business_type={}",
               p.tag, p.ioa, static_cast<int>(p.businessType));
   }
-  if (p.type == IEC104Proto::POINT_TYPE_FLOAT) {
-    p.scale = point.scale();
-    if (p.scale == 0.0) {
-      p.scale = 1.0;
-    }
-    p.offset = point.offset();
-    p.deadband = point.deadband();
-  } else {
-    p.scale = 1.0;
-    p.offset = 0.0;
-    p.deadband = 0.0;
-  }
+  applyEngineeringConfig(point, &p);
   applyRemoteControlOptions(point, &p);
   byTag_[p.tag] = p;
   tagByIoa_[p.ioa] = p.tag;
@@ -231,9 +264,12 @@ void PointTable::ToProto(const std::string& connName, IEC104Proto::PointTable* o
     dst->set_ioa(p.ioa);
     dst->set_type(p.type);
     dst->set_business_type(p.businessType);
-    dst->set_scale(p.scale);
-    dst->set_offset(p.offset);
-    dst->set_deadband(p.deadband);
+    dst->set_scale(*p.scale.ToDouble());
+    dst->set_offset(*p.offset.ToDouble());
+    dst->set_deadband(*p.deadband.ToDouble());
+    dst->set_scale_decimal(p.scale.ToFixedString());
+    dst->set_offset_decimal(p.offset.ToFixedString());
+    dst->set_deadband_decimal(p.deadband.ToFixedString());
     dst->set_remote_control_type(p.remoteControlType);
     dst->set_command_execution_mode(p.commandExecutionMode);
   }

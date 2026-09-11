@@ -66,6 +66,52 @@ TEST(IEC61850ConfigValidationTest, AcceptsValidAggregateConfig) {
   EXPECT_TRUE(issues.empty());
 }
 
+// 验证点映射接受固定20位十进制工程量配置，并由文本字段覆盖旧double字段。
+TEST(IEC61850ConfigValidationTest, AcceptsDecimal20PointEngineeringFields) {
+  auto config = MakeValidConfig();
+  auto* point = config.mutable_point_mappings(0)->mutable_points(0);
+  point->set_scale(99.0);
+  point->set_offset(99.0);
+  point->set_deadband(99.0);
+  point->set_scale_decimal("0.12345678901234567890");
+  point->set_offset_decimal("-0.00000000000000000001");
+  point->set_deadband_decimal("0.00000000000000000001");
+  std::vector<IEC61850Proto::ValidationIssue> issues;
+
+  const auto status = IEC61850::ValidatePersistedConfig(config, &issues);
+
+  EXPECT_TRUE(status.ok()) << status.error_message();
+  EXPECT_TRUE(issues.empty());
+}
+
+// 验证十进制文本非空时必须严格解析，非法文本不能静默回退到合法double字段。
+TEST(IEC61850ConfigValidationTest, RejectsInvalidDecimalPointEngineeringField) {
+  auto config = MakeValidConfig();
+  config.mutable_point_mappings(0)->mutable_points(0)->set_scale_decimal(
+      "1.0非法尾随");
+  std::vector<IEC61850Proto::ValidationIssue> issues;
+
+  const auto status = IEC61850::ValidatePersistedConfig(config, &issues);
+
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  ASSERT_FALSE(issues.empty());
+  EXPECT_EQ(issues.back().code(), "CONFIG_POINT_ENGINEERING_INVALID");
+}
+
+// 验证十进制deadband小于零时仍允许配置，运行态按不过滤处理。
+TEST(IEC61850ConfigValidationTest, AcceptsNegativeDecimalPointDeadband) {
+  auto config = MakeValidConfig();
+  auto* point = config.mutable_point_mappings(0)->mutable_points(0);
+  point->set_deadband(0.0);
+  point->set_deadband_decimal("-0.00000000000000000001");
+  std::vector<IEC61850Proto::ValidationIssue> issues;
+
+  const auto status = IEC61850::ValidatePersistedConfig(config, &issues);
+
+  EXPECT_TRUE(status.ok()) << status.error_message();
+  EXPECT_TRUE(issues.empty());
+}
+
 // 验证：MMS队列、批量和合批窗口等于配置上限时仍允许保存。
 TEST(IEC61850ConfigValidationTest, AcceptsMmsPublishLimitsAtMaximum) {
   auto config = MakeValidConfig();

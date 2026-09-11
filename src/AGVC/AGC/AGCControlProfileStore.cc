@@ -7,16 +7,13 @@
 #include <utility>
 
 #include "Logger.h"
+#include "AGCNumeric.hpp"
 #include "mskdsp/detail/ProtoSqliteStore.hpp"
 
 namespace AGC {
 namespace {
 grpc::Status makeInvalid(std::string message) {
   return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::move(message));
-}
-
-bool finiteNonNegative(double value) {
-  return std::isfinite(value) && value >= 0.0;
 }
 
 void logConfigStoreTrace(const std::string& message) {
@@ -42,17 +39,26 @@ grpc::Status ValidateControlProfilesConfig(const AGCProto::ControlProfilesConfig
       if (!memberNames.emplace(member.member_name()).second) {
         return makeInvalid(std::format("控制参数成员重复: group_name={}, member_name={}", profile.group_name(), member.member_name()));
       }
-      if (!std::isfinite(member.up_p_gain()) || member.up_p_gain() < 0.0 ||
-          !std::isfinite(member.up_i_gain()) || member.up_i_gain() < 0.0 ||
-          !std::isfinite(member.down_p_gain()) || member.down_p_gain() < 0.0 ||
-          !std::isfinite(member.down_i_gain()) || member.down_i_gain() < 0.0) {
+      auto upP = numeric::UpPGain(member);
+      auto upI = numeric::UpIGain(member);
+      auto downP = numeric::DownPGain(member);
+      auto downI = numeric::DownIGain(member);
+      if (!upP.has_value() || *upP < numeric::Zero() ||
+          !upI.has_value() || *upI < numeric::Zero() ||
+          !downP.has_value() || *downP < numeric::Zero() ||
+          !downI.has_value() || *downI < numeric::Zero()) {
         return makeInvalid(std::format("控制参数系数必须是非负有限数值: group_name={}, member_name={}",
                                        profile.group_name(), member.member_name()));
       }
-      if (!std::isfinite(member.up_bias_kw()) || !std::isfinite(member.down_bias_kw()) ||
-          !finiteNonNegative(member.integral_limit_kw()) ||
-          !finiteNonNegative(member.max_step_kw()) ||
-          !finiteNonNegative(member.max_ramp_kw_per_s())) {
+      auto upBias = numeric::UpBias(member);
+      auto downBias = numeric::DownBias(member);
+      auto integralLimit = numeric::IntegralLimit(member);
+      auto maximumStep = numeric::MaximumStep(member);
+      auto maximumRamp = numeric::MaximumRamp(member);
+      if (!upBias.has_value() || !downBias.has_value() ||
+          !integralLimit.has_value() || *integralLimit < numeric::Zero() ||
+          !maximumStep.has_value() || *maximumStep < numeric::Zero() ||
+          !maximumRamp.has_value() || *maximumRamp < numeric::Zero()) {
         return makeInvalid(std::format("控制参数范围非法: group_name={}, member_name={}",
                                        profile.group_name(), member.member_name()));
       }

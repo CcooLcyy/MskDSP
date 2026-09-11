@@ -9,6 +9,7 @@ AVC（Automatic Voltage Control）自动电压控制模块：从 DataCenter 订�
   - 目标电压模式：上游下目标电压，AVC 按 `kp/deadband` 计算总无功目标
   - 总无功模式：上游直接下总无功目标，AVC 只做总量约束和成员分配
 - 总无功分配：将一个总无功目标值按策略（当前实现为 weighted）分解为多个成员设定点
+- 可切换控制方式：`PI_EVENT` 保留现有事件触发调节，`DIRECT_CYCLIC` 在 `q_total_cmd` 总无功命令模式下按可配置周期直接分配，两个算法的运行态相互隔离
 - 默认点：AVC 会自动生成并注册一组内建点（理论/当前无功上下限、调节返回值、当前电压、总无功目标/实测/偏差、电压偏差、功能投入、远方操作），无需手工建点即可直接通过 DataCenter 路由
 - 不可控成员支持：不可控成员只参与无功量测汇总与动态上下限计算，不参与分配
 - 同步命令拒绝：当 IEC104 等协议控制命令经 `DataCenter.ExecuteCommand` 进入 AVC 时，若功能未投入、当前不允许远方操作、总无功目标超过当前可调上下限或目标电压模式缺少必要量测，AVC 返回拒绝结果，由协议模块形成负确认
@@ -36,6 +37,9 @@ AVC 不直接对接 IEC104/ModbusRTU；上下游均通过 DataCenter 的有向�
 - `voltage_meas`：AVC 主闭环电压测量点
 - `voltage_cmd`：主站下发的目标电压点（绝对值）
 - `q_total_cmd`：主站下发的总无功目标点（支持绝对值/增量值）
+- `control_mode`：控制方式；未指定时兼容为 `PI_EVENT`
+- `calculation_execution_period_seconds`：周期直分配的计算周期，范围 1～15 秒
+- `command_control_period_seconds`：周期直分配向下游发布成员设定的最小间隔，范围 4～30 秒；不限制主站向 AVC 下发命令的频率
 - `members[]`：成员（例如逆变器）；每个成员至少包含量测点 `q_meas.tag` 与可选设定点 `q_set.tag`
 
 ### 默认点
@@ -69,6 +73,8 @@ AVC 为每个控制组固定生成以下 12 个默认点，并自动注册到该
 - `AVC功能投入、AVC远方操作`：控制组创建、恢复、配置更新和状态变更时发布当前 BOOL 状态；两者均为运行时状态，不写入 `GroupConfig`，创建或恢复时默认值均为 `true`
 
 ### 控制计算
+`PI_EVENT` 保持现有输入事件触发方式，包括目标电压模式的 `kp/deadband` 调节。`DIRECT_CYCLIC` 仅适用于 `q_total_cmd` 总无功命令模式，不使用比例调节，而是按最新命令和量测直接形成总无功目标并分配；输入事件和同步命令只更新最新缓存，计算周期到达后计算，命令控制周期满足后才向下游发布，间隔内多个目标只保留最新值。
+
 - 目标电压模式：
   - 读取 `voltage_cmd` 与 `voltage_meas`
   - 计算 `error_v = v_ref - v_meas`
@@ -79,6 +85,7 @@ AVC 为每个控制组固定生成以下 12 个默认点，并自动注册到该
 - 上述 `desired_total_q` 会统一钳制到当前总无功能力范围，再按 weighted 策略分配给可控成员
 - 输入进入 AVC 内部计算时，绝对量按 `value * scale + offset` 换算，增量量按 `value * scale` 换算；AVC 输出到 DataCenter 时直接发布工程量，不再按 `scale/offset` 反向换算。成员设定配置为 `DELTA` 时发布的是工程量增量值。
 - 若该轮来自 `DataCenter.ExecuteCommand` 同步命令，AVC 会先用未钳制的原始总无功目标与当前可调上下限比较；超限时返回 `COMMAND_REJECTED`，不更新组内命令缓存，也不下发成员设定。
+- 周期模式的同步命令仍先执行现有合法性和可调范围校验；校验通过后返回已接受并等待周期调度，不表示下游设备已经执行。
 
 ### 配置持久化（当前实现）
 AVC 会将控制组配置作为 protobuf payload 写入 `./conf/config.db`，用于进程重启后的自动恢复。
@@ -97,6 +104,7 @@ AVC 会将控制组配置作为 protobuf payload 写入 `./conf/config.db`，用
 - 恢复出的控制组若满足当前最小可运行条件，会在模块启动阶段自动启动组内控制功能
 - `StartGroup` RPC 仍保留用于兼容，但已改为幂等语义：控制组已在运行时直接返回成功
 - `RUNNING/STOPPED` 表示控制线程与 DataCenter 订阅生命周期，不等同于 `AVC功能投入`；功能未投入时仍可保留量测订阅和状态发布，但不会执行新的成员设定下发。`AVC远方操作=false` 时，来自 IEC104 等协议的总无功/目标电压同步命令会被拒绝。
+- 停止控制组功能或切换模式时会清理事件模式和周期模式的临时运行态；两类运行态均不持久化。
 
 ## 线程与日志
 - 模块内部线程统一使用 `ModuleManager::StartModuleThread(模块LibInfo.LIB_NAME, ...)` 创建，自动绑定日志模块名上下文。

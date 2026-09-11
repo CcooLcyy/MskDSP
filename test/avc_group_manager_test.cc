@@ -5,13 +5,16 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
 #include "AVCGroupManager.h"
 #include "DataCenter_mock.grpc.pb.h"
+#include "mskdsp/Decimal20.hpp"
 #include "support/FakeDataCenter.hpp"
 
 namespace {
@@ -102,6 +105,24 @@ void PublishDoublePoint(FakeDataCenterState* state, uint32_t connId, const char*
   ASSERT_TRUE(state->Publish(req).ok());
 }
 
+std::optional<double> PointValueAsDouble(const DataCenterProto::PointValue& value) {
+  if (value.has_double_value()) {
+    return value.double_value();
+  }
+  if (value.has_decimal_value()) {
+    auto decimal = mskdsp::numeric::Decimal20::Parse(value.decimal_value());
+    if (!decimal.has_value()) {
+      return std::nullopt;
+    }
+    auto boundary = decimal->ToDouble();
+    if (!boundary.has_value()) {
+      return std::nullopt;
+    }
+    return *boundary;
+  }
+  return std::nullopt;
+}
+
 DataCenterProto::ExecuteCommandResponse ExecuteBoolCommand(
     GroupManager* manager, const char* groupName, uint32_t connId, const char* tag, bool value) {
   DataCenterProto::ExecuteCommandRequest request;
@@ -122,8 +143,9 @@ bool WaitForLatestDouble(const FakeDataCenterState& state, uint32_t connId, cons
     req.add_tags(tag);
 
     DataCenterProto::GetLatestResponse resp;
-    if (state.GetLatest(req, &resp).ok() && resp.updates_size() == 1 && resp.updates(0).value().has_double_value()) {
-      if (std::fabs(resp.updates(0).value().double_value() - expected) <= 1e-6) {
+    if (state.GetLatest(req, &resp).ok() && resp.updates_size() == 1) {
+      const auto value = PointValueAsDouble(resp.updates(0).value());
+      if (value.has_value() && std::fabs(*value - expected) <= 1e-6) {
         return true;
       }
     }
@@ -140,8 +162,9 @@ bool WaitForLatestDoubleWithQuality(
     req.add_tags(tag);
 
     DataCenterProto::GetLatestResponse resp;
-    if (state.GetLatest(req, &resp).ok() && resp.updates_size() == 1 && resp.updates(0).value().has_double_value()) {
-      if (std::fabs(resp.updates(0).value().double_value() - expected) <= 1e-6 && resp.updates(0).quality() == quality) {
+    if (state.GetLatest(req, &resp).ok() && resp.updates_size() == 1) {
+      const auto value = PointValueAsDouble(resp.updates(0).value());
+      if (value.has_value() && std::fabs(*value - expected) <= 1e-6 && resp.updates(0).quality() == quality) {
         return true;
       }
     }
@@ -158,11 +181,31 @@ bool WaitForLatestDoubleWithQualityAndTs(
     req.add_tags(tag);
 
     DataCenterProto::GetLatestResponse resp;
-    if (state.GetLatest(req, &resp).ok() && resp.updates_size() == 1 && resp.updates(0).value().has_double_value()) {
-      if (std::fabs(resp.updates(0).value().double_value() - expected) <= 1e-6 && resp.updates(0).quality() == quality &&
+    if (state.GetLatest(req, &resp).ok() && resp.updates_size() == 1) {
+      const auto value = PointValueAsDouble(resp.updates(0).value());
+      if (value.has_value() && std::fabs(*value - expected) <= 1e-6 && resp.updates(0).quality() == quality &&
           resp.updates(0).ts_ms() == tsMs) {
         return true;
       }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return false;
+}
+
+bool WaitForLatestDecimal(
+    const FakeDataCenterState& state, uint32_t connId, const char* tag,
+    std::string_view expected) {
+  for (int i = 0; i < 50; ++i) {
+    DataCenterProto::GetLatestRequest req;
+    req.set_conn_id(connId);
+    req.add_tags(tag);
+
+    DataCenterProto::GetLatestResponse resp;
+    if (state.GetLatest(req, &resp).ok() && resp.updates_size() == 1 &&
+        resp.updates(0).value().has_decimal_value() &&
+        resp.updates(0).value().decimal_value() == expected) {
+      return true;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
@@ -222,6 +265,44 @@ TEST(AvcGroupManagerTest, UpsertGroupCreateOnlyReturnsConnIdAndAutoStartsReadyGr
   EXPECT_EQ(info.state(), AVCProto::GROUP_STATE_RUNNING);
   EXPECT_TRUE(state.HasConnection("AVC", "g-1"));
   ASSERT_TRUE(mgr.StopGroup("g-1").ok());
+}
+
+// 验证：Decimal20 总无功命令经过倍率、分配、响应和 DataCenter 发布后仍保持固定 20 位文本。
+TEST(AvcGroupManagerTest, DecimalCommandRemainsExactThroughResponseAndPublishing) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AVC");
+  mgr.setDataCenterStub(stub);
+  auto groupRequest = MakeQTotalGroupReq("g-decimal");
+  auto* config = groupRequest.mutable_config();
+  config->mutable_q_total_cmd()->mutable_signal()->set_scale_decimal("0.1");
+  config->mutable_q_total_cmd()->mutable_signal()->set_offset_decimal("0.2");
+  config->mutable_members(0)->set_weight_decimal("1");
+  config->mutable_members(1)->set_weight_decimal("2");
+
+  AVCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(groupRequest, &info).ok());
+
+  DataCenterProto::ExecuteCommandRequest request;
+  request.mutable_dst()->set_conn_name("g-decimal");
+  request.mutable_dst()->set_conn_id(info.conn_id());
+  request.mutable_dst()->set_tag("Q_CMD");
+  request.mutable_value()->set_decimal_value("1.00000000000000000000");
+  request.set_quality(DataCenterProto::QUALITY_GOOD);
+  DataCenterProto::ExecuteCommandResponse response;
+  ASSERT_TRUE(mgr.ExecuteCommand(request, &response).ok());
+  EXPECT_EQ(response.status(), DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_EQ(response.requested_value_decimal(), "0.30000000000000000000");
+  EXPECT_EQ(response.accepted_value_decimal(), "0.30000000000000000000");
+  EXPECT_EQ(response.lower_limit_decimal(), "0.00000000000000000000");
+  EXPECT_EQ(response.upper_limit_decimal(), "200.00000000000000000000");
+  EXPECT_TRUE(WaitForLatestDecimal(
+      state, info.conn_id(), "INV1_Q_SET", "0.10000000000000000000"));
+  EXPECT_TRUE(WaitForLatestDecimal(
+      state, info.conn_id(), "INV2_Q_SET", "0.20000000000000000000"));
+
+  ASSERT_TRUE(mgr.StopGroup("g-decimal").ok());
 }
 
 // 验证：UpsertGroup 返回 AVC 自动生成的默认点列表，供上位机直接发现并配置路由。

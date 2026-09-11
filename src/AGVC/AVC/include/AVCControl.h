@@ -7,71 +7,76 @@
 #include <vector>
 
 #include "AVC.pb.h"
+#include "AVCNumeric.hpp"
 #include "AgvcStrategy.h"
 #include "DataCenter.pb.h"
 
 namespace AVC {
 
+using Decimal = numeric::Decimal;
+
 struct ControlInput {
   bool hasVoltageMeasRaw{false};
-  double voltageMeasRaw{0.0};
+  Decimal voltageMeasRaw;
 
   bool hasVoltageCmdRaw{false};
-  double voltageCmdRaw{0.0};
+  Decimal voltageCmdRaw;
 
   bool hasQTotalCmdRaw{false};
-  double qTotalCmdRaw{0.0};
+  Decimal qTotalCmdRaw;
 
-  std::unordered_map<std::string, double> baseRawByTag;
+  std::unordered_map<std::string, Decimal> baseRawByTag;
   std::vector<bool> hasMemberQMeasRaw;
-  std::vector<double> memberQMeasRaw;
+  std::vector<Decimal> memberQMeasRaw;
 
   bool hasLastDesiredTotalQKvar{false};
-  double lastDesiredTotalQKvar{0.0};
+  Decimal lastDesiredTotalQKvar;
+  bool hasDesiredTotalOverride{false};
+  Decimal desiredTotalOverrideQKvar;
 
   std::vector<bool> hasLastMemberTargetQKvar;
-  std::vector<double> lastMemberTargetQKvar;
+  std::vector<Decimal> lastMemberTargetQKvar;
 };
 
 struct ControlOutput {
-  double totalQMeasKvar{0.0};
-  double rawDesiredTotalQKvar{0.0};
-  double desiredTotalQKvar{0.0};
-  double actualTargetQKvar{0.0};
-  double totalQErrorKvar{0.0};
+  Decimal totalQMeasKvar;
+  Decimal rawDesiredTotalQKvar;
+  Decimal desiredTotalQKvar;
+  Decimal actualTargetQKvar;
+  Decimal totalQErrorKvar;
 
   bool hasVoltageMeas{false};
-  double voltageMeas{0.0};
+  Decimal voltageMeas;
   bool hasVoltageError{false};
-  double voltageError{0.0};
+  Decimal voltageError;
 
-  double passiveQKvar{0.0};
-  double targetControllableQKvar{0.0};
-  double unallocatedQKvar{0.0};
+  Decimal passiveQKvar;
+  Decimal targetControllableQKvar;
+  Decimal unallocatedQKvar;
 
-  std::vector<double> memberTargetQKvar;
+  std::vector<Decimal> memberTargetQKvar;
   std::vector<bool> memberPublish;
-  std::vector<double> memberPublishKvar;
+  std::vector<Decimal> memberPublishKvar;
 
   bool hasLastDesiredTotalQKvar{false};
-  double nextLastDesiredTotalQKvar{0.0};
+  Decimal nextLastDesiredTotalQKvar;
 
   std::vector<bool> hasLastMemberTargetQKvar;
-  std::vector<double> nextLastMemberTargetQKvar;
+  std::vector<Decimal> nextLastMemberTargetQKvar;
 };
 
 struct DefaultPointOutput {
-  double theoreticalLowerQKvar{0.0};
-  double theoreticalUpperQKvar{0.0};
-  double dynamicLowerQKvar{0.0};
-  double dynamicUpperQKvar{0.0};
+  Decimal theoreticalLowerQKvar;
+  Decimal theoreticalUpperQKvar;
+  Decimal dynamicLowerQKvar;
+  Decimal dynamicUpperQKvar;
   DataCenterProto::Quality dynamicQuality{DataCenterProto::QUALITY_GOOD};
   size_t uncontrollableMemberCount{0};
   size_t missingUncontrollableMemberCount{0};
 };
 
-std::optional<double> ComputeVoltageMeas(const AVCProto::GroupConfig& config, const ControlInput& input);
-double ComputeTotalQMeasKvar(const AVCProto::GroupConfig& config, const ControlInput& input);
+std::optional<Decimal> ComputeVoltageMeas(const AVCProto::GroupConfig& config, const ControlInput& input);
+std::optional<Decimal> ComputeTotalQMeasKvar(const AVCProto::GroupConfig& config, const ControlInput& input);
 DefaultPointOutput ComputeDefaultPointOutput(const AVCProto::GroupConfig& config, const ControlInput& input);
 std::optional<ControlOutput> ComputeControlOutput(
     const AVCProto::GroupConfig& config,

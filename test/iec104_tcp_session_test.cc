@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/read.hpp>
 #include <boost/asio/write.hpp>
 #include <chrono>
@@ -119,6 +120,16 @@ std::vector<uint8_t> BuildUFrame(uint8_t type) {
   apdu[3] = 0x00;
   apdu[4] = 0x00;
   apdu[5] = 0x00;
+  return apdu;
+}
+
+std::vector<uint8_t> BuildSFrame(uint16_t recv_seq) {
+  std::vector<uint8_t> apdu(6);
+  apdu[0] = kApduStart;
+  apdu[1] = 0x04;
+  apdu[2] = 0x01;
+  apdu[3] = 0x00;
+  WriteSeq(&apdu, 4, recv_seq);
   return apdu;
 }
 
@@ -1036,6 +1047,116 @@ TEST(IEC104TcpSessionTest, PointWithTimeUsesTimestampTypes) {
   ASSERT_EQ(FrameTypeOf(sp_apdu), FrameType::I);
   ASSERT_GT(sp_apdu.size(), 6u);
   EXPECT_EQ(sp_apdu[6], kTypeIdSinglePointWithTime);
+
+  session->Stop();
+  io->stop();
+}
+
+// 验证：SOE 恢复不按 IOA 去重、始终使用带时标单点报文，并由 I/S 帧中的 N(R) 累计确认。
+TEST(IEC104TcpSessionTest, ReplaysSoeInOrderAndAcknowledgesByReceiveSequence) {
+  auto io = std::make_shared<boost::asio::io_context>();
+  auto sockets = MakeConnectedSockets(*io);
+
+  auto config = MakeConfig("soe-replay-ack", IEC104Proto::ROLE_SERVER, 2, 2, 1, 5, 8);
+  config.set_point_dedupe(true);
+  config.set_point_with_time(false);
+  auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
+
+  std::atomic<int> replayCount{0};
+  session->SetSoeReplayProvider([&]() {
+    replayCount.fetch_add(1);
+    IEC104::SoeEvent first;
+    first.eventSequence = 101;
+    first.value.ioa = 9;
+    first.value.type = IEC104Proto::POINT_TYPE_SINGLE;
+    first.value.boolValue = true;
+    first.value.quality = 0;
+    first.value.tsMs = 1710000000001;
+
+    IEC104::SoeEvent second;
+    second.eventSequence = 102;
+    second.value.ioa = 9;
+    second.value.type = IEC104Proto::POINT_TYPE_SINGLE;
+    second.value.boolValue = false;
+    second.value.quality = 0x80;
+    second.value.tsMs = 1710000000002;
+    return std::vector<IEC104::SoeEvent>{first, second};
+  });
+
+  std::promise<std::vector<uint64_t>> firstAckPromise;
+  std::promise<std::vector<uint64_t>> secondAckPromise;
+  std::atomic<int> ackCallbackCount{0};
+  session->SetSoeAcknowledgedCallback([&](const std::vector<uint64_t> &sequences) {
+    const int index = ackCallbackCount.fetch_add(1);
+    if (index == 0) {
+      firstAckPromise.set_value(sequences);
+    } else if (index == 1) {
+      secondAckPromise.set_value(sequences);
+    }
+  });
+  auto firstAckFuture = firstAckPromise.get_future();
+  auto secondAckFuture = secondAckPromise.get_future();
+
+  session->Start(std::move(sockets.session_socket));
+  std::jthread sessionThread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [&]() { io->run(); });
+
+  IEC104::SoeEvent beforeStartDt;
+  beforeStartDt.eventSequence = 102;
+  beforeStartDt.value.ioa = 9;
+  beforeStartDt.value.type = IEC104Proto::POINT_TYPE_SINGLE;
+  beforeStartDt.value.boolValue = false;
+  beforeStartDt.value.tsMs = 1710000000002;
+  session->SendSoe(beforeStartDt);
+  std::promise<void> beforeStartDtHandled;
+  auto beforeStartDtFuture = beforeStartDtHandled.get_future();
+  boost::asio::post(*io, [&]() { beforeStartDtHandled.set_value(); });
+  ASSERT_EQ(beforeStartDtFuture.wait_for(std::chrono::milliseconds(1000)), std::future_status::ready);
+
+  auto startAct = BuildUFrame(kUStartDtAct);
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(startAct));
+  auto startCon = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "SOE 启动确认");
+  ASSERT_FALSE(startCon.empty());
+  EXPECT_EQ(FrameTypeOf(startCon), FrameType::U);
+  EXPECT_EQ(startCon[2], kUStartDtCon);
+
+  auto first = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "第一条 SOE");
+  auto second = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "第二条 SOE");
+  ASSERT_FALSE(first.empty());
+  ASSERT_FALSE(second.empty());
+  ASSERT_GT(first.size(), 15u);
+  ASSERT_GT(second.size(), 15u);
+  EXPECT_EQ(FrameTypeOf(first), FrameType::I);
+  EXPECT_EQ(FrameTypeOf(second), FrameType::I);
+  EXPECT_EQ(ParseSeq(first, 2), 0u);
+  EXPECT_EQ(ParseSeq(second, 2), 1u);
+  EXPECT_EQ(first[6], kTypeIdSinglePointWithTime);
+  EXPECT_EQ(second[6], kTypeIdSinglePointWithTime);
+  EXPECT_EQ(first[15] & 0x01, 0x01);
+  EXPECT_EQ(second[15] & 0x01, 0x00);
+  EXPECT_EQ(second[15] & 0xF0, 0x80);
+
+  auto firstAck = BuildSFrame(1);
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(firstAck));
+  ASSERT_EQ(firstAckFuture.wait_for(std::chrono::milliseconds(1000)), std::future_status::ready);
+  EXPECT_EQ(firstAckFuture.get(), std::vector<uint64_t>({101}));
+
+  const std::vector<uint8_t> dummyAsdu = {0xFF, 0x01, 0x00, 0x00, 0x00, 0x00};
+  auto secondAck = BuildIFrame(0, 2, dummyAsdu);
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(secondAck));
+  ASSERT_EQ(secondAckFuture.wait_for(std::chrono::milliseconds(1000)), std::future_status::ready);
+  EXPECT_EQ(secondAckFuture.get(), std::vector<uint64_t>({102}));
+
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(startAct));
+  auto repeatedStartCon = ReadApduWithTimeout(
+      sockets.peer_socket, std::chrono::milliseconds(2000), "重复 SOE 启动确认");
+  ASSERT_FALSE(repeatedStartCon.empty());
+  EXPECT_EQ(FrameTypeOf(repeatedStartCon), FrameType::U);
+  EXPECT_EQ(repeatedStartCon[2], kUStartDtCon);
+  EXPECT_FALSE(WaitReadable(sockets.peer_socket, std::chrono::milliseconds(200)));
+  EXPECT_EQ(replayCount.load(), 1);
+  EXPECT_EQ(ackCallbackCount.load(), 2);
 
   session->Stop();
   io->stop();

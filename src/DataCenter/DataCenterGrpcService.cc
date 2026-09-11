@@ -74,6 +74,8 @@ std::string formatPointValue(const DataCenterProto::PointValue& value) {
       return "类型=整数, 值=" + std::to_string(value.int_value());
     case DataCenterProto::PointValue::kDoubleValue:
       return "类型=双精度, 值=" + std::to_string(value.double_value());
+    case DataCenterProto::PointValue::kDecimalValue:
+      return "类型=精确十进制, 值=" + value.decimal_value();
     case DataCenterProto::PointValue::kStringValue:
       return "类型=字符串, 长度=" +
              std::to_string(value.string_value().size()) +

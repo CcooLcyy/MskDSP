@@ -1,25 +1,26 @@
 # ConfigPusher 模块
 
 ## 简介
-ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/IEC61850/ModbusRTU/DLT645/AGC/AVC/Calc/ControlOrchestrator，并按配置调用对应 gRPC 接口完成 IEC104/ModbusRTU/DLT645 连接与点表下发、IEC61850模型和IED完整目标态下发、AGC/AVC 控制组下发、Calc 计算分组下发、ControlOrchestrator 命令编排下发，以及 DataCenter 连接标签注册表/路由下发。链路、IED通信功能、控制组或计算分组的模块内功能是否进入运行态，由各模块依据目标配置判定。
+ConfigPusher 读取 JSONC 配置文件，自动启动 DataCenter/IEC104/IEC61850/ModbusRTU/ModbusTCP/DLT645/AGC/AVC/Calc/ControlOrchestrator，并按配置调用对应 gRPC 接口完成 IEC104/ModbusRTU/ModbusTCP/DLT645 连接与点表下发、IEC61850模型和IED完整目标态下发、AGC/AVC 控制组下发、Calc 计算分组下发、ControlOrchestrator 命令编排下发，以及 DataCenter 连接标签注册表/路由下发。链路、IED通信功能、控制组或计算分组的模块内功能是否进入运行态，由各模块依据目标配置判定。
 
 在 `CONFIG_PUSHER` 模式下，ConfigPusher 将 `jsonc` 视为当前进程的目标态与最终真相源，而不是增量补丁：若 SQLite 持久化配置或当前内存态中存在 `jsonc` 未声明的链路、控制组、计算分组、点表、连接标签注册表或路由，ConfigPusher 会在本次编排时将其收敛删除或覆盖，避免旧持久化内容继续生效。
 
 ConfigPusher 更适合作为初始化配置导入与批量编排执行器，不作为上位机日常在线操作的统一入口。
 
 ## 能力清单
-- 自动通过 ModuleManager 启动 DataCenter 与 IEC104/IEC61850/ModbusRTU/DLT645/AGC/AVC/Calc
+- 自动通过 ModuleManager 启动 DataCenter 与 IEC104/IEC61850/ModbusRTU/ModbusTCP/DLT645/AGC/AVC/Calc
 - 解析 JSONC（支持 `//` 与 `/* */` 注释）
 - 下发 IEC104 配置：UpsertLink / UpsertPointTable
 - 下发 IEC61850 配置：读取SCL文件并单次调用 ApplyTargetConfig
 - 下发 ModbusRTU 配置：UpdateConfig / UpsertLink / UpsertPointTable
+- 下发 ModbusTCP 配置：UpsertLink / UpsertPointTable，并收敛删除旧链路
 - 下发 DLT645 配置：UpdateConfig / UpsertLink / UpsertPointTable
 - 下发 AGC 配置：UpsertGroup
 - 下发 AVC 配置：UpsertGroup
 - 下发 Calc 配置：UpsertGroup
 - 下发 ControlOrchestrator 配置：UpsertSequence / DeleteSequence 收敛线性命令编排
 - 下发 DataCenter 配置：UpsertConnTags / UpsertRoutes（仅对已存在连接生效）
-- 下发流程记录请求/响应报文日志（ModuleManager/IEC104/ModbusRTU/DLT645/AGC/AVC/Calc/DataCenter）
+- 下发流程记录请求/响应报文日志（ModuleManager/IEC104/ModbusRTU/ModbusTCP/DLT645/AGC/AVC/Calc/DataCenter）
 - 失败记录日志（当前不做重试）
 - 在 `CONFIG_PUSHER` 模式下按 `jsonc` 目标态收敛：删除 `jsonc` 未声明的旧链路/控制组/计算分组，并覆盖点表/连接标签注册表/路由
 - 对 `start` 字段仅保留兼容日志，不再额外调用 `StartLink/StartGroup`
@@ -67,6 +68,7 @@ README 这里只保留模块说明、启动方式、配置入口与基础语义�
   - `./conf/configPusher/iec104.jsonc`
   - `./conf/configPusher/iec61850.jsonc`
   - `./conf/configPusher/modbus_rtu.jsonc`
+  - `./conf/configPusher/modbus_tcp.jsonc`
 - 使用 Protobuf JSON 映射：枚举需写全名（例如 `ROLE_SERVER`、`POINT_TYPE_FLOAT`、`FUNCTION_READ_COILS`）
 - `modbus_rtu.jsonc` 的 `function` 支持十六进制字符串（`0x01`/`0x03`/`0x04`/`0x05`/`0x06`/`0x10`），解析时会自动转换为枚举值
 - `point_table.conn_name` 可省略（默认使用 `link.config.conn_name`）
@@ -80,6 +82,7 @@ README 这里只保留模块说明、启动方式、配置入口与基础语义�
 - 若需要为同一协议转换器批量生成多条连接，可通过 `{device_no}` 与 `device_nos` 做统一展开。
 - IEC104 可选下发点值上送参数（`point_batch_window_ms/point_max_asdu_bytes/point_use_standard_limit/point_dedupe/point_with_time`；默认不带时标）
 - IEC104 可选下发对时触发 tag（`time_sync_tag`；为空时默认 `__time_sync__`）
+- IEC104 `ROLE_SERVER` 使用 `remote.ip` 作为唯一允许接入的主站 client IP；留空或填写 `0.0.0.0`/`::` 表示允许任意来源，`remote.port` 不参与校验
 - IEC104 从站可选直接设置系统时间（`set_system_time_on_sync=true`；默认关闭，要求运行容器具备 `CAP_SYS_TIME`）
 - IEC104 点表类型支持 `POINT_TYPE_FLOAT` 与 `POINT_TYPE_SINGLE`；点表可选 `business_type` 区分遥信、遥测、遥调、遥控和参数。遥控点还可通过 `remote_control_type` 选择单点/双点，通过 `command_execution_mode` 选择直接执行/选择执行；旧配置默认单点+选择执行。未填写 `business_type` 时由 IEC104 按 IOA/协议类型兼容推导；模拟数据仅覆盖遥信和遥测。
 - IEC61850配置使用 `iec61850.models[]` 声明SCL来源，使用 `iec61850.ieds[]` 声明逻辑IED、A/B通道、点映射和目标运行状态；相对SCL路径基于 `iec61850.jsonc` 所在目录解析
@@ -87,15 +90,19 @@ README 这里只保留模块说明、启动方式、配置入口与基础语义�
 - ConfigPusher只读取SCL文件，不解析IEC61850模型；SCL解析、引用展开和业务校验由IEC61850模块完成
 - IEC61850单个SCL文件上限为32 MiB、SCL正文合计上限为64 MiB，完整 `ApplyTargetConfig` 序列化请求不得超过72 MiB；超过任一上限时不发出RPC
 - DataCenter对IEC61850是可降级异步输出：ConfigPusher会先尝试启动DataCenter，并在使用其地址前等待内部gRPC通道就绪；DataCenter缺失、启动失败或通道未就绪不阻止IEC61850目标态下发
-- IEC104/ModbusRTU/DLT645/AGC/AVC/Calc及DataCenter自身配置依赖DataCenter时，只有DataCenter内部gRPC通道确认就绪后才继续启动依赖模块或下发配置；未就绪时本次依赖配置停止收敛，避免向尚未监听的地址发送请求
+- IEC104/ModbusRTU/ModbusTCP/DLT645/AGC/AVC/Calc及DataCenter自身配置依赖DataCenter时，只有DataCenter内部gRPC通道确认就绪后才继续启动依赖模块或下发配置；未就绪时本次依赖配置停止收敛，避免向尚未监听的地址发送请求
 - AGC 配置使用 `agc.groups[].upsert` 下发控制组；`agc.groups[].start` 为兼容保留字段，当前仅记录日志，不再额外调用 `StartGroup`
 - AGC 控制组配置已不再包含 `loop`、`kp`、`deadband_kw`、`max_step_kw` 等旧闭环参数；ConfigPusher 只接受当前 `GroupConfig` 结构
+- AGC/AVC 控制组可通过 `control_mode` 选择 `CONTROL_MODE_PI_EVENT` 或 `CONTROL_MODE_DIRECT_CYCLIC`；未填写或填写 `CONTROL_MODE_UNSPECIFIED` 时兼容为事件触发 PI 模式
+- 周期直分配模式必须配置 `calculation_execution_period_seconds`（1～15 秒）和 `command_control_period_seconds`（4～30 秒）；后者限制 AGC/AVC 向下游逆变器成功发布成员设定命令的最小间隔，不限制主站向 AGC/AVC 下发命令的间隔
+- ConfigPusher 仅按 protobuf 字段原样下发控制模式和周期参数，不在配置下发层实现定时或限频
 - AGC 每个成员必须配置大于 0 的 `capacity_kw`；该字段由 ConfigPusher 原样下发，由 AGC 最终校验，容量缺失或非法时控制组不会创建/更新成功
-- AGC 会在 `p_cmd`、成员量测或 `base_tag` 等相关输入点变化时，直接按 `p_cmd` 计算出的目标总功率进行成员分配；成员上下限、不可控成员扣减、`ABSOLUTE/DELTA` 与 `DELTA_BASE_LAST_TARGET` 等语义保持不变
+- AGC 的 `PI_EVENT` 模式在 `p_cmd`、成员量测或 `base_tag` 等相关输入点变化时触发既有 PI 调节；`DIRECT_CYCLIC` 模式按计算周期直接分配，成员命令按命令控制周期限频。成员上下限、不可控成员扣减、`ABSOLUTE/DELTA` 与 `DELTA_BASE_LAST_TARGET` 等语义保持不变
 - 若 JSONC 里仍保留旧 `loop` 字段，ConfigPusher 会在解析阶段直接报错，避免继续向 AGC 下发过期配置
 - AVC 配置使用 `avc.groups[].upsert` 下发控制组；`avc.groups[].start` 为兼容保留字段，当前仅记录日志，不再额外调用 `StartGroup`
 - AVC 的 `jsonc` 改名语义按“删除旧组 + 创建新组”处理；ConfigPusher 不提供显式 `RenameGroup` 任务
 - AVC 支持 `voltage_cmd` 或 `q_total_cmd` 两类主命令输入；ConfigPusher 只负责按 `jsonc` 收敛下发，控制组是否自动进入运行态由 AVC 模块依据当前配置判定
+- AVC 使用 `CONTROL_MODE_DIRECT_CYCLIC` 时必须配置 `q_total_cmd` 总无功命令；目标电压模式依赖 `kp/deadband`，继续使用 `CONTROL_MODE_PI_EVENT`
 - Calc 配置使用 `calc.groups[].upsert` 下发计算分组；`calc.groups[].start` 为兼容保留字段，当前仅记录日志，不再额外调用 `StartGroup`
 - Calc 的 `jsonc` 改名语义按“删除旧组 + 创建新组”处理；ConfigPusher 不提供显式 `RenameGroup` 任务
 - Calc 计算项中的 `ROUTED_INPUT` 只声明输入槽位，外部源点仍通过 DataCenter Route 绑定到二元项的 `<item_name>/left_input`/`<item_name>/right_input` 或 SUM/AVERAGE 项的 `<item_name>/input_N`；计算结果发布到 `<item_name>/result`
@@ -103,16 +110,17 @@ README 这里只保留模块说明、启动方式、配置入口与基础语义�
 - 在 `CONFIG_PUSHER` 严格目标态语义下，`point_tables` 视为 ConnTags 的完整目标集合；路由中涉及的连接与 tag 必须在 `point_tables` 中显式声明，否则会在写入 DataCenter 前校验失败，不执行 ConnTags/Routes 写入。
 - 对 ConfigPusher 而言，`jsonc` 表达的是最终目标态：即使底层 gRPC 结构复用了 `replace` 字段，ConfigPusher 也会确保最终生效结果不保留 `jsonc` 未声明的旧条目
 - ModbusRTU 支持双传输并存：`TRANSPORT_SERIAL` 保留本地串口直连；`TRANSPORT_MQTT_UART` 通过 `MQTTManager + uartManager` 做串口透传
+- ModbusTCP 使用独立模块和 `modbus_tcp.jsonc` 目标态配置；每条链路配置 `tcp.host/tcp.port/tcp.unit_id`，默认端口为 502、Unit ID 为 1
 - `modbus_rtu.mqtt` 为 ModbusRTU 的 MQTT 全局连接参数，字段为 `host/port/client_id/username/password/keepalive_sec/clean_session/connect_timeout_ms`
 - 当 `modbus_rtu.links[].link.config.transport_type=TRANSPORT_MQTT_UART` 时，`modbus_rtu.mqtt` 必填；ConfigPusher 会先调用 `ModbusRTU.UpdateConfig`，再继续下发链路与点表
 - `TRANSPORT_MQTT_UART` 链路要求配置 `serial_port/request_timeout_ms/serial_byte_timeout_ms/serial_frame_timeout_ms/serial_est_size`
 - ModbusRTU 链路固定按主站方式运行
 - 当 DLT645 或 ModbusRTU 需要 MQTT 时，ConfigPusher 会按需启动 `MQTTManager`
 - DLT645 配置会启动 DLT645 与 MQTTManager，并先下发 MQTT 全局参数
-- `iec104.links[].start`、`modbus_rtu.links[].start`、`dlt645.links[].start`、`agc.groups[].start`、`avc.groups[].start` 与 `calc.groups[].start` 当前均为兼容保留字段：ConfigPusher 仅输出兼容日志，模块会在配置达到可运行条件后自动启动模块内功能
+- `iec104.links[].start`、`modbus_rtu.links[].start`、`modbus_tcp.links[].start`、`dlt645.links[].start`、`agc.groups[].start`、`avc.groups[].start` 与 `calc.groups[].start` 当前均为兼容保留字段：ConfigPusher 仅输出兼容日志，模块会在配置达到可运行条件后自动启动模块内功能
 
 ### 设计与验收要点
-- 若 SQLite 持久化配置或当前内存态中存在两条 DLT645/IEC104/ModbusRTU 链路，而本次 `jsonc` 只声明一条，则本次下发完成后最终有效链路应仅剩 `jsonc` 声明的那一条。
+- 若 SQLite 持久化配置或当前内存态中存在两条 DLT645/IEC104/ModbusRTU/ModbusTCP 链路，而本次 `jsonc` 只声明一条，则本次下发完成后最终有效链路应仅剩 `jsonc` 声明的那一条。
 - 若 SQLite 持久化配置或当前内存态中存在 `jsonc` 未声明的 AGC 控制组，则该旧控制组不应继续保留为有效配置，也不应继续运行控制组功能。
 - 若 SQLite 持久化配置或当前内存态中存在 `jsonc` 未声明的 AVC 控制组，则该旧控制组不应继续保留为有效配置，也不应继续运行控制组功能。
 - 若 SQLite 持久化配置或当前内存态中存在 `jsonc` 未声明的 Calc 计算分组，则该旧分组不应继续保留为有效配置，也不应继续运行分组运算功能。
@@ -305,6 +313,18 @@ ModbusRTU 示例见 `./conf/configPusher/modbus_rtu.jsonc`。
 AGC 示例见 `./conf/configPusher/agc.jsonc`。
 AVC 示例见 `./conf/configPusher/avc.jsonc`。
 Calc 示例见 `./conf/configPusher/calc.jsonc`。
+
+AGC/AVC 周期直分配模式在各自的 `upsert.config` 中使用同一组字段：
+
+```jsonc
+{
+  "control_mode": "CONTROL_MODE_DIRECT_CYCLIC",
+  "calculation_execution_period_seconds": 2.0,
+  "command_control_period_seconds": 4.0
+}
+```
+
+切回现有事件触发 PI 方式时，将 `control_mode` 设置为 `CONTROL_MODE_PI_EVENT`；周期字段可省略。
 
 ## 线程与日志
 - 模块内部线程统一使用 `ModuleManager::StartModuleThread(模块LibInfo.LIB_NAME, ...)` 创建，自动绑定日志模块名上下文。

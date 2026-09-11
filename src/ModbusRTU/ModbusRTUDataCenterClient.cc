@@ -239,6 +239,34 @@ grpc::Status DataCenterClient::PublishDouble(
   return stub->Publish(&ctx, req, &resp);
 }
 
+grpc::Status DataCenterClient::PublishDecimal(
+    uint32_t connId, const std::string& tag, const std::string& value,
+    DataCenterProto::Quality quality, int64_t tsMs) {
+  if (connId == 0) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_id 不能为空");
+  }
+  if (tag.empty()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "tag 不能为空");
+  }
+  if (value.empty()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "精确十进制点值不能为空");
+  }
+  auto stub = getStub();
+
+  DataCenterProto::PublishRequest req;
+  req.set_conn_id(connId);
+  req.set_tag(tag);
+  req.mutable_value()->set_decimal_value(value);
+  if (tsMs > 0) {
+    req.set_ts_ms(tsMs);
+  }
+  req.set_quality(quality);
+
+  grpc::ClientContext ctx;
+  DataCenterProto::Empty resp;
+  return stub->Publish(&ctx, req, &resp);
+}
+
 std::unique_ptr<grpc::ClientReaderInterface<DataCenterProto::PointUpdate>> DataCenterClient::Subscribe(
     grpc::ClientContext* context, uint32_t connId, const std::vector<std::string>& tags, bool snapshot) {
   if (context == nullptr) {

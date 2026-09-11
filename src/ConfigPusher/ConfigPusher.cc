@@ -40,6 +40,8 @@
 #include "IEC61850.grpc.pb.h"
 #include "Logger.h"
 #include "ModbusRTU.grpc.pb.h"
+#include "ModbusTCP.grpc.pb.h"
+#include "ConfigPusherApplyModbusTcp.h"
 #include "ModuleManager.grpc.pb.h"
 #include "mskdsp/IEC61850Limits.hpp"
 
@@ -67,6 +69,7 @@ constexpr const char *kBootConfigModeUpper = "UPPER";
 constexpr const char *kIec104ConfigPath = "./conf/configPusher/iec104.jsonc";
 constexpr const char *kIec61850ConfigPath = "./conf/configPusher/iec61850.jsonc";
 constexpr const char *kModbusRtuConfigPath = "./conf/configPusher/modbus_rtu.jsonc";
+constexpr const char *kModbusTcpConfigPath = "./conf/configPusher/modbus_tcp.jsonc";
 constexpr const char *kDlt645ConfigPath = "./conf/configPusher/DLT645.jsonc";
 constexpr const char *kDataCenterConfigPath = "./conf/configPusher/DataCenter.jsonc";
 constexpr const char *kAgcConfigPath = "./conf/configPusher/agc.jsonc";
@@ -78,6 +81,7 @@ constexpr const char *kDataCenterModuleName = "DataCenter";
 constexpr const char *kIec104ModuleName = "IEC104";
 constexpr const char *kIec61850ModuleName = "IEC61850";
 constexpr const char *kModbusRtuModuleName = "ModbusRTU";
+constexpr const char *kModbusTcpModuleName = "ModbusTCP";
 constexpr const char *kDlt645ModuleName = "DLT645";
 constexpr const char *kMqttManagerModuleName = "MQTTManager";
 constexpr const char *kAgcModuleName = "AGC";
@@ -197,6 +201,7 @@ void ConfigPusher::applyConfig() {
   const auto iec61850ConfigPath = ResolveConfigPath(configDir, kIec61850ConfigPath);
   auto iec61850Config = LoadConfigFile(iec61850ConfigPath);
   auto modbusConfig = LoadConfigFile(ResolveConfigPath(configDir, kModbusRtuConfigPath));
+  auto modbusTcpConfig = LoadConfigFile(ResolveConfigPath(configDir, kModbusTcpConfigPath));
   auto dlt645Config = LoadConfigFile(ResolveConfigPath(configDir, kDlt645ConfigPath));
   auto dataCenterConfig = LoadDataCenterConfigFile(ResolveConfigPath(configDir, kDataCenterConfigPath));
   auto agcConfig = LoadConfigFile(ResolveConfigPath(configDir, kAgcConfigPath));
@@ -207,6 +212,7 @@ void ConfigPusher::applyConfig() {
   const bool hasIec104 = iec104Config && iec104Config->has_iec104();
   const bool hasIec61850 = iec61850Config && iec61850Config->has_iec61850();
   const bool hasModbus = modbusConfig && modbusConfig->has_modbus_rtu();
+  const bool hasModbusTcp = modbusTcpConfig && modbusTcpConfig->has_modbus_tcp();
   const bool hasModbusMqtt = modbusConfig && modbusNeedsMqtt(*modbusConfig);
   const bool hasDlt645 = dlt645Config && dlt645Config->has_dlt645();
   const bool hasAgc = agcConfig && agcConfig->has_agc();
@@ -214,12 +220,12 @@ void ConfigPusher::applyConfig() {
   const bool hasCalc = calcConfig && calcConfig->has_calc();
   const bool hasControlOrchestrator = controlOrchestratorConfig && controlOrchestratorConfig->has_control_orchestrator();
   const bool hasDataCenter = dataCenterConfig.has_value();
-  const bool requiresDataCenter = hasIec104 || hasModbus || hasDlt645 ||
+  const bool requiresDataCenter = hasIec104 || hasModbus || hasModbusTcp || hasDlt645 ||
                                   hasAgc || hasAvc || hasCalc || hasControlOrchestrator || hasDataCenter;
   const bool wantsDataCenter = requiresDataCenter || hasIec61850;
-  if (!hasIec104 && !hasIec61850 && !hasModbus && !hasDlt645 && !hasAgc &&
+  if (!hasIec104 && !hasIec61850 && !hasModbus && !hasModbusTcp && !hasDlt645 && !hasAgc &&
       !hasAvc && !hasCalc && !hasControlOrchestrator && !hasDataCenter) {
-    LOG_INFO("配置中未包含 IEC104/IEC61850/ModbusRTU/DLT645/AGC/AVC/Calc/ControlOrchestrator/DataCenter 配置");
+    LOG_INFO("配置中未包含 IEC104/IEC61850/ModbusRTU/ModbusTCP/DLT645/AGC/AVC/Calc/ControlOrchestrator/DataCenter 配置");
     return;
   }
   LOG_INFO("ConfigPusher 配置解析完成，开始准备下发配置");
@@ -355,6 +361,14 @@ void ConfigPusher::applyConfig() {
       return;
     }
   }
+  std::optional<ModuleManagerProto::ModuleInfo> modbusTcpInfo;
+  if (hasModbusTcp) {
+    modbusTcpInfo = findModuleInfo(moduleInfos, kModbusTcpModuleName);
+    if (!modbusTcpInfo) {
+      LOG_ERROR("未找到模块: {}", kModbusTcpModuleName);
+      return;
+    }
+  }
   std::optional<ModuleManagerProto::ModuleInfo> dlt645Info;
   std::optional<ModuleManagerProto::ModuleInfo> mqttInfo;
   if (hasDlt645) {
@@ -441,6 +455,26 @@ void ConfigPusher::applyConfig() {
       LOG_INFO("ModbusRTU 已启动");
     } else {
       LOG_INFO("ModbusRTU 已在运行");
+    }
+  }
+
+  std::optional<ModuleManagerProto::ModuleRunningInfo> runningModbusTcp;
+  if (hasModbusTcp) {
+    runningModbusTcp = findRunningInfo(running, kModbusTcpModuleName);
+    if (!runningModbusTcp) {
+      LOG_INFO("ModbusTCP 未运行，开始启动模块");
+      if (!startModule(moduleStub.get(), *modbusTcpInfo)) {
+        LOG_ERROR("启动模块 {} 失败", kModbusTcpModuleName);
+        return;
+      }
+      runningModbusTcp = waitForModule(moduleStub.get(), kModbusTcpModuleName, kModuleStartTimeout);
+      if (!runningModbusTcp) {
+        LOG_ERROR("等待 ModbusTCP 启动超时");
+        return;
+      }
+      LOG_INFO("ModbusTCP 模块已启动");
+    } else {
+      LOG_INFO("ModbusTCP 模块已在运行");
     }
   }
 
@@ -577,6 +611,16 @@ void ConfigPusher::applyConfig() {
       LOG_ERROR("ModbusRTU 配置下发存在错误");
     } else {
       LOG_INFO("ModbusRTU 配置下发完成");
+    }
+  }
+
+  if (hasModbusTcp && runningModbusTcp) {
+    auto channel = grpc::CreateChannel(runningModbusTcp->inner_grpc_server(), grpc::InsecureChannelCredentials());
+    auto stub = ModbusTCPProto::ModbusTCPService::NewStub(channel);
+    if (!applyModbusTcpConfig(modbusTcpConfig->modbus_tcp(), stub.get())) {
+      LOG_ERROR("ModbusTCP 配置下发存在错误");
+    } else {
+      LOG_INFO("ModbusTCP 配置下发完成");
     }
   }
 

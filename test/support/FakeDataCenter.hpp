@@ -141,6 +141,21 @@ public:
     failPublishTags_.emplace(std::move(tag));
   }
 
+  void AllowPublishForTag(const std::string& tag) {
+    std::lock_guard<std::mutex> lock(mu_);
+    failPublishTags_.erase(tag);
+  }
+
+  size_t GetFailedPublishCount(uint32_t connId, const std::string& tag) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto connIt = failedPublishCountByConnId_.find(connId);
+    if (connIt == failedPublishCountByConnId_.end()) {
+      return 0;
+    }
+    auto tagIt = connIt->second.find(tag);
+    return tagIt == connIt->second.end() ? 0 : tagIt->second;
+  }
+
   void FailGetLatestForConn(uint32_t connId) {
     std::lock_guard<std::mutex> lock(mu_);
     failGetLatestConnIds_.emplace(connId);
@@ -165,6 +180,20 @@ public:
     auto tagIt = connIt->second.find(tag);
     if (tagIt == connIt->second.end()) {
       return 0;
+    }
+    return tagIt->second;
+  }
+
+  std::vector<DataCenterProto::PointUpdate> GetPublishedUpdates(uint32_t connId,
+                                                                const std::string& tag) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto connIt = publishHistoryByConnId_.find(connId);
+    if (connIt == publishHistoryByConnId_.end()) {
+      return {};
+    }
+    auto tagIt = connIt->second.find(tag);
+    if (tagIt == connIt->second.end()) {
+      return {};
     }
     return tagIt->second;
   }
@@ -376,6 +405,7 @@ public:
     {
       std::lock_guard<std::mutex> lock(mu_);
       if (failPublishTags_.contains(request.tag())) {
+        failedPublishCountByConnId_[request.conn_id()][request.tag()] += 1;
         return grpc::Status(grpc::StatusCode::INTERNAL, "强制发布失败");
       }
     }
@@ -394,6 +424,7 @@ public:
       std::lock_guard<std::mutex> lock(mu_);
       latestByConnId_[request.conn_id()][request.tag()] = update;
       publishCountByConnId_[request.conn_id()][request.tag()] += 1;
+      publishHistoryByConnId_[request.conn_id()][request.tag()].push_back(update);
       auto& watchers = subscriptionsByConnId_[request.conn_id()];
       for (auto it = watchers.begin(); it != watchers.end();) {
         if (auto sub = it->lock()) {
@@ -493,6 +524,10 @@ public:
       response->mutable_dst()->CopyFrom(request.dst());
     }
     switch (request.value().kind_case()) {
+    case DataCenterProto::PointValue::kDecimalValue:
+      response->set_requested_value_decimal(request.value().decimal_value());
+      response->set_accepted_value_decimal(request.value().decimal_value());
+      break;
     case DataCenterProto::PointValue::kDoubleValue:
       response->set_requested_value(request.value().double_value());
       response->set_accepted_value(request.value().double_value());
@@ -636,6 +671,9 @@ private:
   std::unordered_map<std::string, std::string> rejectCommandReasonsByTag_;
   std::unordered_map<uint32_t, std::unordered_map<std::string, DataCenterProto::PointUpdate>> latestByConnId_;
   std::unordered_map<uint32_t, std::unordered_map<std::string, size_t>> publishCountByConnId_;
+  std::unordered_map<uint32_t, std::unordered_map<std::string, size_t>> failedPublishCountByConnId_;
+  std::unordered_map<uint32_t, std::unordered_map<std::string, std::vector<DataCenterProto::PointUpdate>>>
+      publishHistoryByConnId_;
   std::unordered_map<uint32_t, std::unordered_map<std::string, size_t>> commandCountByConnId_;
   mutable std::unordered_map<uint32_t, size_t> subscriptionCreateCountByConnId_;
   mutable std::unordered_map<uint32_t, std::vector<std::weak_ptr<SubscriptionState>>> subscriptionsByConnId_;

@@ -36,6 +36,7 @@ public:
       DataCenterProto::Quality quality,
       int64_t tsMs);
   grpc::Status PublishDouble(uint32_t connId, const std::string& tag, double value, DataCenterProto::Quality quality, int64_t tsMs);
+  grpc::Status PublishDecimal(uint32_t connId, const std::string& tag, std::string value, DataCenterProto::Quality quality, int64_t tsMs);
 
   grpc::Status GetLatest(uint32_t connId, const std::vector<std::string>& tags, DataCenterProto::GetLatestResponse* out);
   std::unique_ptr<grpc::ClientReaderInterface<DataCenterProto::PointUpdate>> Subscribe(

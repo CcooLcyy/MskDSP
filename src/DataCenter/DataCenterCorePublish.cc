@@ -2,9 +2,12 @@
 
 #include <algorithm>
 #include <chrono>
+#include <format>
 #include <limits>
 #include <utility>
 #include <vector>
+
+#include "mskdsp/Decimal20.hpp"
 
 namespace DataCenter {
 int64_t DataCenterCore::nowMs() {
@@ -272,6 +275,26 @@ grpc::Status DataCenterCore::ResolveCommandRoute(
     case DataCenterProto::PointValue::kBoolValue:
       out->set_requested_value(request.value().bool_value() ? 1.0 : 0.0);
       break;
+    case DataCenterProto::PointValue::kDecimalValue: {
+      auto decimal = mskdsp::numeric::Decimal20::Parse(
+          request.value().decimal_value());
+      if (!decimal.has_value()) {
+        return grpc::Status(
+            grpc::StatusCode::INVALID_ARGUMENT,
+            std::format("命令 decimal_value 解析失败: {}",
+                        mskdsp::numeric::DecimalErrorMessage(decimal.error())));
+      }
+      auto boundary = decimal->ToDouble();
+      if (!boundary.has_value()) {
+        return grpc::Status(
+            grpc::StatusCode::INVALID_ARGUMENT,
+            std::format("命令精确十进制值无法转换到兼容 double 状态边界: {}",
+                        mskdsp::numeric::DecimalErrorMessage(boundary.error())));
+      }
+      out->set_requested_value_decimal(decimal->ToFixedString());
+      out->set_requested_value(*boundary);
+      break;
+    }
     case DataCenterProto::PointValue::kStringValue:
     case DataCenterProto::PointValue::kBytesValue:
     case DataCenterProto::PointValue::KIND_NOT_SET:

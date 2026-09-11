@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
-#include <cmath>
+#include <concepts>
 #include <format>
 #include <limits>
 #include <optional>
@@ -16,6 +16,7 @@
 #include "Logger.h"
 #include "ModbusRTULibInfo.h"
 #include "ThreadUtil.hpp"
+#include "mskdsp/Decimal20.hpp"
 
 namespace ModbusRTU {
 namespace {
@@ -33,6 +34,10 @@ constexpr uint16_t kMaxWriteMultipleRegistersQuantity = 123;
 constexpr uint8_t kFunctionReadCoils = 0x01;
 constexpr uint8_t kFunctionReadHoldingRegisters = 0x03;
 constexpr uint8_t kFunctionReadInputRegisters = 0x04;
+
+using mskdsp::numeric::Decimal20;
+using mskdsp::numeric::DecimalError;
+using mskdsp::numeric::RoundingMode;
 
 bool is16BitRegisterType(ModbusRTUProto::DataType type) {
   return type == ModbusRTUProto::DATA_TYPE_UINT16 || type == ModbusRTUProto::DATA_TYPE_INT16;
@@ -117,49 +122,66 @@ std::array<uint16_t, 2> encodeUint32(uint32_t value,
   return {first, second};
 }
 
-bool shouldReport(double value, double deadband, const std::optional<double>& last) {
-  if (deadband <= 0 || !last.has_value()) {
-    return true;
-  }
-  return std::fabs(value - last.value()) >= deadband;
-}
-
 bool hasUsableMqttConfig(const ModbusRTUProto::MqttConfig& config) {
   return !config.host().empty() && config.port() != 0 && !config.client_id().empty();
 }
 
-bool pointValueToDouble(const DataCenterProto::PointValue& value, double* out) {
-  if (out == nullptr) {
-    return false;
-  }
+std::expected<Decimal20, DecimalError> pointValueToDecimal(
+    const DataCenterProto::PointValue& value) {
   switch (value.kind_case()) {
     case DataCenterProto::PointValue::kDoubleValue:
-      *out = value.double_value();
-      return true;
+      return Decimal20::FromDouble(value.double_value());
     case DataCenterProto::PointValue::kIntValue:
-      *out = static_cast<double>(value.int_value());
-      return true;
+      return Decimal20::FromInt64(value.int_value());
     case DataCenterProto::PointValue::kBoolValue:
-      *out = value.bool_value() ? 1.0 : 0.0;
-      return true;
+      return Decimal20::FromInt64(value.bool_value() ? 1 : 0);
+    case DataCenterProto::PointValue::kDecimalValue:
+      return Decimal20::Parse(value.decimal_value());
     default:
-      return false;
+      return std::unexpected(DecimalError::kInvalidFormat);
   }
 }
 
-bool reverseScale(double eng, double scale, double offset, double* out) {
+std::expected<Decimal20, DecimalError> engineeringFromRaw(
+    int64_t raw, const Decimal20& scale, const Decimal20& offset) {
+  auto rawDecimal = Decimal20::FromInt64(raw);
+  if (!rawDecimal.has_value()) {
+    return std::unexpected(rawDecimal.error());
+  }
+  return mskdsp::numeric::ApplyEngineering(*rawDecimal, scale, offset);
+}
+
+grpc::Status assignEngineeringFromRaw(
+    int64_t raw, const Decimal20& scale, const Decimal20& offset,
+    Decimal20* out) {
   if (out == nullptr) {
-    return false;
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                        "工程量换算输出不能为空");
   }
-  if (scale == 0.0) {
-    scale = 1.0;
+  const auto engineering = engineeringFromRaw(raw, scale, offset);
+  if (!engineering.has_value()) {
+    return grpc::Status(
+        grpc::StatusCode::OUT_OF_RANGE,
+        std::format("工程量换算超出 Decimal20 范围: {}",
+                    mskdsp::numeric::DecimalErrorMessage(
+                        engineering.error())));
   }
-  const double raw = (eng - offset) / scale;
-  if (!std::isfinite(raw)) {
-    return false;
+  *out = *engineering;
+  return grpc::Status::OK;
+}
+
+template <std::integral Integer>
+std::expected<Integer, DecimalError> quantizeRegister(
+    const Decimal20& raw) {
+  const auto minimum = Decimal20::FromInt64(
+      static_cast<int64_t>(std::numeric_limits<Integer>::min()));
+  const auto maximum = Decimal20::FromInt64(
+      static_cast<int64_t>(std::numeric_limits<Integer>::max()));
+  if (!minimum.has_value() || !maximum.has_value() ||
+      raw < *minimum || raw > *maximum) {
+    return std::unexpected(DecimalError::kIntegerOverflow);
   }
-  *out = raw;
-  return true;
+  return raw.ToInteger<Integer>(RoundingMode::kHalfAwayFromZero);
 }
 
 grpc::Status makeNotFound(const std::string& connName) {
@@ -210,7 +232,9 @@ std::string formatRegisterWords(const std::vector<uint16_t>& values) {
   return out;
 }
 
-grpc::Status encodeWriteRegisters(const PointTable::Point& point, double engValue, std::vector<uint16_t>* outValues) {
+grpc::Status encodeWriteRegisters(const PointTable::Point& point,
+                                  const Decimal20& engValue,
+                                  std::vector<uint16_t>* outValues) {
   if (outValues == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "outValues 为空");
   }
@@ -223,21 +247,21 @@ grpc::Status encodeWriteRegisters(const PointTable::Point& point, double engValu
     if (point.function != ModbusRTUProto::FUNCTION_WRITE_SINGLE_REGISTER) {
       return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "BOOL 仅支持写单寄存器");
     }
-    outValues->push_back(engValue != 0.0 ? 1u : 0u);
+    outValues->push_back(engValue.IsZero() ? 0u : 1u);
     return grpc::Status::OK;
   }
 
-  double rawValue = 0.0;
-  if (!reverseScale(engValue, point.scale, point.offset, &rawValue)) {
+  const auto rawValue = mskdsp::numeric::ReverseEngineering(
+      engValue, point.scale, point.offset);
+  if (!rawValue.has_value()) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "工程量反向缩放失败");
   }
   if (point.type == ModbusRTUProto::DATA_TYPE_UINT16) {
-    const double minValue = 0.0;
-    const double maxValue = static_cast<double>(std::numeric_limits<uint16_t>::max());
-    if (rawValue < minValue || rawValue > maxValue) {
+    const auto raw = quantizeRegister<uint16_t>(*rawValue);
+    if (!raw.has_value()) {
       return grpc::Status(grpc::StatusCode::OUT_OF_RANGE, "UINT16 写入值超出范围");
     }
-    auto word = static_cast<uint16_t>(std::llround(rawValue));
+    auto word = *raw;
     if (point.byteOrder == ModbusRTUProto::BYTE_ORDER_BA) {
       word = swapWordBytes(word);
     }
@@ -245,13 +269,11 @@ grpc::Status encodeWriteRegisters(const PointTable::Point& point, double engValu
     return grpc::Status::OK;
   }
   if (point.type == ModbusRTUProto::DATA_TYPE_INT16) {
-    const double minValue = static_cast<double>(std::numeric_limits<int16_t>::min());
-    const double maxValue = static_cast<double>(std::numeric_limits<int16_t>::max());
-    if (rawValue < minValue || rawValue > maxValue) {
+    const auto raw = quantizeRegister<int16_t>(*rawValue);
+    if (!raw.has_value()) {
       return grpc::Status(grpc::StatusCode::OUT_OF_RANGE, "INT16 写入值超出范围");
     }
-    auto signedWord = static_cast<int16_t>(std::llround(rawValue));
-    auto word = static_cast<uint16_t>(signedWord);
+    auto word = static_cast<uint16_t>(*raw);
     if (point.byteOrder == ModbusRTUProto::BYTE_ORDER_BA) {
       word = swapWordBytes(word);
     }
@@ -259,25 +281,22 @@ grpc::Status encodeWriteRegisters(const PointTable::Point& point, double engValu
     return grpc::Status::OK;
   }
   if (point.type == ModbusRTUProto::DATA_TYPE_UINT32) {
-    const double minValue = 0.0;
-    const double maxValue = static_cast<double>(std::numeric_limits<uint32_t>::max());
-    if (rawValue < minValue || rawValue > maxValue) {
+    const auto raw = quantizeRegister<uint32_t>(*rawValue);
+    if (!raw.has_value()) {
       return grpc::Status(grpc::StatusCode::OUT_OF_RANGE, "UINT32 写入值超出范围");
     }
-    const auto raw = static_cast<uint32_t>(std::llround(rawValue));
-    auto words = encodeUint32(raw, point.wordOrder, point.byteOrder);
+    auto words = encodeUint32(*raw, point.wordOrder, point.byteOrder);
     outValues->push_back(words[0]);
     outValues->push_back(words[1]);
     return grpc::Status::OK;
   }
   if (point.type == ModbusRTUProto::DATA_TYPE_INT32) {
-    const double minValue = static_cast<double>(std::numeric_limits<int32_t>::min());
-    const double maxValue = static_cast<double>(std::numeric_limits<int32_t>::max());
-    if (rawValue < minValue || rawValue > maxValue) {
+    const auto raw = quantizeRegister<int32_t>(*rawValue);
+    if (!raw.has_value()) {
       return grpc::Status(grpc::StatusCode::OUT_OF_RANGE, "INT32 写入值超出范围");
     }
-    const auto signedValue = static_cast<int32_t>(std::llround(rawValue));
-    auto words = encodeUint32(static_cast<uint32_t>(signedValue), point.wordOrder, point.byteOrder);
+    auto words = encodeUint32(static_cast<uint32_t>(*raw),
+                              point.wordOrder, point.byteOrder);
     outValues->push_back(words[0]);
     outValues->push_back(words[1]);
     return grpc::Status::OK;
@@ -1303,19 +1322,19 @@ grpc::Status LinkManager::executeWriteCommand(const std::string& connName,
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "写点地址范围超出限制");
   }
 
-  double engValue = 0.0;
-  if (!pointValueToDouble(update.value(), &engValue)) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "命令点值类型不支持");
-  }
-  if (!std::isfinite(engValue)) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "命令点值必须为有限数值");
+  const auto engValue = pointValueToDecimal(update.value());
+  if (!engValue.has_value()) {
+    return grpc::Status(
+        grpc::StatusCode::INVALID_ARGUMENT,
+        std::format("命令点值无法转换为 Decimal20: {}",
+                    mskdsp::numeric::DecimalErrorMessage(engValue.error())));
   }
 
   std::vector<uint16_t> values;
   auto status = grpc::Status::OK;
   const auto deviceId = static_cast<uint8_t>(config.device_id());
   if (isWriteSingleCoilFunction(point.function)) {
-    const bool coilValue = engValue != 0.0;
+    const bool coilValue = !engValue->IsZero();
     LOG_INFO("ModbusRTU 触发写单线圈: conn_name={}, tag={}, device_id={}, address={}, value={}",
              connName, point.tag, config.device_id(), address, coilValue);
     status = bus->WriteSingleCoil(deviceId, static_cast<uint16_t>(address), coilValue);
@@ -1325,7 +1344,7 @@ grpc::Status LinkManager::executeWriteCommand(const std::string& connName,
     }
     return status;
   }
-  status = encodeWriteRegisters(point, engValue, &values);
+  status = encodeWriteRegisters(point, *engValue, &values);
   if (!status.ok()) {
     return status;
   }
@@ -1346,7 +1365,7 @@ grpc::Status LinkManager::executeWriteCommand(const std::string& connName,
              point.tag,
              config.device_id(),
              address,
-             engValue,
+             engValue->ToString(),
              formatRegisterWords(values));
     status = bus->WriteSingleRegister(deviceId, static_cast<uint16_t>(address), values.front());
     if (status.ok()) {
@@ -1364,7 +1383,7 @@ grpc::Status LinkManager::executeWriteCommand(const std::string& connName,
            config.device_id(),
            address,
            values.size(),
-           engValue,
+           engValue->ToString(),
            formatRegisterWords(values));
   status = bus->WriteMultipleRegisters(deviceId, static_cast<uint16_t>(address), values);
   if (status.ok()) {
@@ -1401,14 +1420,24 @@ grpc::Status LinkManager::ExecuteCommand(
   }
   *response->mutable_dst() = request.dst();
 
-  double requestedValue = 0.0;
-  if (!pointValueToDouble(request.value(), &requestedValue)) {
+  const auto requestedDecimal = pointValueToDecimal(request.value());
+  if (!requestedDecimal.has_value()) {
     response->set_status(DataCenterProto::COMMAND_REJECTED);
     response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSUPPORTED_POINT);
-    response->set_reason("命令点值类型不支持");
+    response->set_reason(std::format(
+        "命令点值无法转换为 Decimal20: {}",
+        mskdsp::numeric::DecimalErrorMessage(requestedDecimal.error())));
     return grpc::Status::OK;
   }
-  response->set_requested_value(requestedValue);
+  const auto requestedValue = requestedDecimal->ToDouble();
+  if (!requestedValue.has_value()) {
+    response->set_status(DataCenterProto::COMMAND_REJECTED);
+    response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSUPPORTED_POINT);
+    response->set_reason("命令点值超出兼容响应字段范围");
+    return grpc::Status::OK;
+  }
+  response->set_requested_value(*requestedValue);
+  response->set_requested_value_decimal(requestedDecimal->ToFixedString());
 
   std::string connName;
   ModbusRTUProto::LinkConfig config;
@@ -1497,7 +1526,7 @@ grpc::Status LinkManager::ExecuteCommand(
            connName,
            response->dst().conn_id(),
            point.tag,
-           requestedValue,
+           requestedDecimal->ToString(),
            request.request_id());
   auto status = executeWriteCommand(connName, config, point, bus, update);
   if (!status.ok()) {
@@ -1534,12 +1563,13 @@ grpc::Status LinkManager::ExecuteCommand(
   response->set_status(DataCenterProto::COMMAND_ACCEPTED);
   response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSPECIFIED);
   response->set_reason("ModbusRTU 同步写命令已执行");
-  response->set_accepted_value(requestedValue);
+  response->set_accepted_value(*requestedValue);
+  response->set_accepted_value_decimal(requestedDecimal->ToFixedString());
   LOG_INFO("ModbusRTU 同步写命令执行成功: conn_name={}, conn_id={}, tag={}, value={}",
            connName,
            response->dst().conn_id(),
            point.tag,
-           requestedValue);
+           requestedDecimal->ToString());
   return grpc::Status::OK;
 }
 
@@ -2266,7 +2296,7 @@ void LinkManager::pollLoop(std::string connName,
                            std::stop_token stopToken) {
   const auto interval = std::chrono::milliseconds(config.poll_interval_ms());
   const auto points = pointTable.Points();
-  std::unordered_map<std::string, double> lastReportedByTag;
+  std::unordered_map<std::string, Decimal20> lastReportedByTag;
   lastReportedByTag.reserve(points.size());
   const auto readPlanMode = config.has_read_plan() ? config.read_plan().mode() : ModbusRTUProto::READ_PLAN_MODE_POINT;
   const bool useExplicitPlan = (readPlanMode == ModbusRTUProto::READ_PLAN_MODE_EXPLICIT &&
@@ -2321,7 +2351,7 @@ void LinkManager::pollLoop(std::string connName,
         } else if (point.function == ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS ||
                    point.function == ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS) {
           const bool isInputRegisters = point.function == ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS;
-          std::optional<double> engValue;
+          std::optional<Decimal20> engValue;
           if (isRegisterBitPoint(point)) {
             uint32_t raw = 0;
             if (point.regCount == 1) {
@@ -2394,7 +2424,12 @@ void LinkManager::pollLoop(std::string connName,
                           point.tag,
                           value,
                           static_cast<int>(point.byteOrder));
-                engValue = static_cast<double>(value) * point.scale + point.offset;
+                engValue.emplace();
+                status = assignEngineeringFromRaw(
+                    value, point.scale, point.offset, &*engValue);
+                if (!status.ok()) {
+                  engValue.reset();
+                }
               } else {
                 const int16_t signedValue = decodeInt16(value, point.byteOrder);
                 LOG_DEBUG("ModbusRTU 读取INT16寄存器: conn_name={}, tag={}, raw={}, byte_order={}",
@@ -2402,7 +2437,12 @@ void LinkManager::pollLoop(std::string connName,
                           point.tag,
                           signedValue,
                           static_cast<int>(point.byteOrder));
-                engValue = static_cast<double>(signedValue) * point.scale + point.offset;
+                engValue.emplace();
+                status = assignEngineeringFromRaw(
+                    signedValue, point.scale, point.offset, &*engValue);
+                if (!status.ok()) {
+                  engValue.reset();
+                }
               }
             }
           } else if (is32BitRegisterType(point.type)) {
@@ -2431,7 +2471,12 @@ void LinkManager::pollLoop(std::string connName,
                             values[1],
                             static_cast<int>(point.wordOrder),
                             static_cast<int>(point.byteOrder));
-                  engValue = static_cast<double>(raw) * point.scale + point.offset;
+                  engValue.emplace();
+                  status = assignEngineeringFromRaw(
+                      raw, point.scale, point.offset, &*engValue);
+                  if (!status.ok()) {
+                    engValue.reset();
+                  }
                 } else {
                   const int32_t raw = decodeInt32(values[0], values[1], point.wordOrder, point.byteOrder);
                   LOG_DEBUG("ModbusRTU 读取INT32寄存器: conn_name={}, tag={}, raw={}, reg0={}, reg1={}, word_order={}, byte_order={}",
@@ -2442,7 +2487,12 @@ void LinkManager::pollLoop(std::string connName,
                             values[1],
                             static_cast<int>(point.wordOrder),
                             static_cast<int>(point.byteOrder));
-                  engValue = static_cast<double>(raw) * point.scale + point.offset;
+                  engValue.emplace();
+                  status = assignEngineeringFromRaw(
+                      raw, point.scale, point.offset, &*engValue);
+                  if (!status.ok()) {
+                    engValue.reset();
+                  }
                 }
               }
             }
@@ -2450,26 +2500,30 @@ void LinkManager::pollLoop(std::string connName,
             status = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "寄存器点位类型不支持");
           }
           if (status.ok() && engValue.has_value()) {
-            std::optional<double> last;
+            std::optional<Decimal20> last;
             auto lastIt = lastReportedByTag.find(point.tag);
             if (lastIt != lastReportedByTag.end()) {
               last = lastIt->second;
             }
-            if (!shouldReport(engValue.value(), point.deadband, last)) {
-              LOG_DEBUG("ModbusRTU 死区过滤上报: conn_name={}, tag={}, value={}, last={}, 死区={}",
+            if (last.has_value() &&
+                !mskdsp::numeric::ShouldReport(
+                    *engValue, *last, point.deadband)) {
+              LOG_DEBUG("ModbusRTU 死区过滤上报: conn_name={}, tag={}, 当前值={}, 上次值={}, 死区={}",
                         connName,
                         point.tag,
-                        engValue.value(),
-                        last.value(),
-                        point.deadband);
+                        engValue->ToString(),
+                        last->ToString(),
+                        point.deadband.ToString());
               continue;
             }
-            auto dc = dataCenter_.PublishDouble(connId, point.tag, engValue.value(), DataCenterProto::QUALITY_GOOD, 0);
+            auto dc = dataCenter_.PublishDecimal(
+                connId, point.tag, engValue->ToFixedString(),
+                DataCenterProto::QUALITY_GOOD, 0);
             if (!dc.ok()) {
               updateLastError(connName, dc.error_message());
               LOG_ERROR("ModbusRTU 发布点值失败: conn_name={}, tag={}, 原因={}", connName, point.tag, dc.error_message());
             } else {
-              lastReportedByTag[point.tag] = engValue.value();
+              lastReportedByTag[point.tag] = *engValue;
             }
           }
         } else {
@@ -2509,9 +2563,9 @@ void LinkManager::pollLoop(std::string connName,
     uint32_t regCount = 1;
     ModbusRTUProto::WordOrder wordOrder = ModbusRTUProto::WORD_ORDER_HL;
     ModbusRTUProto::ByteOrder byteOrder = ModbusRTUProto::BYTE_ORDER_AB;
-    double scale = 1.0;
-    double offset = 0.0;
-    double deadband = 0.0;
+    Decimal20 scale = Decimal20::FromInt64(1).value();
+    Decimal20 offset;
+    Decimal20 deadband;
     std::optional<uint32_t> bitIndex;
   };
 
@@ -2692,7 +2746,7 @@ void LinkManager::pollLoop(std::string connName,
           continue;
         }
         const size_t offset = static_cast<size_t>(point.address - start);
-        double engValue = 0.0;
+        Decimal20 engValue;
         if (point.type == ModbusRTUProto::DATA_TYPE_BOOL && point.bitIndex.has_value()) {
           uint32_t raw = 0;
           if (point.regCount == 1) {
@@ -2757,7 +2811,14 @@ void LinkManager::pollLoop(std::string connName,
                     point.tag,
                     value,
                     static_cast<int>(point.byteOrder));
-          engValue = static_cast<double>(value) * point.scale + point.offset;
+          status = assignEngineeringFromRaw(
+              value, point.scale, point.offset, &engValue);
+          if (!status.ok()) {
+            updateLastError(connName, status.error_message());
+            LOG_WARNING("ModbusRTU 轮询区间工程量换算失败: conn_name={}, tag={}, 原因={}",
+                        connName, point.tag, status.error_message());
+            continue;
+          }
         } else if (point.type == ModbusRTUProto::DATA_TYPE_INT16) {
           if (offset >= values.size()) {
             updateLastError(connName, std::string(registerName) + "地址溢出");
@@ -2773,7 +2834,14 @@ void LinkManager::pollLoop(std::string connName,
                     point.tag,
                     value,
                     static_cast<int>(point.byteOrder));
-          engValue = static_cast<double>(value) * point.scale + point.offset;
+          status = assignEngineeringFromRaw(
+              value, point.scale, point.offset, &engValue);
+          if (!status.ok()) {
+            updateLastError(connName, status.error_message());
+            LOG_WARNING("ModbusRTU 轮询区间工程量换算失败: conn_name={}, tag={}, 原因={}",
+                        connName, point.tag, status.error_message());
+            continue;
+          }
         } else if (point.type == ModbusRTUProto::DATA_TYPE_UINT32) {
           if (offset + 1 >= values.size()) {
             updateLastError(connName, std::string(registerName) + "地址溢出");
@@ -2794,7 +2862,14 @@ void LinkManager::pollLoop(std::string connName,
                     second,
                     static_cast<int>(point.wordOrder),
                     static_cast<int>(point.byteOrder));
-          engValue = static_cast<double>(raw) * point.scale + point.offset;
+          status = assignEngineeringFromRaw(
+              raw, point.scale, point.offset, &engValue);
+          if (!status.ok()) {
+            updateLastError(connName, status.error_message());
+            LOG_WARNING("ModbusRTU 轮询区间工程量换算失败: conn_name={}, tag={}, 原因={}",
+                        connName, point.tag, status.error_message());
+            continue;
+          }
         } else if (point.type == ModbusRTUProto::DATA_TYPE_INT32) {
           if (offset + 1 >= values.size()) {
             updateLastError(connName, std::string(registerName) + "地址溢出");
@@ -2815,27 +2890,38 @@ void LinkManager::pollLoop(std::string connName,
                     second,
                     static_cast<int>(point.wordOrder),
                     static_cast<int>(point.byteOrder));
-          engValue = static_cast<double>(raw) * point.scale + point.offset;
+          status = assignEngineeringFromRaw(
+              raw, point.scale, point.offset, &engValue);
+          if (!status.ok()) {
+            updateLastError(connName, status.error_message());
+            LOG_WARNING("ModbusRTU 轮询区间工程量换算失败: conn_name={}, tag={}, 原因={}",
+                        connName, point.tag, status.error_message());
+            continue;
+          }
         } else {
           updateLastError(connName, "寄存器点位类型不支持");
           LOG_WARNING("ModbusRTU 轮询区间点位类型不支持: conn_name={}, tag={}", connName, point.tag);
           continue;
         }
-        std::optional<double> last;
+        std::optional<Decimal20> last;
         auto lastIt = lastReportedByTag.find(point.tag);
         if (lastIt != lastReportedByTag.end()) {
           last = lastIt->second;
         }
-        if (!shouldReport(engValue, point.deadband, last)) {
-          LOG_DEBUG("ModbusRTU 死区过滤上报: conn_name={}, tag={}, value={}, last={}, 死区={}",
+        if (last.has_value() &&
+            !mskdsp::numeric::ShouldReport(
+                engValue, *last, point.deadband)) {
+          LOG_DEBUG("ModbusRTU 死区过滤上报: conn_name={}, tag={}, 当前值={}, 上次值={}, 死区={}",
                     connName,
                     point.tag,
-                    engValue,
-                    last.value(),
-                    point.deadband);
+                    engValue.ToString(),
+                    last->ToString(),
+                    point.deadband.ToString());
           continue;
         }
-        auto dc = dataCenter_.PublishDouble(connId, point.tag, engValue, DataCenterProto::QUALITY_GOOD, 0);
+        auto dc = dataCenter_.PublishDecimal(
+            connId, point.tag, engValue.ToFixedString(),
+            DataCenterProto::QUALITY_GOOD, 0);
         if (!dc.ok()) {
           updateLastError(connName, dc.error_message());
           LOG_ERROR("ModbusRTU 发布点值失败: conn_name={}, tag={}, 原因={}", connName, point.tag, dc.error_message());

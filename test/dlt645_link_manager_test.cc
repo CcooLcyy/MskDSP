@@ -16,12 +16,14 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "DLT645LinkManager.h"
 #include "DLT645PointTable.h"
 #include "DataCenter_mock.grpc.pb.h"
 #include "MQTTManager_mock.grpc.pb.h"
+#include "mskdsp/Decimal20.hpp"
 #include "support/FakeDataCenter.hpp"
 
 namespace {
@@ -199,14 +201,19 @@ DLT645Proto::UpdateConfigRequest MakeMqttUpdateRequest(const char *host, uint32_
   return req;
 }
 
-PointTable::Point MakePoint(const char *tag, uint32_t dataLen, DLT645Proto::DataType type, double scale, double offset, double deadband) {
+PointTable::Point MakePoint(const char *tag,
+                            uint32_t dataLen,
+                            DLT645Proto::DataType type,
+                            std::string_view scale,
+                            std::string_view offset,
+                            std::string_view deadband) {
   PointTable::Point p;
   p.tag = tag;
   p.dataLen = dataLen;
   p.type = type;
-  p.scale = scale;
-  p.offset = offset;
-  p.deadband = deadband;
+  p.scale = mskdsp::numeric::Decimal20::Parse(scale).value();
+  p.offset = mskdsp::numeric::Decimal20::Parse(offset).value();
+  p.deadband = mskdsp::numeric::Decimal20::Parse(deadband).value();
   return p;
 }
 
@@ -2487,7 +2494,7 @@ TEST(Dlt645LinkManagerTest, DecodeAndPublishAllFF) {
   DLT645Proto::LinkInfo info;
   ASSERT_TRUE(mgr.UpsertLink(linkReq, &info).ok());
 
-  PointTable::Point point = MakePoint("A", 2, DLT645Proto::DATA_TYPE_UINT16, 1.0, 0.0, 0.0);
+  PointTable::Point point = MakePoint("A", 2, DLT645Proto::DATA_TYPE_UINT16, "1", "0", "0");
   std::vector<uint8_t> payload = {0xFF, 0xFF};
   auto st = DLT645LinkManagerTestPeer::DecodeAndPublish(mgr, "conn-ff", point, payload, 1, false);
   EXPECT_TRUE(st.ok());
@@ -2514,7 +2521,7 @@ TEST(Dlt645LinkManagerTest, DecodeAndPublishStringTrimAndDeadband) {
   DLT645Proto::LinkInfo info;
   ASSERT_TRUE(mgr.UpsertLink(linkReq, &info).ok());
 
-  PointTable::Point point = MakePoint("S", 4, DLT645Proto::DATA_TYPE_STRING, 1.0, 0.0, 0.1);
+  PointTable::Point point = MakePoint("S", 4, DLT645Proto::DATA_TYPE_STRING, "1", "0", "0.1");
   std::vector<uint8_t> payload = {'a', 'b', ' ', ' '};
   auto st = DLT645LinkManagerTestPeer::DecodeAndPublish(mgr, "conn-str", point, payload, 1, true);
   EXPECT_TRUE(st.ok());
@@ -2527,7 +2534,7 @@ TEST(Dlt645LinkManagerTest, DecodeAndPublishStringTrimAndDeadband) {
   ASSERT_EQ(resp.updates_size(), 1);
   EXPECT_EQ(resp.updates(0).value().string_value(), "ab");
 
-  PointTable::Point floatPoint = MakePoint("F", 4, DLT645Proto::DATA_TYPE_FLOAT, 1.0, 0.0, 1.0);
+  PointTable::Point floatPoint = MakePoint("F", 4, DLT645Proto::DATA_TYPE_FLOAT, "1", "0", "1");
   float f1 = 10.0f;
   uint32_t u1 = 0;
   std::memcpy(&u1, &f1, sizeof(float));
@@ -2561,7 +2568,8 @@ TEST(Dlt645LinkManagerTest, DecodeAndPublishStringTrimAndDeadband) {
   DataCenterProto::GetLatestResponse latestResp;
   ASSERT_TRUE(state.GetLatest(latestReq, &latestResp).ok());
   ASSERT_EQ(latestResp.updates_size(), 1);
-  EXPECT_DOUBLE_EQ(latestResp.updates(0).value().double_value(), 11.0);
+  EXPECT_EQ(latestResp.updates(0).value().decimal_value(),
+            "11.00000000000000000000");
 }
 
 // 验证：decodeAndPublish 支持数值与 BCD 错误分支。
@@ -2577,12 +2585,12 @@ TEST(Dlt645LinkManagerTest, DecodeAndPublishNumericAndBcdErrors) {
   DLT645Proto::LinkInfo info;
   ASSERT_TRUE(mgr.UpsertLink(linkReq, &info).ok());
 
-  PointTable::Point u16 = MakePoint("U16", 2, DLT645Proto::DATA_TYPE_UINT16, 1.0, 0.0, 0.0);
+  PointTable::Point u16 = MakePoint("U16", 2, DLT645Proto::DATA_TYPE_UINT16, "1", "0", "0");
   std::vector<uint8_t> payload = {0x10, 0x00};
   auto st = DLT645LinkManagerTestPeer::DecodeAndPublish(mgr, "conn-num", u16, payload, 1, false);
   EXPECT_TRUE(st.ok());
 
-  PointTable::Point bcd = MakePoint("BCD", 1, DLT645Proto::DATA_TYPE_BCD, 1.0, 0.0, 0.0);
+  PointTable::Point bcd = MakePoint("BCD", 1, DLT645Proto::DATA_TYPE_BCD, "1", "0", "0");
   std::vector<uint8_t> bad = {0xFA};
   st = DLT645LinkManagerTestPeer::DecodeAndPublish(mgr, "conn-num", bcd, bad, 1, false);
   EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
@@ -2601,7 +2609,7 @@ TEST(Dlt645LinkManagerTest, DecodeAndPublishSignedBcdNegativeValue) {
   DLT645Proto::LinkInfo info;
   ASSERT_TRUE(mgr.UpsertLink(linkReq, &info).ok());
 
-  PointTable::Point bcd = MakePoint("BCD_NEG", 3, DLT645Proto::DATA_TYPE_BCD, 1.0, 0.0, 0.0);
+  PointTable::Point bcd = MakePoint("BCD_NEG", 3, DLT645Proto::DATA_TYPE_BCD, "1", "0", "0");
   std::vector<uint8_t> payload = {0x31, 0x00, 0x80};
   auto st = DLT645LinkManagerTestPeer::DecodeAndPublish(mgr, "conn-signed-bcd", bcd, payload, 1, false);
   ASSERT_TRUE(st.ok());
@@ -2612,12 +2620,13 @@ TEST(Dlt645LinkManagerTest, DecodeAndPublishSignedBcdNegativeValue) {
   DataCenterProto::GetLatestResponse resp;
   ASSERT_TRUE(state.GetLatest(req, &resp).ok());
   ASSERT_EQ(resp.updates_size(), 1);
-  EXPECT_DOUBLE_EQ(resp.updates(0).value().double_value(), -31.0);
+  EXPECT_EQ(resp.updates(0).value().decimal_value(),
+            "-31.00000000000000000000");
 }
 
 // 验证：encodeData 按最高位符号规则编码 BCD 负数。
 TEST(Dlt645LinkManagerTest, EncodeDataSignedBcdNegativeValue) {
-  PointTable::Point bcd = MakePoint("BCD_NEG", 3, DLT645Proto::DATA_TYPE_BCD, 1.0, 0.0, 0.0);
+  PointTable::Point bcd = MakePoint("BCD_NEG", 3, DLT645Proto::DATA_TYPE_BCD, "1", "0", "0");
   DataCenterProto::PointValue value;
   value.set_double_value(-31.0);
   std::string error;
@@ -2629,4 +2638,94 @@ TEST(Dlt645LinkManagerTest, EncodeDataSignedBcdNegativeValue) {
   EXPECT_EQ(payload[0], 0x31);
   EXPECT_EQ(payload[1], 0x00);
   EXPECT_EQ(payload[2], 0x80);
+}
+
+// 验证：BCD 原始整数与十进制倍率、偏移全程按 Decimal20 计算并发布精确文本。
+TEST(Dlt645LinkManagerTest, DecodeBcdPublishesExactDecimalEngineeringValue) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(stub);
+
+  DLT645Proto::UpsertLinkRequest linkReq;
+  *linkReq.mutable_config() =
+      MakeValidLinkConfig("conn-decimal-bcd", DLT645Proto::COMM_MODE_LORA);
+  DLT645Proto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(linkReq, &info).ok());
+
+  const auto point =
+      MakePoint("BCD_DEC", 1, DLT645Proto::DATA_TYPE_BCD, "0.1", "0.2", "0");
+  ASSERT_TRUE(DLT645LinkManagerTestPeer::DecodeAndPublish(
+                  mgr, "conn-decimal-bcd", point, {0x01}, 1, false)
+                  .ok());
+
+  DataCenterProto::GetLatestRequest req;
+  req.set_conn_id(
+      DLT645LinkManagerTestPeer::GetConnId(mgr, "conn-decimal-bcd"));
+  req.add_tags("BCD_DEC");
+  DataCenterProto::GetLatestResponse resp;
+  ASSERT_TRUE(state.GetLatest(req, &resp).ok());
+  ASSERT_EQ(resp.updates_size(), 1);
+  EXPECT_EQ(resp.updates(0).value().decimal_value(),
+            "0.30000000000000000000");
+}
+
+// 验证：工程量变化精确等于 0.2 死区时必须上报，不受二进制浮点误差影响。
+TEST(Dlt645LinkManagerTest, DecimalDeadbandReportsExactBoundary) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("DLT645");
+  mgr.setDataCenterStub(stub);
+
+  DLT645Proto::UpsertLinkRequest linkReq;
+  *linkReq.mutable_config() =
+      MakeValidLinkConfig("conn-decimal-deadband", DLT645Proto::COMM_MODE_LORA);
+  DLT645Proto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(linkReq, &info).ok());
+
+  const auto point = MakePoint("BCD_DB", 1, DLT645Proto::DATA_TYPE_BCD,
+                               "0.1", "0.2", "0.2");
+  ASSERT_TRUE(DLT645LinkManagerTestPeer::DecodeAndPublish(
+                  mgr, "conn-decimal-deadband", point, {0x01}, 1, false)
+                  .ok());
+  ASSERT_TRUE(DLT645LinkManagerTestPeer::DecodeAndPublish(
+                  mgr, "conn-decimal-deadband", point, {0x03}, 2, false)
+                  .ok());
+
+  const auto connId =
+      DLT645LinkManagerTestPeer::GetConnId(mgr, "conn-decimal-deadband");
+  EXPECT_EQ(state.GetPublishCount(connId, "BCD_DB"), 2u);
+}
+
+// 验证：BCD 写入先按原始整数精度执行半数远离零量化，协议字节布局保持不变。
+TEST(Dlt645LinkManagerTest, EncodeBcdRoundsAtDeviceBoundary) {
+  const auto point =
+      MakePoint("BCD_ROUND", 1, DLT645Proto::DATA_TYPE_BCD, "0.1", "0", "0");
+  DataCenterProto::PointValue value;
+  value.set_decimal_value("3.15");
+  std::string error;
+
+  const auto payload =
+      DLT645LinkManagerTestPeer::EncodeData(point, value, &error);
+
+  EXPECT_TRUE(error.empty());
+  ASSERT_EQ(payload.size(), 1u);
+  EXPECT_EQ(payload[0], 0x32);
+}
+
+// 验证：IEEE 浮点写入仍使用既有 little-endian binary32 线格式。
+TEST(Dlt645LinkManagerTest, EncodeFloatPreservesBinary32WireFormat) {
+  const auto point =
+      MakePoint("FLOAT", 4, DLT645Proto::DATA_TYPE_FLOAT, "1", "0", "0");
+  DataCenterProto::PointValue value;
+  value.set_decimal_value("0.1");
+  std::string error;
+
+  const auto payload =
+      DLT645LinkManagerTestPeer::EncodeData(point, value, &error);
+
+  EXPECT_TRUE(error.empty());
+  EXPECT_EQ(payload, (std::vector<uint8_t>{0xCD, 0xCC, 0xCC, 0x3D}));
 }

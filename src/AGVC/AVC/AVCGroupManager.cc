@@ -2,7 +2,9 @@
 
 #include <grpcpp/client_context.h>
 
+#include <algorithm>
 #include <cmath>
+#include <expected>
 #include <format>
 #include <utility>
 
@@ -12,6 +14,7 @@
 #include "AVCLibInfo.h"
 #include "Logger.h"
 #include "ThreadUtil.hpp"
+#include "mskdsp/Decimal20.hpp"
 
 namespace AVC {
 namespace {
@@ -42,23 +45,31 @@ const char* groupStateToString(AVCProto::GroupState state) {
   }
 }
 
-constexpr double kValueChangeEps = 1e-6;
-
-bool sameValue(double lhs, double rhs) {
-  return std::fabs(lhs - rhs) <= kValueChangeEps;
+bool sameValue(const Decimal& lhs, const Decimal& rhs) {
+  return lhs == rhs;
 }
 
-double effectiveScale(const AVCProto::SignalSpec& signal) {
-  return signal.scale() == 0.0 ? 1.0 : signal.scale();
-}
-
-double commandEchoEngineeringValue(
-    const AVCProto::SignalSpec& signal, AVCProto::ValueMode mode, double value) {
-  const auto scale = effectiveScale(signal);
-  if (mode == AVCProto::VALUE_MODE_DELTA) {
-    return value * scale;
+std::expected<Decimal, numeric::DecimalError> engineeringValue(
+    const AVCProto::SignalSpec& signal, const Decimal& value) {
+  auto scale = numeric::Scale(signal);
+  auto offset = numeric::Offset(signal);
+  if (!scale.has_value() || !offset.has_value()) {
+    return std::unexpected(!scale.has_value() ? scale.error() : offset.error());
   }
-  return value * scale + signal.offset();
+  return mskdsp::numeric::ApplyEngineering(value, *scale, *offset);
+}
+
+std::expected<Decimal, numeric::DecimalError> commandEchoEngineeringValue(
+    const AVCProto::SignalSpec& signal, AVCProto::ValueMode mode,
+    const Decimal& value) {
+  auto scale = numeric::Scale(signal);
+  if (!scale.has_value()) {
+    return std::unexpected(scale.error());
+  }
+  if (mode == AVCProto::VALUE_MODE_DELTA) {
+    return value.Multiply(*scale);
+  }
+  return engineeringValue(signal, value);
 }
 
 std::string_view defaultPointTag(AVCProto::DefaultPointKind kind) {
@@ -573,7 +584,7 @@ void GroupManager::startThreadsLocked(const std::string& groupName, GroupRuntime
   const auto connId = group->connId;
   auto tags = group->subscribeTags;
   if (connId == 0 || tags.empty()) {
-    LOG_WARNING("AVC 控制组启动事件触发控制功能失败: group_name={}, conn_id={}, 原因=订阅标签为空或连接无效", groupName, connId);
+    LOG_WARNING("AVC 控制组启动控制功能失败: group_name={}, conn_id={}, 原因=订阅标签为空或连接无效", groupName, connId);
     return;
   }
 
@@ -585,15 +596,58 @@ void GroupManager::startThreadsLocked(const std::string& groupName, GroupRuntime
       [this, groupName, trigger](std::stop_token st) {
         std::stop_callback cb(st, [trigger]() { trigger->signal.release(); });
 
-        while (true) {
-          trigger->signal.acquire();
-          if (st.stop_requested()) {
-            break;
+        bool cyclic = false;
+        double calcPeriod = 1.0;
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          auto it = groupsByName_.find(groupName);
+          if (it != groupsByName_.end()) {
+            cyclic = it->second.config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC;
+            const auto configuredPeriod = it->second.config.calculation_execution_period_seconds();
+            if (std::isfinite(configuredPeriod) && configuredPeriod > 0.0) {
+              calcPeriod = std::clamp(configuredPeriod, 1.0, 15.0);
+            }
           }
-          if (!trigger->pending.exchange(false)) {
+        }
+
+        if (!cyclic) {
+          while (true) {
+            trigger->signal.acquire();
+            if (st.stop_requested()) {
+              break;
+            }
+            if (!trigger->pending.exchange(false)) {
+              continue;
+            }
+            controlTick(groupName);
+          }
+          return;
+        }
+
+        // 等待初始快照或首个订阅输入后立即执行第一轮，避免在线程启动时用空输入计算。
+        trigger->signal.acquire();
+        if (st.stop_requested()) {
+          return;
+        }
+        trigger->pending.store(false);
+        controlTick(groupName);
+
+        const auto period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(calcPeriod));
+        auto nextTick = std::chrono::steady_clock::now() + period;
+        while (!st.stop_requested()) {
+          // 即使输入通知持续到达，也不能推迟已经到期的周期计算。
+          if (std::chrono::steady_clock::now() >= nextTick) {
+            controlTick(groupName);
+            nextTick = std::chrono::steady_clock::now() + period;
+            continue;
+          }
+          if (trigger->signal.try_acquire_until(nextTick)) {
+            trigger->pending.store(false);
             continue;
           }
           controlTick(groupName);
+          nextTick = std::chrono::steady_clock::now() + period;
         }
       });
 
@@ -652,7 +706,11 @@ void GroupManager::startThreadsLocked(const std::string& groupName, GroupRuntime
           }
         }
       });
-  LOG_INFO("AVC 控制组已启用事件触发控制功能: group_name={}, conn_id={}, 订阅标签数={}", groupName, connId, tags.size());
+  LOG_INFO("AVC 控制组已启用控制功能: group_name={}, conn_id={}, 订阅标签数={}, 控制方式={}",
+           groupName,
+           connId,
+           tags.size(),
+           group->config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC ? "周期直分配" : "PI 事件触发");
 }
 
 grpc::Status GroupManager::StartGroup(const std::string& groupName) {
@@ -688,7 +746,7 @@ grpc::Status GroupManager::StartGroup(const std::string& groupName) {
   }
   publishControlStatePoints(groupName, "控制组启动");
   primeControlInputs(groupName);
-  LOG_INFO("AVC 控制组已启动事件触发控制功能: group_name={}", groupName);
+  LOG_INFO("AVC 控制组已启动控制功能: group_name={}", groupName);
   return grpc::Status::OK;
 }
 
@@ -714,6 +772,16 @@ grpc::Status GroupManager::StopGroup(const std::string& groupName) {
     it->second.dcSubscribeContext.reset();
     pendingDelete = (it->second.state == AVCProto::GROUP_STATE_PENDING_DELETE);
     it->second.state = pendingDelete ? AVCProto::GROUP_STATE_PENDING_DELETE : AVCProto::GROUP_STATE_STOPPED;
+    it->second.hasLastDesiredTotalQKvar = false;
+    it->second.lastDesiredTotalQKvar = Decimal{};
+    it->second.commandRevision = 0;
+    it->second.directResolvedCommandRevision = 0;
+    it->second.hasDirectResolvedDesiredTotalQKvar = false;
+    it->second.directResolvedDesiredTotalQKvar = Decimal{};
+    std::fill(it->second.hasLastMemberTargetQKvar.begin(), it->second.hasLastMemberTargetQKvar.end(), false);
+    std::fill(it->second.lastMemberTargetQKvar.begin(), it->second.lastMemberTargetQKvar.end(), Decimal{});
+    it->second.hasLastCommandPublishedAt = false;
+    it->second.lastCommandPublishedAt = std::chrono::steady_clock::time_point{};
   }
   if (dcSubscribeThread.joinable()) {
     dcSubscribeThread.request_stop();
@@ -866,8 +934,8 @@ grpc::Status GroupManager::ExecuteCommand(
     return grpc::Status::OK;
   }
 
-  double raw = 0.0;
-  if (!pointValueToDouble(request.value(), &raw)) {
+  Decimal raw;
+  if (!pointValueToDecimal(request.value(), &raw)) {
     response->set_status(DataCenterProto::COMMAND_REJECTED);
     response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSUPPORTED_POINT);
     response->set_reason("命令点值类型不支持");
@@ -879,6 +947,7 @@ grpc::Status GroupManager::ExecuteCommand(
   bool voltageMode = false;
   AVCProto::SignalSpec commandSignal;
   auto commandMode = AVCProto::VALUE_MODE_ABSOLUTE;
+  bool directCyclic = false;
   ControlInput input;
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -915,6 +984,7 @@ grpc::Status GroupManager::ExecuteCommand(
     }
 
     config = it->second.config;
+    directCyclic = config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC;
     connId = it->second.connId;
     voltageMode = it->second.voltageMode;
     input.hasVoltageMeasRaw = it->second.hasVoltageMeasRaw;
@@ -945,8 +1015,14 @@ grpc::Status GroupManager::ExecuteCommand(
   }
 
   const auto defaultOutput = ComputeDefaultPointOutput(config, input);
-  response->set_lower_limit(defaultOutput.dynamicLowerQKvar);
-  response->set_upper_limit(defaultOutput.dynamicUpperQKvar);
+  response->set_lower_limit_decimal(
+      defaultOutput.dynamicLowerQKvar.ToFixedString());
+  response->set_upper_limit_decimal(
+      defaultOutput.dynamicUpperQKvar.ToFixedString());
+  response->set_lower_limit(
+      numeric::ToLegacyDouble(defaultOutput.dynamicLowerQKvar));
+  response->set_upper_limit(
+      numeric::ToLegacyDouble(defaultOutput.dynamicUpperQKvar));
 
   auto outputOpt = ComputeControlOutput(config, input, weightedStrategy_);
   if (!outputOpt) {
@@ -958,14 +1034,20 @@ grpc::Status GroupManager::ExecuteCommand(
     return grpc::Status::OK;
   }
   const auto& output = *outputOpt;
-  response->set_requested_value(output.rawDesiredTotalQKvar);
-  response->set_accepted_value(output.actualTargetQKvar);
 
-  constexpr double kEps = 1e-6;
-  if (output.rawDesiredTotalQKvar > defaultOutput.dynamicUpperQKvar + kEps ||
-      output.rawDesiredTotalQKvar < defaultOutput.dynamicLowerQKvar - kEps) {
+  response->set_requested_value_decimal(
+      output.rawDesiredTotalQKvar.ToFixedString());
+  response->set_accepted_value_decimal(
+      output.actualTargetQKvar.ToFixedString());
+  response->set_requested_value(
+      numeric::ToLegacyDouble(output.rawDesiredTotalQKvar));
+  response->set_accepted_value(
+      numeric::ToLegacyDouble(output.actualTargetQKvar));
+
+  if (output.rawDesiredTotalQKvar > defaultOutput.dynamicUpperQKvar ||
+      output.rawDesiredTotalQKvar < defaultOutput.dynamicLowerQKvar) {
     response->set_status(DataCenterProto::COMMAND_REJECTED);
-    if (output.rawDesiredTotalQKvar > defaultOutput.dynamicUpperQKvar + kEps) {
+    if (output.rawDesiredTotalQKvar > defaultOutput.dynamicUpperQKvar) {
       response->set_reject_code(DataCenterProto::COMMAND_REJECT_OVER_UPPER_LIMIT);
       response->set_reason("总无功目标超过当前可调上限");
     } else {
@@ -974,10 +1056,10 @@ grpc::Status GroupManager::ExecuteCommand(
     }
     LOG_WARNING("AVC 拒绝同步命令: group_name={}, raw_desired_q_kvar={}, lower_q_kvar={}, upper_q_kvar={}, clamped_target_q_kvar={}",
                 groupName,
-                output.rawDesiredTotalQKvar,
-                defaultOutput.dynamicLowerQKvar,
-                defaultOutput.dynamicUpperQKvar,
-                output.actualTargetQKvar);
+                output.rawDesiredTotalQKvar.ToFixedString(),
+                defaultOutput.dynamicLowerQKvar.ToFixedString(),
+                defaultOutput.dynamicUpperQKvar.ToFixedString(),
+                output.actualTargetQKvar.ToFixedString());
     return grpc::Status::OK;
   }
 
@@ -989,6 +1071,35 @@ grpc::Status GroupManager::ExecuteCommand(
   commandUpdate.mutable_value()->CopyFrom(request.value());
   commandUpdate.set_ts_ms(request.ts_ms());
   commandUpdate.set_quality(request.quality());
+
+  if (directCyclic) {
+    // 已完成与 PI_EVENT 相同的缺测、限值校验；周期线程只保留最新命令并负责实际下发。
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = groupsByName_.find(groupName);
+      if (it == groupsByName_.end() || it->second.state != AVCProto::GROUP_STATE_RUNNING) {
+        response->set_status(DataCenterProto::COMMAND_REJECTED);
+        response->set_reject_code(DataCenterProto::COMMAND_REJECT_GROUP_NOT_RUNNING);
+        response->set_reason("AVC 控制组状态已变化，命令未排队");
+        return grpc::Status::OK;
+      }
+      if (voltageMode) {
+        it->second.voltageCmdRaw = raw;
+        it->second.hasVoltageCmdRaw = true;
+      } else {
+        it->second.qTotalCmdRaw = raw;
+        it->second.hasQTotalCmdRaw = true;
+      }
+      ++it->second.commandRevision;
+      it->second.hasDirectResolvedDesiredTotalQKvar = false;
+      requestControlLocked(groupName, &it->second, "周期模式同步命令", request.dst().tag());
+    }
+    publishCommandEchoPoint(connId, commandSignal, commandMode, commandUpdate);
+    response->set_status(DataCenterProto::COMMAND_ACCEPTED);
+    response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSPECIFIED);
+    response->set_reason("AVC 周期模式命令已接受，等待命令控制周期执行");
+    return grpc::Status::OK;
+  }
 
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -1011,7 +1122,7 @@ grpc::Status GroupManager::ExecuteCommand(
     it->second.hasLastMemberTargetQKvar = output.hasLastMemberTargetQKvar;
     it->second.lastMemberTargetQKvar = output.nextLastMemberTargetQKvar;
     it->second.hasLastUnallocatedQKvar = false;
-    it->second.lastUnallocatedQKvar = 0.0;
+    it->second.lastUnallocatedQKvar = Decimal{};
   }
 
   publishCommandEchoPoint(connId, commandSignal, commandMode, commandUpdate);
@@ -1019,13 +1130,33 @@ grpc::Status GroupManager::ExecuteCommand(
 
   const auto quality = DataCenterProto::QUALITY_GOOD;
   if (output.hasVoltageMeas) {
-    (void)dataCenter_.PublishDouble(connId, std::string(defaultPointTag(AVCProto::DEFAULT_POINT_KIND_CURRENT_VOLTAGE)), output.voltageMeas, quality, 0);
+    (void)dataCenter_.PublishDecimal(
+        connId,
+        std::string(defaultPointTag(
+            AVCProto::DEFAULT_POINT_KIND_CURRENT_VOLTAGE)),
+        output.voltageMeas.ToFixedString(), quality, 0);
   }
-  (void)dataCenter_.PublishDouble(connId, std::string(defaultPointTag(AVCProto::DEFAULT_POINT_KIND_TOTAL_Q_MEAS)), output.totalQMeasKvar, quality, 0);
-  (void)dataCenter_.PublishDouble(connId, std::string(defaultPointTag(AVCProto::DEFAULT_POINT_KIND_TOTAL_Q_TARGET)), output.actualTargetQKvar, quality, 0);
-  (void)dataCenter_.PublishDouble(connId, std::string(defaultPointTag(AVCProto::DEFAULT_POINT_KIND_TOTAL_Q_ERROR)), output.totalQErrorKvar, quality, 0);
+  (void)dataCenter_.PublishDecimal(
+      connId,
+      std::string(defaultPointTag(
+          AVCProto::DEFAULT_POINT_KIND_TOTAL_Q_MEAS)),
+      output.totalQMeasKvar.ToFixedString(), quality, 0);
+  (void)dataCenter_.PublishDecimal(
+      connId,
+      std::string(defaultPointTag(
+          AVCProto::DEFAULT_POINT_KIND_TOTAL_Q_TARGET)),
+      output.actualTargetQKvar.ToFixedString(), quality, 0);
+  (void)dataCenter_.PublishDecimal(
+      connId,
+      std::string(defaultPointTag(
+          AVCProto::DEFAULT_POINT_KIND_TOTAL_Q_ERROR)),
+      output.totalQErrorKvar.ToFixedString(), quality, 0);
   if (output.hasVoltageError) {
-    (void)dataCenter_.PublishDouble(connId, std::string(defaultPointTag(AVCProto::DEFAULT_POINT_KIND_VOLTAGE_ERROR)), output.voltageError, quality, 0);
+    (void)dataCenter_.PublishDecimal(
+        connId,
+        std::string(defaultPointTag(
+            AVCProto::DEFAULT_POINT_KIND_VOLTAGE_ERROR)),
+        output.voltageError.ToFixedString(), quality, 0);
   }
 
   for (size_t i = 0; i < output.memberPublish.size() && i < output.memberPublishKvar.size(); ++i) {
@@ -1036,7 +1167,9 @@ grpc::Status GroupManager::ExecuteCommand(
     if (!member.has_q_set() || !member.q_set().has_signal() || member.q_set().signal().tag().empty()) {
       continue;
     }
-    (void)dataCenter_.PublishDouble(connId, member.q_set().signal().tag(), output.memberPublishKvar[i], quality, 0);
+    (void)dataCenter_.PublishDecimal(
+        connId, member.q_set().signal().tag(),
+        output.memberPublishKvar[i].ToFixedString(), quality, 0);
   }
 
   response->set_status(DataCenterProto::COMMAND_ACCEPTED);
@@ -1044,25 +1177,49 @@ grpc::Status GroupManager::ExecuteCommand(
   response->set_reason("AVC 同步命令已接受并执行");
   LOG_INFO("AVC 已执行同步命令: group_name={}, raw_desired_q_kvar={}, actual_target_q_kvar={}",
            groupName,
-           output.rawDesiredTotalQKvar,
-           output.actualTargetQKvar);
+           output.rawDesiredTotalQKvar.ToFixedString(),
+           output.actualTargetQKvar.ToFixedString());
   return grpc::Status::OK;
 }
 
-bool GroupManager::pointValueToDouble(const DataCenterProto::PointValue& value, double* out) {
+bool GroupManager::pointValueToDecimal(
+    const DataCenterProto::PointValue& value, Decimal* out) {
   if (out == nullptr) {
     return false;
   }
   switch (value.kind_case()) {
-  case DataCenterProto::PointValue::kDoubleValue:
-    *out = value.double_value();
+  case DataCenterProto::PointValue::kDoubleValue: {
+    auto decimal = Decimal::FromDouble(value.double_value());
+    if (!decimal.has_value()) {
+      LOG_WARNING("AVC 拒绝非有限 double 点值");
+      return false;
+    }
+    *out = *decimal;
     return true;
-  case DataCenterProto::PointValue::kIntValue:
-    *out = static_cast<double>(value.int_value());
+  }
+  case DataCenterProto::PointValue::kIntValue: {
+    auto decimal = Decimal::FromInt64(value.int_value());
+    if (!decimal.has_value()) {
+      LOG_WARNING("AVC 整数点值超出 Decimal20 范围");
+      return false;
+    }
+    *out = *decimal;
     return true;
+  }
   case DataCenterProto::PointValue::kBoolValue:
-    *out = value.bool_value() ? 1.0 : 0.0;
+    *out = value.bool_value() ? numeric::One() : numeric::Zero();
     return true;
+  case DataCenterProto::PointValue::kDecimalValue: {
+    auto decimal =
+        mskdsp::numeric::Decimal20::Parse(value.decimal_value());
+    if (!decimal.has_value()) {
+      LOG_WARNING("AVC decimal_value 解析失败: {}",
+                  mskdsp::numeric::DecimalErrorMessage(decimal.error()));
+      return false;
+    }
+    *out = *decimal;
+    return true;
+  }
   default:
     return false;
   }
@@ -1127,22 +1284,28 @@ void GroupManager::rebuildTagCache(GroupRuntime* group) {
   group->subscribeTags.clear();
 
   group->hasVoltageMeasRaw = false;
-  group->voltageMeasRaw = 0.0;
+  group->voltageMeasRaw = Decimal{};
   group->hasVoltageCmdRaw = false;
-  group->voltageCmdRaw = 0.0;
+  group->voltageCmdRaw = Decimal{};
   group->hasQTotalCmdRaw = false;
-  group->qTotalCmdRaw = 0.0;
+  group->qTotalCmdRaw = Decimal{};
+  group->commandRevision = 0;
+  group->directResolvedCommandRevision = 0;
+  group->hasDirectResolvedDesiredTotalQKvar = false;
+  group->directResolvedDesiredTotalQKvar = Decimal{};
   group->baseRawByTag.clear();
   group->hasLastDesiredTotalQKvar = false;
-  group->lastDesiredTotalQKvar = 0.0;
+  group->lastDesiredTotalQKvar = Decimal{};
   group->hasLastUnallocatedQKvar = false;
-  group->lastUnallocatedQKvar = 0.0;
+  group->lastUnallocatedQKvar = Decimal{};
+  group->hasLastCommandPublishedAt = false;
+  group->lastCommandPublishedAt = std::chrono::steady_clock::time_point{};
 
   const auto memberCount = static_cast<size_t>(group->config.members_size());
   group->hasMemberQMeasRaw.assign(memberCount, false);
-  group->memberQMeasRaw.assign(memberCount, 0.0);
+  group->memberQMeasRaw.assign(memberCount, Decimal{});
   group->hasLastMemberTargetQKvar.assign(memberCount, false);
-  group->lastMemberTargetQKvar.assign(memberCount, 0.0);
+  group->lastMemberTargetQKvar.assign(memberCount, Decimal{});
 
   std::unordered_set<std::string> seenSubscribeTags;
   auto addSubscribeTag = [&seenSubscribeTags, group](const std::string& tag) {
@@ -1336,8 +1499,8 @@ bool GroupManager::handleUpdateLocked(GroupRuntime* group, const DataCenterProto
     return false;
   }
   const auto& tag = update.dst_tag();
-  double raw = 0.0;
-  if (!pointValueToDouble(update.value(), &raw)) {
+  Decimal raw;
+  if (!pointValueToDecimal(update.value(), &raw)) {
     return false;
   }
 
@@ -1349,6 +1512,8 @@ bool GroupManager::handleUpdateLocked(GroupRuntime* group, const DataCenterProto
   }
 
   if (!group->commandTag.empty() && tag == group->commandTag) {
+    ++group->commandRevision;
+    group->hasDirectResolvedDesiredTotalQKvar = false;
     if (group->voltageMode) {
       // 命令点即使重复下发同值，也要重新触发一次控制计算。
       group->voltageCmdRaw = raw;
@@ -1407,19 +1572,31 @@ void GroupManager::publishDefaultLimitPoints(const std::string& groupName, std::
   const auto dynamicUpperTag = defaultPointTag(AVCProto::DEFAULT_POINT_KIND_DYNAMIC_UPPER);
   const auto theoreticalQuality = DataCenterProto::QUALITY_GOOD;
 
-  auto status = dataCenter_.PublishDouble(connId, std::string(theoreticalLowerTag), defaultOutput.theoreticalLowerQKvar, theoreticalQuality, 0);
+  auto status = dataCenter_.PublishDecimal(
+      connId, std::string(theoreticalLowerTag),
+      defaultOutput.theoreticalLowerQKvar.ToFixedString(), theoreticalQuality,
+      0);
   if (!status.ok()) {
     LOG_ERROR("AVC 发布默认点失败: group_name={}, tag={}, 触发来源={}, 原因={}", groupName, theoreticalLowerTag, trigger, status.error_message());
   }
-  status = dataCenter_.PublishDouble(connId, std::string(theoreticalUpperTag), defaultOutput.theoreticalUpperQKvar, theoreticalQuality, 0);
+  status = dataCenter_.PublishDecimal(
+      connId, std::string(theoreticalUpperTag),
+      defaultOutput.theoreticalUpperQKvar.ToFixedString(), theoreticalQuality,
+      0);
   if (!status.ok()) {
     LOG_ERROR("AVC 发布默认点失败: group_name={}, tag={}, 触发来源={}, 原因={}", groupName, theoreticalUpperTag, trigger, status.error_message());
   }
-  status = dataCenter_.PublishDouble(connId, std::string(dynamicLowerTag), defaultOutput.dynamicLowerQKvar, defaultOutput.dynamicQuality, 0);
+  status = dataCenter_.PublishDecimal(
+      connId, std::string(dynamicLowerTag),
+      defaultOutput.dynamicLowerQKvar.ToFixedString(),
+      defaultOutput.dynamicQuality, 0);
   if (!status.ok()) {
     LOG_ERROR("AVC 发布默认点失败: group_name={}, tag={}, 触发来源={}, 原因={}", groupName, dynamicLowerTag, trigger, status.error_message());
   }
-  status = dataCenter_.PublishDouble(connId, std::string(dynamicUpperTag), defaultOutput.dynamicUpperQKvar, defaultOutput.dynamicQuality, 0);
+  status = dataCenter_.PublishDecimal(
+      connId, std::string(dynamicUpperTag),
+      defaultOutput.dynamicUpperQKvar.ToFixedString(),
+      defaultOutput.dynamicQuality, 0);
   if (!status.ok()) {
     LOG_ERROR("AVC 发布默认点失败: group_name={}, tag={}, 触发来源={}, 原因={}", groupName, dynamicUpperTag, trigger, status.error_message());
   }
@@ -1427,10 +1604,10 @@ void GroupManager::publishDefaultLimitPoints(const std::string& groupName, std::
       "AVC 已发布默认限值点: group_name={}, 触发来源={}, 理论下限={}, 理论上限={}, 当前下限={}, 当前上限={}, 当前质量={}, 不可控成员数={}, 缺测不可控成员数={}",
       groupName,
       trigger,
-      defaultOutput.theoreticalLowerQKvar,
-      defaultOutput.theoreticalUpperQKvar,
-      defaultOutput.dynamicLowerQKvar,
-      defaultOutput.dynamicUpperQKvar,
+      defaultOutput.theoreticalLowerQKvar.ToFixedString(),
+      defaultOutput.theoreticalUpperQKvar.ToFixedString(),
+      defaultOutput.dynamicLowerQKvar.ToFixedString(),
+      defaultOutput.dynamicUpperQKvar.ToFixedString(),
       static_cast<int>(defaultOutput.dynamicQuality),
       defaultOutput.uncontrollableMemberCount,
       defaultOutput.missingUncontrollableMemberCount);
@@ -1440,24 +1617,32 @@ void GroupManager::publishCommandEchoPoint(
     uint32_t connId,
     const AVCProto::SignalSpec& commandSignal,
     AVCProto::ValueMode commandMode,
-    const DataCenterProto::PointUpdate& update) {
+  const DataCenterProto::PointUpdate& update) {
   const auto commandEchoTag = defaultPointTag(AVCProto::DEFAULT_POINT_KIND_COMMAND_ECHO);
-  double value = 0.0;
-  if (!pointValueToDouble(update.value(), &value)) {
+  Decimal value;
+  if (!pointValueToDecimal(update.value(), &value)) {
     LOG_WARNING("AVC 发布调节返回值跳过: conn_id={}, tag={}, 原因=命令点值类型不支持", connId, commandEchoTag);
     return;
   }
 
   const auto echoValue = commandEchoEngineeringValue(commandSignal, commandMode, value);
-  auto status = dataCenter_.PublishDouble(connId, std::string(commandEchoTag), echoValue, update.quality(), update.ts_ms());
+  if (!echoValue.has_value()) {
+    LOG_WARNING("AVC 发布调节返回值跳过: conn_id={}, tag={}, 原因={}",
+                connId, commandEchoTag,
+                mskdsp::numeric::DecimalErrorMessage(echoValue.error()));
+    return;
+  }
+  auto status = dataCenter_.PublishDecimal(
+      connId, std::string(commandEchoTag), echoValue->ToFixedString(),
+      update.quality(), update.ts_ms());
   if (!status.ok()) {
     LOG_ERROR("AVC 发布调节返回值失败: conn_id={}, tag={}, 原因={}", connId, commandEchoTag, status.error_message());
   } else {
     LOG_DEBUG("AVC 已发布调节返回值: conn_id={}, tag={}, value={}, echo_value={}, 质量={}, ts_ms={}",
               connId,
               commandEchoTag,
-              value,
-              echoValue,
+              value.ToFixedString(),
+              echoValue->ToFixedString(),
               static_cast<int>(update.quality()),
               update.ts_ms());
   }
@@ -1468,6 +1653,7 @@ void GroupManager::controlTick(const std::string& groupName) {
   uint32_t connId = 0;
   bool functionEnabled = true;
   ControlInput input;
+  uint64_t commandRevision = 0;
 
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -1482,6 +1668,7 @@ void GroupManager::controlTick(const std::string& groupName) {
     config = it->second.config;
     connId = it->second.connId;
     functionEnabled = it->second.functionEnabled;
+    commandRevision = it->second.commandRevision;
     input.hasVoltageMeasRaw = it->second.hasVoltageMeasRaw;
     input.voltageMeasRaw = it->second.voltageMeasRaw;
     input.hasVoltageCmdRaw = it->second.hasVoltageCmdRaw;
@@ -1495,6 +1682,14 @@ void GroupManager::controlTick(const std::string& groupName) {
     input.lastMemberTargetQKvar = it->second.lastMemberTargetQKvar;
     input.hasLastDesiredTotalQKvar = it->second.hasLastDesiredTotalQKvar;
     input.lastDesiredTotalQKvar = it->second.lastDesiredTotalQKvar;
+    const bool stableDeltaTarget = config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC &&
+                                   config.q_total_cmd().mode() == AVCProto::VALUE_MODE_DELTA &&
+                                   config.q_total_cmd().delta_base() == AVCProto::DELTA_BASE_LAST_TARGET;
+    if (stableDeltaTarget && it->second.hasDirectResolvedDesiredTotalQKvar &&
+        it->second.directResolvedCommandRevision == it->second.commandRevision) {
+      input.hasDesiredTotalOverride = true;
+      input.desiredTotalOverrideQKvar = it->second.directResolvedDesiredTotalQKvar;
+    }
   }
 
   if (connId == 0) {
@@ -1503,26 +1698,35 @@ void GroupManager::controlTick(const std::string& groupName) {
 
   const auto quality = DataCenterProto::QUALITY_GOOD;
   if (const auto voltageMeas = ComputeVoltageMeas(config, input)) {
-    auto status = dataCenter_.PublishDouble(connId, std::string(defaultPointTag(AVCProto::DEFAULT_POINT_KIND_CURRENT_VOLTAGE)), *voltageMeas, quality, 0);
+    auto status = dataCenter_.PublishDecimal(
+        connId,
+        std::string(defaultPointTag(
+            AVCProto::DEFAULT_POINT_KIND_CURRENT_VOLTAGE)),
+        voltageMeas->ToFixedString(), quality, 0);
     if (!status.ok()) {
       LOG_ERROR("AVC 发布当前电压失败: group_name={}, conn_id={}, 原因={}", groupName, connId, status.error_message());
     } else {
-      LOG_DEBUG("AVC 已发布当前电压: group_name={}, conn_id={}, value={}", groupName, connId, *voltageMeas);
+      LOG_DEBUG("AVC 已发布当前电压: group_name={}, conn_id={}, value={}", groupName, connId, voltageMeas->ToFixedString());
     }
   }
 
   const auto totalQMeasKvar = ComputeTotalQMeasKvar(config, input);
-  {
-    auto status = dataCenter_.PublishDouble(connId, std::string(defaultPointTag(AVCProto::DEFAULT_POINT_KIND_TOTAL_Q_MEAS)), totalQMeasKvar, quality, 0);
+  if (totalQMeasKvar.has_value()) {
+    auto status = dataCenter_.PublishDecimal(
+        connId,
+        std::string(defaultPointTag(
+            AVCProto::DEFAULT_POINT_KIND_TOTAL_Q_MEAS)),
+        totalQMeasKvar->ToFixedString(), quality, 0);
     if (!status.ok()) {
       LOG_ERROR("AVC 发布总无功实测失败: group_name={}, conn_id={}, value={}, 原因={}",
                 groupName,
                 connId,
-                totalQMeasKvar,
+                totalQMeasKvar->ToFixedString(),
                 status.error_message());
     }
   }
-  publishDefaultLimitPoints(groupName, "事件触发控制");
+  publishDefaultLimitPoints(groupName,
+                            config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC ? "周期直分配控制" : "PI 事件触发控制");
 
   if (!functionEnabled) {
     LOG_DEBUG("AVC 跳过控制输出: group_name={}, 原因=AVC 功能未投入", groupName);
@@ -1535,51 +1739,109 @@ void GroupManager::controlTick(const std::string& groupName) {
   }
   const auto& output = *outputOpt;
 
-  auto status = dataCenter_.PublishDouble(connId, std::string(defaultPointTag(AVCProto::DEFAULT_POINT_KIND_TOTAL_Q_TARGET)), output.actualTargetQKvar, quality, 0);
+  // 计算期间若收到更新命令，当前结果已过期，不得覆盖最新目标。
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    const auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end() || it->second.state != AVCProto::GROUP_STATE_RUNNING ||
+        it->second.commandRevision != commandRevision) {
+      LOG_DEBUG("AVC 丢弃已过期控制计算结果: group_name={}, command_revision={}", groupName, commandRevision);
+      return;
+    }
+  }
+
+  const bool stableDeltaTarget = config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC &&
+                                 config.q_total_cmd().mode() == AVCProto::VALUE_MODE_DELTA &&
+                                 config.q_total_cmd().delta_base() == AVCProto::DELTA_BASE_LAST_TARGET;
+  if (stableDeltaTarget && !input.hasDesiredTotalOverride) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = groupsByName_.find(groupName);
+    if (it != groupsByName_.end() && it->second.state == AVCProto::GROUP_STATE_RUNNING &&
+        it->second.commandRevision == commandRevision) {
+      it->second.directResolvedCommandRevision = commandRevision;
+      it->second.directResolvedDesiredTotalQKvar = output.rawDesiredTotalQKvar;
+      it->second.hasDirectResolvedDesiredTotalQKvar = true;
+      LOG_DEBUG("AVC 周期直分配已固定增量命令解析目标: group_name={}, command_revision={}, desired_total_q_kvar={}",
+                groupName,
+                commandRevision,
+                output.rawDesiredTotalQKvar.ToFixedString());
+    }
+  }
+
+  // 周期直分配模式按命令控制周期限制成员设定下发，状态量仍按计算周期刷新。
+  const bool directCyclic = config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC;
+  bool allowMemberPublish = true;
+  if (directCyclic) {
+    const auto minInterval = std::chrono::duration<double>(config.command_control_period_seconds());
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = groupsByName_.find(groupName);
+    if (it != groupsByName_.end() && it->second.hasLastCommandPublishedAt) {
+      allowMemberPublish = (std::chrono::steady_clock::now() - it->second.lastCommandPublishedAt) >= minInterval;
+    }
+  }
+
+  auto status = dataCenter_.PublishDecimal(
+      connId,
+      std::string(defaultPointTag(
+          AVCProto::DEFAULT_POINT_KIND_TOTAL_Q_TARGET)),
+      output.actualTargetQKvar.ToFixedString(), quality, 0);
   if (!status.ok()) {
     LOG_ERROR("AVC 发布总无功目标失败: group_name={}, conn_id={}, value={}, 原因={}",
               groupName,
               connId,
-              output.actualTargetQKvar,
+              output.actualTargetQKvar.ToFixedString(),
               status.error_message());
   }
 
-  status = dataCenter_.PublishDouble(connId, std::string(defaultPointTag(AVCProto::DEFAULT_POINT_KIND_TOTAL_Q_ERROR)), output.totalQErrorKvar, quality, 0);
+  status = dataCenter_.PublishDecimal(
+      connId,
+      std::string(defaultPointTag(
+          AVCProto::DEFAULT_POINT_KIND_TOTAL_Q_ERROR)),
+      output.totalQErrorKvar.ToFixedString(), quality, 0);
   if (!status.ok()) {
     LOG_ERROR("AVC 发布总无功偏差失败: group_name={}, conn_id={}, value={}, 原因={}",
               groupName,
               connId,
-              output.totalQErrorKvar,
+              output.totalQErrorKvar.ToFixedString(),
               status.error_message());
   }
 
   if (output.hasVoltageError) {
-    status = dataCenter_.PublishDouble(connId, std::string(defaultPointTag(AVCProto::DEFAULT_POINT_KIND_VOLTAGE_ERROR)), output.voltageError, quality, 0);
+    status = dataCenter_.PublishDecimal(
+        connId,
+        std::string(defaultPointTag(
+            AVCProto::DEFAULT_POINT_KIND_VOLTAGE_ERROR)),
+        output.voltageError.ToFixedString(), quality, 0);
     if (!status.ok()) {
       LOG_ERROR("AVC 发布电压偏差失败: group_name={}, conn_id={}, value={}, 原因={}",
                 groupName,
                 connId,
-                output.voltageError,
+                output.voltageError.ToFixedString(),
                 status.error_message());
     }
   }
 
+  bool commandApplied = false;
   for (size_t i = 0; i < output.memberPublish.size() && i < output.memberPublishKvar.size(); ++i) {
-    if (!output.memberPublish[i]) {
+    if (!allowMemberPublish || !output.memberPublish[i]) {
       continue;
     }
     const auto& member = config.members(static_cast<int>(i));
     if (!member.has_q_set() || !member.q_set().has_signal() || member.q_set().signal().tag().empty()) {
       continue;
     }
-    status = dataCenter_.PublishDouble(connId, member.q_set().signal().tag(), output.memberPublishKvar[i], quality, 0);
+    status = dataCenter_.PublishDecimal(
+        connId, member.q_set().signal().tag(),
+        output.memberPublishKvar[i].ToFixedString(), quality, 0);
     if (!status.ok()) {
       LOG_ERROR("AVC 下发成员无功设定失败: group_name={}, member_name={}, tag={}, publish_kvar={}, 原因={}",
                 groupName,
                 member.member_name(),
                 member.q_set().signal().tag(),
-                output.memberPublishKvar[i],
+                output.memberPublishKvar[i].ToFixedString(),
                 status.error_message());
+    } else {
+      commandApplied = true;
     }
   }
 
@@ -1592,36 +1854,48 @@ void GroupManager::controlTick(const std::string& groupName) {
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = groupsByName_.find(groupName);
-    if (it == groupsByName_.end()) {
+    if (it == groupsByName_.end() || it->second.state != AVCProto::GROUP_STATE_RUNNING ||
+        it->second.commandRevision != commandRevision) {
+      LOG_DEBUG("AVC 跳过过期控制状态写回: group_name={}, command_revision={}", groupName, commandRevision);
       return;
     }
 
-    it->second.hasLastDesiredTotalQKvar = output.hasLastDesiredTotalQKvar;
-    it->second.lastDesiredTotalQKvar = output.nextLastDesiredTotalQKvar;
-    it->second.hasLastMemberTargetQKvar = output.hasLastMemberTargetQKvar;
-    it->second.lastMemberTargetQKvar = output.nextLastMemberTargetQKvar;
+    if (!directCyclic || commandApplied) {
+      it->second.hasLastDesiredTotalQKvar = output.hasLastDesiredTotalQKvar;
+      it->second.lastDesiredTotalQKvar = output.nextLastDesiredTotalQKvar;
+      it->second.hasLastMemberTargetQKvar = output.hasLastMemberTargetQKvar;
+      it->second.lastMemberTargetQKvar = output.nextLastMemberTargetQKvar;
+    }
+    if (directCyclic && commandApplied) {
+      it->second.lastCommandPublishedAt = std::chrono::steady_clock::now();
+      it->second.hasLastCommandPublishedAt = true;
+    }
 
-    constexpr double kEps = 1e-6;
-    if (std::fabs(unallocatedQKvar) > kEps) {
-      if (!it->second.hasLastUnallocatedQKvar || std::fabs(unallocatedQKvar - it->second.lastUnallocatedQKvar) > kEps) {
+    if (!unallocatedQKvar.IsZero()) {
+      if (!it->second.hasLastUnallocatedQKvar ||
+          unallocatedQKvar != it->second.lastUnallocatedQKvar) {
         shouldLogUnallocated = true;
         it->second.hasLastUnallocatedQKvar = true;
         it->second.lastUnallocatedQKvar = unallocatedQKvar;
       }
     } else {
       it->second.hasLastUnallocatedQKvar = false;
-      it->second.lastUnallocatedQKvar = 0.0;
+      it->second.lastUnallocatedQKvar = Decimal{};
     }
+  }
+
+  if (directCyclic && !allowMemberPublish) {
+    LOG_DEBUG("AVC 周期控制暂缓成员命令下发: group_name={}, 原因=命令控制周期未到", groupName);
   }
 
   if (shouldLogUnallocated) {
     LOG_WARNING("AVC 分配受限: group_name={}, unallocated_q_kvar={}, target_controllable_q_kvar={}, passive_q_kvar={}, desired_total_q_kvar={}, actual_target_q_kvar={}",
                 groupName,
-                unallocatedQKvar,
-                targetControllableQKvar,
-                passiveQKvar,
-                desiredTotalQKvar,
-                actualTargetQKvar);
+                unallocatedQKvar.ToFixedString(),
+                targetControllableQKvar.ToFixedString(),
+                passiveQKvar.ToFixedString(),
+                desiredTotalQKvar.ToFixedString(),
+                actualTargetQKvar.ToFixedString());
   }
 }
 

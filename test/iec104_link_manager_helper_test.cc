@@ -8,6 +8,7 @@
 #include "IEC104LinkManager.h"
 #undef private
 
+#include "IEC104ReportPolicy.hpp"
 #include "support/FakeDataCenter.hpp"
 
 namespace {
@@ -89,6 +90,38 @@ const IEC104Proto::SimulationPoint *FindSimulationPoint(
 }
 }  // 命名空间结束
 
+// 验证：遥测数值未越过死区时，品质或时标变化仍会触发上报。
+TEST(IEC104ReportPolicyTest, QualityOrTimestampChangeBypassesDeadband) {
+  const IEC104::detail::LastReportedTelemetry last{
+      .value = mskdsp::numeric::Decimal20::Parse("10").value(),
+      .quality = DataCenterProto::QUALITY_GOOD,
+      .tsMs = 100,
+  };
+
+  EXPECT_FALSE(IEC104::detail::ShouldReportTelemetry(10.1, 1.0, DataCenterProto::QUALITY_GOOD, 100, last));
+  EXPECT_TRUE(IEC104::detail::ShouldReportTelemetry(10.1, 1.0, DataCenterProto::QUALITY_UNCERTAIN, 100, last));
+  EXPECT_TRUE(IEC104::detail::ShouldReportTelemetry(10.1, 1.0, DataCenterProto::QUALITY_GOOD, 101, last));
+  EXPECT_TRUE(IEC104::detail::ShouldReportTelemetry(11.0, 1.0, DataCenterProto::QUALITY_GOOD, 100, last));
+}
+
+// 验证：Decimal20 遥测值精确达到死区边界时会触发上报。
+TEST(IEC104ReportPolicyTest, DecimalValueAtDeadbandBoundaryReports) {
+  const IEC104::detail::LastReportedTelemetry last{
+      .value = mskdsp::numeric::Decimal20::Parse(
+                   "0.10000000000000000001")
+                   .value(),
+      .quality = DataCenterProto::QUALITY_GOOD,
+      .tsMs = 100,
+  };
+  const auto current = mskdsp::numeric::Decimal20::Parse(
+                           "0.30000000000000000001")
+                           .value();
+  const auto deadband = mskdsp::numeric::Decimal20::Parse("0.2").value();
+
+  EXPECT_TRUE(IEC104::detail::ShouldReportTelemetry(
+      current, deadband, DataCenterProto::QUALITY_GOOD, 100, last));
+}
+
 // 验证：validateLinkConfig 对缺失/非法字段返回错误。
 TEST(IEC104LinkManagerHelperTest, ValidateLinkConfigRejectsInvalidFields) {
   IEC104Proto::LinkConfig config;
@@ -112,6 +145,35 @@ TEST(IEC104LinkManagerHelperTest, ValidateLinkConfigRejectsInvalidFields) {
   config.set_ca(70000);
   st = LinkManager::validateLinkConfig(config);
   EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+// 验证：ROLE_SERVER 配置白名单主站 IP 时必须使用合法 IP 地址。
+TEST(IEC104LinkManagerHelperTest, ValidateServerClientIpWhitelist) {
+  IEC104Proto::LinkConfig config;
+  config.set_conn_name("server");
+  config.set_role(IEC104Proto::ROLE_SERVER);
+  config.mutable_local()->set_ip("0.0.0.0");
+  config.mutable_local()->set_port(2404);
+
+  // 未配置 remote.ip 时保持兼容，允许服务端不启用来源限制。
+  auto st = LinkManager::validateLinkConfig(config);
+  EXPECT_TRUE(st.ok());
+
+  config.mutable_remote()->set_ip("192.168.1.10");
+  st = LinkManager::validateLinkConfig(config);
+  EXPECT_TRUE(st.ok());
+
+  config.mutable_remote()->set_ip("not-an-ip");
+  st = LinkManager::validateLinkConfig(config);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+
+  config.mutable_remote()->set_ip("0.0.0.0");
+  st = LinkManager::validateLinkConfig(config);
+  EXPECT_TRUE(st.ok());
+
+  config.mutable_remote()->set_ip("::");
+  st = LinkManager::validateLinkConfig(config);
+  EXPECT_TRUE(st.ok());
 }
 
 // 验证：normalizeStationRole 会根据传输角色补默认站点角色。
@@ -205,7 +267,8 @@ TEST(IEC104LinkManagerHelperTest, HandleClientPointValueDeadbandSkipsPublish) {
   runtime.connId = 2;
   runtime.config = MakeClientConfig("conn", IEC104Proto::STATION_ROLE_SLAVE);
   runtime.pointTable = MakePointTable();
-  runtime.lastReportedByTag["float-tag"] = 21.1;
+  runtime.lastReportedByTag["float-tag"] =
+      mskdsp::numeric::Decimal20::Parse("21.1").value();
   mgr.linksByName_.emplace("conn", std::move(runtime));
 
   PointValue pv;

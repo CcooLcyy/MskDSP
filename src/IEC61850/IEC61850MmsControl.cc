@@ -14,6 +14,7 @@
 #include "IEC61850MmsBer.h"
 #include "IEC61850MmsSession.h"
 #include "IEC61850ProtocolStack.h"
+#include "mskdsp/Decimal20.hpp"
 
 namespace IEC61850 {
 namespace {
@@ -923,9 +924,6 @@ grpc::Status EncodeMmsPointControlValue(
   if (!capability.ctlValType.has_value()) {
     return PreconditionError("在线控制对象缺少ctlVal类型描述");
   }
-  if (!std::isfinite(command.scale) || !std::isfinite(command.offset)) {
-    return ArgumentError("控制点scale或offset不是有限数");
-  }
   const auto& type = *capability.ctlValType;
   switch (command.valueType) {
     case IEC61850Proto::POINT_VALUE_TYPE_BOOL:
@@ -935,28 +933,40 @@ grpc::Status EncodeMmsPointControlValue(
       return EncodeMmsDataBoolean(command.boolValue, encodedValue);
 
     case IEC61850Proto::POINT_VALUE_TYPE_INT64: {
-      const long double scale = command.scale == 0.0 ? 1.0 : command.scale;
-      const long double raw =
-          (static_cast<long double>(command.intValue) -
-           static_cast<long double>(command.offset)) /
-          scale;
-      if (!std::isfinite(raw) ||
-          std::round(raw) != raw) {
-        return ArgumentError("整数控制值反向换算后不是有限整数");
+      const auto raw = mskdsp::numeric::ReverseEngineering(
+          command.engineeringValue, command.scale, command.offset);
+      if (!raw.has_value()) {
+        return ArgumentError(std::format(
+            "整数控制值反向换算失败: {}",
+            mskdsp::numeric::DecimalErrorMessage(raw.error())));
+      }
+      if (type.width == 0 || type.width > 64) {
+        return PreconditionError("在线INTEGER位宽不受支持");
       }
       if (type.kind == MmsTypeSpecificationKind::INTEGER) {
-        if (raw < -0x1p63L || raw >= 0x1p63L) {
+        const auto converted = raw->ToInteger<std::int64_t>(
+            mskdsp::numeric::RoundingMode::kHalfAwayFromZero);
+        if (!converted.has_value()) {
           return ArgumentError("整数控制值超出MMS范围");
         }
-        return EncodeMmsDataSigned(static_cast<std::int64_t>(raw),
-                                   encodedValue);
+        if (type.width < 64) {
+          const auto limit = std::int64_t{1} << (type.width - 1);
+          if (*converted < -limit || *converted >= limit) {
+            return ArgumentError("整数控制值超出在线MMS INTEGER位宽");
+          }
+        }
+        return EncodeMmsDataSigned(*converted, encodedValue);
       }
       if (type.kind == MmsTypeSpecificationKind::UNSIGNED) {
-        if (raw < 0.0L || raw >= 0x1p64L) {
+        const auto converted = raw->ToInteger<std::uint64_t>(
+            mskdsp::numeric::RoundingMode::kHalfAwayFromZero);
+        if (!converted.has_value()) {
           return ArgumentError("无符号控制值超出MMS范围");
         }
-        return EncodeMmsDataUnsigned(static_cast<std::uint64_t>(raw),
-                                     encodedValue);
+        if (type.width < 64 && *converted >= (std::uint64_t{1} << type.width)) {
+          return ArgumentError("无符号控制值超出在线MMS UNSIGNED位宽");
+        }
+        return EncodeMmsDataUnsigned(*converted, encodedValue);
       }
       return PreconditionError("DataCenter整数控制值与在线ctlVal不匹配");
     }
@@ -965,14 +975,12 @@ grpc::Status EncodeMmsPointControlValue(
       if (type.kind != MmsTypeSpecificationKind::FLOATING_POINT) {
         return PreconditionError("DataCenter浮点控制值与在线ctlVal不匹配");
       }
-      const long double scale = command.scale == 0.0 ? 1.0 : command.scale;
-      const long double raw =
-          (static_cast<long double>(command.doubleValue) -
-           static_cast<long double>(command.offset)) /
-          scale;
-      const double converted = static_cast<double>(raw);
-      if (!std::isfinite(raw) || !std::isfinite(converted)) {
-        return ArgumentError("浮点控制值反向换算后不是有限数");
+      const auto raw = mskdsp::numeric::ReverseEngineering(
+          command.engineeringValue, command.scale, command.offset);
+      if (!raw.has_value()) {
+        return ArgumentError(std::format(
+            "浮点控制值反向换算失败: {}",
+            mskdsp::numeric::DecimalErrorMessage(raw.error())));
       }
       std::uint8_t formatWidth = 0;
       if (type.width == 32 || type.width == 0x08) {
@@ -982,8 +990,19 @@ grpc::Status EncodeMmsPointControlValue(
       } else {
         return PreconditionError("在线FLOATING-POINT格式宽度不受支持");
       }
-      return EncodeMmsDataFloatingPoint(converted, formatWidth,
-                                        encodedValue);
+      if (formatWidth == 0x08) {
+        const auto converted = raw->ToFloat();
+        if (!converted.has_value()) {
+          return ArgumentError("浮点控制值超出MMS FLOAT32范围");
+        }
+        return EncodeMmsDataFloatingPoint(static_cast<double>(*converted),
+                                          formatWidth, encodedValue);
+      }
+      const auto converted = raw->ToDouble();
+      if (!converted.has_value()) {
+        return ArgumentError("浮点控制值超出MMS FLOAT64范围");
+      }
+      return EncodeMmsDataFloatingPoint(*converted, formatWidth, encodedValue);
     }
 
     default:

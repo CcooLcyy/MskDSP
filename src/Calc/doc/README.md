@@ -7,7 +7,7 @@ Calc 类型化运算模块：从 DataCenter 订阅同一计算分组 `conn_id` �
 - 按分组管理计算：一个 `group_name` 对应 DataCenter 的一条连接 `(module_name="Calc", conn_name=group_name) -> conn_id`
 - 分组内多 item：同一个 group 可包含多条计算项
 - 类型化运算：支持二元数值运算 `ADD/SUB/MUL/DIV`、多项聚合 `SUM/AVERAGE` 与逻辑运算 `NOT/AND/OR/XOR`
-- 类型化常量：支持 `bool/int64/double` 常量
+- 类型化常量：支持 `bool/int64/double/decimal` 常量；精确十进制以文本传入
 - 自动内建点：二元/逻辑 item 自动生成 `left_input/right_input/result`；SUM/AVERAGE 按操作数顺序生成 `input_1/input_2/.../result`，并同步到 DataCenter 连接标签注册表
 - 自动启动：分组配置达到当前最小可运行条件后，会自动尝试启动分组内运算功能
 
@@ -49,11 +49,11 @@ Calc 不直接对接 IEC104/ModbusRTU/DLT645；上下游均通过 DataCenter 的
 - `item_name`：分组内唯一的计算项名
 - `left_input/right_input/result`：二元或逻辑 item 自动派生的内建点角色，实际 tag 形式分别为 `<item_name>/left_input`、`<item_name>/right_input`、`<item_name>/result`
 - `operands`：SUM/AVERAGE 的有序操作数列表，每项可以是 DataCenter 路由输入或类型化常量；对应输入 tag 按 1-based 顺序派生为 `<item_name>/input_1`、`<item_name>/input_2` 等，结果统一发布到 `<item_name>/result`
-- `decimal_places`：AVERAGE 可选的小数位数；未设置时不主动舍入，设置后按普通四舍五入输出指定小数位
+- `decimal_places`：AVERAGE 可选的小数位数，合法范围为 0..20；未设置时不主动量化，设置后按半数远离零输出指定小数位
 
 ### 运算与类型规则
-- 数值运算：`ADD/SUB/MUL/DIV` 仅接受 `int64/double`
-- 聚合运算：`SUM/AVERAGE` 至少需要两个 `operands`，仅接受 `int64/double`；SUM 在全为 int64 且不溢出时输出 int64，否则输出 double；AVERAGE 始终输出 double
+- 数值运算：`ADD/SUB/MUL/DIV` 接受 `int64/double/decimal`，内部统一按小数点后 20 位计算
+- 聚合运算：`SUM/AVERAGE` 至少需要两个 `operands`，接受 `int64/double/decimal`；显式 decimal 输入以固定 20 位 `decimal_value` 输出，旧类型继续保持兼容输出
 - 逻辑运算：`NOT/AND/OR/XOR` 仅接受 `bool`
 - 类型不匹配：记录中文日志并跳过本轮结果发布
 - `DIV` 除零：记录中文告警日志并跳过本轮结果发布
@@ -76,7 +76,7 @@ Calc 不直接对接 IEC104/ModbusRTU/DLT645；上下游均通过 DataCenter 的
 
 ### 上位机建模建议
 - 页面建议按“分组列表 + item 列表 + 运算配置 + 内建点说明 + 运行状态”组织，而不是拆成 item 级独立 CRUD
-- 数值运算仅允许为常量选择 `int64/double`；逻辑运算仅允许为常量选择 `bool`
+- 数值运算允许为常量选择 `int64/double/decimal`，需要 20 位小数时必须使用 decimal 文本；逻辑运算仅允许为常量选择 `bool`
 - “已有点 + 已有点”与“已有点 + 常量”都应通过同一个 `CalcItemConfig` 表达，不要为两者拆两套模型
 - `conn_id` 应作为关键只读字段展示，供用户在 `数据总线` 页面确认 Route 是否绑定到正确分组
 

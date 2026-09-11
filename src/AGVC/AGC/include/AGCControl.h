@@ -7,74 +7,79 @@
 #include <vector>
 
 #include "AGC.pb.h"
+#include "AGCNumeric.hpp"
 #include "AgvcStrategy.h"
 #include "DataCenter.pb.h"
 
 namespace AGC {
 
+using Decimal = numeric::Decimal;
+
 struct ControlInput {
   bool hasCmdRaw{false};
-  double cmdRaw{0.0};
-  std::unordered_map<std::string, double> baseRawByTag;
+  Decimal cmdRaw;
+  std::unordered_map<std::string, Decimal> baseRawByTag;
   std::vector<bool> hasMemberMeasRaw;
-  std::vector<double> memberMeasRaw;
+  std::vector<Decimal> memberMeasRaw;
 
   bool hasLastDesiredTotalKw{false};
-  double lastDesiredTotalKw{0.0};
+  Decimal lastDesiredTotalKw;
 
   std::vector<bool> hasLastMemberTargetKw;
-  std::vector<double> lastMemberTargetKw;
+  std::vector<Decimal> lastMemberTargetKw;
 
   // 已确认的成员固定控制参数；缺少某个成员时沿用原始分配结果。
   AGCProto::GroupControlProfile controlProfile;
-  std::vector<double> integralMemoryKw;
+  std::vector<Decimal> integralMemoryKw;
   double controlPeriodSeconds{1.0};
+  // 仅 PI_EVENT 模式启用固定参数修正；周期直分配模式保持纯分配。
+  bool enablePi{true};
   bool integralEnabled{true};
   bool hasDesiredTotalOverride{false};
-  double desiredTotalOverrideKw{0.0};
+  Decimal desiredTotalOverrideKw;
 };
 
 struct ControlOutput {
-  double totalMeasKw{0.0};
-  double desiredTotalKw{0.0};
-  double actualTargetKw{0.0};
-  double totalErrorKw{0.0};
+  Decimal totalMeasKw;
+  Decimal desiredTotalKw;
+  Decimal actualTargetKw;
+  Decimal totalErrorKw;
 
-  double passiveKw{0.0};
-  double targetControllableKw{0.0};
-  double unallocatedKw{0.0};
+  Decimal passiveKw;
+  Decimal targetControllableKw;
+  Decimal unallocatedKw;
 
   bool publishTotalMeas{false};
   bool publishTotalTarget{false};
   bool publishTotalError{false};
 
-  std::vector<double> memberTargetKw;
+  std::vector<Decimal> memberTargetKw;
   std::vector<bool> memberPublish;
-  std::vector<double> memberPublishKw;
+  std::vector<Decimal> memberPublishKw;
 
   bool hasLastDesiredTotalKw{false};
-  double nextLastDesiredTotalKw{0.0};
+  Decimal nextLastDesiredTotalKw;
 
   std::vector<bool> hasLastMemberTargetKw;
-  std::vector<double> nextLastMemberTargetKw;
+  std::vector<Decimal> nextLastMemberTargetKw;
 
-  std::vector<double> nextIntegralMemoryKw;
+  std::vector<Decimal> nextIntegralMemoryKw;
 };
 
 struct DefaultPointOutput {
-  double theoreticalLowerKw{0.0};
-  double theoreticalUpperKw{0.0};
-  double dynamicLowerKw{0.0};
-  double dynamicUpperKw{0.0};
+  Decimal theoreticalLowerKw;
+  Decimal theoreticalUpperKw;
+  Decimal dynamicLowerKw;
+  Decimal dynamicUpperKw;
   DataCenterProto::Quality dynamicQuality{DataCenterProto::QUALITY_GOOD};
   size_t uncontrollableMemberCount{0};
   size_t missingUncontrollableMemberCount{0};
 };
 
-std::optional<double> ComputeTotalMeasKw(
+std::optional<Decimal> ComputeTotalMeasKw(
     const AGCProto::GroupConfig& config,
     const ControlInput& input,
-    double* totalMeasKwOut = nullptr);
+    Decimal* totalMeasKwOut = nullptr);
 DefaultPointOutput ComputeDefaultPointOutput(const AGCProto::GroupConfig& config, const ControlInput& input);
 std::optional<ControlOutput> ComputeControlOutput(
     const AGCProto::GroupConfig& config,

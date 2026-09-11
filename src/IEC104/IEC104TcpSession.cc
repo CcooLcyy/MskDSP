@@ -35,6 +35,7 @@ constexpr uint8_t kCotActivationCon = 7;
 constexpr uint8_t kCotActivationTermination = 10;
 constexpr uint8_t kCotInterrogatedByStation = 20;
 constexpr uint8_t kCotNegative = 0x40;
+constexpr uint8_t kCotSpontaneous = 3;
 
 constexpr uint8_t kQoiStation = 20;
 
@@ -55,6 +56,7 @@ constexpr uint32_t kMeasuredValueSq1ObjectSize = 5;
 constexpr uint32_t kCp56Time2aSize = 7;
 constexpr uint32_t kMinMeasuredValueAsduBytes = kAsduHeaderSize + 3 + 4 + 1 + kCp56Time2aSize;
 constexpr uint32_t kDefaultPointBatchWindowMs = 20;
+constexpr size_t kSoeDedupeWindow = 8000;
 constexpr std::chrono::seconds kRemoteControlSelectTimeout{10};
 
 size_t maxSq0Objects(uint32_t maxAsduBytes, uint32_t objectSize) {
@@ -147,6 +149,10 @@ void TcpSession::Start(boost::asio::ip::tcp::socket socket) {
   sendUnacked_ = 0;
   recvSinceLastAck_ = 0;
   pendingAsdu_.clear();
+  sentIFrameSoeSequences_.clear();
+  soeReplayLoaded_ = false;
+  soeSeenSequences_.clear();
+  soeSeenSequenceOrder_.clear();
   writeQueue_.clear();
   clearRemoteControlState();
   writing_ = false;
@@ -186,6 +192,10 @@ void TcpSession::Stop() {
     self->recvSinceLastAck_ = 0;
     self->writeQueue_.clear();
     self->pendingAsdu_.clear();
+    self->sentIFrameSoeSequences_.clear();
+    self->soeReplayLoaded_ = false;
+    self->soeSeenSequences_.clear();
+    self->soeSeenSequenceOrder_.clear();
     self->pointPendingByKey_.clear();
     self->pointPending_.clear();
     self->pointFlushScheduled_ = false;
@@ -203,6 +213,14 @@ void TcpSession::SetPointValueCallback(PointValueCallback cb) {
 
 void TcpSession::SetInterrogationSnapshotProvider(SnapshotProvider provider) {
   interrogationSnapshotProvider_ = std::move(provider);
+}
+
+void TcpSession::SetSoeReplayProvider(SoeReplayProvider provider) {
+  soeReplayProvider_ = std::move(provider);
+}
+
+void TcpSession::SetSoeAcknowledgedCallback(SoeAcknowledgedCallback cb) {
+  onSoeAcknowledged_ = std::move(cb);
 }
 
 void TcpSession::SetTimeSyncCallback(TimeSyncCallback cb) {
@@ -227,6 +245,15 @@ void TcpSession::SendPointValue(const PointValue &value, uint8_t cause) {
       return;
     }
     self->enqueuePointValue(value, cause);
+  });
+}
+
+void TcpSession::SendSoe(const SoeEvent &event) {
+  boost::asio::post(io_, [self = shared_from_this(), event]() {
+    if (self->closing_) {
+      return;
+    }
+    self->enqueueSoe(event);
   });
 }
 
@@ -1226,13 +1253,84 @@ void TcpSession::handleTimeSyncCommand(const std::vector<uint8_t> &asdu) {
   }
 }
 
-void TcpSession::enqueueAsdu(std::vector<uint8_t> asdu) {
+void TcpSession::enqueueAsdu(std::vector<uint8_t> asdu, std::optional<uint64_t> soeEventSequence) {
   if (closing_) {
     return;
   }
-  pendingAsdu_.emplace_back(std::move(asdu));
+  pendingAsdu_.push_back(PendingAsdu{std::move(asdu), soeEventSequence});
   LOG_DEBUG("IEC104 ASDU 入队: conn_name={}, 待处理={}, 激活={}", config_.conn_name(), pendingAsdu_.size(), dataTransferActive_);
   trySendPending();
+}
+
+void TcpSession::enqueueSoe(const SoeEvent &event) {
+  if (!dataTransferActive_) {
+    LOG_DEBUG("IEC104 数据传输未激活，SOE 等待持久化回放: conn_name={}, event_seq={}",
+              config_.conn_name(),
+              event.eventSequence);
+    return;
+  }
+  if (event.eventSequence == 0) {
+    LOG_WARNING("IEC104 跳过事件序号为 0 的 SOE: conn_name={}, ioa={}", config_.conn_name(), event.value.ioa);
+    return;
+  }
+  if (event.value.type != IEC104Proto::POINT_TYPE_SINGLE) {
+    LOG_WARNING("IEC104 跳过非单点 SOE: conn_name={}, event_seq={}, ioa={}, type={}",
+                config_.conn_name(),
+                event.eventSequence,
+                event.value.ioa,
+                static_cast<int>(event.value.type));
+    return;
+  }
+  if (soeSeenSequences_.contains(event.eventSequence)) {
+    LOG_DEBUG("IEC104 跳过当前会话内重复 SOE: conn_name={}, event_seq={}", config_.conn_name(), event.eventSequence);
+    return;
+  }
+
+  auto asdu = buildSinglePointAsdu(event.value.ioa,
+                                   event.value.boolValue,
+                                   event.value.quality,
+                                   kCotSpontaneous,
+                                   event.value.tsMs,
+                                   true);
+  if (asdu.empty()) {
+    LOG_WARNING("IEC104 构造 SOE 报文失败: conn_name={}, event_seq={}, ioa={}, ts_ms={}",
+                config_.conn_name(),
+                event.eventSequence,
+                event.value.ioa,
+                event.value.tsMs);
+    return;
+  }
+
+  while (soeSeenSequenceOrder_.size() >= kSoeDedupeWindow) {
+    soeSeenSequences_.erase(soeSeenSequenceOrder_.front());
+    soeSeenSequenceOrder_.pop_front();
+  }
+  soeSeenSequences_.insert(event.eventSequence);
+  soeSeenSequenceOrder_.push_back(event.eventSequence);
+  LOG_DEBUG("IEC104 SOE 入队: conn_name={}, event_seq={}, ioa={}, 状态={}, 时标={}, 品质={}",
+            config_.conn_name(),
+            event.eventSequence,
+            event.value.ioa,
+            event.value.boolValue ? "合" : "分",
+            event.value.tsMs,
+            event.value.quality);
+  enqueueAsdu(std::move(asdu), event.eventSequence);
+}
+
+void TcpSession::loadSoeReplay() {
+  if (soeReplayLoaded_) {
+    return;
+  }
+  soeReplayLoaded_ = true;
+  if (!soeReplayProvider_) {
+    return;
+  }
+
+  auto events = soeReplayProvider_();
+  LOG_INFO("IEC104 加载未确认 SOE: conn_name={}, 条数={}", config_.conn_name(), events.size());
+  for (const auto &event : events) {
+    enqueueSoe(event);
+  }
 }
 
 void TcpSession::trySendPending() {
@@ -1242,34 +1340,35 @@ void TcpSession::trySendPending() {
   while (!pendingAsdu_.empty() && sendUnacked_ < apci_.k) {
     auto asdu = std::move(pendingAsdu_.front());
     pendingAsdu_.pop_front();
-    sendIFrame(asdu);
+    sendIFrame(std::move(asdu));
   }
 }
 
-void TcpSession::sendIFrame(const std::vector<uint8_t> &asdu) {
+void TcpSession::sendIFrame(PendingAsdu asdu) {
   if (closing_) {
     return;
   }
   if (!dataTransferActive_) {
     LOG_WARNING("IEC104 非激活状态发送 I 帧: conn_name={}", config_.conn_name());
-    pendingAsdu_.emplace_front(asdu);
+    pendingAsdu_.emplace_front(std::move(asdu));
     return;
   }
   if (sendUnacked_ >= apci_.k) {
     LOG_DEBUG("IEC104 发送窗口已满，ASDU 入队: conn_name={}, k={}, 未确认={}", config_.conn_name(), apci_.k, sendUnacked_);
-    pendingAsdu_.emplace_front(asdu);
+    pendingAsdu_.emplace_front(std::move(asdu));
     return;
   }
 
   std::vector<uint8_t> apdu;
   apdu.resize(6);
   apdu[0] = kApduStart;
-  apdu[1] = static_cast<uint8_t>(4 + asdu.size());
+  apdu[1] = static_cast<uint8_t>(4 + asdu.bytes.size());
   writeSeq(&apdu, 2, sendSeq_);
   writeSeq(&apdu, 4, recvSeqExpected_);
-  apdu.insert(apdu.end(), asdu.begin(), asdu.end());
+  apdu.insert(apdu.end(), asdu.bytes.begin(), asdu.bytes.end());
   LOG_DEBUG("IEC104 发送 I 帧: conn_name={}, ns={}, nr={}, 未确认={}", config_.conn_name(), sendSeq_, recvSeqExpected_, sendUnacked_ + 1);
   LOG_INFO("IEC104 报文发送: conn_name={}, 角色={}, 长度={}, 数据={}", config_.conn_name(), isClient_ ? "客户端" : "服务端", apdu.size(), bytesToHex(apdu));
+  sentIFrameSoeSequences_.push_back(asdu.soeEventSequence);
   sendSeq_ = static_cast<uint16_t>((sendSeq_ + 1) % 32768);
   sendUnacked_++;
   if (ackPending_) {
@@ -1785,9 +1884,34 @@ void TcpSession::handleAck(uint16_t remoteAckSeq) {
     Stop();
     return;
   }
+  if (diff > sentIFrameSoeSequences_.size()) {
+    LOG_ERROR("IEC104 发送确认映射不一致: conn_name={}, 确认帧数={}, 映射帧数={}",
+              config_.conn_name(),
+              diff,
+              sentIFrameSoeSequences_.size());
+    Stop();
+    return;
+  }
+
+  std::vector<uint64_t> acknowledgedSoeSequences;
+  acknowledgedSoeSequences.reserve(diff);
+  for (uint16_t i = 0; i < diff; ++i) {
+    const auto eventSequence = sentIFrameSoeSequences_.front();
+    sentIFrameSoeSequences_.pop_front();
+    if (eventSequence.has_value()) {
+      acknowledgedSoeSequences.push_back(*eventSequence);
+    }
+  }
   sendAckedSeq_ = remoteAckSeq;
   sendUnacked_ -= diff;
   LOG_DEBUG("IEC104 确认更新: conn_name={}, 已确认={}, 剩余={}", config_.conn_name(), diff, sendUnacked_);
+  if (!acknowledgedSoeSequences.empty() && onSoeAcknowledged_) {
+    LOG_DEBUG("IEC104 SOE 收到累计确认: conn_name={}, 条数={}, nr={}",
+              config_.conn_name(),
+              acknowledgedSoeSequences.size(),
+              remoteAckSeq);
+    onSoeAcknowledged_(acknowledgedSoeSequences);
+  }
   if (sendUnacked_ == 0) {
     stopT1();
   } else {
@@ -1807,6 +1931,7 @@ void TcpSession::setDataTransferActive(bool active, const char *reason) {
     if (isMasterStation() && !autoInterrogationSent_) {
       sendAutoInterrogation(kQoiStation);
     }
+    loadSoeReplay();
     trySendPending();
     return;
   }
@@ -1819,6 +1944,10 @@ void TcpSession::setDataTransferActive(bool active, const char *reason) {
   sendUnacked_ = 0;
   sendAckedSeq_ = sendSeq_;
   pendingAsdu_.clear();
+  sentIFrameSoeSequences_.clear();
+  soeReplayLoaded_ = false;
+  soeSeenSequences_.clear();
+  soeSeenSequenceOrder_.clear();
   clearRemoteControlState();
   clearPointQueue();
 }

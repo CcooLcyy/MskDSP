@@ -29,6 +29,11 @@ struct PointValue {
   int64_t tsMs = 0;
 };
 
+struct SoeEvent {
+  uint64_t eventSequence = 0;
+  PointValue value;
+};
+
 struct CommandValue {
   uint32_t ioa = 0;
   IEC104Proto::PointType type = IEC104Proto::POINT_TYPE_UNSPECIFIED;
@@ -48,6 +53,8 @@ class TcpLink {
 public:
   using PointValueCallback = std::function<void(const PointValue&)>;
   using SnapshotProvider = std::function<std::vector<PointValue>()>;
+  using SoeReplayProvider = std::function<std::vector<SoeEvent>()>;
+  using SoeAcknowledgedCallback = std::function<void(const std::vector<uint64_t>&)>;
   // 返回 true 表示对时已被业务接受，false 表示应回负确认。
   using TimeSyncCallback = std::function<bool(int64_t)>;
   using CommandCallback = std::function<CommandResult(const CommandValue&)>;
@@ -65,6 +72,7 @@ public:
   bool IsRunning() const;
 
   void SendPointValue(const PointValue& value, uint8_t cause);
+  void SendSoe(const SoeEvent& event);
   void SendTimeSync(int64_t tsMs);
   void SendSingleCommand(uint32_t ioa, bool value, bool useSelect);
   void SendRemoteControl(uint32_t ioa,
@@ -74,6 +82,8 @@ public:
   void SendSetpointCommand(uint32_t ioa, double value);
   void SetPointValueCallback(PointValueCallback cb);
   void SetInterrogationSnapshotProvider(SnapshotProvider provider);
+  void SetSoeReplayProvider(SoeReplayProvider provider);
+  void SetSoeAcknowledgedCallback(SoeAcknowledgedCallback cb);
   void SetTimeSyncCallback(TimeSyncCallback cb);
   void SetCommandCallback(CommandCallback cb);
   void SetCommandExecutionModeCallback(CommandExecutionModeCallback cb);
@@ -102,6 +112,8 @@ private:
   std::shared_ptr<TcpSession> session_;
   PointValueCallback onPointValue_;
   SnapshotProvider interrogationSnapshotProvider_;
+  SoeReplayProvider soeReplayProvider_;
+  SoeAcknowledgedCallback onSoeAcknowledged_;
   TimeSyncCallback onTimeSync_;
   CommandCallback onCommand_;
   CommandExecutionModeCallback onCommandExecutionMode_;

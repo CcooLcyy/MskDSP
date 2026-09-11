@@ -6,6 +6,7 @@
 #include <string_view>
 
 #include "AGC.pb.h"
+#include "mskdsp/Decimal20.hpp"
 
 namespace AGC {
 
@@ -19,6 +20,6 @@ struct DefaultPointDefinition {
 std::span<const DefaultPointDefinition> DefaultPointDefinitions();
 bool IsReservedDefaultPointTag(std::string_view tag);
 void FillDefaultPointInfos(google::protobuf::RepeatedPtrField<AGCProto::DefaultPointInfo> *out);
-double ComputeInstalledCapacityKw(const AGCProto::GroupConfig &config);
+mskdsp::numeric::Decimal20 ComputeInstalledCapacityKw(const AGCProto::GroupConfig &config);
 
 }  // namespace AGC

@@ -1,44 +1,61 @@
 #include "AGCControl.h"
 
-#include <algorithm>
 #include <cmath>
-#include <unordered_map>
+#include <expected>
+#include <string_view>
 
 #include "Logger.h"
 
 namespace AGC {
 namespace {
-double effectiveScale(const AGCProto::SignalSpec& s) {
-  return (s.scale() == 0.0) ? 1.0 : s.scale();
+
+using Error = numeric::DecimalError;
+
+std::expected<Decimal, Error> toPhysicalAbs(
+    const AGCProto::SignalSpec &signal, const Decimal &raw) {
+  auto scale = numeric::Scale(signal);
+  if (!scale.has_value()) {
+    return std::unexpected(scale.error());
+  }
+  auto offset = numeric::Offset(signal);
+  if (!offset.has_value()) {
+    return std::unexpected(offset.error());
+  }
+  return mskdsp::numeric::ApplyEngineering(raw, *scale, *offset);
 }
 
-double toPhysicalAbs(const AGCProto::SignalSpec& s, double raw) {
-  const auto scale = effectiveScale(s);
-  return raw * scale + s.offset();
+std::expected<Decimal, Error> toPhysicalDelta(
+    const AGCProto::SignalSpec &signal, const Decimal &rawDelta) {
+  auto scale = numeric::Scale(signal);
+  if (!scale.has_value()) {
+    return std::unexpected(scale.error());
+  }
+  return rawDelta.Multiply(*scale);
 }
 
-double toPhysicalDelta(const AGCProto::SignalSpec& s, double rawDelta) {
-  const auto scale = effectiveScale(s);
-  return rawDelta * scale;
-}
-
-double effectiveMemberMaxKw(const AGCProto::MemberConfig& member) {
-  const auto maxKw = member.max_kw();
-  if (maxKw != 0.0) {
-    if (member.capacity_kw() > 0.0 && maxKw > member.capacity_kw()) {
-      return member.capacity_kw();
+std::expected<Decimal, Error> effectiveMemberMaxKw(
+    const AGCProto::MemberConfig &member) {
+  auto maximum = numeric::Maximum(member);
+  if (!maximum.has_value()) {
+    return std::unexpected(maximum.error());
+  }
+  auto capacity = numeric::Capacity(member);
+  if (!capacity.has_value()) {
+    return std::unexpected(capacity.error());
+  }
+  if (!maximum->IsZero()) {
+    if (*capacity > numeric::Zero() && *maximum > *capacity) {
+      return *capacity;
     }
-    return maxKw;
+    return *maximum;
   }
-  if (member.capacity_kw() > 0.0) {
-    return member.capacity_kw();
-  }
-  return 0.0;
+  return *capacity > numeric::Zero() ? *capacity : numeric::Zero();
 }
 
-const AGCProto::MemberControlProfile* findControlProfile(
-    const AGCProto::GroupControlProfile& profile, const std::string& memberName) {
-  for (const auto& member : profile.members()) {
+const AGCProto::MemberControlProfile *findControlProfile(
+    const AGCProto::GroupControlProfile &profile,
+    const std::string &memberName) {
+  for (const auto &member : profile.members()) {
     if (member.member_name() == memberName) {
       return &member;
     }
@@ -46,322 +63,559 @@ const AGCProto::MemberControlProfile* findControlProfile(
   return nullptr;
 }
 
-double clampToMemberLimits(const AGCProto::MemberConfig& member, double value) {
-  const auto minKw = member.min_kw();
-  const auto maxKw = effectiveMemberMaxKw(member);
-  if (maxKw > 0.0) {
-    value = std::min(value, maxKw);
+std::expected<Decimal, Error> clampToMemberLimits(
+    const AGCProto::MemberConfig &member, const Decimal &value) {
+  auto minimum = numeric::Minimum(member);
+  if (!minimum.has_value()) {
+    return std::unexpected(minimum.error());
   }
-  return std::max(value, minKw);
+  auto maximum = effectiveMemberMaxKw(member);
+  if (!maximum.has_value()) {
+    return std::unexpected(maximum.error());
+  }
+  auto result = value;
+  if (result > *maximum) {
+    result = *maximum;
+  }
+  if (result < *minimum) {
+    result = *minimum;
+  }
+  return result;
 }
 
-double computeTotalMeasKw(const AGCProto::GroupConfig& config, const ControlInput& input) {
+std::expected<Decimal, Error> computeTotalMeasKw(
+    const AGCProto::GroupConfig &config, const ControlInput &input) {
+  Decimal total;
   const auto memberCount = static_cast<size_t>(config.members_size());
-  double totalMeasKw = 0.0;
-  for (size_t i = 0; i < memberCount; ++i) {
-    if (i < input.memberMeasRaw.size() && i < input.hasMemberMeasRaw.size() && input.hasMemberMeasRaw[i]) {
-      totalMeasKw += toPhysicalAbs(config.members(static_cast<int>(i)).p_meas(), input.memberMeasRaw[i]);
+  for (size_t index = 0; index < memberCount; ++index) {
+    if (index >= input.memberMeasRaw.size() ||
+        index >= input.hasMemberMeasRaw.size() ||
+        !input.hasMemberMeasRaw[index]) {
+      continue;
     }
+    auto measured = toPhysicalAbs(
+        config.members(static_cast<int>(index)).p_meas(),
+        input.memberMeasRaw[index]);
+    if (!measured.has_value()) {
+      return std::unexpected(measured.error());
+    }
+    auto next = total.Add(*measured);
+    if (!next.has_value()) {
+      return std::unexpected(next.error());
+    }
+    total = *next;
   }
-  return totalMeasKw;
+  return total;
 }
+
+void logCalculationError(const AGCProto::GroupConfig &config,
+                         std::string_view stage, Error error) {
+  LOG_ERROR("AGC 十进制控制计算失败: group_name={}, 阶段={}, 原因={}",
+            config.group_name(), stage,
+            mskdsp::numeric::DecimalErrorMessage(error));
+}
+
 }  // namespace
 
-std::optional<double> ComputeTotalMeasKw(const AGCProto::GroupConfig& config, const ControlInput& input, double* totalMeasKwOut) {
-  if (!config.has_outputs()) {
+std::optional<Decimal> ComputeTotalMeasKw(
+    const AGCProto::GroupConfig &config, const ControlInput &input,
+    Decimal *totalMeasKwOut) {
+  if (!config.has_outputs() || !config.outputs().has_p_total_meas() ||
+      config.outputs().p_total_meas().tag().empty()) {
     return std::nullopt;
   }
-  const auto& outputs = config.outputs();
-  if (!outputs.has_p_total_meas() || outputs.p_total_meas().tag().empty()) {
+  auto total = computeTotalMeasKw(config, input);
+  if (!total.has_value()) {
+    logCalculationError(config, "汇总成员量测", total.error());
     return std::nullopt;
   }
-
-  const auto totalMeasKw = computeTotalMeasKw(config, input);
   if (totalMeasKwOut != nullptr) {
-    *totalMeasKwOut = totalMeasKw;
+    *totalMeasKwOut = *total;
   }
-  return totalMeasKw;
+  return *total;
 }
 
-DefaultPointOutput ComputeDefaultPointOutput(const AGCProto::GroupConfig& config, const ControlInput& input) {
+DefaultPointOutput ComputeDefaultPointOutput(
+    const AGCProto::GroupConfig &config, const ControlInput &input) {
   DefaultPointOutput out;
   const auto memberCount = static_cast<size_t>(config.members_size());
-  for (size_t i = 0; i < memberCount; ++i) {
-    const auto& member = config.members(static_cast<int>(i));
+  for (size_t index = 0; index < memberCount; ++index) {
+    const auto &member = config.members(static_cast<int>(index));
     if (member.controllable()) {
-      out.theoreticalLowerKw += member.min_kw();
-      out.theoreticalUpperKw += effectiveMemberMaxKw(member);
+      auto minimum = numeric::Minimum(member);
+      auto maximum = effectiveMemberMaxKw(member);
+      if (!minimum.has_value() || !maximum.has_value()) {
+        logCalculationError(config, "计算默认上下限",
+                            !minimum.has_value() ? minimum.error()
+                                                 : maximum.error());
+        out.dynamicQuality = DataCenterProto::QUALITY_BAD;
+        continue;
+      }
+      auto lower = out.theoreticalLowerKw.Add(*minimum);
+      auto upper = out.theoreticalUpperKw.Add(*maximum);
+      if (!lower.has_value() || !upper.has_value()) {
+        logCalculationError(config, "汇总默认上下限",
+                            !lower.has_value() ? lower.error()
+                                               : upper.error());
+        out.dynamicQuality = DataCenterProto::QUALITY_BAD;
+        continue;
+      }
+      out.theoreticalLowerKw = *lower;
+      out.theoreticalUpperKw = *upper;
       continue;
     }
 
     ++out.uncontrollableMemberCount;
-    if (i < input.memberMeasRaw.size() && i < input.hasMemberMeasRaw.size() && input.hasMemberMeasRaw[i]) {
-      const auto measKw = toPhysicalAbs(member.p_meas(), input.memberMeasRaw[i]);
-      out.dynamicLowerKw += measKw;
-      out.dynamicUpperKw += measKw;
-      continue;
+    if (index < input.memberMeasRaw.size() &&
+        index < input.hasMemberMeasRaw.size() &&
+        input.hasMemberMeasRaw[index]) {
+      auto measured = toPhysicalAbs(member.p_meas(),
+                                    input.memberMeasRaw[index]);
+      if (measured.has_value()) {
+        auto lower = out.dynamicLowerKw.Add(*measured);
+        auto upper = out.dynamicUpperKw.Add(*measured);
+        if (lower.has_value() && upper.has_value()) {
+          out.dynamicLowerKw = *lower;
+          out.dynamicUpperKw = *upper;
+          continue;
+        }
+      }
     }
     ++out.missingUncontrollableMemberCount;
   }
 
-  out.dynamicLowerKw += out.theoreticalLowerKw;
-  out.dynamicUpperKw += out.theoreticalUpperKw;
-  out.dynamicQuality = (out.missingUncontrollableMemberCount == 0) ? DataCenterProto::QUALITY_GOOD
-                                                                   : DataCenterProto::QUALITY_BAD;
+  auto lower = out.dynamicLowerKw.Add(out.theoreticalLowerKw);
+  auto upper = out.dynamicUpperKw.Add(out.theoreticalUpperKw);
+  if (lower.has_value() && upper.has_value()) {
+    out.dynamicLowerKw = *lower;
+    out.dynamicUpperKw = *upper;
+  } else {
+    out.dynamicQuality = DataCenterProto::QUALITY_BAD;
+  }
+  if (out.dynamicQuality != DataCenterProto::QUALITY_BAD) {
+    out.dynamicQuality = out.missingUncontrollableMemberCount == 0
+                             ? DataCenterProto::QUALITY_GOOD
+                             : DataCenterProto::QUALITY_BAD;
+  }
   return out;
 }
 
 std::optional<ControlOutput> ComputeControlOutput(
-    const AGCProto::GroupConfig& config,
-    const ControlInput& input,
-    const AGVC::WeightedStrategy& strategy) {
+    const AGCProto::GroupConfig &config, const ControlInput &input,
+    const AGVC::WeightedStrategy &strategy) {
   if (!config.has_p_cmd() || !config.p_cmd().has_signal()) {
-    LOG_DEBUG("AGC 控制计算跳过: group_name={}, 原因=缺少总设定点配置", config.group_name());
+    LOG_DEBUG("AGC 控制计算跳过: group_name={}, 原因=缺少总设定点配置",
+              config.group_name());
     return std::nullopt;
   }
   if (!input.hasCmdRaw && !input.hasDesiredTotalOverride) {
-    LOG_DEBUG("AGC 控制计算跳过: group_name={}, 原因=尚未收到总设定输入", config.group_name());
+    LOG_DEBUG("AGC 控制计算跳过: group_name={}, 原因=尚未收到总设定输入",
+              config.group_name());
     return std::nullopt;
   }
 
   const auto memberCount = static_cast<size_t>(config.members_size());
   if (memberCount == 0) {
-    LOG_WARNING("AGC 控制计算跳过: group_name={}, 原因=成员列表为空", config.group_name());
+    LOG_WARNING("AGC 控制计算跳过: group_name={}, 原因=成员列表为空",
+                config.group_name());
     return std::nullopt;
   }
 
   ControlOutput out;
-  out.memberTargetKw.assign(memberCount, 0.0);
+  out.memberTargetKw.assign(memberCount, Decimal{});
   out.memberPublish.assign(memberCount, false);
-  out.memberPublishKw.assign(memberCount, 0.0);
+  out.memberPublishKw.assign(memberCount, Decimal{});
 
-  std::vector<double> measKw(memberCount, 0.0);
-  for (size_t i = 0; i < memberCount; ++i) {
-    if (i < input.memberMeasRaw.size() && i < input.hasMemberMeasRaw.size() && input.hasMemberMeasRaw[i]) {
-      measKw[i] = toPhysicalAbs(config.members(static_cast<int>(i)).p_meas(), input.memberMeasRaw[i]);
+  std::vector<Decimal> measuredKw(memberCount);
+  for (size_t index = 0; index < memberCount; ++index) {
+    if (index >= input.memberMeasRaw.size() ||
+        index >= input.hasMemberMeasRaw.size() ||
+        !input.hasMemberMeasRaw[index]) {
+      continue;
     }
+    auto measured = toPhysicalAbs(
+        config.members(static_cast<int>(index)).p_meas(),
+        input.memberMeasRaw[index]);
+    if (!measured.has_value()) {
+      logCalculationError(config, "换算成员量测", measured.error());
+      return std::nullopt;
+    }
+    measuredKw[index] = *measured;
   }
 
-  out.totalMeasKw = computeTotalMeasKw(config, input);
+  auto totalMeasured = computeTotalMeasKw(config, input);
+  if (!totalMeasured.has_value()) {
+    logCalculationError(config, "汇总成员量测", totalMeasured.error());
+    return std::nullopt;
+  }
+  out.totalMeasKw = *totalMeasured;
 
-  const auto& cmdSpec = config.p_cmd();
-  double cmdKw = 0.0;
-  if (cmdSpec.mode() == AGCProto::VALUE_MODE_DELTA) {
-    cmdKw = toPhysicalDelta(cmdSpec.signal(), input.cmdRaw);
-  } else {
-    cmdKw = toPhysicalAbs(cmdSpec.signal(), input.cmdRaw);
+  const auto &command = config.p_cmd();
+  auto commandKw = command.mode() == AGCProto::VALUE_MODE_DELTA
+                       ? toPhysicalDelta(command.signal(), input.cmdRaw)
+                       : toPhysicalAbs(command.signal(), input.cmdRaw);
+  if (!commandKw.has_value()) {
+    logCalculationError(config, "换算总设定输入", commandKw.error());
+    return std::nullopt;
   }
 
-  double desiredTotalKw = cmdKw;
-  if (cmdSpec.mode() == AGCProto::VALUE_MODE_DELTA) {
-    double baseKw = out.totalMeasKw;
-    switch (cmdSpec.delta_base()) {
-    case AGCProto::DELTA_BASE_LAST_TARGET:
-      if (input.hasLastDesiredTotalKw) {
-        baseKw = input.lastDesiredTotalKw;
+  auto desiredTotalKw = *commandKw;
+  if (command.mode() == AGCProto::VALUE_MODE_DELTA) {
+    auto baseKw = out.totalMeasKw;
+    switch (command.delta_base()) {
+      case AGCProto::DELTA_BASE_LAST_TARGET:
+        if (input.hasLastDesiredTotalKw) {
+          baseKw = input.lastDesiredTotalKw;
+        }
+        break;
+      case AGCProto::DELTA_BASE_BASE_TAG: {
+        const auto iterator = input.baseRawByTag.find(command.base_tag());
+        if (iterator != input.baseRawByTag.end()) {
+          auto converted = toPhysicalAbs(command.signal(), iterator->second);
+          if (!converted.has_value()) {
+            logCalculationError(config, "换算增量基准", converted.error());
+            return std::nullopt;
+          }
+          baseKw = *converted;
+        }
+        break;
       }
-      break;
-    case AGCProto::DELTA_BASE_BASE_TAG: {
-      auto it = input.baseRawByTag.find(cmdSpec.base_tag());
-      if (it != input.baseRawByTag.end()) {
-        baseKw = toPhysicalAbs(cmdSpec.signal(), it->second);
-      }
-      break;
+      case AGCProto::DELTA_BASE_CURRENT_MEAS:
+      case AGCProto::DELTA_BASE_UNSPECIFIED:
+      default:
+        break;
     }
-    case AGCProto::DELTA_BASE_CURRENT_MEAS:
-    case AGCProto::DELTA_BASE_UNSPECIFIED:
-    default:
-      break;
+    auto combined = baseKw.Add(*commandKw);
+    if (!combined.has_value()) {
+      logCalculationError(config, "叠加增量目标", combined.error());
+      return std::nullopt;
     }
-    desiredTotalKw = baseKw + cmdKw;
+    desiredTotalKw = *combined;
   }
-  if (input.hasDesiredTotalOverride && std::isfinite(input.desiredTotalOverrideKw)) {
+  if (input.hasDesiredTotalOverride) {
     desiredTotalKw = input.desiredTotalOverrideKw;
   }
   out.desiredTotalKw = desiredTotalKw;
-  out.totalErrorKw = desiredTotalKw - out.totalMeasKw;
+  auto totalError = desiredTotalKw.Subtract(out.totalMeasKw);
+  if (!totalError.has_value()) {
+    logCalculationError(config, "计算总偏差", totalError.error());
+    return std::nullopt;
+  }
+  out.totalErrorKw = *totalError;
 
-  if (config.has_outputs()) {
-    const auto& outputs = config.outputs();
-    if (outputs.has_p_total_meas() && !outputs.p_total_meas().tag().empty()) {
-      out.publishTotalMeas = true;
-    }
+  if (config.has_outputs() && config.outputs().has_p_total_meas() &&
+      !config.outputs().p_total_meas().tag().empty()) {
+    out.publishTotalMeas = true;
   }
 
-  const double nextTargetKw = desiredTotalKw;
-
-  double passiveKw = 0.0;
-  for (size_t i = 0; i < memberCount; ++i) {
-    if (!config.members(static_cast<int>(i)).controllable()) {
-      passiveKw += measKw[i];
-    }
-  }
-  out.passiveKw = passiveKw;
-  out.targetControllableKw = nextTargetKw - passiveKw;
-
-  std::vector<size_t> controllableIdx;
-  controllableIdx.reserve(memberCount);
-  std::vector<AGVC::AllocationMember> allocMembers;
-  allocMembers.reserve(memberCount);
-  for (size_t i = 0; i < memberCount; ++i) {
-    const auto& m = config.members(static_cast<int>(i));
-    if (!m.controllable()) {
+  for (size_t index = 0; index < memberCount; ++index) {
+    if (config.members(static_cast<int>(index)).controllable()) {
       continue;
     }
-    controllableIdx.emplace_back(i);
-
-    AGVC::AllocationMember a;
-    a.weight = m.weight() > 0.0 ? m.weight() : (m.capacity_kw() > 0.0 ? m.capacity_kw() : 1.0);
-    a.min = m.min_kw();
-    a.max = effectiveMemberMaxKw(m);
-    allocMembers.emplace_back(a);
+    auto next = out.passiveKw.Add(measuredKw[index]);
+    if (!next.has_value()) {
+      logCalculationError(config, "汇总不可控出力", next.error());
+      return std::nullopt;
+    }
+    out.passiveKw = *next;
   }
-
-  const auto alloc = strategy.Allocate(out.targetControllableKw, allocMembers);
-  out.unallocatedKw = alloc.unallocated;
-
-  for (size_t k = 0; k < controllableIdx.size() && k < alloc.values.size(); ++k) {
-    out.memberTargetKw[controllableIdx[k]] = alloc.values[k];
+  auto controllableTarget = desiredTotalKw.Subtract(out.passiveKw);
+  if (!controllableTarget.has_value()) {
+    logCalculationError(config, "计算可控目标", controllableTarget.error());
+    return std::nullopt;
   }
+  out.targetControllableKw = *controllableTarget;
 
-  // 固定参数只修正成员自己的分配目标。这样每台设备可以使用独立的
-  // P/I/bias 参数，同时仍然以原有平均/加权分配作为基准，不在上一轮目标上累加。
-  out.nextIntegralMemoryKw.assign(memberCount, 0.0);
-  for (size_t i = 0; i < memberCount; ++i) {
-    if (!config.members(static_cast<int>(i)).controllable()) {
+  std::vector<size_t> controllableIndexes;
+  std::vector<AGVC::DecimalAllocationMember> allocationMembers;
+  controllableIndexes.reserve(memberCount);
+  allocationMembers.reserve(memberCount);
+  for (size_t index = 0; index < memberCount; ++index) {
+    const auto &member = config.members(static_cast<int>(index));
+    if (!member.controllable()) {
       continue;
     }
-    const auto* profile = findControlProfile(input.controlProfile, config.members(static_cast<int>(i)).member_name());
-    const auto previousIntegral = i < input.integralMemoryKw.size() ? input.integralMemoryKw[i] : 0.0;
-    out.nextIntegralMemoryKw[i] = previousIntegral;
-    if (profile == nullptr) {
+    auto weight = numeric::Weight(member);
+    auto capacity = numeric::Capacity(member);
+    auto minimum = numeric::Minimum(member);
+    auto maximum = effectiveMemberMaxKw(member);
+    if (!weight.has_value() || !capacity.has_value() ||
+        !minimum.has_value() || !maximum.has_value()) {
+      const auto error = !weight.has_value() ? weight.error()
+                         : !capacity.has_value() ? capacity.error()
+                         : !minimum.has_value() ? minimum.error()
+                                                : maximum.error();
+      logCalculationError(config, "读取成员分配参数", error);
+      return std::nullopt;
+    }
+    controllableIndexes.emplace_back(index);
+    allocationMembers.push_back({
+        .weight = *weight > numeric::Zero()
+                      ? *weight
+                      : (*capacity > numeric::Zero() ? *capacity
+                                                     : numeric::One()),
+        .min = *minimum,
+        .max = *maximum,
+    });
+  }
+
+  auto allocation =
+      strategy.AllocateDecimal(out.targetControllableKw, allocationMembers);
+  if (!allocation.has_value()) {
+    logCalculationError(config, "执行加权分配", allocation.error());
+    return std::nullopt;
+  }
+  out.unallocatedKw = allocation->unallocated;
+  for (size_t index = 0;
+       index < controllableIndexes.size() &&
+       index < allocation->values.size();
+       ++index) {
+    out.memberTargetKw[controllableIndexes[index]] = allocation->values[index];
+  }
+
+  out.nextIntegralMemoryKw.assign(memberCount, Decimal{});
+  const auto periodSeconds =
+      std::isfinite(input.controlPeriodSeconds) && input.controlPeriodSeconds > 0.0
+          ? input.controlPeriodSeconds
+          : 1.0;
+  auto decimalPeriod = Decimal::FromDouble(periodSeconds);
+  if (!decimalPeriod.has_value()) {
+    logCalculationError(config, "转换控制周期", decimalPeriod.error());
+    return std::nullopt;
+  }
+  for (size_t index = 0; index < memberCount; ++index) {
+    const auto &member = config.members(static_cast<int>(index));
+    if (!member.controllable()) {
+      continue;
+    }
+    const auto *profile =
+        findControlProfile(input.controlProfile, member.member_name());
+    const auto previousIntegral = index < input.integralMemoryKw.size()
+                                      ? input.integralMemoryKw[index]
+                                      : Decimal{};
+    out.nextIntegralMemoryKw[index] = previousIntegral;
+    if (!input.enablePi || profile == nullptr) {
       continue;
     }
 
-    const auto measuredKw = measKw[i];
-    const auto baseTargetKw = out.memberTargetKw[i];
-    const auto memberErrorKw = baseTargetKw - measuredKw;
-    const auto dt = std::isfinite(input.controlPeriodSeconds) && input.controlPeriodSeconds > 0.0
-                        ? input.controlPeriodSeconds
-                        : 1.0;
-    auto integral = input.integralEnabled ? previousIntegral + memberErrorKw * dt : previousIntegral;
-    const auto integralLimit = profile->integral_limit_kw();
-    if (integralLimit > 0.0 && std::isfinite(integralLimit)) {
-      integral = std::clamp(integral, -integralLimit, integralLimit);
+    auto memberError = out.memberTargetKw[index].Subtract(measuredKw[index]);
+    if (!memberError.has_value()) {
+      logCalculationError(config, "计算成员偏差", memberError.error());
+      return std::nullopt;
     }
-    out.nextIntegralMemoryKw[i] = integral;
+    auto errorByPeriod = memberError->Multiply(*decimalPeriod);
+    if (!errorByPeriod.has_value()) {
+      logCalculationError(config, "计算成员积分增量", errorByPeriod.error());
+      return std::nullopt;
+    }
+    auto integral = input.integralEnabled
+                        ? previousIntegral.Add(*errorByPeriod)
+                        : std::expected<Decimal, Error>(previousIntegral);
+    auto integralLimit = numeric::IntegralLimit(*profile);
+    if (!integral.has_value() || !integralLimit.has_value()) {
+      logCalculationError(config, "计算成员积分",
+                          !integral.has_value() ? integral.error()
+                                                : integralLimit.error());
+      return std::nullopt;
+    }
+    if (*integralLimit > numeric::Zero()) {
+      auto negativeLimit = numeric::Negate(*integralLimit);
+      auto limited = negativeLimit.has_value()
+                         ? mskdsp::numeric::Clamp(*integral, *negativeLimit,
+                                                 *integralLimit)
+                         : std::expected<Decimal, Error>(
+                               std::unexpected(negativeLimit.error()));
+      if (!limited.has_value()) {
+        logCalculationError(config, "执行积分限幅", limited.error());
+        return std::nullopt;
+      }
+      integral = *limited;
+    }
+    out.nextIntegralMemoryKw[index] = *integral;
 
-    double correctionKw = 0.0;
-    if (memberErrorKw >= 0.0) {
-      correctionKw += profile->up_p_gain() * memberErrorKw;
-      correctionKw += input.integralEnabled ? profile->up_i_gain() * integral : 0.0;
-      correctionKw += profile->up_bias_kw();
-    } else {
-      correctionKw += profile->down_p_gain() * memberErrorKw;
-      correctionKw += input.integralEnabled ? profile->down_i_gain() * integral : 0.0;
-      correctionKw -= profile->down_bias_kw();
+    auto pGain = *memberError >= numeric::Zero()
+                     ? numeric::UpPGain(*profile)
+                     : numeric::DownPGain(*profile);
+    auto iGain = *memberError >= numeric::Zero()
+                     ? numeric::UpIGain(*profile)
+                     : numeric::DownIGain(*profile);
+    auto bias = *memberError >= numeric::Zero()
+                    ? numeric::UpBias(*profile)
+                    : numeric::DownBias(*profile);
+    if (!pGain.has_value() || !iGain.has_value() || !bias.has_value()) {
+      const auto error = !pGain.has_value() ? pGain.error()
+                         : !iGain.has_value() ? iGain.error()
+                                              : bias.error();
+      logCalculationError(config, "读取成员 PI 参数", error);
+      return std::nullopt;
     }
-    if (!std::isfinite(correctionKw)) {
-      correctionKw = 0.0;
+    auto pCorrection = pGain->Multiply(*memberError);
+    auto iCorrection = input.integralEnabled
+                           ? iGain->Multiply(*integral)
+                           : std::expected<Decimal, Error>(Decimal{});
+    if (!pCorrection.has_value() || !iCorrection.has_value()) {
+      logCalculationError(config, "计算成员 PI 修正",
+                          !pCorrection.has_value() ? pCorrection.error()
+                                                   : iCorrection.error());
+      return std::nullopt;
     }
-    if (profile->max_step_kw() > 0.0 && std::isfinite(profile->max_step_kw())) {
-      correctionKw = std::clamp(correctionKw, -profile->max_step_kw(), profile->max_step_kw());
+    auto correction = pCorrection->Add(*iCorrection);
+    if (correction.has_value()) {
+      correction = *memberError >= numeric::Zero()
+                       ? correction->Add(*bias)
+                       : correction->Subtract(*bias);
     }
-    auto correctedTargetKw = baseTargetKw + correctionKw;
-    if (profile->max_ramp_kw_per_s() > 0.0 && std::isfinite(profile->max_ramp_kw_per_s()) &&
-        i < input.hasLastMemberTargetKw.size() && i < input.lastMemberTargetKw.size() && input.hasLastMemberTargetKw[i]) {
-      const auto maxDeltaKw = profile->max_ramp_kw_per_s() * dt;
-      correctedTargetKw = std::clamp(correctedTargetKw,
-                                     input.lastMemberTargetKw[i] - maxDeltaKw,
-                                     input.lastMemberTargetKw[i] + maxDeltaKw);
+    auto maximumStep = numeric::MaximumStep(*profile);
+    if (!correction.has_value() || !maximumStep.has_value()) {
+      logCalculationError(config, "计算成员偏置修正",
+                          !correction.has_value() ? correction.error()
+                                                  : maximumStep.error());
+      return std::nullopt;
     }
-    out.memberTargetKw[i] = clampToMemberLimits(config.members(static_cast<int>(i)), correctedTargetKw);
+    if (*maximumStep > numeric::Zero()) {
+      auto negativeStep = numeric::Negate(*maximumStep);
+      auto limited = negativeStep.has_value()
+                         ? mskdsp::numeric::Clamp(*correction, *negativeStep,
+                                                 *maximumStep)
+                         : std::expected<Decimal, Error>(
+                               std::unexpected(negativeStep.error()));
+      if (!limited.has_value()) {
+        logCalculationError(config, "执行单步限幅", limited.error());
+        return std::nullopt;
+      }
+      correction = *limited;
+    }
+    auto correctedTarget = out.memberTargetKw[index].Add(*correction);
+    auto maximumRamp = numeric::MaximumRamp(*profile);
+    if (!correctedTarget.has_value() || !maximumRamp.has_value()) {
+      logCalculationError(config, "计算成员修正目标",
+                          !correctedTarget.has_value() ? correctedTarget.error()
+                                                       : maximumRamp.error());
+      return std::nullopt;
+    }
+    if (*maximumRamp > numeric::Zero() &&
+        index < input.hasLastMemberTargetKw.size() &&
+        index < input.lastMemberTargetKw.size() &&
+        input.hasLastMemberTargetKw[index]) {
+      auto maximumDelta = maximumRamp->Multiply(*decimalPeriod);
+      if (!maximumDelta.has_value()) {
+        logCalculationError(config, "计算成员爬坡幅度", maximumDelta.error());
+        return std::nullopt;
+      }
+      auto lower = input.lastMemberTargetKw[index].Subtract(*maximumDelta);
+      auto upper = input.lastMemberTargetKw[index].Add(*maximumDelta);
+      if (!lower.has_value() || !upper.has_value()) {
+        logCalculationError(config, "计算成员爬坡边界",
+                            !lower.has_value() ? lower.error() : upper.error());
+        return std::nullopt;
+      }
+      auto limited =
+          mskdsp::numeric::Clamp(*correctedTarget, *lower, *upper);
+      if (!limited.has_value()) {
+        logCalculationError(config, "执行成员爬坡限幅", limited.error());
+        return std::nullopt;
+      }
+      correctedTarget = *limited;
+    }
+    auto clamped = clampToMemberLimits(member, *correctedTarget);
+    if (!clamped.has_value()) {
+      logCalculationError(config, "执行成员出力限幅", clamped.error());
+      return std::nullopt;
+    }
+    out.memberTargetKw[index] = *clamped;
   }
 
-  double actualTargetKw = passiveKw;
-  for (size_t i = 0; i < memberCount; ++i) {
-    if (config.members(static_cast<int>(i)).controllable()) {
-      actualTargetKw += out.memberTargetKw[i];
+  out.actualTargetKw = out.passiveKw;
+  for (size_t index = 0; index < memberCount; ++index) {
+    if (!config.members(static_cast<int>(index)).controllable()) {
+      continue;
     }
+    auto next = out.actualTargetKw.Add(out.memberTargetKw[index]);
+    if (!next.has_value()) {
+      logCalculationError(config, "汇总实际目标", next.error());
+      return std::nullopt;
+    }
+    out.actualTargetKw = *next;
   }
-  out.actualTargetKw = actualTargetKw;
 
   LOG_DEBUG(
       "AGC 控制计算完成: group_name={}, total_meas_kw={}, desired_total_kw={}, target_controllable_kw={}, passive_kw={}, actual_target_kw={}, unallocated_kw={}",
-      config.group_name(),
-      out.totalMeasKw,
-      out.desiredTotalKw,
-      out.targetControllableKw,
-      out.passiveKw,
-      out.actualTargetKw,
-      out.unallocatedKw);
+      config.group_name(), out.totalMeasKw.ToFixedString(),
+      out.desiredTotalKw.ToFixedString(),
+      out.targetControllableKw.ToFixedString(), out.passiveKw.ToFixedString(),
+      out.actualTargetKw.ToFixedString(), out.unallocatedKw.ToFixedString());
 
   if (config.has_outputs()) {
-    const auto& o = config.outputs();
-    if (o.has_p_total_target() && !o.p_total_target().tag().empty()) {
-      out.publishTotalTarget = true;
-    }
-    if (o.has_p_total_error() && !o.p_total_error().tag().empty()) {
-      out.publishTotalError = true;
-    }
+    const auto &outputs = config.outputs();
+    out.publishTotalTarget = outputs.has_p_total_target() &&
+                             !outputs.p_total_target().tag().empty();
+    out.publishTotalError = outputs.has_p_total_error() &&
+                            !outputs.p_total_error().tag().empty();
   }
 
-  for (size_t i = 0; i < memberCount; ++i) {
-    const auto& m = config.members(static_cast<int>(i));
-    if (!m.controllable()) {
+  for (size_t index = 0; index < memberCount; ++index) {
+    const auto &member = config.members(static_cast<int>(index));
+    if (!member.controllable() || !member.has_p_set() ||
+        !member.p_set().has_signal() ||
+        member.p_set().signal().tag().empty()) {
       continue;
     }
-    if (!m.has_p_set() || !m.p_set().has_signal() || m.p_set().signal().tag().empty()) {
-      continue;
-    }
-
-    const auto& outSpec = m.p_set();
-    double publishKw = 0.0;
-    if (outSpec.mode() == AGCProto::VALUE_MODE_DELTA) {
-      double baseKw = 0.0;
-      switch (outSpec.delta_base()) {
-      case AGCProto::DELTA_BASE_LAST_TARGET:
-        if (i < input.lastMemberTargetKw.size() && i < input.hasLastMemberTargetKw.size() && input.hasLastMemberTargetKw[i]) {
-          baseKw = input.lastMemberTargetKw[i];
+    auto publishKw = std::expected<Decimal, Error>(out.memberTargetKw[index]);
+    if (member.p_set().mode() == AGCProto::VALUE_MODE_DELTA) {
+      auto baseKw = Decimal{};
+      switch (member.p_set().delta_base()) {
+        case AGCProto::DELTA_BASE_LAST_TARGET:
+          if (index < input.lastMemberTargetKw.size() &&
+              index < input.hasLastMemberTargetKw.size() &&
+              input.hasLastMemberTargetKw[index]) {
+            baseKw = input.lastMemberTargetKw[index];
+          }
+          break;
+        case AGCProto::DELTA_BASE_CURRENT_MEAS:
+          baseKw = measuredKw[index];
+          break;
+        case AGCProto::DELTA_BASE_BASE_TAG: {
+          const auto iterator =
+              input.baseRawByTag.find(member.p_set().base_tag());
+          if (iterator != input.baseRawByTag.end()) {
+            auto converted =
+                toPhysicalAbs(member.p_set().signal(), iterator->second);
+            if (!converted.has_value()) {
+              logCalculationError(config, "换算成员增量基准",
+                                  converted.error());
+              return std::nullopt;
+            }
+            baseKw = *converted;
+          } else {
+            baseKw = measuredKw[index];
+          }
+          break;
         }
-        break;
-      case AGCProto::DELTA_BASE_CURRENT_MEAS:
-        baseKw = measKw[i];
-        break;
-      case AGCProto::DELTA_BASE_BASE_TAG: {
-        auto it = input.baseRawByTag.find(outSpec.base_tag());
-        if (it != input.baseRawByTag.end()) {
-          baseKw = toPhysicalAbs(outSpec.signal(), it->second);
-        } else {
-          baseKw = measKw[i];
-        }
-        break;
+        case AGCProto::DELTA_BASE_UNSPECIFIED:
+        default:
+          baseKw = measuredKw[index];
+          break;
       }
-      case AGCProto::DELTA_BASE_UNSPECIFIED:
-      default:
-        baseKw = measKw[i];
-        break;
-      }
-      publishKw = out.memberTargetKw[i] - baseKw;
-    } else {
-      publishKw = out.memberTargetKw[i];
+      publishKw = out.memberTargetKw[index].Subtract(baseKw);
     }
-
-    out.memberPublish[i] = true;
-    out.memberPublishKw[i] = publishKw;
+    if (!publishKw.has_value()) {
+      logCalculationError(config, "计算成员发布值", publishKw.error());
+      return std::nullopt;
+    }
+    out.memberPublish[index] = true;
+    out.memberPublishKw[index] = *publishKw;
   }
 
   out.hasLastDesiredTotalKw = true;
   out.nextLastDesiredTotalKw = desiredTotalKw;
   out.hasLastMemberTargetKw.assign(memberCount, false);
-  out.nextLastMemberTargetKw.assign(memberCount, 0.0);
-  for (size_t i = 0; i < memberCount; ++i) {
-    if (config.members(static_cast<int>(i)).controllable()) {
-      out.hasLastMemberTargetKw[i] = true;
-      out.nextLastMemberTargetKw[i] = out.memberTargetKw[i];
+  out.nextLastMemberTargetKw.assign(memberCount, Decimal{});
+  for (size_t index = 0; index < memberCount; ++index) {
+    if (config.members(static_cast<int>(index)).controllable()) {
+      out.hasLastMemberTargetKw[index] = true;
+      out.nextLastMemberTargetKw[index] = out.memberTargetKw[index];
     }
   }
-
   return out;
 }
 

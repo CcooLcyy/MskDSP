@@ -1,6 +1,7 @@
 #include "DLT645PointTable.h"
 
 #include <algorithm>
+#include <format>
 #include <iomanip>
 #include <sstream>
 #include <unordered_set>
@@ -36,6 +37,24 @@ bool isBitBool(const DLT645Proto::BlockItem& item) {
 
 bool validateBitPosition(uint32_t dataLen, uint32_t byteIndex, uint32_t bitIndex) {
   return byteIndex < dataLen && bitIndex < 8;
+}
+
+std::expected<mskdsp::numeric::Decimal20, mskdsp::numeric::DecimalError>
+pointDecimal(std::string_view decimalText, double legacyValue) {
+  return mskdsp::numeric::ParseConfiguredDecimal(decimalText, legacyValue);
+}
+
+grpc::Status validateDecimalField(std::string_view fieldName,
+                                  std::string_view decimalText,
+                                  double legacyValue) {
+  const auto value = pointDecimal(decimalText, legacyValue);
+  if (value.has_value()) {
+    return grpc::Status::OK;
+  }
+  return grpc::Status(
+      grpc::StatusCode::INVALID_ARGUMENT,
+      std::format("{} 的十进制配置非法: {}", fieldName,
+                  mskdsp::numeric::DecimalErrorMessage(value.error())));
 }
 
 std::string formatHex(const std::array<uint8_t, 4>& data) {
@@ -149,9 +168,21 @@ void PointTable::ToProto(const std::string& connName, DLT645Proto::PointTable* o
     outPoint->set_data_len(point.dataLen);
     outPoint->set_type(point.type);
     outPoint->set_access(point.access);
-    outPoint->set_scale(point.scale);
-    outPoint->set_offset(point.offset);
-    outPoint->set_deadband(point.deadband);
+    const auto legacyScale = point.scale.ToDouble();
+    const auto legacyOffset = point.offset.ToDouble();
+    const auto legacyDeadband = point.deadband.ToDouble();
+    if (legacyScale.has_value()) {
+      outPoint->set_scale(*legacyScale);
+    }
+    if (legacyOffset.has_value()) {
+      outPoint->set_offset(*legacyOffset);
+    }
+    if (legacyDeadband.has_value()) {
+      outPoint->set_deadband(*legacyDeadband);
+    }
+    outPoint->set_scale_decimal(point.scale.ToFixedString());
+    outPoint->set_offset_decimal(point.offset.ToFixedString());
+    outPoint->set_deadband_decimal(point.deadband.ToFixedString());
     if (point.byteIndex.has_value()) {
       outPoint->set_byte_index(point.byteIndex.value());
     }
@@ -170,9 +201,21 @@ void PointTable::ToProto(const std::string& connName, DLT645Proto::PointTable* o
       outItem->set_data_len(point.dataLen);
       outItem->set_type(point.type);
       outItem->set_access(point.access);
-      outItem->set_scale(point.scale);
-      outItem->set_offset(point.offset);
-      outItem->set_deadband(point.deadband);
+      const auto legacyScale = point.scale.ToDouble();
+      const auto legacyOffset = point.offset.ToDouble();
+      const auto legacyDeadband = point.deadband.ToDouble();
+      if (legacyScale.has_value()) {
+        outItem->set_scale(*legacyScale);
+      }
+      if (legacyOffset.has_value()) {
+        outItem->set_offset(*legacyOffset);
+      }
+      if (legacyDeadband.has_value()) {
+        outItem->set_deadband(*legacyDeadband);
+      }
+      outItem->set_scale_decimal(point.scale.ToFixedString());
+      outItem->set_offset_decimal(point.offset.ToFixedString());
+      outItem->set_deadband_decimal(point.deadband.ToFixedString());
       outItem->set_trim_right_space(item.trimRightSpace);
       if (point.byteIndex.has_value()) {
         outItem->set_byte_index(point.byteIndex.value());
@@ -218,8 +261,20 @@ grpc::Status PointTable::validatePoint(const DLT645Proto::Point& point) {
   if (point.access() == DLT645Proto::ACCESS_UNSPECIFIED) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "access 不能为空");
   }
-  if (point.deadband() < 0) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "deadband 不能为负数");
+  auto decimalStatus = validateDecimalField(
+      "scale_decimal", point.scale_decimal(), point.scale());
+  if (!decimalStatus.ok()) {
+    return decimalStatus;
+  }
+  decimalStatus = validateDecimalField(
+      "offset_decimal", point.offset_decimal(), point.offset());
+  if (!decimalStatus.ok()) {
+    return decimalStatus;
+  }
+  decimalStatus = validateDecimalField(
+      "deadband_decimal", point.deadband_decimal(), point.deadband());
+  if (!decimalStatus.ok()) {
+    return decimalStatus;
   }
   if (isBitBool(point)) {
     const uint32_t byteIndex = point.has_byte_index() ? point.byte_index() : 0;
@@ -259,8 +314,20 @@ grpc::Status PointTable::validateBlockItem(const DLT645Proto::BlockItem& item) {
   if (item.access() == DLT645Proto::ACCESS_UNSPECIFIED) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "数据块子项 access 不能为空");
   }
-  if (item.deadband() < 0) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "数据块子项 deadband 不能为负数");
+  auto decimalStatus = validateDecimalField(
+      "数据块子项 scale_decimal", item.scale_decimal(), item.scale());
+  if (!decimalStatus.ok()) {
+    return decimalStatus;
+  }
+  decimalStatus = validateDecimalField(
+      "数据块子项 offset_decimal", item.offset_decimal(), item.offset());
+  if (!decimalStatus.ok()) {
+    return decimalStatus;
+  }
+  decimalStatus = validateDecimalField(
+      "数据块子项 deadband_decimal", item.deadband_decimal(), item.deadband());
+  if (!decimalStatus.ok()) {
+    return decimalStatus;
   }
   if (isBitBool(item)) {
     const uint32_t byteIndex = item.has_byte_index() ? item.byte_index() : 0;
@@ -394,12 +461,19 @@ grpc::Status PointTable::insertOrUpdatePoint(const DLT645Proto::Point& point) {
   p.dataLen = point.data_len();
   p.type = point.type();
   p.access = point.access();
-  p.scale = point.scale();
-  if (p.scale == 0.0) {
-    p.scale = 1.0;
+  p.scale = pointDecimal(point.scale_decimal(), point.scale()).value();
+  if (p.scale.IsZero()) {
+    p.scale = mskdsp::numeric::Decimal20::FromInt64(1).value();
   }
-  p.offset = point.offset();
-  p.deadband = point.deadband();
+  p.offset = pointDecimal(point.offset_decimal(), point.offset()).value();
+  p.deadband =
+      pointDecimal(point.deadband_decimal(), point.deadband()).value();
+  if (p.type != DLT645Proto::DATA_TYPE_BOOL &&
+      (point.scale_decimal().empty() || point.offset_decimal().empty() ||
+       point.deadband_decimal().empty())) {
+    LOG_WARNING("DLT645 点位使用旧 double 工程量配置兼容解析: tag={}",
+                p.tag);
+  }
   if (point.has_bit_index()) {
     p.byteIndex = point.has_byte_index() ? point.byte_index() : 0;
     p.bitIndex = point.bit_index();
@@ -418,13 +492,16 @@ grpc::Status PointTable::insertOrUpdatePoint(const DLT645Proto::Point& point) {
   if (std::find(tags.begin(), tags.end(), p.tag) == tags.end()) {
     tags.push_back(p.tag);
   }
-  LOG_DEBUG("DLT645 点表写入点位: tag={}, 配置DI={}, 发送DI={}, data_len={}, byte_index={}, bit_index={}",
+  LOG_DEBUG("DLT645 点表写入点位: tag={}, 配置DI={}, 发送DI={}, data_len={}, byte_index={}, bit_index={}, scale={}, offset={}, deadband={}",
             p.tag,
             p.diText,
             formatHex(p.diBytes),
             p.dataLen,
             p.byteIndex.has_value() ? std::to_string(p.byteIndex.value()) : "-",
-            p.bitIndex.has_value() ? std::to_string(p.bitIndex.value()) : "-");
+            p.bitIndex.has_value() ? std::to_string(p.bitIndex.value()) : "-",
+            p.scale.ToString(),
+            p.offset.ToString(),
+            p.deadband.ToString());
   return grpc::Status::OK;
 }
 
@@ -463,12 +540,19 @@ grpc::Status PointTable::insertOrUpdateBlock(const DLT645Proto::Block& block) {
     p.dataLen = item.data_len();
     p.type = item.type();
     p.access = item.access();
-    p.scale = item.scale();
-    if (p.scale == 0.0) {
-      p.scale = 1.0;
+    p.scale = pointDecimal(item.scale_decimal(), item.scale()).value();
+    if (p.scale.IsZero()) {
+      p.scale = mskdsp::numeric::Decimal20::FromInt64(1).value();
     }
-    p.offset = item.offset();
-    p.deadband = item.deadband();
+    p.offset = pointDecimal(item.offset_decimal(), item.offset()).value();
+    p.deadband =
+        pointDecimal(item.deadband_decimal(), item.deadband()).value();
+    if (p.type != DLT645Proto::DATA_TYPE_BOOL &&
+        (item.scale_decimal().empty() || item.offset_decimal().empty() ||
+         item.deadband_decimal().empty())) {
+      LOG_WARNING("DLT645 数据块子项使用旧 double 工程量配置兼容解析: block_di={}, tag={}",
+                  block.block_di(), p.tag);
+    }
     if (item.has_bit_index()) {
       p.byteIndex = item.has_byte_index() ? item.byte_index() : 0;
       p.bitIndex = item.bit_index();
@@ -503,8 +587,14 @@ grpc::Status PointTable::insertOrUpdateBlock(const DLT645Proto::Block& block) {
     if (pointIt != byTag_.end()) {
       LOG_WARNING("DLT645 点表存在读块写点冲突: tag={}, 读使用数据块, 写使用单点", item.point.tag);
     }
-    LOG_DEBUG("DLT645 数据块写入子项: block_di={}, tag={}, offset={}, data_len={}", blockDef.diText, item.point.tag,
-              item.offset, item.point.dataLen);
+    LOG_DEBUG("DLT645 数据块写入子项: block_di={}, tag={}, offset={}, data_len={}, scale={}, 工程量偏移={}, deadband={}",
+              blockDef.diText,
+              item.point.tag,
+              item.offset,
+              item.point.dataLen,
+              item.point.scale.ToString(),
+              item.point.offset.ToString(),
+              item.point.deadband.ToString());
   }
   LOG_INFO("DLT645 点表写入数据块: block_di={}, 发送DI={}, data_len={}, item_count={}",
            blockDef.diText, formatHex(blockDef.diBytes), blockDef.dataLen, blockDef.items.size());

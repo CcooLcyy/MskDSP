@@ -1136,6 +1136,134 @@ TEST(ModbusRtuLinkManagerTest, ExecuteCommandWritesMultipleRegistersAndReturnsAc
   ASSERT_TRUE(mgr.StopLink("conn-command").ok());
 }
 
+// 验证：十进制命令经精确反向换算后，在 1.5 寄存器边界按半数远离零量化为 2。
+TEST(ModbusRtuLinkManagerTest, DecimalCommandRoundsRegisterTieAwayFromZero) {
+  ScopedPseudoTty pty;
+  ASSERT_TRUE(pty.ok()) << pty.error();
+
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  LinkManagerTestEnv env;
+  auto& mgr = env.mgr;
+  mgr.setDataCenterStub(stub);
+
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(
+      MakeMinimalLinkReq("conn-decimal-command", pty.slavePath().c_str(), 1),
+      &info).ok());
+
+  ModbusRTUProto::UpsertPointTableRequest pointRequest;
+  pointRequest.set_conn_name("conn-decimal-command");
+  auto point = MakeWriteMultipleRegistersPoint("decimal-setpoint", 100);
+  point.set_scale_decimal("0.2");
+  *pointRequest.add_points() = point;
+  pointRequest.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(pointRequest).ok());
+  ASSERT_TRUE(mgr.StartLink("conn-decimal-command").ok());
+
+  std::vector<uint8_t> requestFrame;
+  bool responseWritten = false;
+  std::jthread responder([&]() {
+    if (!pty.readExact(&requestFrame, 11, 3000)) {
+      return;
+    }
+    std::vector<uint8_t> responseFrame(requestFrame.begin(),
+                                       requestFrame.begin() + 6);
+    ModbusRTU::SerialBus::appendCrc(&responseFrame);
+    responseWritten = pty.writeAll(responseFrame);
+  });
+
+  DataCenterProto::ExecuteCommandRequest request;
+  request.mutable_dst()->set_conn_id(info.conn_id());
+  request.mutable_dst()->set_module_name("ModbusRTU");
+  request.mutable_dst()->set_conn_name("conn-decimal-command");
+  request.mutable_dst()->set_tag("decimal-setpoint");
+  request.mutable_value()->set_decimal_value("0.3");
+
+  DataCenterProto::ExecuteCommandResponse response;
+  const auto status = mgr.ExecuteCommand(request, &response);
+  responder.join();
+
+  EXPECT_TRUE(status.ok()) << status.error_message();
+  EXPECT_TRUE(responseWritten);
+  ASSERT_EQ(requestFrame.size(), 11u);
+  EXPECT_EQ(requestFrame[7], 0x00);
+  EXPECT_EQ(requestFrame[8], 0x02);
+  EXPECT_EQ(response.status(), DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_EQ(response.requested_value_decimal(),
+            "0.30000000000000000000");
+  EXPECT_EQ(response.accepted_value_decimal(),
+            "0.30000000000000000000");
+
+  ASSERT_TRUE(mgr.StopLink("conn-decimal-command").ok());
+}
+
+// 验证：采集值按精确 scale/offset 换算，并在等于精确死区的边界连续上报 Decimal20。
+TEST(ModbusRtuLinkManagerTest, PollingReportsExactDecimalAtDeadbandBoundary) {
+  ScopedPseudoTty pty;
+  ASSERT_TRUE(pty.ok()) << pty.error();
+
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  LinkManagerTestEnv env;
+  auto& mgr = env.mgr;
+  mgr.setDataCenterStub(stub);
+
+  auto linkRequest = MakeMinimalLinkReq(
+      "conn-decimal-poll", pty.slavePath().c_str(), 1);
+  linkRequest.mutable_config()->set_poll_interval_ms(5);
+  linkRequest.mutable_config()->mutable_serial()->set_read_timeout_ms(100);
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(linkRequest, &info).ok());
+
+  ModbusRTUProto::UpsertPointTableRequest pointRequest;
+  pointRequest.set_conn_name("conn-decimal-poll");
+  auto point = MakeHoldingRegisterPoint("decimal-measurement", 10);
+  point.set_scale_decimal("0.2");
+  point.set_offset_decimal("0.1");
+  point.set_deadband_decimal("0.2");
+  *pointRequest.add_points() = point;
+  pointRequest.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(pointRequest).ok());
+  ASSERT_TRUE(mgr.StartLink("conn-decimal-poll").ok());
+
+  std::jthread responder([&](std::stop_token stopToken) {
+    size_t responseCount = 0;
+    while (!stopToken.stop_requested()) {
+      std::vector<uint8_t> requestFrame;
+      if (!pty.readExact(&requestFrame, 8, 500)) {
+        return;
+      }
+      const uint16_t raw = responseCount == 0 ? 1u : 2u;
+      std::vector<uint8_t> responseFrame{
+          1, 3, 2, static_cast<uint8_t>(raw >> 8),
+          static_cast<uint8_t>(raw & 0xFF)};
+      ModbusRTU::SerialBus::appendCrc(&responseFrame);
+      if (!pty.writeAll(responseFrame)) {
+        return;
+      }
+      ++responseCount;
+    }
+  });
+
+  ASSERT_TRUE(state.WaitForPublishCount(info.conn_id(),
+                                        "decimal-measurement",
+                                        2,
+                                        std::chrono::seconds(2)));
+  const auto updates = state.GetPublishedUpdates(info.conn_id(),
+                                                  "decimal-measurement");
+  ASSERT_GE(updates.size(), 2u);
+  ASSERT_TRUE(updates[0].value().has_decimal_value());
+  ASSERT_TRUE(updates[1].value().has_decimal_value());
+  EXPECT_EQ(updates[0].value().decimal_value(),
+            "0.30000000000000000000");
+  EXPECT_EQ(updates[1].value().decimal_value(),
+            "0.50000000000000000000");
+
+  ASSERT_TRUE(mgr.StopLink("conn-decimal-poll").ok());
+  responder.request_stop();
+}
+
 // 验证：同步 BOOL 命令通过 0x05 写单线圈，并按标准发送 true=FF00、false=0000。
 TEST(ModbusRtuLinkManagerTest, ExecuteCommandWritesSingleCoilBoolOnAndOff) {
   ScopedPseudoTty pty;

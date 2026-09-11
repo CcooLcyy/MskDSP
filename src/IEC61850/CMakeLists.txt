@@ -11,6 +11,7 @@ add_dependencies(${LIB_NAME} dspProto)
 
 target_sources(${LIB_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include/IEC61850CommandExecutorService.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/IEC61850Decimal.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/include/IEC61850SvState.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/IEC61850GooseRuntime.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/IEC61850SvRuntime.h

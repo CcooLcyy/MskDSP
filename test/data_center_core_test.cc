@@ -410,6 +410,35 @@ TEST(DataCenterCoreTest, ResolveCommandRouteRejectsMultipleBusinessDestinations)
   EXPECT_TRUE(resp.dst().module_name().empty());
 }
 
+// 验证：同步命令路由响应保留规范 Decimal20 原文，同时继续填写兼容 double 字段。
+TEST(DataCenterCoreTest, ResolveCommandRoutePreservesDecimalRequestedValue) {
+  DataCenterCore core;
+
+  DataCenterProto::ConnectionsConfig cfg;
+  cfg.set_next_conn_id(3);
+  *cfg.add_conns() = MakeConnInfo(1, "IEC104", "104主站");
+  *cfg.add_conns() = MakeConnInfo(2, "AGC", "AGC");
+  ASSERT_TRUE(core.ReplaceConnectionsConfig(cfg).ok());
+
+  DataCenterProto::UpsertRoutesRequest routes;
+  routes.set_replace(true);
+  *routes.add_routes() = MakeStableRoute(1, "IEC104", "104主站", "有功命令",
+                                         2, "AGC", "AGC", "总有功命令");
+  ASSERT_TRUE(core.UpsertRoutes(routes).ok());
+
+  DataCenterProto::ExecuteCommandRequest req;
+  req.mutable_src()->set_conn_id(1);
+  req.mutable_src()->set_tag("有功命令");
+  req.mutable_value()->set_decimal_value("0.10000000000000000001");
+  req.set_quality(DataCenterProto::QUALITY_GOOD);
+
+  DataCenterProto::ExecuteCommandResponse resp;
+  ASSERT_TRUE(core.ResolveCommandRoute(req, &resp).ok());
+  EXPECT_EQ(resp.status(), DataCenterProto::COMMAND_STATUS_UNSPECIFIED);
+  EXPECT_EQ(resp.requested_value_decimal(), "0.10000000000000000001");
+  EXPECT_DOUBLE_EQ(resp.requested_value(), 0.1);
+}
+
 // 验证：GetLatest 返回目标连接内“按目的端点”最新一次路由后的值（按 dst_tag 排序）。
 TEST(DataCenterCoreTest, GetLatestReturnsLastRoutedValueByDstEndpoint) {
   DataCenterCore core;

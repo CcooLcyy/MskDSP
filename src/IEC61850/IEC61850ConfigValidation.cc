@@ -11,6 +11,7 @@
 #include <unordered_set>
 
 #include "mskdsp/IEC61850Limits.hpp"
+#include "IEC61850Decimal.hpp"
 #include "IEC61850ModelSelection.h"
 #include "IEC61850SvRuntime.h"
 #include "IEC61850ThreadRuntimePolicy.h"
@@ -640,10 +641,11 @@ grpc::Status ValidatePersistedConfig(
           }
         }
       }
-      if (!std::isfinite(point.scale()) || !std::isfinite(point.offset()) ||
-          !std::isfinite(point.deadband()) || point.deadband() < 0) {
+      const auto engineering = ParsePointEngineeringDecimal(point);
+      if (!engineering.has_value()) {
         AddError(issues, "CONFIG_POINT_ENGINEERING_INVALID", pointPath,
-                 "scale、offset和deadband必须为有限数，且deadband不能小于0");
+                 std::format("scale、offset或deadband配置非法: {}",
+                     mskdsp::numeric::DecimalErrorMessage(engineering.error())));
         hasError = true;
       }
     }

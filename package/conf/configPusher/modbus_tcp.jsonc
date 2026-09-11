@@ -1,0 +1,6 @@
+{
+  // Modbus TCP 主站目标态配置。默认不声明链路，避免启动 ConfigPusher 时覆盖现场配置。
+  "modbusTcp": {
+    "links": []
+  }
+}

@@ -101,7 +101,8 @@ TEST(IEC61850MmsPipelineTest, MapsAndPublishesMmsReport) {
   DataCenterProto::GetLatestResponse latest;
   ASSERT_TRUE(state.GetLatest(latestRequest, &latest).ok());
   ASSERT_EQ(latest.updates_size(), 1);
-  EXPECT_DOUBLE_EQ(latest.updates(0).value().double_value(), 21.0);
+  EXPECT_EQ(latest.updates(0).value().decimal_value(),
+            "21.00000000000000000000");
   EXPECT_EQ(latest.updates(0).ts_ms(), 1234);
   EXPECT_EQ(latest.updates(0).quality(), DataCenterProto::QUALITY_GOOD);
   const auto statistics = pipeline.GetStatistics("line-1");
@@ -418,6 +419,64 @@ TEST(IEC61850MmsPipelineTest, DeadbandFiltersSmallEngineeringChange) {
   ASSERT_TRUE(pipeline.WaitUntilIdle(std::chrono::seconds(2)));
 
   EXPECT_EQ(state.GetPublishCount(11, "P"), 1u);
+  EXPECT_EQ(pipeline.GetStatistics("line-1").mms_values_deadband_filtered(),
+            1u);
+}
+
+// 验证MMS普通数值按十进制文本配置换算，且文本字段优先于旧double字段发布20位小数。
+TEST(IEC61850MmsPipelineTest, PublishesDecimal20UsingPreferredTextFields) {
+  FakeDataCenterState state;
+  state.AddConnection(11, "IEC61850", "line-1");
+  IEC61850::DataCenterClient client("IEC61850");
+  client.SetStub(MakeStub(&state));
+  IEC61850::MmsEventPipeline pipeline(&client);
+  auto mappings = MakeMappings();
+  auto* point = mappings.mutable_points(0);
+  point->set_scale(99.0);
+  point->set_offset(99.0);
+  point->set_scale_decimal("0.12345678901234567890");
+  point->set_offset_decimal("0.00000000000000000001");
+  ASSERT_TRUE(pipeline.ConfigureIed(MakePublishConfig(mappings)).ok());
+
+  auto report = MakeReport(0.0, 1000);
+  report.values.front().value = std::int64_t{1};
+  ASSERT_TRUE(pipeline.EnqueueReport("line-1", std::move(report)));
+
+  ASSERT_TRUE(state.WaitForPublishCount(
+      11, "P", 1, std::chrono::seconds(2)));
+  DataCenterProto::GetLatestRequest request;
+  request.set_conn_id(11);
+  request.add_tags("P");
+  DataCenterProto::GetLatestResponse latest;
+  ASSERT_TRUE(state.GetLatest(request, &latest).ok());
+  ASSERT_EQ(latest.updates_size(), 1);
+  EXPECT_EQ(latest.updates(0).value().decimal_value(),
+            "0.12345678901234567891");
+}
+
+// 验证Decimal20死区严格过滤小于阈值的变化，精确等于阈值时必须上报。
+TEST(IEC61850MmsPipelineTest, ReportsAtExactDecimal20DeadbandBoundary) {
+  FakeDataCenterState state;
+  state.AddConnection(11, "IEC61850", "line-1");
+  IEC61850::DataCenterClient client("IEC61850");
+  client.SetStub(MakeStub(&state));
+  IEC61850::MmsEventPipeline pipeline(&client);
+  auto mappings = MakeMappings();
+  auto* point = mappings.mutable_points(0);
+  point->set_scale_decimal("0.00000000000000000001");
+  point->set_offset_decimal("0");
+  point->set_deadband_decimal("0.00000000000000000002");
+  ASSERT_TRUE(pipeline.ConfigureIed(MakePublishConfig(mappings)).ok());
+
+  const std::vector<std::pair<std::int64_t, std::size_t>> samples{
+      {100, 1}, {101, 1}, {102, 2}};
+  for (const auto [raw, expectedCount] : samples) {
+    auto report = MakeReport(0.0, 1000 + raw);
+    report.values.front().value = raw;
+    ASSERT_TRUE(pipeline.EnqueueReport("line-1", std::move(report)));
+    ASSERT_TRUE(pipeline.WaitUntilIdle(std::chrono::seconds(2)));
+    EXPECT_EQ(state.GetPublishCount(11, "P"), expectedCount);
+  }
   EXPECT_EQ(pipeline.GetStatistics("line-1").mms_values_deadband_filtered(),
             1u);
 }

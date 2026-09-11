@@ -134,3 +134,30 @@ TEST(ModbusRtuDataCenterClientTest, PublishDoubleBuildsRequest) {
   auto st = client.PublishDouble(11, "reg-2", 220.5, DataCenterProto::QUALITY_GOOD, 789);
   EXPECT_TRUE(st.ok());
 }
+
+// 验证：PublishDecimal 使用 decimal_value 原样传递固定 20 位工程量。
+TEST(ModbusRtuDataCenterClientTest, PublishDecimalBuildsRequest) {
+  auto stub = std::make_shared<DataCenterProto::MockDataCenterServiceStub>();
+  DataCenterClient client("ModbusRTU");
+  client.setStub(stub);
+
+  EXPECT_CALL(*stub, Publish(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext*,
+                          const DataCenterProto::PublishRequest& req,
+                          DataCenterProto::Empty*) {
+        EXPECT_EQ(req.conn_id(), 12u);
+        EXPECT_EQ(req.tag(), "decimal-reg");
+        EXPECT_EQ(req.value().kind_case(),
+                  DataCenterProto::PointValue::kDecimalValue);
+        EXPECT_EQ(req.value().decimal_value(),
+                  "0.30000000000000000000");
+        EXPECT_EQ(req.quality(), DataCenterProto::QUALITY_GOOD);
+        EXPECT_EQ(req.ts_ms(), 901);
+        return grpc::Status::OK;
+      }));
+
+  const auto status = client.PublishDecimal(
+      12, "decimal-reg", "0.30000000000000000000",
+      DataCenterProto::QUALITY_GOOD, 901);
+  EXPECT_TRUE(status.ok());
+}

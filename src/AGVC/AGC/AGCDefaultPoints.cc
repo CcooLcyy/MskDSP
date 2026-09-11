@@ -85,10 +85,18 @@ void FillDefaultPointInfos(google::protobuf::RepeatedPtrField<AGCProto::DefaultP
   }
 }
 
-double ComputeInstalledCapacityKw(const AGCProto::GroupConfig &config) {
-  double total = 0.0;
+mskdsp::numeric::Decimal20 ComputeInstalledCapacityKw(const AGCProto::GroupConfig &config) {
+  mskdsp::numeric::Decimal20 total;
   for (const auto &member : config.members()) {
-    total += member.capacity_kw();
+    auto capacity = mskdsp::numeric::ParseConfiguredDecimal(
+        member.capacity_kw_decimal(), member.capacity_kw());
+    if (!capacity.has_value()) {
+      continue;
+    }
+    auto next = total.Add(*capacity);
+    if (next.has_value()) {
+      total = *next;
+    }
   }
   return total;
 }

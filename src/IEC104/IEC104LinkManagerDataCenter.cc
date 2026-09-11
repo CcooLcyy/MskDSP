@@ -17,7 +17,10 @@
 
 #include "Logger.h"
 #include "IEC104LibInfo.h"
+#include "IEC104ReportPolicy.hpp"
+#include "IEC104SoeStore.h"
 #include "ThreadUtil.hpp"
+#include "mskdsp/Decimal20.hpp"
 
 namespace IEC104 {
 namespace {
@@ -49,49 +52,101 @@ uint8_t toIec104Quality(DataCenterProto::Quality q) {
 }
 }
 
-double applyScale(double raw, double scale, double offset) {
-  if (scale == 0.0) {
-    scale = 1.0;
-  }
-  return raw * scale + offset;
-}
-
-bool reverseScale(double eng, double scale, double offset, double* out) {
+bool applyScale(double raw,
+                const mskdsp::numeric::Decimal20& scale,
+                const mskdsp::numeric::Decimal20& offset,
+                mskdsp::numeric::Decimal20* out) {
   if (out == nullptr) {
     return false;
   }
-  if (scale == 0.0) {
-    scale = 1.0;
-  }
-  const double value = (eng - offset) / scale;
-  if (!std::isfinite(value)) {
+  // IEC104 遥测和遥调使用 short float，先按实际协议精度进入业务计算。
+  auto rawDecimal =
+      mskdsp::numeric::Decimal20::FromFloat(static_cast<float>(raw));
+  if (!rawDecimal) {
     return false;
   }
-  *out = value;
+  auto engineering =
+      mskdsp::numeric::ApplyEngineering(*rawDecimal, scale, offset);
+  if (!engineering) {
+    return false;
+  }
+  *out = *engineering;
   return true;
 }
 
-bool shouldReport(double value, double deadband, const std::optional<double>& last) {
-  if (deadband <= 0 || !last.has_value()) {
-    return true;
+bool reverseScale(const mskdsp::numeric::Decimal20& engineering,
+                  const mskdsp::numeric::Decimal20& scale,
+                  const mskdsp::numeric::Decimal20& offset,
+                  double* out) {
+  if (out == nullptr) {
+    return false;
   }
-  return std::fabs(value - last.value()) >= deadband;
+  auto raw =
+      mskdsp::numeric::ReverseEngineering(engineering, scale, offset);
+  if (!raw) {
+    return false;
+  }
+  // 在 ASDU 边界完成 binary32 范围检查和量化，线格式仍保持 short float。
+  auto boundary = raw->ToFloat();
+  if (!boundary) {
+    return false;
+  }
+  *out = static_cast<double>(*boundary);
+  return true;
 }
 
-bool pointValueToDouble(const DataCenterProto::PointValue& v, double* out) {
+bool reverseScale(double engineering,
+                  const mskdsp::numeric::Decimal20& scale,
+                  const mskdsp::numeric::Decimal20& offset,
+                  double* out) {
+  auto decimal = mskdsp::numeric::Decimal20::FromDouble(engineering);
+  return decimal && reverseScale(*decimal, scale, offset, out);
+}
+
+bool shouldReport(const mskdsp::numeric::Decimal20& value,
+                  const mskdsp::numeric::Decimal20& deadband,
+                  const std::optional<mskdsp::numeric::Decimal20>& last) {
+  if (deadband <= mskdsp::numeric::Decimal20{} || !last.has_value()) {
+    return true;
+  }
+  return mskdsp::numeric::ShouldReport(value, *last, deadband);
+}
+
+bool pointValueToDecimal(const DataCenterProto::PointValue& v,
+                         mskdsp::numeric::Decimal20* out) {
   if (out == nullptr) {
     return false;
   }
   switch (v.kind_case()) {
-  case DataCenterProto::PointValue::kDoubleValue:
-    *out = v.double_value();
-    return true;
-  case DataCenterProto::PointValue::kIntValue:
-    *out = static_cast<double>(v.int_value());
-    return true;
-  case DataCenterProto::PointValue::kBoolValue:
-    *out = v.bool_value() ? 1.0 : 0.0;
-    return true;
+  case DataCenterProto::PointValue::kDoubleValue: {
+    auto value = mskdsp::numeric::Decimal20::FromDouble(v.double_value());
+    if (value) {
+      *out = *value;
+    }
+    return value.has_value();
+  }
+  case DataCenterProto::PointValue::kIntValue: {
+    auto value = mskdsp::numeric::Decimal20::FromInt64(v.int_value());
+    if (value) {
+      *out = *value;
+    }
+    return value.has_value();
+  }
+  case DataCenterProto::PointValue::kBoolValue: {
+    auto value =
+        mskdsp::numeric::Decimal20::FromInt64(v.bool_value() ? 1 : 0);
+    if (value) {
+      *out = *value;
+    }
+    return value.has_value();
+  }
+  case DataCenterProto::PointValue::kDecimalValue: {
+    auto value = mskdsp::numeric::Decimal20::Parse(v.decimal_value());
+    if (value) {
+      *out = *value;
+    }
+    return value.has_value();
+  }
   default:
     return false;
   }
@@ -111,6 +166,14 @@ bool pointValueToBool(const DataCenterProto::PointValue& v, bool* out) {
   case DataCenterProto::PointValue::kDoubleValue:
     *out = (v.double_value() != 0.0);
     return true;
+  case DataCenterProto::PointValue::kDecimalValue: {
+    auto decimal = mskdsp::numeric::Decimal20::Parse(v.decimal_value());
+    if (!decimal) {
+      return false;
+    }
+    *out = !decimal->IsZero();
+    return true;
+  }
   default:
     return false;
   }
@@ -169,6 +232,60 @@ CommandResult rejectCommand(std::string reason) {
 }
 }  // namespace
 
+bool LinkManager::storeAndSendSoe(const std::string& connName,
+                                  const PointValue& pv,
+                                  TcpLink* transport) {
+  if (transport == nullptr) {
+    LOG_ERROR("IEC104 SOE 上送失败: conn_name={}, ioa={}, 原因=传输对象为空", connName, pv.ioa);
+    return false;
+  }
+  if (!soeStore_) {
+    LOG_WARNING("IEC104 未启用 SOE 持久化，按普通点值上送: conn_name={}, ioa={}", connName, pv.ioa);
+    transport->SendPointValue(pv, kCotSpontaneous);
+    return true;
+  }
+
+  PointValue persistedValue = pv;
+  if (persistedValue.tsMs <= 0) {
+    persistedValue.tsMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::system_clock::now().time_since_epoch())
+                              .count();
+    LOG_WARNING("IEC104 SOE 缺少有效时标，使用当前时间: conn_name={}, ioa={}, ts_ms={}",
+                connName,
+                persistedValue.ioa,
+                persistedValue.tsMs);
+  }
+
+  SoeAppendResult result;
+  auto status = soeStore_->Append(connName,
+                                  persistedValue.ioa,
+                                  persistedValue.boolValue,
+                                  persistedValue.tsMs,
+                                  persistedValue.quality,
+                                  &result);
+  if (!status.ok()) {
+    LOG_ERROR("IEC104 SOE 落盘失败，不执行上送: conn_name={}, ioa={}, ts_ms={}, 原因={}",
+              connName,
+              persistedValue.ioa,
+              persistedValue.tsMs,
+              status.error_message());
+    return false;
+  }
+
+  SoeEvent event;
+  event.eventSequence = result.record.eventSequence;
+  event.value = persistedValue;
+  transport->SendSoe(event);
+  LOG_DEBUG("IEC104 SOE 已落盘并提交发送: conn_name={}, event_seq={}, ioa={}, 状态={}, ts_ms={}, 品质={}",
+            connName,
+            event.eventSequence,
+            persistedValue.ioa,
+            persistedValue.boolValue ? "合" : "分",
+            persistedValue.tsMs,
+            persistedValue.quality);
+  return true;
+}
+
 void LinkManager::stopDataCenterSubscribeLocked(LinkRuntime* link) {
   if (link == nullptr) {
     return;
@@ -191,9 +308,10 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, Li
   struct PointMeta {
     uint32_t ioa = 0;
     IEC104Proto::PointType type = IEC104Proto::POINT_TYPE_UNSPECIFIED;
-    double scale = 1.0;
-    double offset = 0.0;
-    double deadband = 0.0;
+    mskdsp::numeric::Decimal20 scale =
+        mskdsp::numeric::Decimal20::FromInt64(1).value();
+    mskdsp::numeric::Decimal20 offset;
+    mskdsp::numeric::Decimal20 deadband;
   };
   std::unordered_map<std::string, PointMeta> metaByTag;
   metaByTag.reserve(tags.size());
@@ -223,7 +341,7 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, Li
       return;
     }
 
-    std::unordered_map<std::string, double> lastSentByTag;
+    std::unordered_map<std::string, detail::LastReportedTelemetry> lastSentByTag;
     lastSentByTag.reserve(metaByTag.size());
     DataCenterProto::PointUpdate update;
     while (reader->Read(&update)) {
@@ -236,28 +354,31 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, Li
         continue;
       }
       if (it->second.type == IEC104Proto::POINT_TYPE_FLOAT) {
-        double value = 0;
-        if (!pointValueToDouble(update.value(), &value)) {
+        mskdsp::numeric::Decimal20 value;
+        if (!pointValueToDecimal(update.value(), &value)) {
           LOG_DEBUG("IEC104 遥测点值类型不匹配: conn_name={}, tag={}", connName, update.dst_tag());
           continue;
         }
-        std::optional<double> last;
+        std::optional<detail::LastReportedTelemetry> last;
         auto lastIt = lastSentByTag.find(update.dst_tag());
         if (lastIt != lastSentByTag.end()) {
           last = lastIt->second;
         }
-        if (!shouldReport(value, it->second.deadband, last)) {
-          LOG_DEBUG("IEC104 死区过滤上送: conn_name={}, tag={}, value={}, last={}, 死区={}",
+        if (!detail::ShouldReportTelemetry(value, it->second.deadband, update.quality(), update.ts_ms(), last)) {
+          LOG_DEBUG("IEC104 死区过滤上送: conn_name={}, tag={}, value={}, last={}, 品质={}, ts_ms={}, 死区={}",
                     connName,
                     update.dst_tag(),
-                    value,
-                    last.value(),
-                    it->second.deadband);
+                    value.ToString(),
+                    last->value.ToString(),
+                    static_cast<int>(update.quality()),
+                    update.ts_ms(),
+                    it->second.deadband.ToString());
           continue;
         }
         double rawValue = 0;
         if (!reverseScale(value, it->second.scale, it->second.offset, &rawValue)) {
-          LOG_WARNING("IEC104 点值反向缩放失败: conn_name={}, tag={}, value={}", connName, update.dst_tag(), value);
+          LOG_WARNING("IEC104 点值反向缩放失败: conn_name={}, tag={}, value={}",
+                      connName, update.dst_tag(), value.ToString());
           continue;
         }
         PointValue pv;
@@ -267,7 +388,11 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, Li
         pv.quality = toIec104Quality(update.quality());
         pv.tsMs = update.ts_ms();
         transport->SendPointValue(pv, kCotSpontaneous);
-        lastSentByTag[update.dst_tag()] = value;
+        lastSentByTag[update.dst_tag()] = detail::LastReportedTelemetry{
+            .value = value,
+            .quality = update.quality(),
+            .tsMs = update.ts_ms(),
+        };
       } else if (it->second.type == IEC104Proto::POINT_TYPE_SINGLE) {
         bool value = false;
         if (!pointValueToBool(update.value(), &value)) {
@@ -280,7 +405,7 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, Li
         pv.boolValue = value;
         pv.quality = toIec104Quality(update.quality());
         pv.tsMs = update.ts_ms();
-        transport->SendPointValue(pv, kCotSpontaneous);
+        (void)storeAndSendSoe(connName, pv, transport);
       }
     }
 
@@ -360,6 +485,18 @@ void LinkManager::startTimeSyncSubscribeLocked(const std::string& connName, Link
         case DataCenterProto::PointValue::kDoubleValue:
           tsMs = static_cast<int64_t>(update.value().double_value());
           break;
+        case DataCenterProto::PointValue::kDecimalValue: {
+          auto decimal = mskdsp::numeric::Decimal20::Parse(
+              update.value().decimal_value());
+          if (decimal) {
+            auto integer = decimal->ToInteger<int64_t>(
+                mskdsp::numeric::RoundingMode::kTowardZero);
+            if (integer) {
+              tsMs = *integer;
+            }
+          }
+          break;
+        }
         default:
           break;
         }
@@ -412,8 +549,9 @@ void LinkManager::startCommandSubscribeLocked(const std::string& connName, LinkR
     IEC104Proto::RemoteControlType remoteControlType = IEC104Proto::REMOTE_CONTROL_TYPE_SINGLE;
     IEC104Proto::CommandExecutionMode commandExecutionMode =
         IEC104Proto::COMMAND_EXECUTION_MODE_SELECT_EXECUTE;
-    double scale = 1.0;
-    double offset = 0.0;
+    mskdsp::numeric::Decimal20 scale =
+        mskdsp::numeric::Decimal20::FromInt64(1).value();
+    mskdsp::numeric::Decimal20 offset;
   };
   std::vector<std::string> tags;
   std::unordered_map<std::string, PointMeta> metaByTag;
@@ -473,17 +611,19 @@ void LinkManager::startCommandSubscribeLocked(const std::string& connName, LinkR
           LOG_WARNING("IEC104 遥调点协议类型不是浮点: conn_name={}, tag={}", connName, update.dst_tag());
           continue;
         }
-        double value = 0;
-        if (!pointValueToDouble(update.value(), &value)) {
+        mskdsp::numeric::Decimal20 value;
+        if (!pointValueToDecimal(update.value(), &value)) {
           LOG_DEBUG("IEC104 设点点值类型不匹配: conn_name={}, tag={}", connName, update.dst_tag());
           continue;
         }
         double rawValue = 0;
         if (!reverseScale(value, it->second.scale, it->second.offset, &rawValue)) {
-          LOG_WARNING("IEC104 设点反向缩放失败: conn_name={}, tag={}, value={}", connName, update.dst_tag(), value);
+          LOG_WARNING("IEC104 设点反向缩放失败: conn_name={}, tag={}, value={}",
+                      connName, update.dst_tag(), value.ToString());
           continue;
         }
-        LOG_INFO("IEC104 触发设点命令: conn_name={}, tag={}, ioa={}, value={}", connName, update.dst_tag(), it->second.ioa, value);
+        LOG_INFO("IEC104 触发设点命令: conn_name={}, tag={}, ioa={}, value={}",
+                 connName, update.dst_tag(), it->second.ioa, value.ToString());
         transport->SendSetpointCommand(it->second.ioa, rawValue);
       } else if (it->second.businessType == IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_CONTROL) {
         if (it->second.type != IEC104Proto::POINT_TYPE_SINGLE) {
@@ -535,10 +675,11 @@ grpc::Status LinkManager::handleClientPointValue(const std::string& connName, co
   uint32_t connId = 0;
   std::string tag;
   IEC104Proto::PointType type = IEC104Proto::POINT_TYPE_UNSPECIFIED;
-  double scale = 1.0;
-  double offset = 0.0;
-  double deadband = 0.0;
-  std::optional<double> last;
+  mskdsp::numeric::Decimal20 scale =
+      mskdsp::numeric::Decimal20::FromInt64(1).value();
+  mskdsp::numeric::Decimal20 offset;
+  mskdsp::numeric::Decimal20 deadband;
+  std::optional<mskdsp::numeric::Decimal20> last;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = linksByName_.find(connName);
@@ -572,17 +713,24 @@ grpc::Status LinkManager::handleClientPointValue(const std::string& connName, co
 
   if (type == IEC104Proto::POINT_TYPE_FLOAT) {
     auto quality = toDataCenterQuality(pv.quality);
-    const double engValue = applyScale(pv.doubleValue, scale, offset);
+    mskdsp::numeric::Decimal20 engValue;
+    if (!applyScale(pv.doubleValue, scale, offset, &engValue)) {
+      LOG_WARNING("IEC104 工程量换算失败: conn_name={}, tag={}, raw={}, scale={}, offset={}",
+                  connName, tag, pv.doubleValue, scale.ToString(), offset.ToString());
+      return grpc::Status(grpc::StatusCode::OUT_OF_RANGE,
+                          "IEC104 工程量换算结果超出 Decimal20 范围");
+    }
     if (!shouldReport(engValue, deadband, last)) {
       LOG_DEBUG("IEC104 死区过滤上报: conn_name={}, tag={}, value={}, last={}, 死区={}",
                 connName,
                 tag,
-                engValue,
-                last.value(),
-                deadband);
+                engValue.ToString(),
+                last->ToString(),
+                deadband.ToString());
       return grpc::Status::OK;
     }
-    auto st = dataCenter_.PublishDouble(connId, tag, engValue, quality, pv.tsMs);
+    auto st = dataCenter_.PublishDecimal(
+        connId, tag, engValue.ToFixedString(), quality, pv.tsMs);
     if (!st.ok()) {
       LOG_WARNING("IEC104 发布点位失败: conn_name={}, tag={}, 错误={}", connName, tag, st.error_message());
       std::lock_guard<std::mutex> lock(mu_);
@@ -626,8 +774,9 @@ CommandResult LinkManager::handleCommandValue(const std::string& connName, const
   IEC104Proto::PointType type = IEC104Proto::POINT_TYPE_UNSPECIFIED;
   IEC104Proto::PointBusinessType businessType = IEC104Proto::POINT_BUSINESS_TYPE_UNSPECIFIED;
   IEC104Proto::RemoteControlType remoteControlType = IEC104Proto::REMOTE_CONTROL_TYPE_SINGLE;
-  double scale = 1.0;
-  double offset = 0.0;
+  mskdsp::numeric::Decimal20 scale =
+      mskdsp::numeric::Decimal20::FromInt64(1).value();
+  mskdsp::numeric::Decimal20 offset;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = linksByName_.find(connName);
@@ -673,8 +822,13 @@ CommandResult LinkManager::handleCommandValue(const std::string& connName, const
                   connName, tag, static_cast<int>(businessType));
       return rejectCommand("IEC104 设点命令目标不是遥调点");
     }
-    const double engValue = applyScale(cv.doubleValue, scale, offset);
-    req.mutable_value()->set_double_value(engValue);
+    mskdsp::numeric::Decimal20 engValue;
+    if (!applyScale(cv.doubleValue, scale, offset, &engValue)) {
+      LOG_WARNING("IEC104 设点工程量换算失败: conn_name={}, tag={}, raw={}, scale={}, offset={}",
+                  connName, tag, cv.doubleValue, scale.ToString(), offset.ToString());
+      return rejectCommand("IEC104 设点工程量换算失败");
+    }
+    req.mutable_value()->set_decimal_value(engValue.ToFixedString());
     DataCenterProto::ExecuteCommandResponse resp;
     auto st = dataCenter_.ExecuteCommand(req, &resp);
     if (!st.ok()) {
@@ -691,13 +845,14 @@ CommandResult LinkManager::handleCommandValue(const std::string& connName, const
       LOG_WARNING("IEC104 设点被同步命令链路拒绝: conn_name={}, tag={}, value={}, status={}, reject_code={}, 原因={}",
                   connName,
                   tag,
-                  engValue,
+                  engValue.ToString(),
                   static_cast<int>(resp.status()),
                   static_cast<int>(resp.reject_code()),
                   reason);
       return rejectCommand(reason);
     }
-    LOG_INFO("IEC104 设点同步执行成功: conn_name={}, tag={}, value={}", connName, tag, engValue);
+    LOG_INFO("IEC104 设点同步执行成功: conn_name={}, tag={}, value={}",
+             connName, tag, engValue.ToString());
     return CommandResult{};
   }
 
@@ -836,8 +991,9 @@ std::vector<PointValue> LinkManager::buildInterrogationSnapshot(const std::strin
   struct PointMeta {
     uint32_t ioa = 0;
     IEC104Proto::PointType type = IEC104Proto::POINT_TYPE_UNSPECIFIED;
-    double scale = 1.0;
-    double offset = 0.0;
+    mskdsp::numeric::Decimal20 scale =
+        mskdsp::numeric::Decimal20::FromInt64(1).value();
+    mskdsp::numeric::Decimal20 offset;
   };
   std::unordered_map<std::string, PointMeta> metaByTag;
   std::unordered_map<std::string, IEC104Proto::SimulationPoint> simulationValues;
@@ -880,13 +1036,14 @@ std::vector<PointValue> LinkManager::buildInterrogationSnapshot(const std::strin
       continue;
     }
     if (it->second.type == IEC104Proto::POINT_TYPE_FLOAT) {
-      double value = 0;
-      if (!pointValueToDouble(update.value(), &value)) {
+      mskdsp::numeric::Decimal20 value;
+      if (!pointValueToDecimal(update.value(), &value)) {
         continue;
       }
       double rawValue = 0;
       if (!reverseScale(value, it->second.scale, it->second.offset, &rawValue)) {
-        LOG_WARNING("IEC104 总召点值反向缩放失败: conn_name={}, tag={}, value={}", connName, update.dst_tag(), value);
+        LOG_WARNING("IEC104 总召点值反向缩放失败: conn_name={}, tag={}, value={}",
+                    connName, update.dst_tag(), value.ToString());
         continue;
       }
       PointValue mv;
@@ -1223,7 +1380,13 @@ grpc::Status LinkManager::ApplySimulationValues(const std::string& connName) {
     } else {
       continue;
     }
-    link.transport->SendPointValue(pv, kCotSpontaneous);
+    if (pv.type == IEC104Proto::POINT_TYPE_SINGLE) {
+      if (!storeAndSendSoe(connName, pv, link.transport.get())) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "模拟遥信 SOE 落盘失败");
+      }
+    } else {
+      link.transport->SendPointValue(pv, kCotSpontaneous);
+    }
   }
   LOG_INFO("IEC104 已发送固定模拟值: conn_name={}, 点数={}", connName, link.simulationValues.size());
   return grpc::Status::OK;

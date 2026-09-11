@@ -35,6 +35,8 @@ public:
   grpc::Status PublishUInt16(uint32_t connId, const std::string& tag, uint16_t value, DataCenterProto::Quality quality,
                              int64_t tsMs);
   grpc::Status PublishDouble(uint32_t connId, const std::string& tag, double value, DataCenterProto::Quality quality, int64_t tsMs);
+  grpc::Status PublishDecimal(uint32_t connId, const std::string& tag, const std::string& value,
+                              DataCenterProto::Quality quality, int64_t tsMs);
   grpc::Status PublishString(uint32_t connId, const std::string& tag, const std::string& value,
                              DataCenterProto::Quality quality, int64_t tsMs);
 

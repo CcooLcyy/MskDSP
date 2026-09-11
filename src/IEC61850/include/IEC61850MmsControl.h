@@ -14,6 +14,7 @@
 
 #include "IEC61850.pb.h"
 #include "IEC61850MmsService.h"
+#include "mskdsp/Decimal20.hpp"
 
 namespace IEC61850 {
 
@@ -57,10 +58,9 @@ struct MmsPointControlCommand {
   IEC61850Proto::PointValueType valueType =
       IEC61850Proto::POINT_VALUE_TYPE_UNSPECIFIED;
   bool boolValue = false;
-  std::int64_t intValue = 0;
-  double doubleValue = 0.0;
-  double scale = 1.0;
-  double offset = 0.0;
+  mskdsp::numeric::Decimal20 engineeringValue;
+  mskdsp::numeric::Decimal20 scale;
+  mskdsp::numeric::Decimal20 offset;
   // DataCenter调用方提供的整次控制序列截止时间；未设置时使用在线控制参数。
   std::optional<std::chrono::milliseconds> requestTimeout;
   // RPC取消状态；生命周期由本次控制命令共享管理。

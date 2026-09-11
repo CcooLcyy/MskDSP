@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "AGCDefaultPoints.h"
+#include "AGCNumeric.hpp"
 
 namespace AGC {
 namespace {
@@ -18,6 +19,21 @@ grpc::Status makeInvalid(std::string message) {
 grpc::Status validateNoReservedDefaultTag(const std::string& tag, std::string_view fieldName) {
   if (!tag.empty() && IsReservedDefaultPointTag(tag)) {
     return makeInvalid(std::format("{} 不能使用 AGC 默认点保留 tag: {}", fieldName, tag));
+  }
+  return grpc::Status::OK;
+}
+
+grpc::Status validateSignalDecimal(const AGCProto::SignalSpec &signal,
+                                   std::string_view fieldName) {
+  auto scale = numeric::Scale(signal);
+  if (!scale.has_value()) {
+    return makeInvalid(std::format("{}.scale_decimal 非法: {}", fieldName,
+                                   mskdsp::numeric::DecimalErrorMessage(scale.error())));
+  }
+  auto offset = numeric::Offset(signal);
+  if (!offset.has_value()) {
+    return makeInvalid(std::format("{}.offset_decimal 非法: {}", fieldName,
+                                   mskdsp::numeric::DecimalErrorMessage(offset.error())));
   }
   return grpc::Status::OK;
 }
@@ -38,6 +54,10 @@ grpc::Status ValidateGroupConfig(const AGCProto::GroupConfig& config) {
   if (!status.ok()) {
     return status;
   }
+  status = validateSignalDecimal(config.p_cmd().signal(), "p_cmd.signal");
+  if (!status.ok()) {
+    return status;
+  }
   if (config.p_cmd().mode() == AGCProto::VALUE_MODE_DELTA && config.p_cmd().delta_base() == AGCProto::DELTA_BASE_BASE_TAG) {
     status = validateNoReservedDefaultTag(config.p_cmd().base_tag(), "p_cmd.base_tag");
     if (!status.ok()) {
@@ -48,10 +68,36 @@ grpc::Status ValidateGroupConfig(const AGCProto::GroupConfig& config) {
     return makeInvalid("members 不能为空");
   }
 
+  const auto mode = config.control_mode();
+  if (mode != AGCProto::CONTROL_MODE_UNSPECIFIED && mode != AGCProto::CONTROL_MODE_PI_EVENT &&
+      mode != AGCProto::CONTROL_MODE_DIRECT_CYCLIC) {
+    return makeInvalid("control_mode 取值无效");
+  }
+  const auto calc = config.calculation_execution_period_seconds();
+  const auto command = config.command_control_period_seconds();
+  if (calc != 0.0 && (!std::isfinite(calc) || calc < 1.0 || calc > 15.0)) {
+    return makeInvalid("calculation_execution_period_seconds 必须在 1～15 秒范围内");
+  }
+  if (command != 0.0 && (!std::isfinite(command) || command < 4.0 || command > 30.0)) {
+    return makeInvalid("command_control_period_seconds 必须在 4～30 秒范围内");
+  }
+  if (mode == AGCProto::CONTROL_MODE_DIRECT_CYCLIC) {
+    if (!std::isfinite(calc) || calc < 1.0 || calc > 15.0) {
+      return makeInvalid("周期直分配模式 calculation_execution_period_seconds 必须在 1～15 秒范围内");
+    }
+    if (!std::isfinite(command) || command < 4.0 || command > 30.0) {
+      return makeInvalid("周期直分配模式 command_control_period_seconds 必须在 4～30 秒范围内");
+    }
+  }
+
   if (config.has_outputs()) {
     const auto& outputs = config.outputs();
     if (outputs.has_p_total_meas()) {
       status = validateNoReservedDefaultTag(outputs.p_total_meas().tag(), "outputs.p_total_meas.tag");
+      if (!status.ok()) {
+        return status;
+      }
+      status = validateSignalDecimal(outputs.p_total_meas(), "outputs.p_total_meas");
       if (!status.ok()) {
         return status;
       }
@@ -61,9 +107,17 @@ grpc::Status ValidateGroupConfig(const AGCProto::GroupConfig& config) {
       if (!status.ok()) {
         return status;
       }
+      status = validateSignalDecimal(outputs.p_total_target(), "outputs.p_total_target");
+      if (!status.ok()) {
+        return status;
+      }
     }
     if (outputs.has_p_total_error()) {
       status = validateNoReservedDefaultTag(outputs.p_total_error().tag(), "outputs.p_total_error.tag");
+      if (!status.ok()) {
+        return status;
+      }
+      status = validateSignalDecimal(outputs.p_total_error(), "outputs.p_total_error");
       if (!status.ok()) {
         return status;
       }
@@ -72,7 +126,8 @@ grpc::Status ValidateGroupConfig(const AGCProto::GroupConfig& config) {
 
   std::unordered_set<std::string> memberNames;
   memberNames.reserve(static_cast<size_t>(config.members_size()));
-  double installedCapacityKw = 0.0;
+  numeric::Decimal installedCapacityKw;
+  numeric::Decimal allocationWeightTotal;
   for (const auto& m : config.members()) {
     if (m.member_name().empty()) {
       return makeInvalid("members.member_name 不能为空");
@@ -83,14 +138,42 @@ grpc::Status ValidateGroupConfig(const AGCProto::GroupConfig& config) {
     if (!m.has_p_meas() || m.p_meas().tag().empty()) {
       return makeInvalid(std::format("members[{}].p_meas.tag 不能为空", m.member_name()));
     }
-    if (!std::isfinite(m.capacity_kw()) || m.capacity_kw() <= 0.0) {
+    auto capacity = numeric::Capacity(m);
+    if (!capacity.has_value() || *capacity <= numeric::Zero()) {
       return makeInvalid(std::format("成员 {} 的 capacity_kw 必须是大于 0 的有限数值", m.member_name()));
     }
-    installedCapacityKw += m.capacity_kw();
-    if (!std::isfinite(installedCapacityKw)) {
+    auto nextCapacity = installedCapacityKw.Add(*capacity);
+    if (!nextCapacity.has_value()) {
       return makeInvalid("所有成员 capacity_kw 之和必须是有限数值");
     }
+    installedCapacityKw = *nextCapacity;
+    auto weight = numeric::Weight(m);
+    auto minimum = numeric::Minimum(m);
+    auto maximum = numeric::Maximum(m);
+    if (!weight.has_value() || !minimum.has_value() || !maximum.has_value()) {
+      return makeInvalid(std::format("成员 {} 的 weight/min_kw/max_kw 十进制配置非法", m.member_name()));
+    }
+    const auto effectiveMaximum =
+        maximum->IsZero() || *maximum > *capacity ? *capacity : *maximum;
+    if (*minimum > effectiveMaximum) {
+      return makeInvalid(std::format(
+          "成员 {} 的 min_kw 不能大于 capacity_kw 与 max_kw 共同确定的有效上限",
+          m.member_name()));
+    }
+    if (m.controllable()) {
+      const auto effectiveWeight =
+          *weight > numeric::Zero() ? *weight : *capacity;
+      auto nextWeight = allocationWeightTotal.Add(effectiveWeight);
+      if (!nextWeight.has_value()) {
+        return makeInvalid("可控成员的有效分配权重之和超出 Decimal20 范围");
+      }
+      allocationWeightTotal = *nextWeight;
+    }
     status = validateNoReservedDefaultTag(m.p_meas().tag(), std::format("members[{}].p_meas.tag", m.member_name()));
+    if (!status.ok()) {
+      return status;
+    }
+    status = validateSignalDecimal(m.p_meas(), std::format("members[{}].p_meas", m.member_name()));
     if (!status.ok()) {
       return status;
     }
@@ -102,6 +185,11 @@ grpc::Status ValidateGroupConfig(const AGCProto::GroupConfig& config) {
     if (m.has_p_set() && m.p_set().has_signal()) {
       status = validateNoReservedDefaultTag(
           m.p_set().signal().tag(), std::format("members[{}].p_set.signal.tag", m.member_name()));
+      if (!status.ok()) {
+        return status;
+      }
+      status = validateSignalDecimal(
+          m.p_set().signal(), std::format("members[{}].p_set.signal", m.member_name()));
       if (!status.ok()) {
         return status;
       }

@@ -1,6 +1,7 @@
 #include "ModbusRTUPointTable.h"
 
 #include <algorithm>
+#include <format>
 
 #include "Logger.h"
 
@@ -64,6 +65,24 @@ ModbusRTUProto::WordOrder normalizeWordOrder(ModbusRTUProto::WordOrder order) {
 
 ModbusRTUProto::ByteOrder normalizeByteOrder(ModbusRTUProto::ByteOrder order) {
   return order == ModbusRTUProto::BYTE_ORDER_BA ? order : ModbusRTUProto::BYTE_ORDER_AB;
+}
+
+std::expected<mskdsp::numeric::Decimal20, mskdsp::numeric::DecimalError>
+pointDecimal(std::string_view decimalText, double legacyValue) {
+  return mskdsp::numeric::ParseConfiguredDecimal(decimalText, legacyValue);
+}
+
+grpc::Status validateDecimalField(std::string_view fieldName,
+                                  std::string_view decimalText,
+                                  double legacyValue) {
+  const auto value = pointDecimal(decimalText, legacyValue);
+  if (value.has_value()) {
+    return grpc::Status::OK;
+  }
+  return grpc::Status(
+      grpc::StatusCode::INVALID_ARGUMENT,
+      std::format("{} 的十进制配置非法: {}", fieldName,
+                  mskdsp::numeric::DecimalErrorMessage(value.error())));
 }
 }  // namespace
 
@@ -169,8 +188,17 @@ grpc::Status PointTable::validatePoint(const ModbusRTUProto::Point &point) const
       !is32BitRegisterType(point.type())) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "写多寄存器点位需要 UINT16、UINT32、INT16 或 INT32 类型");
   }
-  if (point.deadband() < 0) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "死区不能为负");
+  auto status = validateDecimalField("scale_decimal", point.scale_decimal(), point.scale());
+  if (!status.ok()) {
+    return status;
+  }
+  status = validateDecimalField("offset_decimal", point.offset_decimal(), point.offset());
+  if (!status.ok()) {
+    return status;
+  }
+  status = validateDecimalField("deadband_decimal", point.deadband_decimal(), point.deadband());
+  if (!status.ok()) {
+    return status;
   }
   return grpc::Status::OK;
 }
@@ -184,12 +212,12 @@ grpc::Status PointTable::insertOrUpdatePoint(const ModbusRTUProto::Point &point)
   p.regCount = point.reg_count() == 0 ? defaultRegCount(point.type()) : point.reg_count();
   p.wordOrder = normalizeWordOrder(point.word_order());
   p.byteOrder = normalizeByteOrder(point.byte_order());
-  p.scale = point.scale();
-  if (p.scale == 0.0) {
-    p.scale = 1.0;
+  p.scale = pointDecimal(point.scale_decimal(), point.scale()).value();
+  if (p.scale.IsZero()) {
+    p.scale = mskdsp::numeric::Decimal20::FromInt64(1).value();
   }
-  p.offset = point.offset();
-  p.deadband = point.deadband();
+  p.offset = pointDecimal(point.offset_decimal(), point.offset()).value();
+  p.deadband = pointDecimal(point.deadband_decimal(), point.deadband()).value();
   if (point.has_bit_index()) {
     p.bitIndex = point.bit_index();
   }
@@ -255,12 +283,15 @@ grpc::Status PointTable::insertOrUpdatePoint(const ModbusRTUProto::Point &point)
       tagByKey_[keys[i]] = AddressEntry{p.tag, i};
     }
   }
-  LOG_DEBUG("ModbusRTU 点表写入点位: tag={}, function={}, address={}, reg_count={}, bit_index={}",
+  LOG_DEBUG("ModbusRTU 点表写入点位: tag={}, function={}, address={}, reg_count={}, bit_index={}, 倍率={}, 偏移={}, 死区={}",
             p.tag,
             static_cast<int>(p.function),
             p.address,
             p.regCount,
-            p.bitIndex.has_value() ? std::to_string(p.bitIndex.value()) : "-");
+            p.bitIndex.has_value() ? std::to_string(p.bitIndex.value()) : "-",
+            p.scale.ToString(),
+            p.offset.ToString(),
+            p.deadband.ToString());
   return grpc::Status::OK;
 }
 
@@ -344,9 +375,21 @@ void PointTable::ToProto(const std::string &connName, ModbusRTUProto::PointTable
       dst->set_byte_order(point.byteOrder);
       dst->set_bit_index(point.bitIndex.value());
     }
-    dst->set_scale(point.scale);
-    dst->set_offset(point.offset);
-    dst->set_deadband(point.deadband);
+    const auto legacyScale = point.scale.ToDouble();
+    const auto legacyOffset = point.offset.ToDouble();
+    const auto legacyDeadband = point.deadband.ToDouble();
+    if (legacyScale.has_value()) {
+      dst->set_scale(*legacyScale);
+    }
+    if (legacyOffset.has_value()) {
+      dst->set_offset(*legacyOffset);
+    }
+    if (legacyDeadband.has_value()) {
+      dst->set_deadband(*legacyDeadband);
+    }
+    dst->set_scale_decimal(point.scale.ToFixedString());
+    dst->set_offset_decimal(point.offset.ToFixedString());
+    dst->set_deadband_decimal(point.deadband.ToFixedString());
   }
 }
 

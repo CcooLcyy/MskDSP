@@ -69,13 +69,15 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
   `DATA_TYPE_BCD` 按有符号 BCD 处理：最高有效半字节的最高位 `0` 表示正数、`1` 表示负数，
   去掉该符号位后其余 BCD 位按十进制数值解析；例如 `80031` 表示 `-31`。
 - `access`：读写属性（`ACCESS_READ_ONLY/ACCESS_WRITE_ONLY/ACCESS_READ_WRITE`）。
-- `scale/offset`：工程量换算 `value = raw * scale + offset`（`scale=0` 视为 1）。
-- `deadband`：工程量单位，`<=0` 不过滤；当 `>0` 时，`|delta| < deadband` 过滤，`|delta| >= deadband` 上报；BOOL 忽略 `scale/offset/deadband`。
+- `scale_decimal/offset_decimal`：首选工程量配置，使用十进制字符串；支持普通十进制和科学计数法，超过小数点后 20 位时按半数远离零量化。换算规则为 `value = raw * scale + offset`，`scale=0` 视为 1。
+- `deadband_decimal`：首选死区配置，单位为工程量；`<=0` 不过滤，`|delta| < deadband` 过滤，`|delta| >= deadband` 上报。
+- `scale/offset/deadband`：兼容旧配置的 `double` 字段；对应十进制文本非空时以文本为准。点表回读时十进制字段固定保留 20 位小数。
+- BOOL 点忽略倍率、偏移和死区。
 
 ### 数据块字段说明
 - `block_di`：数据块 DI，8 位十六进制字符串；配置为人读顺序（高字节在前），模块发送时按字节逆序（低字节在前）。
 - `block_data_len`：数据块数据域总长度（不包含 DI 或设备序号）。
-- `items[]`：子项定义，按表格顺序拼接；`data_len` 之和必须等于 `block_data_len`。
+- `items[]`：子项定义，按表格顺序拼接；`data_len` 之和必须等于 `block_data_len`，工程量字段同样使用上述十进制文本优先规则。
 - `trim_right_space`：ASCII 字段右侧空格裁剪（未配置默认裁剪）。
 
 ### 读块写点规则
@@ -122,9 +124,9 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
               "data_len": 2,
               "type": "DATA_TYPE_UINT16",
               "access": "ACCESS_READ_ONLY",
-              "scale": 1.0,
-              "offset": 0.0,
-              "deadband": 0.0
+              "scale_decimal": "1.00000000000000000000",
+              "offset_decimal": "0.00000000000000000000",
+              "deadband_decimal": "0.00000000000000000000"
             }
           ],
           "blocks": [
@@ -138,27 +140,27 @@ DLT645 模块负责管理 DLT645 协议链路与点表，按设备维度支持�
                   "data_len": 3,
                   "type": "DATA_TYPE_BCD",
                   "access": "ACCESS_READ_ONLY",
-                  "scale": 0.01,
-                  "offset": 0.0,
-                  "deadband": 0.0
+                  "scale_decimal": "0.01000000000000000000",
+                  "offset_decimal": "0.00000000000000000000",
+                  "deadband_decimal": "0.00000000000000000000"
                 },
                 {
                   "tag": "B相电压",
                   "data_len": 3,
                   "type": "DATA_TYPE_BCD",
                   "access": "ACCESS_READ_ONLY",
-                  "scale": 0.01,
-                  "offset": 0.0,
-                  "deadband": 0.0
+                  "scale_decimal": "0.01000000000000000000",
+                  "offset_decimal": "0.00000000000000000000",
+                  "deadband_decimal": "0.00000000000000000000"
                 },
                 {
                   "tag": "C相电压",
                   "data_len": 3,
                   "type": "DATA_TYPE_BCD",
                   "access": "ACCESS_READ_ONLY",
-                  "scale": 0.01,
-                  "offset": 0.0,
-                  "deadband": 0.0
+                  "scale_decimal": "0.01000000000000000000",
+                  "offset_decimal": "0.00000000000000000000",
+                  "deadband_decimal": "0.00000000000000000000"
                 }
               ]
             }

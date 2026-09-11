@@ -16,6 +16,9 @@ target_link_libraries(${LIB_NAME} PUBLIC
     moduleManager
     Boost::asio
 )
+target_link_libraries(${LIB_NAME} PRIVATE
+    unofficial::sqlite3::sqlite3
+)
 set_target_properties(${LIB_NAME} PROPERTIES
     VERSION ${VERSION}
     SOVERSION ${VERSION_MAJOR}

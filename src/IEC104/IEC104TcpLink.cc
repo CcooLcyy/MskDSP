@@ -9,6 +9,7 @@
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/error.hpp>
 #include <boost/asio/ip/address.hpp>
+#include <boost/asio/ip/address_v6.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 
@@ -24,6 +25,19 @@ using tcp = asio::ip::tcp;
 namespace {
 constexpr std::chrono::milliseconds kDefaultReconnectDelay{1000};
 
+bool isSameClientAddress(const asio::ip::address& client, const asio::ip::address& allowed) {
+  if (client == allowed) {
+    return true;
+  }
+  if (client.is_v6() && client.to_v6().is_v4_mapped() && allowed.is_v4()) {
+    return asio::ip::make_address_v4(asio::ip::v4_mapped, client.to_v6()) == allowed.to_v4();
+  }
+  if (allowed.is_v6() && allowed.to_v6().is_v4_mapped() && client.is_v4()) {
+    return asio::ip::make_address_v4(asio::ip::v4_mapped, allowed.to_v6()) == client.to_v4();
+  }
+  return false;
+}
+
 grpc::Status validateLinkConfig(const IEC104Proto::LinkConfig& config) {
   if (config.conn_name().empty()) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "conn_name 不能为空");
@@ -31,6 +45,14 @@ grpc::Status validateLinkConfig(const IEC104Proto::LinkConfig& config) {
   if (config.role() == IEC104Proto::ROLE_SERVER) {
     if (config.local().port() == 0) {
       return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "role=ROLE_SERVER 时 local.port 不能为空");
+    }
+    if (!config.remote().ip().empty()) {
+      boost::system::error_code ec;
+      (void)asio::ip::make_address(config.remote().ip(), ec);
+      if (ec) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                            std::format("role=ROLE_SERVER 时 remote.ip 必须是合法 IP: {}", config.remote().ip()));
+      }
     }
   } else if (config.role() == IEC104Proto::ROLE_CLIENT) {
     if (config.remote().ip().empty() || config.remote().port() == 0) {
@@ -165,6 +187,14 @@ void TcpLink::SendPointValue(const PointValue& value, uint8_t cause) {
   s->SendPointValue(value, cause);
 }
 
+void TcpLink::SendSoe(const SoeEvent& event) {
+  auto s = session();
+  if (!s) {
+    return;
+  }
+  s->SendSoe(event);
+}
+
 void TcpLink::SendTimeSync(int64_t tsMs) {
   auto s = session();
   if (!s) {
@@ -213,6 +243,22 @@ void TcpLink::SetInterrogationSnapshotProvider(SnapshotProvider provider) {
   interrogationSnapshotProvider_ = std::move(provider);
   if (session_) {
     session_->SetInterrogationSnapshotProvider(interrogationSnapshotProvider_);
+  }
+}
+
+void TcpLink::SetSoeReplayProvider(SoeReplayProvider provider) {
+  std::lock_guard<std::mutex> lock(mu_);
+  soeReplayProvider_ = std::move(provider);
+  if (session_) {
+    session_->SetSoeReplayProvider(soeReplayProvider_);
+  }
+}
+
+void TcpLink::SetSoeAcknowledgedCallback(SoeAcknowledgedCallback cb) {
+  std::lock_guard<std::mutex> lock(mu_);
+  onSoeAcknowledged_ = std::move(cb);
+  if (session_) {
+    session_->SetSoeAcknowledgedCallback(onSoeAcknowledged_);
   }
 }
 
@@ -281,6 +327,26 @@ void TcpLink::startAccept() {
 
     boost::system::error_code remoteEc;
     auto remote = socket.remote_endpoint(remoteEc);
+    // ROLE_SERVER 下 remote.ip 作为主站来源 IP 白名单；空值或未指定地址兼容为允许任意来源。
+    if (!config_.remote().ip().empty()) {
+      boost::system::error_code allowEc;
+      const auto allowedAddress = asio::ip::make_address(config_.remote().ip(), allowEc);
+      const bool whitelistDisabled = !allowEc && allowedAddress.is_unspecified();
+      const bool allowed = whitelistDisabled ||
+                           (!remoteEc && !allowEc && isSameClientAddress(remote.address(), allowedAddress));
+      if (!allowed) {
+        LOG_WARNING("IEC104 拒绝未授权主站连接: conn_name={}, client_ip={}, 允许IP={}",
+                    config_.conn_name(),
+                    remoteEc ? std::string("未知") : remote.address().to_string(),
+                    config_.remote().ip());
+        boost::system::error_code closeEc;
+        socket.shutdown(tcp::socket::shutdown_both, closeEc);
+        socket.close(closeEc);
+        startAccept();
+        return;
+      }
+    }
+
     if (remoteEc) {
       LOG_INFO("IEC104 已接受连接: conn_name={}, 远端未知, 错误={}",
                config_.conn_name(),
@@ -291,6 +357,7 @@ void TcpLink::startAccept() {
                remote.address().to_string(),
                remote.port());
     }
+
     auto newSession = std::make_shared<TcpSession>(io_, config_, false);
     {
       std::lock_guard<std::mutex> lock(mu_);
@@ -300,6 +367,8 @@ void TcpLink::startAccept() {
       session_ = newSession;
       session_->SetPointValueCallback(onPointValue_);
       session_->SetInterrogationSnapshotProvider(interrogationSnapshotProvider_);
+      session_->SetSoeReplayProvider(soeReplayProvider_);
+      session_->SetSoeAcknowledgedCallback(onSoeAcknowledged_);
       session_->SetTimeSyncCallback(onTimeSync_);
       session_->SetCommandCallback(onCommand_);
       session_->SetCommandExecutionModeCallback(onCommandExecutionMode_);
@@ -370,6 +439,8 @@ void TcpLink::startConnect() {
       session_ = newSession;
       session_->SetPointValueCallback(onPointValue_);
       session_->SetInterrogationSnapshotProvider(interrogationSnapshotProvider_);
+      session_->SetSoeReplayProvider(soeReplayProvider_);
+      session_->SetSoeAcknowledgedCallback(onSoeAcknowledged_);
       session_->SetTimeSyncCallback(onTimeSync_);
       session_->SetCommandCallback(onCommand_);
       session_->SetCommandExecutionModeCallback(onCommandExecutionMode_);

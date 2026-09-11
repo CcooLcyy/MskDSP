@@ -9,6 +9,7 @@
 #include <grpcpp/support/status.h>
 
 #include "IEC104.pb.h"
+#include "mskdsp/Decimal20.hpp"
 
 namespace IEC104 {
 
@@ -19,9 +20,10 @@ public:
     uint32_t ioa = 0;
     IEC104Proto::PointType type = IEC104Proto::POINT_TYPE_UNSPECIFIED;
     IEC104Proto::PointBusinessType businessType = IEC104Proto::POINT_BUSINESS_TYPE_UNSPECIFIED;
-    double scale = 1.0;
-    double offset = 0.0;
-    double deadband = 0.0;
+    mskdsp::numeric::Decimal20 scale =
+        mskdsp::numeric::Decimal20::FromInt64(1).value();
+    mskdsp::numeric::Decimal20 offset;
+    mskdsp::numeric::Decimal20 deadband;
     IEC104Proto::RemoteControlType remoteControlType =
         IEC104Proto::REMOTE_CONTROL_TYPE_SINGLE;
     IEC104Proto::CommandExecutionMode commandExecutionMode =

@@ -20,6 +20,7 @@
 #include "IEC61850.pb.h"
 #include "IEC61850DataCenterClient.h"
 #include "IEC61850ProtocolStack.h"
+#include "mskdsp/Decimal20.hpp"
 
 namespace IEC61850 {
 
@@ -67,13 +68,16 @@ private:
 
   struct PublishedPointState {
     bool hasNumericValue = false;
-    long double numericValue = 0.0L;
+    mskdsp::numeric::Decimal20 numericValue;
     bool hasQuality = false;
     DataCenterProto::Quality quality = DataCenterProto::QUALITY_UNSPECIFIED;
   };
 
   struct MappingState {
     IEC61850Proto::PointMapping mapping;
+    mskdsp::numeric::Decimal20 scale;
+    mskdsp::numeric::Decimal20 offset;
+    mskdsp::numeric::Decimal20 deadband;
     PublishedPointState published;
   };
 

@@ -1,8 +1,10 @@
 #include "CalcGroupManager.h"
 
 #include <algorithm>
-#include <cmath>
+#include <chrono>
+#include <condition_variable>
 #include <format>
+#include <limits>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -13,6 +15,7 @@
 #include "CalcValidation.h"
 #include "Logger.h"
 #include "ThreadUtil.hpp"
+#include "mskdsp/Decimal20.hpp"
 
 namespace Calc {
 namespace {
@@ -77,12 +80,13 @@ struct RuntimeValue {
     kBool,
     kInt,
     kDouble,
+    kDecimal,
   };
 
   Type type{Type::kInt};
   bool boolValue{false};
   int64_t intValue{0};
-  double doubleValue{0.0};
+  std::optional<mskdsp::numeric::Decimal20> decimalValue;
   DataCenterProto::Quality quality{DataCenterProto::QUALITY_GOOD};
   int64_t tsMs{0};
 };
@@ -93,6 +97,7 @@ struct PublishAction {
   DataCenterProto::PointValue value;
   DataCenterProto::Quality quality{DataCenterProto::QUALITY_GOOD};
   int64_t tsMs{0};
+  uint64_t triggerGeneration{0};
 };
 
 bool isNumericOperator(CalcProto::OperatorKind op) {
@@ -119,6 +124,33 @@ bool isLogicOperator(CalcProto::OperatorKind op) {
   }
 }
 
+bool isPeriodicMode(const CalcProto::CalcGroupConfig &config) {
+  return config.trigger_mode() == CalcProto::TRIGGER_MODE_PERIODIC;
+}
+
+bool operandUsesLegacyDoubleConstant(const CalcProto::OperandSpec &operand) {
+  return operand.source_kind() == CalcProto::OPERAND_SOURCE_CONSTANT &&
+      operand.has_constant() && operand.constant().has_double_value();
+}
+
+bool configUsesLegacyDoubleConstant(const CalcProto::CalcGroupConfig &config) {
+  for (const auto &item : config.items()) {
+    if (isAggregateOperator(item.operator_kind())) {
+      for (const auto &operand : item.operands()) {
+        if (operandUsesLegacyDoubleConstant(operand)) {
+          return true;
+        }
+      }
+      continue;
+    }
+    if ((item.has_left_operand() && operandUsesLegacyDoubleConstant(item.left_operand())) ||
+        (item.has_right_operand() && operandUsesLegacyDoubleConstant(item.right_operand()))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 DataCenterProto::Quality combineQuality(DataCenterProto::Quality lhs, DataCenterProto::Quality rhs) {
   if (lhs == DataCenterProto::QUALITY_BAD || rhs == DataCenterProto::QUALITY_BAD) {
     return DataCenterProto::QUALITY_BAD;
@@ -132,23 +164,66 @@ DataCenterProto::Quality combineQuality(DataCenterProto::Quality lhs, DataCenter
   return DataCenterProto::QUALITY_GOOD;
 }
 
-RuntimeValue makeValueFromConstant(const CalcProto::TypedConstant &constant) {
+bool makeValueFromConstant(const CalcProto::TypedConstant &constant,
+                           RuntimeValue *out,
+                           std::string *error) {
+  if (out == nullptr) {
+    return false;
+  }
   RuntimeValue value;
   value.quality = DataCenterProto::QUALITY_GOOD;
   value.tsMs = 0;
   if (constant.has_bool_value()) {
     value.type = RuntimeValue::Type::kBool;
     value.boolValue = constant.bool_value();
-    return value;
+    *out = std::move(value);
+    return true;
+  }
+  if (constant.has_int_value()) {
+    auto parsed = mskdsp::numeric::Decimal20::FromInt64(constant.int_value());
+    if (!parsed.has_value()) {
+      if (error != nullptr) {
+        *error = "int_value 超出 Decimal20 可表示范围";
+      }
+      return false;
+    }
+    value.type = RuntimeValue::Type::kInt;
+    value.intValue = constant.int_value();
+    value.decimalValue = std::move(*parsed);
+    *out = std::move(value);
+    return true;
   }
   if (constant.has_double_value()) {
+    auto parsed = mskdsp::numeric::Decimal20::FromDouble(constant.double_value());
+    if (!parsed.has_value()) {
+      if (error != nullptr) {
+        *error = "double_value 不是有限数或超出 Decimal20 可表示范围";
+      }
+      return false;
+    }
     value.type = RuntimeValue::Type::kDouble;
-    value.doubleValue = constant.double_value();
-    return value;
+    value.decimalValue = std::move(*parsed);
+    *out = std::move(value);
+    return true;
   }
-  value.type = RuntimeValue::Type::kInt;
-  value.intValue = constant.int_value();
-  return value;
+  if (constant.has_decimal_value()) {
+    auto parsed = mskdsp::numeric::Decimal20::Parse(constant.decimal_value());
+    if (!parsed.has_value()) {
+      if (error != nullptr) {
+        *error = std::format("decimal_value 解析失败: {}",
+                             mskdsp::numeric::DecimalErrorMessage(parsed.error()));
+      }
+      return false;
+    }
+    value.type = RuntimeValue::Type::kDecimal;
+    value.decimalValue = std::move(*parsed);
+    *out = std::move(value);
+    return true;
+  }
+  if (error != nullptr) {
+    *error = "constant 未设置可识别的值";
+  }
+  return false;
 }
 
 bool makeValueFromPointUpdate(const DataCenterProto::PointUpdate &update, RuntimeValue *out, std::string *error) {
@@ -165,36 +240,51 @@ bool makeValueFromPointUpdate(const DataCenterProto::PointUpdate &update, Runtim
     return true;
   }
   if (update.value().has_int_value()) {
+    auto parsed = mskdsp::numeric::Decimal20::FromInt64(update.value().int_value());
+    if (!parsed.has_value()) {
+      if (error != nullptr) {
+        *error = std::format("tag={} 的 int_value 超出 Decimal20 可表示范围", update.dst_tag());
+      }
+      return false;
+    }
     value.type = RuntimeValue::Type::kInt;
     value.intValue = update.value().int_value();
+    value.decimalValue = std::move(*parsed);
     *out = value;
     return true;
   }
   if (update.value().has_double_value()) {
+    auto parsed = mskdsp::numeric::Decimal20::FromDouble(update.value().double_value());
+    if (!parsed.has_value()) {
+      if (error != nullptr) {
+        *error = std::format("tag={} 的 double_value 不是有限数或超出 Decimal20 可表示范围", update.dst_tag());
+      }
+      return false;
+    }
     value.type = RuntimeValue::Type::kDouble;
-    value.doubleValue = update.value().double_value();
+    value.decimalValue = std::move(*parsed);
+    *out = std::move(value);
+    return true;
+  }
+  if (update.value().has_decimal_value()) {
+    auto parsed = mskdsp::numeric::Decimal20::Parse(update.value().decimal_value());
+    if (!parsed.has_value()) {
+      if (error != nullptr) {
+        *error = std::format("tag={} 的 decimal_value 解析失败: {}",
+                             update.dst_tag(),
+                             mskdsp::numeric::DecimalErrorMessage(parsed.error()));
+      }
+      return false;
+    }
+    value.type = RuntimeValue::Type::kDecimal;
+    value.decimalValue = std::move(*parsed);
     *out = value;
     return true;
   }
   if (error != nullptr) {
-    *error = std::format("tag={} 类型不支持，当前仅支持 bool/int64/double", update.dst_tag());
+    *error = std::format("tag={} 类型不支持，当前仅支持 bool/int64/double/decimal", update.dst_tag());
   }
   return false;
-}
-
-void setPointValueFromRuntimeValue(const RuntimeValue &value, DataCenterProto::PointValue *out) {
-  out->Clear();
-  switch (value.type) {
-  case RuntimeValue::Type::kBool:
-    out->set_bool_value(value.boolValue);
-    return;
-  case RuntimeValue::Type::kInt:
-    out->set_int_value(value.intValue);
-    return;
-  case RuntimeValue::Type::kDouble:
-    out->set_double_value(value.doubleValue);
-    return;
-  }
 }
 
 bool tryGetOperandValue(const CalcProto::OperandSpec &operand,
@@ -209,8 +299,7 @@ bool tryGetOperandValue(const CalcProto::OperandSpec &operand,
   *missing = false;
 
   if (operand.source_kind() == CalcProto::OPERAND_SOURCE_CONSTANT) {
-    *out = makeValueFromConstant(operand.constant());
-    return true;
+    return makeValueFromConstant(operand.constant(), out, error);
   }
 
   auto it = latestByTag.find(tag);
@@ -222,11 +311,56 @@ bool tryGetOperandValue(const CalcProto::OperandSpec &operand,
 }
 
 bool isNumericValue(const RuntimeValue &value) {
-  return value.type == RuntimeValue::Type::kInt || value.type == RuntimeValue::Type::kDouble;
+  return value.type != RuntimeValue::Type::kBool && value.decimalValue.has_value();
 }
 
-double toDouble(const RuntimeValue &value) {
-  return value.type == RuntimeValue::Type::kDouble ? value.doubleValue : static_cast<double>(value.intValue);
+bool usesExplicitDecimal(const std::vector<RuntimeValue> &values) {
+  return std::any_of(values.begin(), values.end(), [](const RuntimeValue &value) {
+    return value.type == RuntimeValue::Type::kDecimal;
+  });
+}
+
+bool setDecimalBoundaryValue(const mskdsp::numeric::Decimal20 &value,
+                             bool publishDecimal,
+                             DataCenterProto::PointValue *out,
+                             std::string *error) {
+  if (out == nullptr) {
+    if (error != nullptr) {
+      *error = "Decimal20 发布目标为空";
+    }
+    return false;
+  }
+  if (publishDecimal) {
+    out->set_decimal_value(value.ToFixedString());
+    return true;
+  }
+  auto doubleValue = value.ToDouble();
+  if (!doubleValue.has_value()) {
+    if (error != nullptr) {
+      *error = std::format("Decimal20 转换为兼容 double 边界失败: {}",
+                           mskdsp::numeric::DecimalErrorMessage(doubleValue.error()));
+    }
+    return false;
+  }
+  out->set_double_value(*doubleValue);
+  return true;
+}
+
+void setDecimalOperationError(const CalcProto::CalcItemConfig &item,
+                              std::string_view operation,
+                              mskdsp::numeric::DecimalError decimalError,
+                              std::string *error) {
+  if (error == nullptr) {
+    return;
+  }
+  if (decimalError == mskdsp::numeric::DecimalError::kDivisionByZero) {
+    *error = std::format("item_name={} 除零，跳过本轮结果发布", item.item_name());
+    return;
+  }
+  *error = std::format("item_name={} {}失败: {}",
+                       item.item_name(),
+                       operation,
+                       mskdsp::numeric::DecimalErrorMessage(decimalError));
 }
 
 std::string joinTags(const std::vector<std::string> &tags) {
@@ -285,7 +419,7 @@ std::optional<PublishAction> evaluateItem(const CalcProto::CalcItemConfig &item,
     for (const auto &value : values) {
       if (!isNumericValue(value)) {
         if (error != nullptr) {
-          *error = std::format("item_name={} SUM/AVERAGE 仅接受 int64/double", item.item_name());
+          *error = std::format("item_name={} SUM/AVERAGE 仅接受 int64/double/decimal", item.item_name());
         }
         return std::nullopt;
       }
@@ -293,41 +427,81 @@ std::optional<PublishAction> evaluateItem(const CalcProto::CalcItemConfig &item,
       action.tsMs = std::max(action.tsMs, value.tsMs);
     }
 
+    auto decimalSum = mskdsp::numeric::Decimal20::FromInt64(0);
+    if (!decimalSum.has_value()) {
+      if (error != nullptr) {
+        *error = std::format("item_name={} 初始化 Decimal20 累加器失败", item.item_name());
+      }
+      return std::nullopt;
+    }
+    for (const auto &value : values) {
+      auto next = decimalSum->Add(*value.decimalValue);
+      if (!next.has_value()) {
+        setDecimalOperationError(item, "求和", next.error(), error);
+        return std::nullopt;
+      }
+      decimalSum = std::move(next);
+    }
+
     if (item.operator_kind() == CalcProto::OPERATOR_KIND_AVERAGE) {
-      double sum = 0.0;
-      for (const auto &value : values) {
-        sum += toDouble(value);
-      }
-      double average = sum / static_cast<double>(values.size());
-      if (item.has_decimal_places()) {
-        const double scale = std::pow(10.0, static_cast<double>(item.decimal_places()));
-        if (std::isfinite(scale) && scale > 0.0) {
-          average = std::round(average * scale) / scale;
+      if (values.size() > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+        if (error != nullptr) {
+          *error = std::format("item_name={} 操作数数量超出可计算范围", item.item_name());
         }
+        return std::nullopt;
       }
-      action.value.set_double_value(average);
+      auto divisor = mskdsp::numeric::Decimal20::FromInt64(
+          static_cast<int64_t>(values.size()));
+      if (!divisor.has_value()) {
+        if (error != nullptr) {
+          *error = std::format("item_name={} 构造平均值除数失败", item.item_name());
+        }
+        return std::nullopt;
+      }
+      auto average = decimalSum->Divide(*divisor);
+      if (!average.has_value()) {
+        setDecimalOperationError(item, "平均值计算", average.error(), error);
+        return std::nullopt;
+      }
+      if (item.has_decimal_places()) {
+        auto quantized = average->Quantize(
+            item.decimal_places(),
+            mskdsp::numeric::RoundingMode::kHalfAwayFromZero);
+        if (!quantized.has_value()) {
+          setDecimalOperationError(item, "平均值量化", quantized.error(), error);
+          return std::nullopt;
+        }
+        average = std::move(quantized);
+      }
+      const bool publishDecimal = usesExplicitDecimal(values) ||
+          (item.has_decimal_places() && item.decimal_places() > 15);
+      if (!setDecimalBoundaryValue(*average, publishDecimal, &action.value, error)) {
+        return std::nullopt;
+      }
       return action;
     }
 
-    bool allInt = true;
+    const bool allInt = std::all_of(values.begin(), values.end(), [](const RuntimeValue &value) {
+      return value.type == RuntimeValue::Type::kInt;
+    });
     int64_t intResult = 0;
     bool overflow = false;
-    double doubleResult = 0.0;
-    for (const auto &value : values) {
-      allInt = allInt && value.type == RuntimeValue::Type::kInt;
-      if (allInt && !overflow) {
+    if (allInt) {
+      for (const auto &value : values) {
         int64_t next = 0;
         overflow = __builtin_add_overflow(intResult, value.intValue, &next);
-        if (!overflow) {
-          intResult = next;
+        if (overflow) {
+          break;
         }
+        intResult = next;
       }
-      doubleResult += toDouble(value);
     }
     if (allInt && !overflow) {
       action.value.set_int_value(intResult);
     } else {
-      action.value.set_double_value(doubleResult);
+      if (!setDecimalBoundaryValue(*decimalSum, usesExplicitDecimal(values), &action.value, error)) {
+        return std::nullopt;
+      }
     }
     return action;
   }
@@ -343,7 +517,7 @@ std::optional<PublishAction> evaluateItem(const CalcProto::CalcItemConfig &item,
     const bool rightIsNumeric = isNumericValue(right);
     if (!leftIsNumeric || !rightIsNumeric) {
       if (error != nullptr) {
-        *error = std::format("item_name={} 数值运算仅接受 int64/double", item.item_name());
+        *error = std::format("item_name={} 数值运算仅接受 int64/double/decimal", item.item_name());
       }
       return std::nullopt;
     }
@@ -351,74 +525,47 @@ std::optional<PublishAction> evaluateItem(const CalcProto::CalcItemConfig &item,
     action.quality = combineQuality(left.quality, right.quality);
     action.tsMs = std::max(left.tsMs, right.tsMs);
 
-    const bool useDouble = item.operator_kind() == CalcProto::OPERATOR_KIND_DIV ||
-        left.type == RuntimeValue::Type::kDouble ||
-        right.type == RuntimeValue::Type::kDouble;
-    if (item.operator_kind() == CalcProto::OPERATOR_KIND_DIV) {
-      const double rhs = toDouble(right);
-      if (rhs == 0.0) {
-        if (error != nullptr) {
-          *error = std::format("item_name={} 除零，跳过本轮结果发布", item.item_name());
-        }
-        return std::nullopt;
-      }
-      const double lhs = toDouble(left);
-      action.value.set_double_value(lhs / rhs);
-      return action;
-    }
-
-    if (useDouble) {
-      const double lhs = toDouble(left);
-      const double rhs = toDouble(right);
-      switch (item.operator_kind()) {
-      case CalcProto::OPERATOR_KIND_ADD:
-        action.value.set_double_value(lhs + rhs);
-        return action;
-      case CalcProto::OPERATOR_KIND_SUB:
-        action.value.set_double_value(lhs - rhs);
-        return action;
-      case CalcProto::OPERATOR_KIND_MUL:
-        action.value.set_double_value(lhs * rhs);
-        return action;
-      default:
-        break;
-      }
-    }
-
+    const bool allInt = left.type == RuntimeValue::Type::kInt &&
+        right.type == RuntimeValue::Type::kInt;
     int64_t result = 0;
     bool overflow = false;
+    const bool publishDecimal = left.type == RuntimeValue::Type::kDecimal ||
+        right.type == RuntimeValue::Type::kDecimal;
+
+    const auto publishResult = [&](auto decimalResult, std::string_view operation) -> std::optional<PublishAction> {
+      if (!decimalResult.has_value()) {
+        setDecimalOperationError(item, operation, decimalResult.error(), error);
+        return std::nullopt;
+      }
+      if (allInt && item.operator_kind() != CalcProto::OPERATOR_KIND_DIV && !overflow) {
+        action.value.set_int_value(result);
+      } else if (!setDecimalBoundaryValue(*decimalResult, publishDecimal, &action.value, error)) {
+        return std::nullopt;
+      }
+      return action;
+    };
+
     switch (item.operator_kind()) {
     case CalcProto::OPERATOR_KIND_ADD:
-      overflow = __builtin_add_overflow(left.intValue, right.intValue, &result);
-      break;
+      if (allInt) {
+        overflow = __builtin_add_overflow(left.intValue, right.intValue, &result);
+      }
+      return publishResult(left.decimalValue->Add(*right.decimalValue), "加法");
     case CalcProto::OPERATOR_KIND_SUB:
-      overflow = __builtin_sub_overflow(left.intValue, right.intValue, &result);
-      break;
+      if (allInt) {
+        overflow = __builtin_sub_overflow(left.intValue, right.intValue, &result);
+      }
+      return publishResult(left.decimalValue->Subtract(*right.decimalValue), "减法");
     case CalcProto::OPERATOR_KIND_MUL:
-      overflow = __builtin_mul_overflow(left.intValue, right.intValue, &result);
-      break;
+      if (allInt) {
+        overflow = __builtin_mul_overflow(left.intValue, right.intValue, &result);
+      }
+      return publishResult(left.decimalValue->Multiply(*right.decimalValue), "乘法");
+    case CalcProto::OPERATOR_KIND_DIV:
+      return publishResult(left.decimalValue->Divide(*right.decimalValue), "除法");
     default:
       break;
     }
-    if (overflow) {
-      const double lhs = static_cast<double>(left.intValue);
-      const double rhs = static_cast<double>(right.intValue);
-      switch (item.operator_kind()) {
-      case CalcProto::OPERATOR_KIND_ADD:
-        action.value.set_double_value(lhs + rhs);
-        return action;
-      case CalcProto::OPERATOR_KIND_SUB:
-        action.value.set_double_value(lhs - rhs);
-        return action;
-      case CalcProto::OPERATOR_KIND_MUL:
-        action.value.set_double_value(lhs * rhs);
-        return action;
-      default:
-        break;
-      }
-    }
-    action.value.set_int_value(result);
-    return action;
   }
 
   if (isLogicOperator(item.operator_kind())) {
@@ -461,6 +608,59 @@ std::optional<PublishAction> evaluateItem(const CalcProto::CalcItemConfig &item,
     *error = std::format("item_name={} operator_kind 非法", item.item_name());
   }
   return std::nullopt;
+}
+
+void applyTriggerTimestamp(std::vector<PublishAction> *actions,
+                           const std::unordered_map<std::string, int64_t> &firstTriggerTsByItem,
+                           const std::unordered_map<std::string, uint64_t> &triggerGenerationByItem) {
+  if (actions == nullptr) {
+    return;
+  }
+  for (auto &action : *actions) {
+    auto it = firstTriggerTsByItem.find(action.itemName);
+    if (it != firstTriggerTsByItem.end()) {
+      action.tsMs = it->second;
+    }
+    auto generationIt = triggerGenerationByItem.find(action.itemName);
+    if (generationIt != triggerGenerationByItem.end()) {
+      action.triggerGeneration = generationIt->second;
+    }
+  }
+}
+
+void recordFirstTriggerTimestamp(const CalcProto::CalcGroupConfig &config,
+                                 const DataCenterProto::PointUpdate &update,
+                                 std::unordered_map<std::string, int64_t> *firstTriggerTsByItem,
+                                 std::unordered_map<std::string, uint64_t> *triggerGenerationByItem,
+                                 uint64_t *nextTriggerGeneration) {
+  if (firstTriggerTsByItem == nullptr || triggerGenerationByItem == nullptr || nextTriggerGeneration == nullptr) {
+    return;
+  }
+  for (const auto &item : config.items()) {
+    const auto tags = makeItemTags(item);
+    bool isTriggerInput = false;
+    for (size_t index = 0; index < tags.inputTags.size(); ++index) {
+      const CalcProto::OperandSpec *operand = nullptr;
+      if (isAggregateOperator(item.operator_kind())) {
+        if (index < static_cast<size_t>(item.operands_size())) {
+          operand = &item.operands(static_cast<int>(index));
+        }
+      } else if (index == 0) {
+        operand = &item.left_operand();
+      } else if (index == 1 && item.has_right_operand()) {
+        operand = &item.right_operand();
+      }
+      if (operand != nullptr && operand->source_kind() == CalcProto::OPERAND_SOURCE_ROUTED_INPUT &&
+          tags.inputTags[index] == update.dst_tag()) {
+        isTriggerInput = true;
+        break;
+      }
+    }
+    if (isTriggerInput && !firstTriggerTsByItem->contains(item.item_name())) {
+      (*firstTriggerTsByItem)[item.item_name()] = update.ts_ms();
+      (*triggerGenerationByItem)[item.item_name()] = ++(*nextTriggerGeneration);
+    }
+  }
 }
 
 std::vector<PublishAction> evaluateGroupLocked(const CalcProto::CalcGroupConfig &config,
@@ -518,7 +718,8 @@ void fillOperandStatuses(const CalcProto::CalcItemConfig &item,
     const bool numericOperation = isNumericOperator(item.operator_kind()) ||
         isAggregateOperator(item.operator_kind());
     const bool numericValue = it->second.value().has_int_value() ||
-        it->second.value().has_double_value();
+        it->second.value().has_double_value() ||
+        it->second.value().has_decimal_value();
     if (numericOperation && !numericValue) {
       status->set_ready(false);
       status->set_reason("已收到输入，但类型不支持当前数值运算");
@@ -555,6 +756,36 @@ void fillOperandStatuses(const CalcProto::CalcItemConfig &item,
 GroupManager::GroupManager(std::string moduleName, std::filesystem::path configDbPath) :
   groupStore_(std::move(configDbPath)),
   dataCenter_(std::move(moduleName)) {}
+
+GroupManager::~GroupManager() {
+  Shutdown();
+}
+
+void GroupManager::Shutdown() {
+  std::vector<std::jthread> stoppingThreads;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (shutdown_) {
+      return;
+    }
+    shutdown_ = true;
+    stoppingThreads.reserve(groupsByName_.size() * 2);
+    for (auto &[groupName, group] : groupsByName_) {
+      std::jthread subscribeThread;
+      std::jthread periodicThread;
+      stopThreadsLocked(&group, false, &subscribeThread, &periodicThread);
+      if (subscribeThread.joinable()) {
+        stoppingThreads.push_back(std::move(subscribeThread));
+      }
+      if (periodicThread.joinable()) {
+        stoppingThreads.push_back(std::move(periodicThread));
+      }
+      LOG_DEBUG("Calc 析构时已请求停止分组线程: group_name={}", groupName);
+    }
+  }
+  stoppingThreads.clear();
+  LOG_INFO("Calc 分组管理器已停止全部运算线程");
+}
 
 void GroupManager::setDataCenterServerAddress(std::string address) {
   dataCenter_.setServerAddress(std::move(address));
@@ -625,6 +856,9 @@ grpc::Status GroupManager::tryAutoStartGroup(const std::string &groupName, std::
     auto it = groupsByName_.find(groupName);
     if (it == groupsByName_.end()) {
       return makeNotFound(groupName);
+    }
+    if (shutdown_) {
+      return makePreconditionFailed("分组管理器正在停止，不能启动分组功能");
     }
     if (it->second.state == CalcProto::GROUP_STATE_RUNNING) {
       LOG_INFO("Calc 自动启动分组跳过: group_name={}, 触发来源={}, 原因=分组已在运行", groupName, trigger);
@@ -798,6 +1032,8 @@ grpc::Status GroupManager::UpsertGroup(const CalcProto::UpsertGroupRequest &requ
       }
       it->second.config = request.config();
       it->second.latestByTag.clear();
+      it->second.firstTriggerTsByItem.clear();
+      it->second.triggerGenerationByItem.clear();
       it->second.itemLastErrors.clear();
       it->second.lastError.clear();
       rebuildTagCache(&it->second);
@@ -829,6 +1065,8 @@ grpc::Status GroupManager::UpsertGroup(const CalcProto::UpsertGroupRequest &requ
       group.connId = connInfo.conn_id();
       group.state = CalcProto::GROUP_STATE_STOPPED;
       group.lastError.clear();
+      group.firstTriggerTsByItem.clear();
+      group.triggerGenerationByItem.clear();
       group.itemLastErrors.clear();
       rebuildTagCache(&group);
       connId = group.connId;
@@ -842,6 +1080,11 @@ grpc::Status GroupManager::UpsertGroup(const CalcProto::UpsertGroupRequest &requ
       }
       return status;
     }
+  }
+
+  if (configUsesLegacyDoubleConstant(request.config())) {
+    LOG_WARNING("Calc 分组配置包含旧 double 常量，将按最短往返十进制文本转换为 Decimal20: group_name={}",
+                groupName);
   }
 
   std::vector<std::string> tagList;
@@ -992,42 +1235,69 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
   if (subscribeTags.empty()) {
     group->dcSubscribeContext.reset();
     LOG_INFO("Calc 分组无需订阅 DataCenter 输入: group_name={}, conn_id={}", groupName, connId);
-    return;
+  } else {
+    group->dcSubscribeContext = std::make_shared<grpc::ClientContext>();
+    auto context = group->dcSubscribeContext;
+    auto reader = dataCenter_.Subscribe(context.get(), connId, subscribeTags, true);
+    if (!reader) {
+      group->dcSubscribeContext.reset();
+      group->state = CalcProto::GROUP_STATE_STOPPED;
+      group->lastError = "建立 DataCenter 订阅失败";
+      LOG_ERROR("Calc 建立 DataCenter 订阅失败: group_name={}, conn_id={}, 标签数={}", groupName, connId, subscribeTags.size());
+      return;
+    }
+
+    group->dcSubscribeThread = ModuleManager::StartModuleThread(
+        CalcLibInfo.LIB_NAME,
+        [this, groupName, context, reader = std::move(reader)](std::stop_token st) mutable {
+          std::stop_callback callback(st, [context]() { context->TryCancel(); });
+          DataCenterProto::PointUpdate update;
+          while (reader->Read(&update)) {
+            handleUpdate(groupName, update);
+          }
+          auto finishStatus = reader->Finish();
+          std::lock_guard<std::mutex> lock(mu_);
+          auto it = groupsByName_.find(groupName);
+          if (it == groupsByName_.end()) {
+            return;
+          }
+          if (it->second.state == CalcProto::GROUP_STATE_RUNNING) {
+            if (it->second.periodicThread.joinable()) {
+              it->second.periodicThread.request_stop();
+            }
+            it->second.state = CalcProto::GROUP_STATE_STOPPED;
+            it->second.lastError = finishStatus.ok() ? "DataCenter 订阅流已结束"
+                                                     : std::format("DataCenter 订阅失败: {}", finishStatus.error_message());
+            LOG_WARNING("Calc 分组订阅线程退出: group_name={}, 原因={}", groupName, it->second.lastError);
+          }
+        });
+    LOG_INFO("Calc 分组已启用 DataCenter 订阅: group_name={}, conn_id={}, 订阅标签数={}", groupName, connId, subscribeTags.size());
   }
 
-  group->dcSubscribeContext = std::make_shared<grpc::ClientContext>();
-  auto context = group->dcSubscribeContext;
-  auto reader = dataCenter_.Subscribe(context.get(), connId, subscribeTags, true);
-  if (!reader) {
-    group->dcSubscribeContext.reset();
-    group->state = CalcProto::GROUP_STATE_STOPPED;
-    group->lastError = "建立 DataCenter 订阅失败";
-    LOG_ERROR("Calc 建立 DataCenter 订阅失败: group_name={}, conn_id={}, 标签数={}", groupName, connId, subscribeTags.size());
-    return;
+  if (isPeriodicMode(group->config)) {
+    const auto period = std::chrono::milliseconds(group->config.period_ms());
+    group->periodicThread = ModuleManager::StartModuleThread(
+        CalcLibInfo.LIB_NAME,
+        [this, groupName, period](std::stop_token st) {
+          std::condition_variable_any wakeup;
+          std::mutex wakeupMutex;
+          std::unique_lock<std::mutex> lock(wakeupMutex);
+          auto nextDeadline = std::chrono::steady_clock::now() + period;
+          while (!st.stop_requested()) {
+            wakeup.wait_until(lock, st, nextDeadline, [] { return false; });
+            if (st.stop_requested()) {
+              break;
+            }
+            handlePeriodicCalculation(groupName);
+            nextDeadline += period;
+            const auto now = std::chrono::steady_clock::now();
+            while (nextDeadline <= now) {
+              nextDeadline += period;
+            }
+          }
+        });
+    LOG_INFO("Calc 分组已启用周期计算: group_name={}, 周期毫秒={}", groupName, group->config.period_ms());
   }
-
-  group->dcSubscribeThread = ModuleManager::StartModuleThread(
-      CalcLibInfo.LIB_NAME,
-      [this, groupName, context, reader = std::move(reader)](std::stop_token st) mutable {
-        std::stop_callback callback(st, [context]() { context->TryCancel(); });
-        DataCenterProto::PointUpdate update;
-        while (reader->Read(&update)) {
-          handleUpdate(groupName, update);
-        }
-        auto finishStatus = reader->Finish();
-        std::lock_guard<std::mutex> lock(mu_);
-        auto it = groupsByName_.find(groupName);
-        if (it == groupsByName_.end()) {
-          return;
-        }
-        if (it->second.state == CalcProto::GROUP_STATE_RUNNING) {
-          it->second.state = CalcProto::GROUP_STATE_STOPPED;
-          it->second.lastError = finishStatus.ok() ? "DataCenter 订阅流已结束"
-                                                   : std::format("DataCenter 订阅失败: {}", finishStatus.error_message());
-          LOG_WARNING("Calc 分组订阅线程退出: group_name={}, 原因={}", groupName, it->second.lastError);
-        }
-      });
-  LOG_INFO("Calc 分组已启用 DataCenter 订阅: group_name={}, conn_id={}, 订阅标签数={}", groupName, connId, subscribeTags.size());
 }
 
 grpc::Status GroupManager::StartGroup(const std::string &groupName) {
@@ -1036,14 +1306,32 @@ grpc::Status GroupManager::StartGroup(const std::string &groupName) {
     return status;
   }
 
-  std::vector<PublishAction> startupActions;
-  std::vector<std::string> startupErrors;
-  uint32_t startupConnId = 0;
+  {
+    std::jthread staleSubscribeThread;
+    std::jthread stalePeriodicThread;
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end()) {
+      return makeNotFound(groupName);
+    }
+    if (shutdown_) {
+      return makePreconditionFailed("分组管理器正在停止，不能启动分组功能");
+    }
+    if (it->second.state == CalcProto::GROUP_STATE_STOPPED &&
+        (it->second.dcSubscribeThread.joinable() || it->second.periodicThread.joinable())) {
+      LOG_INFO("Calc 启动分组前回收已停止线程: group_name={}", groupName);
+      stopThreadsLocked(&it->second, true, &staleSubscribeThread, &stalePeriodicThread);
+    }
+  }
+
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = groupsByName_.find(groupName);
     if (it == groupsByName_.end()) {
       return makeNotFound(groupName);
+    }
+    if (shutdown_) {
+      return makePreconditionFailed("分组管理器正在停止，不能启动分组功能");
     }
     if (it->second.state == CalcProto::GROUP_STATE_RUNNING) {
       LOG_INFO("Calc 启动分组请求幂等成功: group_name={}, 原因=分组已在运行", groupName);
@@ -1056,35 +1344,42 @@ grpc::Status GroupManager::StartGroup(const std::string &groupName) {
     }
 
     it->second.latestByTag.clear();
+    it->second.firstTriggerTsByItem.clear();
+    it->second.triggerGenerationByItem.clear();
     it->second.itemLastErrors.clear();
     it->second.lastError.clear();
     it->second.state = CalcProto::GROUP_STATE_RUNNING;
     startThreadsLocked(groupName, &it->second);
     if (it->second.state != CalcProto::GROUP_STATE_RUNNING ||
-        (!it->second.subscribeTags.empty() && !it->second.dcSubscribeThread.joinable())) {
+        (!it->second.subscribeTags.empty() && !it->second.dcSubscribeThread.joinable()) ||
+        (isPeriodicMode(it->second.config) && !it->second.periodicThread.joinable())) {
       if (it->second.lastError.empty()) {
         it->second.lastError = "建立 DataCenter 订阅失败";
       }
       return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, it->second.lastError);
     }
-    startupConnId = it->second.connId;
-    startupActions = evaluateGroupLocked(it->second.config, it->second.latestByTag, &startupErrors, &it->second.itemLastErrors);
-  }
-
-  for (const auto &error : startupErrors) {
-    LOG_WARNING("Calc 启动时计算跳过: group_name={}, 原因={}", groupName, error);
-  }
-  for (const auto &action : startupActions) {
-    auto publishStatus = dataCenter_.PublishValue(startupConnId, action.tag, action.value, action.quality, action.tsMs);
-    if (!publishStatus.ok()) {
-      LOG_ERROR("Calc 启动时发布结果失败: group_name={}, item_name={}, tag={}, 原因={}", groupName, action.itemName, action.tag, publishStatus.error_message());
-      std::lock_guard<std::mutex> lock(mu_);
-      auto it = groupsByName_.find(groupName);
-      if (it != groupsByName_.end()) {
-        it->second.lastError = std::format("发布结果失败: {}", publishStatus.error_message());
+    if (!isPeriodicMode(it->second.config)) {
+      std::vector<std::string> startupErrors;
+      auto startupActions = evaluateGroupLocked(
+          it->second.config, it->second.latestByTag, &startupErrors, &it->second.itemLastErrors);
+      for (const auto &error : startupErrors) {
+        LOG_WARNING("Calc 启动时计算跳过: group_name={}, 原因={}", groupName, error);
       }
-    } else {
-      LOG_DEBUG("Calc 启动时已发布结果: group_name={}, item_name={}, tag={}", groupName, action.itemName, action.tag);
+      for (const auto &action : startupActions) {
+        auto publishStatus = dataCenter_.PublishValue(
+            it->second.connId, action.tag, action.value, action.quality, action.tsMs);
+        if (!publishStatus.ok()) {
+          LOG_ERROR("Calc 启动时发布结果失败: group_name={}, item_name={}, tag={}, 原因={}", groupName, action.itemName, action.tag, publishStatus.error_message());
+          it->second.lastError = std::format("发布结果失败: {}", publishStatus.error_message());
+        } else {
+          LOG_DEBUG("Calc 启动时已发布结果: group_name={}, item_name={}, tag={}, quality={}, ts_ms={}",
+                    groupName,
+                    action.itemName,
+                    action.tag,
+                    static_cast<int>(action.quality),
+                    action.tsMs);
+        }
+      }
     }
   }
 
@@ -1092,17 +1387,31 @@ grpc::Status GroupManager::StartGroup(const std::string &groupName) {
   return grpc::Status::OK;
 }
 
-void GroupManager::stopThreadsLocked(GroupRuntime *group, bool keepPendingDeleteState, std::jthread *outThread) {
+void GroupManager::stopThreadsLocked(GroupRuntime *group,
+                                      bool keepPendingDeleteState,
+                                      std::jthread *outSubscribeThread,
+                                      std::jthread *outPeriodicThread) {
   if (group == nullptr) {
     return;
   }
   if (group->dcSubscribeContext != nullptr) {
     group->dcSubscribeContext->TryCancel();
   }
-  if (outThread != nullptr) {
-    *outThread = std::move(group->dcSubscribeThread);
+  if (group->dcSubscribeThread.joinable()) {
+    group->dcSubscribeThread.request_stop();
+  }
+  if (outSubscribeThread != nullptr) {
+    *outSubscribeThread = std::move(group->dcSubscribeThread);
+  }
+  if (group->periodicThread.joinable()) {
+    group->periodicThread.request_stop();
+  }
+  if (outPeriodicThread != nullptr) {
+    *outPeriodicThread = std::move(group->periodicThread);
   }
   group->dcSubscribeContext.reset();
+  group->firstTriggerTsByItem.clear();
+  group->triggerGenerationByItem.clear();
   if (!keepPendingDeleteState || group->state != CalcProto::GROUP_STATE_PENDING_DELETE) {
     group->state = CalcProto::GROUP_STATE_STOPPED;
   }
@@ -1114,7 +1423,9 @@ grpc::Status GroupManager::StopGroup(const std::string &groupName) {
     return status;
   }
 
-  std::jthread thread;
+  std::jthread subscribeThread;
+  std::jthread periodicThread;
+  bool alreadyStopped = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = groupsByName_.find(groupName);
@@ -1122,13 +1433,27 @@ grpc::Status GroupManager::StopGroup(const std::string &groupName) {
       return makeNotFound(groupName);
     }
     if (it->second.state == CalcProto::GROUP_STATE_STOPPED) {
-      LOG_INFO("Calc 停止分组请求幂等成功: group_name={}, 原因=分组已停止", groupName);
-      return grpc::Status::OK;
+      alreadyStopped = true;
+      if (!it->second.dcSubscribeThread.joinable() && !it->second.periodicThread.joinable()) {
+        LOG_INFO("Calc 停止分组请求幂等成功: group_name={}, 原因=分组已停止", groupName);
+        return grpc::Status::OK;
+      }
     }
-    stopThreadsLocked(&it->second, true, &thread);
+    stopThreadsLocked(&it->second, true, &subscribeThread, &periodicThread);
   }
 
-  LOG_INFO("Calc 分组已停止运算功能: group_name={}", groupName);
+  if (subscribeThread.joinable()) {
+    subscribeThread.join();
+  }
+  if (periodicThread.joinable()) {
+    periodicThread.join();
+  }
+
+  if (alreadyStopped) {
+    LOG_INFO("Calc 停止分组请求幂等成功并已回收残留线程: group_name={}", groupName);
+  } else {
+    LOG_INFO("Calc 分组已停止运算功能: group_name={}", groupName);
+  }
   return grpc::Status::OK;
 }
 
@@ -1138,14 +1463,22 @@ grpc::Status GroupManager::DeleteGroup(const std::string &groupName) {
     return status;
   }
 
-  std::jthread thread;
+  std::jthread subscribeThread;
+  std::jthread periodicThread;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = groupsByName_.find(groupName);
     if (it == groupsByName_.end()) {
       return makeNotFound(groupName);
     }
-    stopThreadsLocked(&it->second, false, &thread);
+    stopThreadsLocked(&it->second, false, &subscribeThread, &periodicThread);
+  }
+
+  if (subscribeThread.joinable()) {
+    subscribeThread.join();
+  }
+  if (periodicThread.joinable()) {
+    periodicThread.join();
   }
 
   status = dataCenter_.DeleteConnection(groupName);
@@ -1177,6 +1510,7 @@ void GroupManager::handleUpdate(const std::string &groupName, const DataCenterPr
   std::vector<PublishAction> actions;
   std::vector<std::string> errors;
   uint32_t connId = 0;
+  bool changeMode = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = groupsByName_.find(groupName);
@@ -1185,7 +1519,23 @@ void GroupManager::handleUpdate(const std::string &groupName, const DataCenterPr
     }
     it->second.latestByTag[update.dst_tag()] = update;
     connId = it->second.connId;
+    if (isPeriodicMode(it->second.config)) {
+      LOG_DEBUG("Calc 周期分组已更新输入缓存: group_name={}, tag={}, ts_ms={}", groupName, update.dst_tag(), update.ts_ms());
+      return;
+    }
+    changeMode = true;
+    recordFirstTriggerTimestamp(it->second.config,
+                                update,
+                                &it->second.firstTriggerTsByItem,
+                                &it->second.triggerGenerationByItem,
+                                &it->second.nextTriggerGeneration);
     actions = evaluateGroupLocked(it->second.config, it->second.latestByTag, &errors, &it->second.itemLastErrors);
+    applyTriggerTimestamp(&actions, it->second.firstTriggerTsByItem, it->second.triggerGenerationByItem);
+    actions.erase(std::remove_if(actions.begin(), actions.end(),
+                                 [&it](const PublishAction &action) {
+                                   return !it->second.firstTriggerTsByItem.contains(action.itemName);
+                                 }),
+                  actions.end());
   }
 
   for (const auto &error : errors) {
@@ -1196,7 +1546,63 @@ void GroupManager::handleUpdate(const std::string &groupName, const DataCenterPr
     if (!status.ok()) {
       LOG_ERROR("Calc 发布结果失败: group_name={}, item_name={}, tag={}, 原因={}", groupName, action.itemName, action.tag, status.error_message());
     } else {
-      LOG_DEBUG("Calc 已发布结果: group_name={}, item_name={}, tag={}", groupName, action.itemName, action.tag);
+      LOG_DEBUG("Calc 已发布结果: group_name={}, item_name={}, tag={}, quality={}, ts_ms={}",
+                groupName,
+                action.itemName,
+                action.tag,
+                static_cast<int>(action.quality),
+                action.tsMs);
+      if (changeMode) {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto it = groupsByName_.find(groupName);
+        if (it != groupsByName_.end()) {
+          auto generationIt = it->second.triggerGenerationByItem.find(action.itemName);
+          if (generationIt != it->second.triggerGenerationByItem.end() &&
+              generationIt->second == action.triggerGeneration) {
+            it->second.triggerGenerationByItem.erase(generationIt);
+            it->second.firstTriggerTsByItem.erase(action.itemName);
+          }
+        }
+      }
+    }
+  }
+}
+
+void GroupManager::handlePeriodicCalculation(const std::string &groupName) {
+  std::vector<PublishAction> actions;
+  std::vector<std::string> errors;
+  uint32_t connId = 0;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end() || it->second.state != CalcProto::GROUP_STATE_RUNNING ||
+        !isPeriodicMode(it->second.config)) {
+      return;
+    }
+    connId = it->second.connId;
+    actions = evaluateGroupLocked(it->second.config, it->second.latestByTag, &errors, &it->second.itemLastErrors);
+    const auto calculationTs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::system_clock::now().time_since_epoch())
+                                   .count();
+    for (auto &action : actions) {
+      action.tsMs = calculationTs;
+    }
+  }
+
+  for (const auto &error : errors) {
+    LOG_WARNING("Calc 周期计算跳过: group_name={}, 原因={}", groupName, error);
+  }
+  for (const auto &action : actions) {
+    auto status = dataCenter_.PublishValue(connId, action.tag, action.value, action.quality, action.tsMs);
+    if (!status.ok()) {
+      LOG_ERROR("Calc 周期发布结果失败: group_name={}, item_name={}, tag={}, 原因={}", groupName, action.itemName, action.tag, status.error_message());
+    } else {
+      LOG_DEBUG("Calc 周期已发布结果: group_name={}, item_name={}, tag={}, quality={}, ts_ms={}",
+                groupName,
+                action.itemName,
+                action.tag,
+                static_cast<int>(action.quality),
+                action.tsMs);
     }
   }
 }

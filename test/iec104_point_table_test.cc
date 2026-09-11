@@ -91,15 +91,44 @@ TEST(IEC104PointTableTest, NormalizesScaleAndKeepsDeadband) {
 
   auto updated = table.FindByTag("A");
   ASSERT_TRUE(updated.has_value());
-  EXPECT_DOUBLE_EQ(updated->scale, 1.0);
-  EXPECT_DOUBLE_EQ(updated->offset, -2.0);
-  EXPECT_DOUBLE_EQ(updated->deadband, 0.5);
+  EXPECT_EQ(updated->scale.ToFixedString(), "1.00000000000000000000");
+  EXPECT_EQ(updated->offset.ToFixedString(), "-2.00000000000000000000");
+  EXPECT_EQ(updated->deadband.ToFixedString(), "0.50000000000000000000");
 
   IEC104Proto::PointTable out;
   table.ToProto("conn-1", &out);
   ASSERT_EQ(out.points_size(), 1);
   EXPECT_DOUBLE_EQ(out.points(0).scale(), 1.0);
   EXPECT_DOUBLE_EQ(out.points(0).deadband(), 0.5);
+  EXPECT_EQ(out.points(0).scale_decimal(), "1.00000000000000000000");
+  EXPECT_EQ(out.points(0).offset_decimal(), "-2.00000000000000000000");
+  EXPECT_EQ(out.points(0).deadband_decimal(), "0.50000000000000000000");
+}
+
+// 验证：点表优先保存并返回 20 位精确十进制工程量配置。
+TEST(IEC104PointTableTest, KeepsDecimalEngineeringConfiguration) {
+  PointTable table;
+  IEC104Proto::UpsertPointTableRequest req;
+  auto *point = req.add_points();
+  *point = MakePoint("decimal", 2);
+  point->set_scale(9.0);
+  point->set_scale_decimal("1.00000000000000000001");
+  point->set_offset_decimal("-0.00000000000000000001");
+  point->set_deadband_decimal("0.10000000000000000001");
+
+  ASSERT_TRUE(table.Upsert(req.points(), true).ok());
+  const auto stored = table.FindByTag("decimal");
+  ASSERT_TRUE(stored.has_value());
+  EXPECT_EQ(stored->scale.ToFixedString(), "1.00000000000000000001");
+  EXPECT_EQ(stored->offset.ToFixedString(), "-0.00000000000000000001");
+  EXPECT_EQ(stored->deadband.ToFixedString(), "0.10000000000000000001");
+
+  IEC104Proto::PointTable output;
+  table.ToProto("conn", &output);
+  ASSERT_EQ(output.points_size(), 1);
+  EXPECT_EQ(output.points(0).scale_decimal(), "1.00000000000000000001");
+  EXPECT_EQ(output.points(0).offset_decimal(), "-0.00000000000000000001");
+  EXPECT_EQ(output.points(0).deadband_decimal(), "0.10000000000000000001");
 }
 
 // 验证：显式业务类型会随点表保存和查询，并允许业务语义与协议数据类型独立表达。
@@ -232,13 +261,13 @@ TEST(IEC104PointTableTest, SinglePointIgnoresScaleOffsetDeadband) {
   auto updated = table.FindByTag("S");
   ASSERT_TRUE(updated.has_value());
   EXPECT_EQ(updated->type, IEC104Proto::POINT_TYPE_SINGLE);
-  EXPECT_DOUBLE_EQ(updated->scale, 1.0);
-  EXPECT_DOUBLE_EQ(updated->offset, 0.0);
-  EXPECT_DOUBLE_EQ(updated->deadband, 0.0);
+  EXPECT_EQ(updated->scale.ToFixedString(), "1.00000000000000000000");
+  EXPECT_EQ(updated->offset.ToFixedString(), "0.00000000000000000000");
+  EXPECT_EQ(updated->deadband.ToFixedString(), "0.00000000000000000000");
 }
 
-// 验证：死区为负时拒绝。
-TEST(IEC104PointTableTest, RejectsNegativeDeadband) {
+// 验证：负死区允许配置，并按小于等于零时不过滤的兼容语义原样保存。
+TEST(IEC104PointTableTest, AcceptsNegativeDeadbandAsDisabledFilter) {
   PointTable table;
 
   IEC104Proto::UpsertPointTableRequest req;
@@ -249,8 +278,10 @@ TEST(IEC104PointTableTest, RejectsNegativeDeadband) {
   p->set_deadband(-0.5);
   req.set_replace(true);
 
-  auto st = table.Upsert(req.points(), req.replace());
-  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  ASSERT_TRUE(table.Upsert(req.points(), req.replace()).ok());
+  const auto stored = table.FindByTag("A");
+  ASSERT_TRUE(stored.has_value());
+  EXPECT_EQ(stored->deadband.ToFixedString(), "-0.50000000000000000000");
 }
 
 // 验证：点表拒绝冲突映射（同 tag 不同 ioa、同 ioa 不同 tag）。

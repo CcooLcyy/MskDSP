@@ -24,6 +24,7 @@ namespace IEC104 {
 
 class IEC104LinkStore;
 class IEC104PointTableStore;
+class IEC104SoeStore;
 
 class LinkManager {
 public:
@@ -71,7 +72,7 @@ private:
     std::string lastError;
     PointTable pointTable;
     bool pointTableConfigured = false;
-    std::unordered_map<std::string, double> lastReportedByTag;
+    std::unordered_map<std::string, mskdsp::numeric::Decimal20> lastReportedByTag;
     std::unordered_map<std::string, IEC104Proto::SimulationPoint> simulationValues;
 
     std::unique_ptr<TcpLink> transport;
@@ -118,6 +119,7 @@ private:
   void stopCommandSubscribeLocked(LinkRuntime *link);
 
   grpc::Status handleClientPointValue(const std::string &connName, const PointValue &pv);
+  bool storeAndSendSoe(const std::string &connName, const PointValue &pv, TcpLink *transport);
   CommandResult handleCommandValue(const std::string &connName, const CommandValue &cv);
   static grpc::Status setSystemClock(int64_t tsMs);
   grpc::Status handleTimeSyncCommand(const std::string &connName, int64_t tsMs);
@@ -128,6 +130,8 @@ private:
   static std::string normalizeTimeSyncTag(const IEC104Proto::LinkConfig &config);
 
   mutable std::mutex mu_;
+  // 必须晚于运行中链路析构，避免会话关闭回调访问已释放的 SOE 存储。
+  std::unique_ptr<IEC104SoeStore> soeStore_;
   std::unordered_map<std::string, LinkRuntime> linksByName_;
   // 记录 ROLE_SERVER 链路配置的监听端点（含进行中的 UpsertLink 创建）；
   // 仅用于配置索引与恢复，不代表端点当前已成功监听。

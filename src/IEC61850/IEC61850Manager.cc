@@ -14,10 +14,12 @@
 #include <vector>
 
 #include "IEC61850ConfigValidation.h"
+#include "IEC61850Decimal.hpp"
 #include "IEC61850MmsSession.h"
 #include "IEC61850ModelSelection.h"
 #include "IEC61850RealtimePlan.h"
 #include "Logger.h"
+#include "mskdsp/Decimal20.hpp"
 
 namespace IEC61850 {
 namespace {
@@ -113,33 +115,15 @@ bool PointValueToBool(const DataCenterProto::PointValue& value,
       }
       *output = value.double_value() != 0.0;
       return true;
-    default:
-      return false;
-  }
-}
-
-bool PointValueToInt64(const DataCenterProto::PointValue& value,
-                       std::int64_t* output) {
-  if (output == nullptr) {
-    return false;
-  }
-  switch (value.kind_case()) {
-    case DataCenterProto::PointValue::kIntValue:
-      *output = value.int_value();
-      return true;
-    case DataCenterProto::PointValue::kBoolValue:
-      *output = value.bool_value() ? 1 : 0;
-      return true;
-    case DataCenterProto::PointValue::kDoubleValue: {
-      const double input = value.double_value();
-      constexpr double kInt64LowerBound = -0x1p63;
-      constexpr double kInt64UpperBoundExclusive = 0x1p63;
-      if (!std::isfinite(input) || std::round(input) != input ||
-          input < kInt64LowerBound ||
-          input >= kInt64UpperBoundExclusive) {
+    case DataCenterProto::PointValue::kDecimalValue: {
+      auto decimal =
+          mskdsp::numeric::Decimal20::Parse(value.decimal_value());
+      if (!decimal.has_value()) {
+        LOG_WARNING("IEC61850 decimal_value 解析失败，无法转换到布尔协议边界: {}",
+                    mskdsp::numeric::DecimalErrorMessage(decimal.error()));
         return false;
       }
-      *output = static_cast<std::int64_t>(input);
+      *output = !decimal->IsZero();
       return true;
     }
     default:
@@ -147,23 +131,19 @@ bool PointValueToInt64(const DataCenterProto::PointValue& value,
   }
 }
 
-bool PointValueToDouble(const DataCenterProto::PointValue& value,
-                        double* output) {
-  if (output == nullptr) {
-    return false;
-  }
+std::expected<mskdsp::numeric::Decimal20, mskdsp::numeric::DecimalError>
+PointValueToDecimal(const DataCenterProto::PointValue& value) {
   switch (value.kind_case()) {
-    case DataCenterProto::PointValue::kDoubleValue:
-      *output = value.double_value();
-      return std::isfinite(*output);
     case DataCenterProto::PointValue::kIntValue:
-      *output = static_cast<double>(value.int_value());
-      return std::isfinite(*output);
+      return mskdsp::numeric::Decimal20::FromInt64(value.int_value());
     case DataCenterProto::PointValue::kBoolValue:
-      *output = value.bool_value() ? 1.0 : 0.0;
-      return true;
+      return mskdsp::numeric::Decimal20::FromInt64(value.bool_value() ? 1 : 0);
+    case DataCenterProto::PointValue::kDoubleValue:
+      return mskdsp::numeric::Decimal20::FromDouble(value.double_value());
+    case DataCenterProto::PointValue::kDecimalValue:
+      return mskdsp::numeric::Decimal20::Parse(value.decimal_value());
     default:
-      return false;
+      return std::unexpected(mskdsp::numeric::DecimalError::kInvalidFormat);
   }
 }
 
@@ -2607,8 +2587,21 @@ grpc::Status Manager::ExecuteDataCenterCommand(
   }
   MmsPointControlCommand command;
   command.valueType = mapping.value_type();
-  command.scale = mapping.scale();
-  command.offset = mapping.offset();
+  const auto engineeringConfig = ParsePointEngineeringDecimal(mapping);
+  if (!engineeringConfig.has_value()) {
+    response->set_status(DataCenterProto::COMMAND_REJECTED);
+    response->set_reject_code(DataCenterProto::COMMAND_REJECT_BAD_CONFIG);
+    response->set_reason(std::format(
+        "IEC61850控制点工程量配置非法: {}",
+        mskdsp::numeric::DecimalErrorMessage(engineeringConfig.error())));
+    LOG_WARNING("IEC61850同步MMS控制工程量配置解析失败: IED={}, tag={}, 原因={}",
+                connName, request.dst().tag(),
+                mskdsp::numeric::DecimalErrorMessage(
+                    engineeringConfig.error()));
+    return grpc::Status::OK;
+  }
+  command.scale = engineeringConfig->scale;
+  command.offset = engineeringConfig->offset;
   if (request.timeout_ms() != 0) {
     command.requestTimeout = std::chrono::milliseconds(request.timeout_ms());
     LOG_DEBUG("IEC61850同步MMS控制采用调用方截止时间: IED={}, tag={}, 超时={}毫秒",
@@ -2628,21 +2621,42 @@ grpc::Status Manager::ExecuteDataCenterCommand(
     return grpc::Status::OK;
   }
 
-  double requestedValue = 0.0;
+  mskdsp::numeric::Decimal20 requestedValue;
   bool converted = false;
   switch (command.valueType) {
     case IEC61850Proto::POINT_VALUE_TYPE_BOOL:
       converted = PointValueToBool(request.value(), &command.boolValue);
-      requestedValue = command.boolValue ? 1.0 : 0.0;
+      if (converted) {
+        requestedValue = *mskdsp::numeric::Decimal20::FromInt64(
+            command.boolValue ? 1 : 0);
+      }
       break;
-    case IEC61850Proto::POINT_VALUE_TYPE_INT64:
-      converted = PointValueToInt64(request.value(), &command.intValue);
-      requestedValue = static_cast<double>(command.intValue);
+    case IEC61850Proto::POINT_VALUE_TYPE_INT64: {
+      const auto decimal = PointValueToDecimal(request.value());
+      if (!decimal.has_value()) {
+        break;
+      }
+      const auto integer = decimal->ToInteger<std::int64_t>(
+          mskdsp::numeric::RoundingMode::kTowardZero);
+      const auto quantized = decimal->Quantize(
+          0, mskdsp::numeric::RoundingMode::kTowardZero);
+      converted = integer.has_value() && quantized.has_value() &&
+                  *quantized == *decimal;
+      if (converted) {
+        command.engineeringValue = *decimal;
+        requestedValue = *decimal;
+      }
       break;
-    case IEC61850Proto::POINT_VALUE_TYPE_DOUBLE:
-      converted = PointValueToDouble(request.value(), &command.doubleValue);
-      requestedValue = command.doubleValue;
+    }
+    case IEC61850Proto::POINT_VALUE_TYPE_DOUBLE: {
+      const auto decimal = PointValueToDecimal(request.value());
+      converted = decimal.has_value();
+      if (converted) {
+        command.engineeringValue = *decimal;
+        requestedValue = *decimal;
+      }
       break;
+    }
     default:
       converted = false;
       break;
@@ -2653,7 +2667,15 @@ grpc::Status Manager::ExecuteDataCenterCommand(
     response->set_reason("IEC61850控制点值类型不支持或与点映射不一致");
     return grpc::Status::OK;
   }
-  response->set_requested_value(requestedValue);
+  const auto legacyRequestedValue = requestedValue.ToDouble();
+  if (!legacyRequestedValue.has_value()) {
+    response->set_status(DataCenterProto::COMMAND_REJECTED);
+    response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSUPPORTED_POINT);
+    response->set_reason("IEC61850控制点值无法转换为旧double响应字段");
+    return grpc::Status::OK;
+  }
+  response->set_requested_value(*legacyRequestedValue);
+  response->set_requested_value_decimal(requestedValue.ToFixedString());
   if (stack == nullptr) {
     response->set_status(DataCenterProto::COMMAND_TARGET_UNAVAILABLE);
     response->set_reason("IEC61850协议栈未配置");
@@ -2720,10 +2742,11 @@ grpc::Status Manager::ExecuteDataCenterCommand(
   response->set_status(DataCenterProto::COMMAND_ACCEPTED);
   response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSPECIFIED);
   response->set_reason("IEC61850 MMS同步控制已执行");
-  response->set_accepted_value(requestedValue);
+  response->set_accepted_value(*legacyRequestedValue);
+  response->set_accepted_value_decimal(requestedValue.ToFixedString());
   LOG_INFO("IEC61850同步MMS控制执行成功: IED={}, conn_id={}, tag={}, value={}, request_id={}",
            connName, response->dst().conn_id(), request.dst().tag(),
-           requestedValue, request.request_id());
+           requestedValue.ToFixedString(), request.request_id());
   return grpc::Status::OK;
 }
 

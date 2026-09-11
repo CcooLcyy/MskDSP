@@ -200,3 +200,114 @@ TEST(Dlt645PointTableTest, AllowsReadBlockWritePointWithSameDefinition) {
   EXPECT_TRUE(table.FindByTag("A").has_value());
   EXPECT_TRUE(table.BlockTags().find("A") != table.BlockTags().end());
 }
+
+// 验证：单点与数据块子项优先使用十进制文本，并以固定 20 位小数回显。
+TEST(Dlt645PointTableTest, DecimalEngineeringFieldsTakePriorityAndRoundTrip) {
+  PointTable table;
+
+  DLT645Proto::UpsertPointTableRequest req;
+  auto point = MakePoint("P", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16,
+                         DLT645Proto::ACCESS_READ_ONLY);
+  point.set_scale(99.0);
+  point.set_offset(99.0);
+  point.set_deadband(99.0);
+  point.set_scale_decimal("1e-20");
+  point.set_offset_decimal("-0.25000000000000000000");
+  point.set_deadband_decimal("0.123456789012345678905");
+  *req.add_points() = point;
+
+  auto *block = req.add_blocks();
+  block->set_block_di("040000FF");
+  block->set_block_data_len(2);
+  auto item = MakeBlockItem("B", 2, DLT645Proto::DATA_TYPE_UINT16,
+                            DLT645Proto::ACCESS_READ_ONLY);
+  item.set_scale_decimal("2.5e-1");
+  item.set_offset_decimal("0.1");
+  item.set_deadband_decimal("0.2");
+  *block->add_items() = item;
+  req.set_replace(true);
+
+  ASSERT_TRUE(table.Upsert(req.points(), req.blocks(), req.replace()).ok());
+  const auto stored = table.FindByTag("P");
+  ASSERT_TRUE(stored.has_value());
+  EXPECT_EQ(stored->scale.ToFixedString(), "0.00000000000000000001");
+  EXPECT_EQ(stored->offset.ToFixedString(), "-0.25000000000000000000");
+  EXPECT_EQ(stored->deadband.ToFixedString(), "0.12345678901234567891");
+
+  const auto &blocks = table.Blocks();
+  ASSERT_EQ(blocks.size(), 1u);
+  ASSERT_EQ(blocks.front().items.size(), 1u);
+  EXPECT_EQ(blocks.front().items.front().point.scale.ToFixedString(),
+            "0.25000000000000000000");
+
+  DLT645Proto::PointTable out;
+  table.ToProto("conn-decimal", &out);
+  ASSERT_EQ(out.points_size(), 1);
+  EXPECT_EQ(out.points(0).scale_decimal(), "0.00000000000000000001");
+  EXPECT_EQ(out.points(0).offset_decimal(), "-0.25000000000000000000");
+  EXPECT_EQ(out.points(0).deadband_decimal(), "0.12345678901234567891");
+  ASSERT_EQ(out.blocks_size(), 1);
+  ASSERT_EQ(out.blocks(0).items_size(), 1);
+  EXPECT_EQ(out.blocks(0).items(0).scale_decimal(),
+            "0.25000000000000000000");
+}
+
+// 验证：十进制文本非法时不回退旧 double。
+TEST(Dlt645PointTableTest, RejectsInvalidDecimalEngineeringFields) {
+  PointTable table;
+
+  DLT645Proto::UpsertPointTableRequest invalidPoint;
+  auto point = MakePoint("P", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16,
+                         DLT645Proto::ACCESS_READ_ONLY);
+  point.set_scale_decimal("0.1x");
+  *invalidPoint.add_points() = point;
+  invalidPoint.set_replace(true);
+  auto status = table.Upsert(invalidPoint.points(), invalidPoint.blocks(),
+                             invalidPoint.replace());
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  EXPECT_NE(status.error_message().find("scale_decimal"), std::string::npos);
+
+}
+
+// 验证：负死区允许配置，并按小于等于零时不过滤的兼容语义原样保存。
+TEST(Dlt645PointTableTest, AcceptsNegativeDeadbandAsDisabledFilter) {
+  PointTable table;
+  DLT645Proto::UpsertPointTableRequest negativeBlockDeadband;
+  auto *block = negativeBlockDeadband.add_blocks();
+  block->set_block_di("040000FF");
+  block->set_block_data_len(2);
+  auto item = MakeBlockItem("B", 2, DLT645Proto::DATA_TYPE_UINT16,
+                            DLT645Proto::ACCESS_READ_ONLY);
+  item.set_deadband_decimal("-1e-20");
+  *block->add_items() = item;
+  negativeBlockDeadband.set_replace(true);
+  const auto status = table.Upsert(negativeBlockDeadband.points(),
+                                   negativeBlockDeadband.blocks(),
+                                   negativeBlockDeadband.replace());
+  ASSERT_TRUE(status.ok());
+  ASSERT_EQ(table.Blocks().size(), 1u);
+  ASSERT_EQ(table.Blocks().front().items.size(), 1u);
+  EXPECT_EQ(table.Blocks().front().items.front().point.deadband.ToFixedString(),
+            "-0.00000000000000000001");
+}
+
+// 验证：未提供十进制文本的旧 double 点表仍可加载，并按可见十进制语义进入 Decimal20。
+TEST(Dlt645PointTableTest, LegacyDoubleEngineeringFieldsRemainCompatible) {
+  PointTable table;
+
+  DLT645Proto::UpsertPointTableRequest req;
+  auto point = MakePoint("P", "02010100", 2, DLT645Proto::DATA_TYPE_UINT16,
+                         DLT645Proto::ACCESS_READ_ONLY);
+  point.set_scale(0.1);
+  point.set_offset(0.2);
+  point.set_deadband(0.3);
+  *req.add_points() = point;
+  req.set_replace(true);
+
+  ASSERT_TRUE(table.Upsert(req.points(), req.blocks(), req.replace()).ok());
+  const auto stored = table.FindByTag("P");
+  ASSERT_TRUE(stored.has_value());
+  EXPECT_EQ(stored->scale.ToFixedString(), "0.10000000000000000000");
+  EXPECT_EQ(stored->offset.ToFixedString(), "0.20000000000000000000");
+  EXPECT_EQ(stored->deadband.ToFixedString(), "0.30000000000000000000");
+}

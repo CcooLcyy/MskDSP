@@ -586,6 +586,8 @@ IEC61850Proto::UpsertPointMappingsRequest MakeMmsControlMappingRequest() {
   floatingPoint->set_value_type(IEC61850Proto::POINT_VALUE_TYPE_DOUBLE);
   floatingPoint->set_scale(4.0);
   floatingPoint->set_offset(-1.0);
+  floatingPoint->set_scale_decimal("4.00000000000000000001");
+  floatingPoint->set_offset_decimal("-1.00000000000000000001");
 
   return request;
 }
@@ -1238,20 +1240,31 @@ TEST(IEC61850ManagerTest,
   EXPECT_EQ(response.status(), DataCenterProto::COMMAND_ACCEPTED);
   EXPECT_EQ(stack->lastPointControlCommand.valueType,
             IEC61850Proto::POINT_VALUE_TYPE_INT64);
-  EXPECT_EQ(stack->lastPointControlCommand.intValue, 7);
-  EXPECT_DOUBLE_EQ(stack->lastPointControlCommand.scale, 2.0);
-  EXPECT_DOUBLE_EQ(stack->lastPointControlCommand.offset, 3.0);
+  EXPECT_EQ(stack->lastPointControlCommand.engineeringValue.ToFixedString(),
+            "7.00000000000000000000");
+  EXPECT_EQ(stack->lastPointControlCommand.scale.ToFixedString(),
+            "2.00000000000000000000");
+  EXPECT_EQ(stack->lastPointControlCommand.offset.ToFixedString(),
+            "3.00000000000000000000");
 
   auto floatingRequest = makeRequest("FLOAT_CONTROL");
-  floatingRequest.mutable_value()->set_double_value(2.5);
+  floatingRequest.mutable_value()->set_decimal_value(
+      "2.50000000000000000001");
   response.Clear();
   ASSERT_TRUE(manager.ExecuteDataCenterCommand(floatingRequest, &response).ok());
   EXPECT_EQ(response.status(), DataCenterProto::COMMAND_ACCEPTED);
   EXPECT_EQ(stack->lastPointControlCommand.valueType,
             IEC61850Proto::POINT_VALUE_TYPE_DOUBLE);
-  EXPECT_DOUBLE_EQ(stack->lastPointControlCommand.doubleValue, 2.5);
-  EXPECT_DOUBLE_EQ(stack->lastPointControlCommand.scale, 4.0);
-  EXPECT_DOUBLE_EQ(stack->lastPointControlCommand.offset, -1.0);
+  EXPECT_EQ(stack->lastPointControlCommand.engineeringValue.ToFixedString(),
+            "2.50000000000000000001");
+  EXPECT_EQ(stack->lastPointControlCommand.scale.ToFixedString(),
+            "4.00000000000000000001");
+  EXPECT_EQ(stack->lastPointControlCommand.offset.ToFixedString(),
+            "-1.00000000000000000001");
+  EXPECT_EQ(response.requested_value_decimal(),
+            "2.50000000000000000001");
+  EXPECT_EQ(response.accepted_value_decimal(),
+            "2.50000000000000000001");
 
   auto boundedRequest = makeRequest("BOOL_CONTROL");
   boundedRequest.mutable_value()->set_bool_value(true);

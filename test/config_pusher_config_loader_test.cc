@@ -340,7 +340,7 @@ TEST(ConfigPusherConfigLoaderTest, LoadAvcConfigFile) {
   EXPECT_TRUE(task.start());
 }
 
-// 验证：加载 Calc 配置时可解析计算分组任务、运算项与常量操作数。
+// 验证：加载 Calc 配置时可解析周期触发参数、运算项与常量操作数。
 TEST(ConfigPusherConfigLoaderTest, LoadCalcConfigFile) {
   InitLoggerOnce();
   ScopedTempDir dir;
@@ -354,6 +354,8 @@ TEST(ConfigPusherConfigLoaderTest, LoadCalcConfigFile) {
           "create_only": false,
           "config": {
             "group_name": "calc-1",
+            "trigger_mode": "TRIGGER_MODE_PERIODIC",
+            "period_ms": 1000,
             "items": [
               {
                 "item_name": "sum",
@@ -386,6 +388,8 @@ TEST(ConfigPusherConfigLoaderTest, LoadCalcConfigFile) {
   EXPECT_FALSE(task.upsert().create_only());
   ASSERT_TRUE(task.upsert().has_config());
   EXPECT_EQ(task.upsert().config().group_name(), "calc-1");
+  EXPECT_EQ(task.upsert().config().trigger_mode(), CalcProto::TRIGGER_MODE_PERIODIC);
+  EXPECT_EQ(task.upsert().config().period_ms(), 1000u);
   ASSERT_EQ(task.upsert().config().items_size(), 1);
   const auto &item = task.upsert().config().items(0);
   EXPECT_EQ(item.item_name(), "sum");

@@ -4,6 +4,7 @@
     "boost-iostreams",
     "boost-json",
     "boost-log",
+    "boost-multiprecision",
     "gtest",
     "lua",
     "paho-mqttpp3",

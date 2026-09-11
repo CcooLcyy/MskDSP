@@ -24,6 +24,7 @@ namespace Calc {
 class GroupManager {
 public:
   explicit GroupManager(std::string moduleName, std::filesystem::path configDbPath = std::filesystem::path("./conf/config.db"));
+  ~GroupManager();
 
   void setDataCenterServerAddress(std::string address);
   void setDataCenterStub(std::shared_ptr<DataCenterProto::DataCenterService::StubInterface> stub);
@@ -37,6 +38,7 @@ public:
   grpc::Status StopGroup(const std::string &groupName);
   grpc::Status DeleteGroup(const std::string &groupName);
   void TryAutoStartReadyGroups(std::string_view trigger);
+  void Shutdown();
 
 private:
   struct GroupRuntime {
@@ -47,9 +49,14 @@ private:
 
     std::shared_ptr<grpc::ClientContext> dcSubscribeContext;
     std::jthread dcSubscribeThread;
+    std::jthread periodicThread;
 
     std::unordered_set<std::string> subscribeTags;
     std::unordered_map<std::string, DataCenterProto::PointUpdate> latestByTag;
+    // 变化触发时，每个计算项本轮最先到达输入的时标。
+    std::unordered_map<std::string, int64_t> firstTriggerTsByItem;
+    std::unordered_map<std::string, uint64_t> triggerGenerationByItem;
+    uint64_t nextTriggerGeneration{0};
     std::unordered_map<std::string, std::string> itemLastErrors;
   };
 
@@ -63,13 +70,18 @@ private:
   grpc::Status restoreGroupFromConfig(const CalcProto::PersistedGroup &persisted);
 
   void startThreadsLocked(const std::string &groupName, GroupRuntime *group);
-  void stopThreadsLocked(GroupRuntime *group, bool keepPendingDeleteState, std::jthread *outThread);
+  void stopThreadsLocked(GroupRuntime *group,
+                         bool keepPendingDeleteState,
+                         std::jthread *outSubscribeThread,
+                         std::jthread *outPeriodicThread);
+  void handlePeriodicCalculation(const std::string &groupName);
   void handleUpdate(const std::string &groupName, const DataCenterProto::PointUpdate &update);
 
   static std::unordered_set<std::string> collectAllTags(const CalcProto::CalcGroupConfig &config);
   static void rebuildTagCache(GroupRuntime *group);
 
   mutable std::mutex mu_;
+  bool shutdown_{false};
   std::unordered_map<std::string, GroupRuntime> groupsByName_;
   GroupStore groupStore_;
   DataCenterClient dataCenter_;

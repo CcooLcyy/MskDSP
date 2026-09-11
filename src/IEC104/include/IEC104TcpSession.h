@@ -11,6 +11,7 @@
 #include <optional>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <boost/asio/io_context.hpp>
@@ -53,6 +54,8 @@ class TcpSession : public std::enable_shared_from_this<TcpSession> {
 public:
   using PointValueCallback = TcpLink::PointValueCallback;
   using SnapshotProvider = TcpLink::SnapshotProvider;
+  using SoeReplayProvider = TcpLink::SoeReplayProvider;
+  using SoeAcknowledgedCallback = TcpLink::SoeAcknowledgedCallback;
   using TimeSyncCallback = TcpLink::TimeSyncCallback;
   using CommandCallback = TcpLink::CommandCallback;
   using CommandExecutionModeCallback = TcpLink::CommandExecutionModeCallback;
@@ -64,6 +67,7 @@ public:
   void Stop();
 
   void SendPointValue(const PointValue& value, uint8_t cause);
+  void SendSoe(const SoeEvent& event);
   void SendTimeSync(int64_t tsMs);
   void SendSingleCommand(uint32_t ioa, bool value, bool useSelect);
   void SendRemoteControl(uint32_t ioa,
@@ -74,6 +78,8 @@ public:
 
   void SetPointValueCallback(PointValueCallback cb);
   void SetInterrogationSnapshotProvider(SnapshotProvider provider);
+  void SetSoeReplayProvider(SoeReplayProvider provider);
+  void SetSoeAcknowledgedCallback(SoeAcknowledgedCallback cb);
   void SetTimeSyncCallback(TimeSyncCallback cb);
   void SetCommandCallback(CommandCallback cb);
   void SetCommandExecutionModeCallback(CommandExecutionModeCallback cb);
@@ -122,11 +128,19 @@ private:
   bool autoInterrogationSent_ = false;
 
   std::deque<std::vector<uint8_t>> writeQueue_;
-  std::deque<std::vector<uint8_t>> pendingAsdu_;
+  struct PendingAsdu {
+    std::vector<uint8_t> bytes;
+    std::optional<uint64_t> soeEventSequence;
+  };
+
+  std::deque<PendingAsdu> pendingAsdu_;
+  std::deque<std::optional<uint64_t>> sentIFrameSoeSequences_;
   bool writing_ = false;
 
   PointValueCallback onPointValue_;
   SnapshotProvider interrogationSnapshotProvider_;
+  SoeReplayProvider soeReplayProvider_;
+  SoeAcknowledgedCallback onSoeAcknowledged_;
   TimeSyncCallback onTimeSync_;
   CommandCallback onCommand_;
   CommandExecutionModeCallback onCommandExecutionMode_;
@@ -143,6 +157,9 @@ private:
   uint32_t pointMaxAsduBytes_ = 0;
   bool pointDedupe_ = true;
   bool pointFlushScheduled_ = false;
+  bool soeReplayLoaded_ = false;
+  std::unordered_set<uint64_t> soeSeenSequences_;
+  std::deque<uint64_t> soeSeenSequenceOrder_;
 
   struct RemoteControlSelect {
     IEC104Proto::RemoteControlType type = IEC104Proto::REMOTE_CONTROL_TYPE_SINGLE;
@@ -171,7 +188,9 @@ private:
   void handleTimeSyncCommand(const std::vector<uint8_t>& asdu);
   void handleInterrogation(const std::vector<uint8_t>& asdu);
 
-  void enqueueAsdu(std::vector<uint8_t> asdu);
+  void enqueueAsdu(std::vector<uint8_t> asdu, std::optional<uint64_t> soeEventSequence = std::nullopt);
+  void enqueueSoe(const SoeEvent& event);
+  void loadSoeReplay();
   void enqueuePointValue(const PointValue& value, uint8_t cause);
   void schedulePointFlush();
   void flushPoint(const boost::system::error_code& ec);
@@ -179,7 +198,7 @@ private:
   void clearPointQueue();
   void enqueuePointValuesBatch(std::vector<PointValue> values, uint8_t cause);
   void trySendPending();
-  void sendIFrame(const std::vector<uint8_t>& asdu);
+  void sendIFrame(PendingAsdu asdu);
   void sendSFrame();
   void sendUFrame(UFrameType type);
   void enqueueWrite(std::vector<uint8_t> frame);

@@ -5,6 +5,8 @@
 #include <string_view>
 #include <unordered_set>
 
+#include "mskdsp/Decimal20.hpp"
+
 namespace Calc {
 namespace {
 
@@ -13,7 +15,8 @@ grpc::Status makeInvalid(std::string message) {
 }
 
 bool isNumericConstantKind(const CalcProto::TypedConstant &constant) {
-  return constant.has_int_value() || constant.has_double_value();
+  return constant.has_int_value() || constant.has_double_value() ||
+      constant.has_decimal_value();
 }
 
 bool isAggregateOperator(CalcProto::OperatorKind operatorKind) {
@@ -46,7 +49,17 @@ grpc::Status validateOperand(const CalcProto::OperandSpec &operand, CalcProto::O
   case CalcProto::OPERATOR_KIND_SUM:
   case CalcProto::OPERATOR_KIND_AVERAGE:
     if (!isNumericConstantKind(operand.constant())) {
-      return makeInvalid(std::format("{} 的 constant 必须为 int/double", fieldName));
+      return makeInvalid(std::format("{} 的 constant 必须为 int/double/decimal", fieldName));
+    }
+    if (operand.constant().has_decimal_value()) {
+      const auto parsed = mskdsp::numeric::Decimal20::Parse(
+          operand.constant().decimal_value());
+      if (!parsed.has_value()) {
+        return makeInvalid(std::format(
+            "{} 的 constant.decimal_value 非法: {}",
+            fieldName,
+            mskdsp::numeric::DecimalErrorMessage(parsed.error())));
+      }
     }
     return grpc::Status::OK;
   case CalcProto::OPERATOR_KIND_NOT:
@@ -71,6 +84,14 @@ grpc::Status ValidateGroupConfig(const CalcProto::CalcGroupConfig &config) {
   }
   if (config.items_size() <= 0) {
     return makeInvalid("items 不能为空");
+  }
+  if (config.trigger_mode() != CalcProto::TRIGGER_MODE_UNSPECIFIED &&
+      config.trigger_mode() != CalcProto::TRIGGER_MODE_ON_CHANGE &&
+      config.trigger_mode() != CalcProto::TRIGGER_MODE_PERIODIC) {
+    return makeInvalid("trigger_mode 非法");
+  }
+  if (config.trigger_mode() == CalcProto::TRIGGER_MODE_PERIODIC && config.period_ms() == 0) {
+    return makeInvalid("周期触发时 period_ms 必须大于 0");
   }
 
   std::unordered_set<std::string> itemNames;
@@ -123,8 +144,8 @@ grpc::Status ValidateGroupConfig(const CalcProto::CalcGroupConfig &config) {
       if (item.has_left_operand() || item.has_right_operand()) {
         return makeInvalid(std::format("items[{}] 的 SUM/AVERAGE 只能使用 operands，不能携带 left_operand/right_operand", item.item_name()));
       }
-      if (item.has_decimal_places() && item.decimal_places() > 15) {
-        return makeInvalid(std::format("items[{}].decimal_places 不能大于 15", item.item_name()));
+      if (item.has_decimal_places() && item.decimal_places() > 20) {
+        return makeInvalid(std::format("items[{}].decimal_places 不能大于 20", item.item_name()));
       }
       break;
     case CalcProto::OPERATOR_KIND_UNSPECIFIED:

@@ -114,6 +114,29 @@ TEST(AgcGroupStoreTest, SaveAndLoadRoundtrip) {
   EXPECT_TRUE(IsPendingDelete(loaded, "g-2"));
 }
 
+// 验证：成员容量、权重、限值和倍率的 Decimal20 文本持久化后保持原文。
+TEST(AgcGroupStoreTest, DecimalFieldsRoundtripWithoutPrecisionLoss) {
+  ScopedTempDir dir;
+  AGCGroupStore store(dir.path() / "config.db");
+  auto config = MakeGroupsConfig();
+  auto *member = config.mutable_persisted_groups(0)->mutable_config()->mutable_members(0);
+  member->set_capacity_kw_decimal("50.00000000000000000001");
+  member->set_weight_decimal("0.12345678901234567890");
+  member->set_min_kw_decimal("-0.00000000000000000001");
+  member->set_max_kw_decimal("49.99999999999999999999");
+  member->mutable_p_meas()->set_scale_decimal("0.10000000000000000001");
+  member->mutable_p_meas()->set_offset_decimal("0.20000000000000000002");
+
+  ASSERT_TRUE(store.Save(config).ok());
+  AGCProto::GroupsConfig loaded;
+  ASSERT_TRUE(store.Load(&loaded).ok());
+  const auto &restored = loaded.persisted_groups(0).config().members(0);
+  EXPECT_EQ(restored.capacity_kw_decimal(), "50.00000000000000000001");
+  EXPECT_EQ(restored.weight_decimal(), "0.12345678901234567890");
+  EXPECT_EQ(restored.p_meas().scale_decimal(), "0.10000000000000000001");
+  EXPECT_EQ(restored.p_meas().offset_decimal(), "0.20000000000000000002");
+}
+
 // 验证：Save 会拒绝非法配置（例如重复的 group_name）。
 TEST(AgcGroupStoreTest, SaveRejectsInvalidConfig) {
   ScopedTempDir dir;

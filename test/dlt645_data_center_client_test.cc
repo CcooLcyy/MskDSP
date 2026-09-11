@@ -61,6 +61,12 @@ TEST(Dlt645DataCenterClientTest, PublishAndGetLatestValidateArgs) {
   st = client.PublishDouble(1, "", 1.0, DataCenterProto::QUALITY_GOOD, 0);
   EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
 
+  st = client.PublishDecimal(1, "", "0.1", DataCenterProto::QUALITY_GOOD, 0);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+
+  st = client.PublishDecimal(1, "tag", "", DataCenterProto::QUALITY_GOOD, 0);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+
   st = client.PublishString(1, "", "v", DataCenterProto::QUALITY_GOOD, 0);
   EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
 
@@ -88,4 +94,24 @@ TEST(Dlt645DataCenterClientTest, PublishAndGetLatestSuccess) {
   EXPECT_TRUE(st.ok());
   ASSERT_EQ(resp.updates_size(), 1);
   EXPECT_EQ(resp.updates(0).dst_tag(), "tag");
+}
+
+// 验证：精确十进制发布保持原始文本，不经过 double 边界。
+TEST(Dlt645DataCenterClientTest, PublishDecimalKeepsExactText) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  DataCenterClient client("DLT645");
+  client.setStub(stub);
+
+  ASSERT_TRUE(client.PublishDecimal(1, "decimal-tag",
+                                    "0.12345678901234567890",
+                                    DataCenterProto::QUALITY_GOOD, 123)
+                  .ok());
+
+  DataCenterProto::GetLatestResponse resp;
+  ASSERT_TRUE(client.GetLatest(1, {"decimal-tag"}, &resp).ok());
+  ASSERT_EQ(resp.updates_size(), 1);
+  EXPECT_EQ(resp.updates(0).value().decimal_value(),
+            "0.12345678901234567890");
 }

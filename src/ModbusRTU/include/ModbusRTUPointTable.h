@@ -9,6 +9,7 @@
 #include <grpcpp/support/status.h>
 
 #include "ModbusRTU.pb.h"
+#include "mskdsp/Decimal20.hpp"
 
 namespace ModbusRTU {
 
@@ -22,9 +23,10 @@ public:
     uint32_t regCount = 1;
     ModbusRTUProto::WordOrder wordOrder = ModbusRTUProto::WORD_ORDER_HL;
     ModbusRTUProto::ByteOrder byteOrder = ModbusRTUProto::BYTE_ORDER_AB;
-    double scale = 1.0;
-    double offset = 0.0;
-    double deadband = 0.0;
+    mskdsp::numeric::Decimal20 scale =
+        mskdsp::numeric::Decimal20::FromInt64(1).value();
+    mskdsp::numeric::Decimal20 offset;
+    mskdsp::numeric::Decimal20 deadband;
     std::optional<uint32_t> bitIndex;
   };
 

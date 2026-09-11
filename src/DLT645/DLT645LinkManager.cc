@@ -21,6 +21,7 @@
 #include "DLT645LibInfo.h"
 #include "Logger.h"
 #include "ThreadUtil.hpp"
+#include "mskdsp/Decimal20.hpp"
 
 namespace {
 constexpr uint8_t kFrameStart = 0x68;
@@ -2943,7 +2944,9 @@ grpc::Status LinkManager::decodeAndPublish(LinkRuntime *link, const PointTable::
     if (point.type == DLT645Proto::DATA_TYPE_STRING) {
       return dataCenter_.PublishString(link->connId, point.tag, "", DataCenterProto::QUALITY_BAD, tsMs);
     }
-    return dataCenter_.PublishDouble(link->connId, point.tag, 0.0, DataCenterProto::QUALITY_BAD, tsMs);
+    return dataCenter_.PublishDecimal(
+        link->connId, point.tag, "0.00000000000000000000",
+        DataCenterProto::QUALITY_BAD, tsMs);
   }
 
   if (point.type == DLT645Proto::DATA_TYPE_BOOL) {
@@ -2977,19 +2980,34 @@ grpc::Status LinkManager::decodeAndPublish(LinkRuntime *link, const PointTable::
     return dataCenter_.PublishString(link->connId, point.tag, text, DataCenterProto::QUALITY_GOOD, tsMs);
   }
 
-  double raw = 0.0;
+  mskdsp::numeric::Decimal20 raw;
   if (point.type == DLT645Proto::DATA_TYPE_UINT16 && point.dataLen >= 2) {
-    raw = static_cast<double>(payload[0] | (payload[1] << 8));
+    const auto value = static_cast<uint16_t>(
+        static_cast<uint16_t>(payload[0]) |
+        static_cast<uint16_t>(static_cast<uint16_t>(payload[1]) << 8));
+    raw = mskdsp::numeric::Decimal20::FromInt64(value).value();
   } else if (point.type == DLT645Proto::DATA_TYPE_UINT32 && point.dataLen >= 4) {
-    raw = static_cast<double>(payload[0] | (payload[1] << 8) | (payload[2] << 16) | (payload[3] << 24));
+    const auto value = static_cast<uint32_t>(payload[0]) |
+        (static_cast<uint32_t>(payload[1]) << 8) |
+        (static_cast<uint32_t>(payload[2]) << 16) |
+        (static_cast<uint32_t>(payload[3]) << 24);
+    raw = mskdsp::numeric::Decimal20::FromInt64(value).value();
   } else if (point.type == DLT645Proto::DATA_TYPE_FLOAT && point.dataLen >= 4) {
-    uint32_t temp = payload[0] |
-        (payload[1] << 8) |
-        (payload[2] << 16) |
-        (payload[3] << 24);
+    const uint32_t temp = static_cast<uint32_t>(payload[0]) |
+        (static_cast<uint32_t>(payload[1]) << 8) |
+        (static_cast<uint32_t>(payload[2]) << 16) |
+        (static_cast<uint32_t>(payload[3]) << 24);
     float f = 0.0f;
     std::memcpy(&f, &temp, sizeof(float));
-    raw = static_cast<double>(f);
+    const auto parsed = mskdsp::numeric::Decimal20::FromFloat(f);
+    if (!parsed.has_value()) {
+      LOG_WARNING("DLT645 IEEE 浮点数据无法进入 Decimal20: tag={}, 原因={}",
+                  point.tag,
+                  mskdsp::numeric::DecimalErrorMessage(parsed.error()));
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "IEEE 浮点数据不是可用的有限数");
+    }
+    raw = *parsed;
   } else if (point.type == DLT645Proto::DATA_TYPE_BCD) {
     std::string digits;
     digits.reserve(point.dataLen * 2);
@@ -3010,33 +3028,53 @@ grpc::Status LinkManager::decodeAndPublish(LinkRuntime *link, const PointTable::
       digits.push_back(static_cast<char>('0' + high));
       digits.push_back(static_cast<char>('0' + low));
     }
-    try {
-      raw = std::stod(digits);
-      if (negative && raw != 0.0) {
-        raw = -raw;
-      }
-    } catch (const std::exception &) {
-      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "BCD 数值解析失败");
+    const std::string signedDigits = negative ? "-" + digits : digits;
+    const auto parsed = mskdsp::numeric::Decimal20::Parse(signedDigits);
+    if (!parsed.has_value()) {
+      LOG_WARNING("DLT645 BCD 数值无法进入 Decimal20: tag={}, 原因={}",
+                  point.tag,
+                  mskdsp::numeric::DecimalErrorMessage(parsed.error()));
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                          "BCD 数值解析失败");
     }
-    LOG_DEBUG("DLT645 解析有符号 BCD: tag={}, digits={}, negative={}, raw={}", point.tag, digits, negative, raw);
+    raw = *parsed;
+    LOG_DEBUG("DLT645 解析有符号 BCD: tag={}, digits={}, negative={}, raw={}",
+              point.tag,
+              digits,
+              negative,
+              raw.ToString());
   } else {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "不支持的数据类型");
   }
 
-  const double scale = point.scale == 0.0 ? 1.0 : point.scale;
-  const double value = raw * scale + point.offset;
-  if (point.deadband > 0) {
+  const auto engineering =
+      mskdsp::numeric::ApplyEngineering(raw, point.scale, point.offset);
+  if (!engineering.has_value()) {
+    LOG_WARNING("DLT645 工程量正向换算失败: tag={}, 原因={}",
+                point.tag,
+                mskdsp::numeric::DecimalErrorMessage(engineering.error()));
+    return grpc::Status(grpc::StatusCode::OUT_OF_RANGE,
+                        "工程量正向换算结果超出范围");
+  }
+  if (!point.deadband.IsZero()) {
     auto lastIt = link->lastReportedByTag.find(point.tag);
     if (lastIt != link->lastReportedByTag.end()) {
-      if (std::abs(value - lastIt->second) < point.deadband) {
-        LOG_DEBUG("DLT645 死区过滤: tag={}, value={}, last={}, deadband={}", point.tag, value, lastIt->second, point.deadband);
+      if (!mskdsp::numeric::ShouldReport(*engineering, lastIt->second,
+                                         point.deadband)) {
+        LOG_DEBUG("DLT645 死区过滤: tag={}, value={}, last={}, deadband={}",
+                  point.tag,
+                  engineering->ToString(),
+                  lastIt->second.ToString(),
+                  point.deadband.ToString());
         return grpc::Status::OK;
       }
     }
   }
-  auto status = dataCenter_.PublishDouble(link->connId, point.tag, value, DataCenterProto::QUALITY_GOOD, tsMs);
+  auto status = dataCenter_.PublishDecimal(
+      link->connId, point.tag, engineering->ToFixedString(),
+      DataCenterProto::QUALITY_GOOD, tsMs);
   if (status.ok()) {
-    link->lastReportedByTag[point.tag] = value;
+    link->lastReportedByTag[point.tag] = *engineering;
   }
   return status;
 }
@@ -3244,42 +3282,67 @@ std::vector<uint8_t> LinkManager::encodeData(const PointTable::Point &point, con
     return out;
   }
 
-  double val = 0.0;
-  if (!pointValueToDouble(value, &val)) {
+  mskdsp::numeric::Decimal20 engineering;
+  if (!pointValueToDecimal(value, &engineering)) {
     if (error != nullptr) {
       *error = "点值类型不匹配";
     }
     return {};
   }
 
-  double raw = 0.0;
-  if (!reverseScale(val, point.scale, point.offset, &raw)) {
+  const auto raw = reverseScale(engineering, point.scale, point.offset);
+  if (!raw.has_value()) {
     if (error != nullptr) {
-      *error = "反向缩放失败";
+      *error = std::format(
+          "反向工程量换算失败: {}",
+          mskdsp::numeric::DecimalErrorMessage(raw.error()));
     }
+    LOG_WARNING("DLT645 反向工程量换算失败: tag={}, 原因={}",
+                point.tag,
+                mskdsp::numeric::DecimalErrorMessage(raw.error()));
     return {};
   }
 
   if (point.type == DLT645Proto::DATA_TYPE_UINT16 && point.dataLen >= 2) {
-    if (raw < 0 || raw > 65535) {
+    const auto maximum =
+        mskdsp::numeric::Decimal20::FromInt64(65535).value();
+    if (*raw < mskdsp::numeric::Decimal20{} || *raw > maximum) {
       if (error != nullptr) {
         *error = "UINT16 超出范围";
       }
       return {};
     }
-    uint16_t v = static_cast<uint16_t>(std::llround(raw));
+    const auto converted = raw->ToInteger<uint16_t>(
+        mskdsp::numeric::RoundingMode::kHalfAwayFromZero);
+    if (!converted.has_value()) {
+      if (error != nullptr) {
+        *error = "UINT16 量化后超出范围";
+      }
+      return {};
+    }
+    const uint16_t v = *converted;
     out.push_back(static_cast<uint8_t>(v & 0xFF));
     out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
     return out;
   }
   if (point.type == DLT645Proto::DATA_TYPE_UINT32 && point.dataLen >= 4) {
-    if (raw < 0 || raw > 4294967295.0) {
+    const auto maximum =
+        mskdsp::numeric::Decimal20::FromInt64(4294967295LL).value();
+    if (*raw < mskdsp::numeric::Decimal20{} || *raw > maximum) {
       if (error != nullptr) {
         *error = "UINT32 超出范围";
       }
       return {};
     }
-    uint32_t v = static_cast<uint32_t>(std::llround(raw));
+    const auto converted = raw->ToInteger<uint32_t>(
+        mskdsp::numeric::RoundingMode::kHalfAwayFromZero);
+    if (!converted.has_value()) {
+      if (error != nullptr) {
+        *error = "UINT32 量化后超出范围";
+      }
+      return {};
+    }
+    const uint32_t v = *converted;
     out.push_back(static_cast<uint8_t>(v & 0xFF));
     out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
     out.push_back(static_cast<uint8_t>((v >> 16) & 0xFF));
@@ -3287,7 +3350,14 @@ std::vector<uint8_t> LinkManager::encodeData(const PointTable::Point &point, con
     return out;
   }
   if (point.type == DLT645Proto::DATA_TYPE_FLOAT && point.dataLen >= 4) {
-    float f = static_cast<float>(raw);
+    const auto converted = raw->ToFloat();
+    if (!converted.has_value()) {
+      if (error != nullptr) {
+        *error = "IEEE 浮点数据超出 binary32 范围";
+      }
+      return {};
+    }
+    const float f = *converted;
     uint32_t u = 0;
     std::memcpy(&u, &f, sizeof(float));
     out.push_back(static_cast<uint8_t>(u & 0xFF));
@@ -3297,9 +3367,19 @@ std::vector<uint8_t> LinkManager::encodeData(const PointTable::Point &point, con
     return out;
   }
   if (point.type == DLT645Proto::DATA_TYPE_BCD) {
-    const auto rounded = static_cast<uint64_t>(std::llround(std::abs(raw)));
-    const bool negative = raw < 0 && rounded != 0;
-    const auto digits = std::to_string(rounded);
+    const auto quantized = raw->Quantize(
+        0, mskdsp::numeric::RoundingMode::kHalfAwayFromZero);
+    if (!quantized.has_value()) {
+      if (error != nullptr) {
+        *error = "BCD 整数精度量化失败";
+      }
+      return {};
+    }
+    std::string digits = quantized->ToString();
+    const bool negative = !digits.empty() && digits.front() == '-';
+    if (negative) {
+      digits.erase(digits.begin());
+    }
     auto bcd = encodeBcd(digits);
     if (bcd.size() > point.dataLen) {
       if (error != nullptr) {
@@ -3322,7 +3402,7 @@ std::vector<uint8_t> LinkManager::encodeData(const PointTable::Point &point, con
     }
     LOG_DEBUG("DLT645 编码有符号 BCD: tag={}, raw={}, digits={}, negative={}, payload={}",
               point.tag,
-              raw,
+              raw->ToString(),
               digits,
               negative,
               formatHex(bcd));
@@ -3609,16 +3689,43 @@ grpc::Status LinkManager::parseResponsePayload(const std::string &payloadBase64,
   return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "帧解析失败且未找到有效帧");
 }
 
-bool LinkManager::pointValueToDouble(const DataCenterProto::PointValue &value, double *out) {
+bool LinkManager::pointValueToDecimal(
+    const DataCenterProto::PointValue &value,
+    mskdsp::numeric::Decimal20 *out) {
   if (out == nullptr) {
     return false;
   }
-  if (value.has_double_value()) {
-    *out = value.double_value();
+  if (value.has_decimal_value()) {
+    const auto decimal =
+        mskdsp::numeric::Decimal20::Parse(value.decimal_value());
+    if (!decimal.has_value()) {
+      LOG_WARNING("DLT645 decimal_value 解析失败: {}",
+                  mskdsp::numeric::DecimalErrorMessage(decimal.error()));
+      return false;
+    }
+    *out = *decimal;
     return true;
   }
   if (value.has_int_value()) {
-    *out = static_cast<double>(value.int_value());
+    const auto decimal =
+        mskdsp::numeric::Decimal20::FromInt64(value.int_value());
+    if (!decimal.has_value()) {
+      LOG_WARNING("DLT645 整数点值无法进入 Decimal20: {}",
+                  mskdsp::numeric::DecimalErrorMessage(decimal.error()));
+      return false;
+    }
+    *out = *decimal;
+    return true;
+  }
+  if (value.has_double_value()) {
+    const auto decimal =
+        mskdsp::numeric::Decimal20::FromDouble(value.double_value());
+    if (!decimal.has_value()) {
+      LOG_WARNING("DLT645 double 点值无法进入 Decimal20: {}",
+                  mskdsp::numeric::DecimalErrorMessage(decimal.error()));
+      return false;
+    }
+    *out = *decimal;
     return true;
   }
   return false;
@@ -3650,13 +3757,11 @@ bool LinkManager::pointValueToString(const DataCenterProto::PointValue &value, s
   return false;
 }
 
-bool LinkManager::reverseScale(double value, double scale, double offset, double *out) {
-  if (out == nullptr) {
-    return false;
-  }
-  const double s = scale == 0.0 ? 1.0 : scale;
-  *out = (value - offset) / s;
-  return true;
+std::expected<mskdsp::numeric::Decimal20, mskdsp::numeric::DecimalError>
+LinkManager::reverseScale(const mskdsp::numeric::Decimal20 &value,
+                          const mskdsp::numeric::Decimal20 &scale,
+                          const mskdsp::numeric::Decimal20 &offset) {
+  return mskdsp::numeric::ReverseEngineering(value, scale, offset);
 }
 
 std::string LinkManager::nextToken() {

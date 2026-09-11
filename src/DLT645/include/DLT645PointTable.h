@@ -12,6 +12,7 @@
 #include <grpcpp/support/status.h>
 
 #include "DLT645.pb.h"
+#include "mskdsp/Decimal20.hpp"
 
 namespace DLT645 {
 
@@ -24,9 +25,10 @@ public:
     uint32_t dataLen = 0;
     DLT645Proto::DataType type = DLT645Proto::DATA_TYPE_UNSPECIFIED;
     DLT645Proto::AccessMode access = DLT645Proto::ACCESS_UNSPECIFIED;
-    double scale = 1.0;
-    double offset = 0.0;
-    double deadband = 0.0;
+    mskdsp::numeric::Decimal20 scale =
+        mskdsp::numeric::Decimal20::FromInt64(1).value();
+    mskdsp::numeric::Decimal20 offset;
+    mskdsp::numeric::Decimal20 deadband;
     std::optional<uint32_t> byteIndex;
     std::optional<uint32_t> bitIndex;
   };

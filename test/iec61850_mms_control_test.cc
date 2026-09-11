@@ -15,6 +15,7 @@
 #include "IEC61850MmsBer.h"
 #include "IEC61850MmsControl.h"
 #include "IEC61850ProtocolStack.h"
+#include "mskdsp/Decimal20.hpp"
 
 namespace {
 
@@ -759,9 +760,10 @@ TEST(IEC61850MmsControlTest, EncodesDataCenterScalarControlValue) {
       .kind = IEC61850::MmsTypeSpecificationKind::INTEGER, .width = 32};
   IEC61850::MmsPointControlCommand command;
   command.valueType = IEC61850Proto::POINT_VALUE_TYPE_INT64;
-  command.intValue = 17;
-  command.scale = 2.0;
-  command.offset = 3.0;
+  command.engineeringValue =
+      mskdsp::numeric::Decimal20::Parse("17").value();
+  command.scale = mskdsp::numeric::Decimal20::Parse("2").value();
+  command.offset = mskdsp::numeric::Decimal20::Parse("3").value();
 
   std::vector<std::uint8_t> encoded;
   ASSERT_TRUE(IEC61850::EncodeMmsPointControlValue(
@@ -777,9 +779,10 @@ TEST(IEC61850MmsControlTest, EncodesDataCenterScalarControlValue) {
 
   capability.ctlValType = IEC61850::MmsTypeSpecification{
       .kind = IEC61850::MmsTypeSpecificationKind::UNSIGNED, .width = 32};
-  command.intValue = 5;
-  command.scale = 0.0;
-  command.offset = 0.0;
+  command.engineeringValue =
+      mskdsp::numeric::Decimal20::Parse("5").value();
+  command.scale = mskdsp::numeric::Decimal20{};
+  command.offset = mskdsp::numeric::Decimal20{};
   ASSERT_TRUE(IEC61850::EncodeMmsPointControlValue(
                   command, capability, &encoded)
                   .ok());
@@ -792,14 +795,67 @@ TEST(IEC61850MmsControlTest, EncodesDataCenterScalarControlValue) {
   capability.ctlValType = IEC61850::MmsTypeSpecification{
       .kind = IEC61850::MmsTypeSpecificationKind::FLOATING_POINT, .width = 32};
   command.valueType = IEC61850Proto::POINT_VALUE_TYPE_DOUBLE;
-  command.doubleValue = 6.0;
-  command.scale = 2.0;
-  command.offset = 1.0;
+  command.engineeringValue =
+      mskdsp::numeric::Decimal20::Parse("6").value();
+  command.scale = mskdsp::numeric::Decimal20::Parse("2").value();
+  command.offset = mskdsp::numeric::Decimal20::Parse("1").value();
   ASSERT_TRUE(IEC61850::EncodeMmsPointControlValue(
                   command, capability, &encoded)
                   .ok());
   EXPECT_EQ(encoded.front(), 0x87);
   EXPECT_EQ(encoded[2], 0x08);
+}
+
+// 验证Decimal20控制反算在MMS整数边界按半数远离零量化，并检查在线整数位宽。
+TEST(IEC61850MmsControlTest, QuantizesDecimal20AtMmsIntegerBoundary) {
+  IEC61850::MmsControlCapability capability;
+  capability.ctlValType = IEC61850::MmsTypeSpecification{
+      .kind = IEC61850::MmsTypeSpecificationKind::INTEGER, .width = 8};
+  IEC61850::MmsPointControlCommand command;
+  command.valueType = IEC61850Proto::POINT_VALUE_TYPE_INT64;
+  command.engineeringValue =
+      mskdsp::numeric::Decimal20::Parse("-3").value();
+  command.scale = mskdsp::numeric::Decimal20::Parse("2").value();
+
+  std::vector<std::uint8_t> encoded;
+  ASSERT_TRUE(IEC61850::EncodeMmsPointControlValue(
+                  command, capability, &encoded)
+                  .ok());
+  std::size_t offset = 0;
+  IEC61850::BerTlvView value;
+  ASSERT_TRUE(IEC61850::ReadBerTlv(encoded, &offset, &value).ok());
+  std::int64_t decoded = 0;
+  ASSERT_TRUE(IEC61850::ReadBerSigned(value.value, &decoded).ok());
+  EXPECT_EQ(decoded, -2);
+
+  command.engineeringValue =
+      mskdsp::numeric::Decimal20::Parse("255").value();
+  EXPECT_EQ(IEC61850::EncodeMmsPointControlValue(
+                command, capability, &encoded)
+                .error_code(),
+            grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+// 验证Decimal20浮点控制值只在MMS边界按在线FLOAT32宽度量化，线格式保持不变。
+TEST(IEC61850MmsControlTest, QuantizesDecimal20AtMmsFloat32Boundary) {
+  IEC61850::MmsControlCapability capability;
+  capability.ctlValType = IEC61850::MmsTypeSpecification{
+      .kind = IEC61850::MmsTypeSpecificationKind::FLOATING_POINT, .width = 32};
+  IEC61850::MmsPointControlCommand command;
+  command.valueType = IEC61850Proto::POINT_VALUE_TYPE_DOUBLE;
+  command.engineeringValue = mskdsp::numeric::Decimal20::Parse(
+                                 "0.12345678901234567890")
+                                 .value();
+  command.scale = mskdsp::numeric::Decimal20::Parse("1").value();
+
+  std::vector<std::uint8_t> encoded;
+  ASSERT_TRUE(IEC61850::EncodeMmsPointControlValue(
+                  command, capability, &encoded)
+                  .ok());
+
+  EXPECT_EQ(encoded,
+            (std::vector<std::uint8_t>{0x87, 0x05, 0x08, 0x3d, 0xfc, 0xd6,
+                                       0xea}));
 }
 
 // 验证DataCenter整数控制值反向换算后超出MMS有符号或无符号范围时被拒绝。
@@ -809,8 +865,10 @@ TEST(IEC61850MmsControlTest, RejectsDataCenterIntegerControlOverflow) {
       .kind = IEC61850::MmsTypeSpecificationKind::INTEGER, .width = 64};
   IEC61850::MmsPointControlCommand command;
   command.valueType = IEC61850Proto::POINT_VALUE_TYPE_INT64;
-  command.intValue = std::numeric_limits<std::int64_t>::max();
-  command.scale = 0.5;
+  command.engineeringValue = mskdsp::numeric::Decimal20::Parse(
+                                 "9223372036854775807")
+                                 .value();
+  command.scale = mskdsp::numeric::Decimal20::Parse("0.5").value();
   std::vector<std::uint8_t> encoded;
   EXPECT_EQ(IEC61850::EncodeMmsPointControlValue(
                 command, capability, &encoded)
@@ -818,9 +876,10 @@ TEST(IEC61850MmsControlTest, RejectsDataCenterIntegerControlOverflow) {
             grpc::StatusCode::INVALID_ARGUMENT);
 
   capability.ctlValType->kind = IEC61850::MmsTypeSpecificationKind::UNSIGNED;
-  command.offset = 0.0;
-  command.scale = 0.0;
-  command.intValue = -1;
+  command.offset = mskdsp::numeric::Decimal20{};
+  command.scale = mskdsp::numeric::Decimal20{};
+  command.engineeringValue =
+      mskdsp::numeric::Decimal20::Parse("-1").value();
   EXPECT_EQ(IEC61850::EncodeMmsPointControlValue(
                 command, capability, &encoded)
                 .error_code(),

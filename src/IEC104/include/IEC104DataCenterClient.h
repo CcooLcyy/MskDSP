@@ -32,6 +32,8 @@ public:
 
   grpc::Status PublishBool(uint32_t connId, const std::string& tag, bool value, DataCenterProto::Quality quality, int64_t tsMs);
   grpc::Status PublishDouble(uint32_t connId, const std::string& tag, double value, DataCenterProto::Quality quality, int64_t tsMs);
+  grpc::Status PublishDecimal(uint32_t connId, const std::string& tag, const std::string& value,
+                              DataCenterProto::Quality quality, int64_t tsMs);
   grpc::Status PublishInt64(uint32_t connId, const std::string& tag, int64_t value, DataCenterProto::Quality quality, int64_t tsMs);
   grpc::Status ExecuteCommand(const DataCenterProto::ExecuteCommandRequest& request, DataCenterProto::ExecuteCommandResponse* response);
 

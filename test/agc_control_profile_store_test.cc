@@ -81,12 +81,42 @@ TEST(AgcControlProfileStoreTest, SaveAndLoadRoundtrip) {
   EXPECT_EQ(store.databasePath(), configDbPath);
 }
 
+// 验证：控制参数的 20 位十进制文本经过 SQLite 往返后保持原文不变。
+TEST(AgcControlProfileStoreTest, DecimalFieldsRoundtripWithoutPrecisionLoss) {
+  ScopedTempDir dir;
+  AGCControlProfileStore store(dir.path() / "config.db");
+  auto config = MakeProfilesConfig();
+  auto *member = config.mutable_profiles(0)->mutable_members(0);
+  member->set_up_p_gain_decimal("0.12345678901234567890");
+  member->set_integral_limit_kw_decimal("20.00000000000000000001");
+
+  ASSERT_TRUE(store.Save(config).ok());
+  AGCProto::ControlProfilesConfig loaded;
+  ASSERT_TRUE(store.Load(&loaded).ok());
+  EXPECT_EQ(loaded.profiles(0).members(0).up_p_gain_decimal(),
+            "0.12345678901234567890");
+  EXPECT_EQ(loaded.profiles(0).members(0).integral_limit_kw_decimal(),
+            "20.00000000000000000001");
+}
+
 // 验证：Save 拒绝成员控制参数中的负比例或积分系数。
 TEST(AgcControlProfileStoreTest, SaveRejectsNegativeGain) {
   ScopedTempDir dir;
   AGCControlProfileStore store(dir.path() / "config.db");
   auto config = MakeProfilesConfig();
   config.mutable_profiles(0)->mutable_members(0)->set_up_p_gain(-0.1);
+
+  const auto status = store.Save(config);
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+// 验证：非法 decimal 参数不会回退到合法的旧 double 参数。
+TEST(AgcControlProfileStoreTest, SaveRejectsInvalidDecimalGain) {
+  ScopedTempDir dir;
+  AGCControlProfileStore store(dir.path() / "config.db");
+  auto config = MakeProfilesConfig();
+  config.mutable_profiles(0)->mutable_members(0)->set_up_p_gain_decimal("非法");
 
   const auto status = store.Save(config);
   EXPECT_FALSE(status.ok());

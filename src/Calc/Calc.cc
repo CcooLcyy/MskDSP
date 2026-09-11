@@ -59,6 +59,7 @@ void Calc::start(std::stop_token stopToken) {
   while (!stopToken.stop_requested()) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
+  groupManager_.Shutdown();
   LOG_INFO("Calc 模块停止");
 }
 

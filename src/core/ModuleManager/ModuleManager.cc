@@ -181,6 +181,7 @@ std::vector<ModuleSqliteAutoStartRule> buildSqliteAutoStartRules() {
       {"IEC61850", {"config"}},
       {"IEC104", {"links", "point_tables"}},
       {"ModbusRTU", {"mqtt", "links", "point_tables"}},
+      {"ModbusTCP", {"links", "point_tables"}},
       {"DLT645", {"mqtt", "links", "point_tables"}},
       {"AGC", {"groups"}},
       {"AVC", {"groups"}},

@@ -79,7 +79,17 @@ DataCenter调用IEC61850模块的 `CommandExecutor.ExecuteCommand` 时，目标�
 `conn_name`（或当前有效的 `conn_id`）和点 `tag`。点映射必须是 `POINT_SOURCE_MMS`；
 FC=CO的点按控制对象处理，控制对象由 `data_ref` 去掉末尾 `.ctlVal` 后转换为
 MMS Domain/Item引用。当前命令值支持BOOL、INTEGER和FLOATING-POINT标量，工程量点按
-`scale/offset`反向换算，BOOL忽略换算参数。
+`scale/offset`反向换算，BOOL忽略换算参数。点映射优先读取
+`scale_decimal/offset_decimal/deadband_decimal`，非空文本必须严格解析为固定20位小数；
+文本为空时才兼容旧 `double` 字段。MMS普通数值的正反换算和死区比较均使用
+`Decimal20`，`deadband<=0`表示不过滤，变化量精确等于正死区时必须上报。
+
+`POINT_VALUE_TYPE_DOUBLE`报告以DataCenter `decimal_value`发布固定20位文本；
+`POINT_VALUE_TYPE_INT64`继续按半数远离零量化并发布 `int_value`，不改变既有业务类型。
+同步控制入口优先无损消费DataCenter `decimal_value`，响应同时填写精确
+`requested_value_decimal/accepted_value_decimal`和旧 `double` 字段。反算结果只在最终
+MMS边界按在线 `INTEGER/UNSIGNED` 位宽或 `FLOAT32/FLOAT64` 格式量化，BER标签、字段宽度和
+IEEE-754线编码保持不变。本规则不迁移GOOSE/SV实时值和SV的RMS、相量、频率算法。
 
 命令执行策略由在线 `ctlModel` 决定：直控模型直接发送 `$Oper`；普通SBO先读取
 `$SBO`再发送`$Oper`；增强SBOw先写入`$SBOw`再发送`$Oper`。每一步都复用当前活动
@@ -136,6 +146,7 @@ MMS通道的串行控制队列，并以IED的协议确认作为 `COMMAND_ACCEPTE
 - MMS发布参数为0时使用默认值：队列4096个待处理点值、批量256点、窗口20毫秒；显式配置上限分别为65536个待处理点值、4096点和1000毫秒。
 - MMS固定限制单个STRING/BYTES为256 KiB、单份报告逻辑保留内存为4 MiB、每IED队列逻辑保留内存为16 MiB、单个DataCenter批次序列化大小为3 MiB；报告按固定开销加实际内容字节计算，队列和发布批次同时受点数与字节数约束。
 - MMS按IED使用独立发布工作线程；死区基准只在DataCenter成功接受后推进，品质变化不受数值死区过滤。
+- MMS普通点的倍率、偏移和死区使用Decimal20；十进制文本字段优先，非法文本不回退旧double字段。
 - DataCenter重新分配 `conn_id` 时使旧在途批次和死区基准失效，后续报告中的相同值可向新连接发布首值。
 - GOOSE二层解码必须要求APPID载荷声明的PDU长度与实际接收载荷完全一致，并要求必需的`gocbRef`、`timeAllowedToLive`、`datSet`、`goID`、`UtcTime[4]`、`stNum`、`sqNum`、`test`、`confRev`、`ndsCom`、`numDatSetEntries`和`allData`各出现一次；缺少或重复字段、UtcTime长度错误、截断TLV和超出固定缓冲的字段均拒绝，完整帧再交给GOOSE实时状态机执行身份、TTL、序号和A/B去重校验。
 - GOOSE `allData` 的浮点成员必须按 `0x87` + `format-width` + IEEE-754大端值编码：FLOAT32使用`0x08`并跟随4字节，FLOAT64使用`0x0B`并跟随8字节；宽度由启动计划固化，缺少format-width、宽度不匹配、非有限值或非法长度时拒绝整帧，禁止使用裸4/8字节浮点编码。

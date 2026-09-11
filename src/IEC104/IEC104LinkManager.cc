@@ -13,6 +13,7 @@
 
 #include "IEC104LinkStore.h"
 #include "IEC104PointTableStore.h"
+#include "IEC104SoeStore.h"
 #include "Logger.h"
 
 namespace IEC104 {
@@ -73,7 +74,8 @@ LinkManager::LinkManager(std::string moduleName, std::filesystem::path configDbP
   }
 
   linkStore_ = std::make_unique<IEC104LinkStore>(configDbPath);
-  pointTableStore_ = std::make_unique<IEC104PointTableStore>(std::move(configDbPath));
+  pointTableStore_ = std::make_unique<IEC104PointTableStore>(configDbPath);
+  soeStore_ = std::make_unique<IEC104SoeStore>(std::move(configDbPath));
   loadPersistedConfig("构造阶段");
 }
 
@@ -141,6 +143,14 @@ grpc::Status LinkManager::validateLinkConfig(const IEC104Proto::LinkConfig &conf
   if (config.role() == IEC104Proto::ROLE_SERVER) {
     if (config.local().port() == 0) {
       return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "role=ROLE_SERVER 时 local.port 不能为空");
+    }
+    if (!config.remote().ip().empty()) {
+      boost::system::error_code ec;
+      (void)boost::asio::ip::make_address(config.remote().ip(), ec);
+      if (ec) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                            std::format("role=ROLE_SERVER 时 remote.ip 必须是合法 IP: {}", config.remote().ip()));
+      }
     }
   }
   if (config.role() == IEC104Proto::ROLE_CLIENT) {
@@ -658,7 +668,7 @@ IEC104Proto::PointTablesConfig LinkManager::dumpPointTablesConfigLocked() const 
 }
 
 bool LinkManager::persistenceEnabled() const {
-  return linkStore_ != nullptr && pointTableStore_ != nullptr;
+  return linkStore_ != nullptr && pointTableStore_ != nullptr && soeStore_ != nullptr;
 }
 
 grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &request, IEC104Proto::LinkInfo *out) {
@@ -967,6 +977,15 @@ grpc::Status LinkManager::RenameLink(const std::string &oldConnName,
       releaseRenameReservation();
       return status;
     }
+    status = soeStore_->RenameConnection(oldConnName, newConnName);
+    if (!status.ok()) {
+      LOG_ERROR("IEC104 改名 SOE 历史失败: old_conn_name={}, new_conn_name={}, 原因={}",
+                oldConnName,
+                newConnName,
+                status.error_message());
+      releaseRenameReservation();
+      return status;
+    }
   }
 
   {
@@ -1054,6 +1073,45 @@ void LinkManager::configureTransportCallbacksLocked(const std::string &connName,
   }
   if (isSlaveStation(link->config)) {
     link->transport->SetInterrogationSnapshotProvider([this, connName]() { return buildInterrogationSnapshot(connName); });
+    if (soeStore_) {
+      link->transport->SetSoeReplayProvider([this, connName]() {
+        std::vector<SoeRecord> records;
+        auto status = soeStore_->LoadUnacknowledged(connName, &records);
+        if (!status.ok()) {
+          LOG_ERROR("IEC104 加载未确认 SOE 失败: conn_name={}, 原因={}", connName, status.error_message());
+          return std::vector<SoeEvent>{};
+        }
+
+        std::vector<SoeEvent> events;
+        events.reserve(records.size());
+        for (const auto &record : records) {
+          SoeEvent event;
+          event.eventSequence = record.eventSequence;
+          event.value.ioa = record.ioa;
+          event.value.type = IEC104Proto::POINT_TYPE_SINGLE;
+          event.value.boolValue = record.state;
+          event.value.quality = record.quality;
+          event.value.tsMs = record.tsMs;
+          events.push_back(event);
+        }
+        return events;
+      });
+      link->transport->SetSoeAcknowledgedCallback([this, connName](const std::vector<uint64_t> &sequences) {
+        size_t updatedCount = 0;
+        auto status = soeStore_->MarkAcknowledged(connName, sequences, &updatedCount);
+        if (!status.ok()) {
+          LOG_ERROR("IEC104 SOE 确认状态落盘失败: conn_name={}, 请求条数={}, 原因={}",
+                    connName,
+                    sequences.size(),
+                    status.error_message());
+          return;
+        }
+        LOG_DEBUG("IEC104 SOE 确认完成: conn_name={}, 请求条数={}, 更新条数={}",
+                  connName,
+                  sequences.size(),
+                  updatedCount);
+      });
+    }
   }
   link->transport->SetTimeSyncCallback([this, connName](int64_t tsMs) {
     return handleTimeSyncCommand(connName, tsMs).ok();
@@ -1188,6 +1246,13 @@ grpc::Status LinkManager::DeleteLink(const std::string &connName) {
   if (!status.ok()) {
     LOG_ERROR("IEC104 删除点表配置落盘失败: conn_name={}, 原因={}", connName, status.error_message());
     return status;
+  }
+  if (soeStore_) {
+    status = soeStore_->DeleteConnection(connName);
+    if (!status.ok()) {
+      LOG_ERROR("IEC104 删除 SOE 历史失败: conn_name={}, 原因={}", connName, status.error_message());
+      return status;
+    }
   }
   return grpc::Status::OK;
 }

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <chrono>
+#include <expected>
 #include <format>
 #include <unordered_set>
 #include <utility>
@@ -15,6 +16,7 @@
 #include "AGCLibInfo.h"
 #include "Logger.h"
 #include "ThreadUtil.hpp"
+#include "mskdsp/Decimal20.hpp"
 
 namespace AGC {
 namespace {
@@ -44,23 +46,42 @@ const char *groupStateToString(AGCProto::GroupState state) {
   }
 }
 
-constexpr double kValueChangeEps = 1e-6;
 constexpr auto kMemberSetpointRefreshInterval = std::chrono::seconds(30);
 
-bool sameValue(double lhs, double rhs) {
-  return std::fabs(lhs - rhs) <= kValueChangeEps;
+AGCProto::ControlMode effectiveControlMode(const AGCProto::GroupConfig &config) {
+  return config.control_mode() == AGCProto::CONTROL_MODE_UNSPECIFIED
+             ? AGCProto::CONTROL_MODE_PI_EVENT
+             : config.control_mode();
 }
 
-double effectiveScale(const AGCProto::SignalSpec &signal) {
-  return signal.scale() == 0.0 ? 1.0 : signal.scale();
+bool isDirectCyclicMode(const AGCProto::GroupConfig &config) {
+  return effectiveControlMode(config) == AGCProto::CONTROL_MODE_DIRECT_CYCLIC;
 }
 
-double commandEchoEngineeringValue(const AGCProto::ValueSpec &spec, double value) {
-  const auto scale = effectiveScale(spec.signal());
-  if (spec.mode() == AGCProto::VALUE_MODE_DELTA) {
-    return value * scale;
+bool sameValue(const Decimal &lhs, const Decimal &rhs) {
+  return lhs == rhs;
+}
+
+std::expected<Decimal, numeric::DecimalError> engineeringValue(
+    const AGCProto::SignalSpec &signal, const Decimal &value) {
+  auto scale = numeric::Scale(signal);
+  auto offset = numeric::Offset(signal);
+  if (!scale.has_value() || !offset.has_value()) {
+    return std::unexpected(!scale.has_value() ? scale.error() : offset.error());
   }
-  return value * scale + spec.signal().offset();
+  return mskdsp::numeric::ApplyEngineering(value, *scale, *offset);
+}
+
+std::expected<Decimal, numeric::DecimalError> commandEchoEngineeringValue(
+    const AGCProto::ValueSpec &spec, const Decimal &value) {
+  auto scale = numeric::Scale(spec.signal());
+  if (!scale.has_value()) {
+    return std::unexpected(scale.error());
+  }
+  if (spec.mode() == AGCProto::VALUE_MODE_DELTA) {
+    return value.Multiply(*scale);
+  }
+  return engineeringValue(spec.signal(), value);
 }
 
 std::string_view defaultPointTag(AGCProto::DefaultPointKind kind) {
@@ -177,8 +198,9 @@ grpc::Status GroupManager::fillTuningStatusLocked(const GroupRuntime &g, AGCProt
 }
 
 grpc::Status GroupManager::validateTuningConfig(const AGCProto::TuningConfig &config) const {
-  if (!std::isfinite(config.target_lower_kw()) || !std::isfinite(config.target_upper_kw()) ||
-      config.target_lower_kw() >= config.target_upper_kw()) {
+  auto lower = numeric::TuningLower(config);
+  auto upper = numeric::TuningUpper(config);
+  if (!lower.has_value() || !upper.has_value() || *lower >= *upper) {
     return makeInvalid("调试目标范围必须是有限数值且下限小于上限");
   }
   if (config.total_time_minutes() == 0 || config.attempt_max_time_minutes() == 0 ||
@@ -188,7 +210,8 @@ grpc::Status GroupManager::validateTuningConfig(const AGCProto::TuningConfig &co
   if (config.min_up_tests() < 3 || config.min_down_tests() < 3) {
     return makeInvalid("调试至少需要 3 次有效上调和 3 次有效下调");
   }
-  if (!std::isfinite(config.total_tolerance_kw()) || config.total_tolerance_kw() <= 0.0) {
+  auto tolerance = numeric::TuningTolerance(config);
+  if (!tolerance.has_value() || *tolerance <= numeric::Zero()) {
     return makeInvalid("调试总量精度必须是大于 0 的有限数值");
   }
   const uint64_t requiredMinutes = static_cast<uint64_t>(config.min_up_tests()) + config.min_down_tests();
@@ -326,7 +349,7 @@ grpc::Status GroupManager::restoreGroupFromConfig(const AGCProto::GroupConfig &c
   runtime.remoteEnabled = true;
   rebuildTagCache(&runtime);
   runtime.controlProfile = makeDefaultControlProfileLocked(runtime);
-  runtime.integralMemoryKw.assign(static_cast<size_t>(config.members_size()), 0.0);
+  runtime.integralMemoryKw.assign(static_cast<size_t>(config.members_size()), Decimal{});
   runtime.tuningStatus.set_group_name(config.group_name());
   runtime.tuningStatus.set_state(AGCProto::TUNING_STATE_IDLE);
 
@@ -458,7 +481,7 @@ grpc::Status GroupManager::UpsertGroup(const AGCProto::UpsertGroupRequest &reque
       it->second.config = request.config();
       rebuildTagCache(&it->second);
       it->second.controlProfile = makeDefaultControlProfileLocked(it->second);
-      it->second.integralMemoryKw.assign(static_cast<size_t>(request.config().members_size()), 0.0);
+      it->second.integralMemoryKw.assign(static_cast<size_t>(request.config().members_size()), Decimal{});
       it->second.lastError.clear();
       fillGroupInfoLocked(it->second, out);
     } else {
@@ -493,7 +516,7 @@ grpc::Status GroupManager::UpsertGroup(const AGCProto::UpsertGroupRequest &reque
       g.remoteEnabled = true;
       rebuildTagCache(&g);
       g.controlProfile = makeDefaultControlProfileLocked(g);
-      g.integralMemoryKw.assign(static_cast<size_t>(request.config().members_size()), 0.0);
+      g.integralMemoryKw.assign(static_cast<size_t>(request.config().members_size()), Decimal{});
       g.tuningStatus.set_group_name(groupName);
       g.tuningStatus.set_state(AGCProto::TUNING_STATE_IDLE);
       fillGroupInfoLocked(g, out);
@@ -593,7 +616,7 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
   const auto connId = g->connId;
   auto tags = g->subscribeTags;
   if (connId == 0 || tags.empty()) {
-    LOG_WARNING("AGC 控制组启动事件触发控制功能失败: group_name={}, conn_id={}, 原因=订阅标签为空或连接无效", groupName, connId);
+    LOG_WARNING("AGC 控制组启动控制功能失败: group_name={}, conn_id={}, 原因=订阅标签为空或连接无效", groupName, connId);
     return;
   }
 
@@ -605,15 +628,58 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
       [this, groupName, trigger](std::stop_token st) {
         std::stop_callback cb(st, [trigger]() { trigger->signal.release(); });
 
-        while (true) {
-          trigger->signal.acquire();
-          if (st.stop_requested()) {
-            break;
+        bool directCyclic = false;
+        double calculationPeriodSeconds = 1.0;
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          auto it = groupsByName_.find(groupName);
+          if (it != groupsByName_.end()) {
+            directCyclic = isDirectCyclicMode(it->second.config);
+            const auto configuredPeriod = it->second.config.calculation_execution_period_seconds();
+            if (std::isfinite(configuredPeriod) && configuredPeriod > 0.0) {
+              calculationPeriodSeconds = std::clamp(configuredPeriod, 1.0, 15.0);
+            }
           }
-          if (!trigger->pending.exchange(false)) {
+        }
+
+        if (!directCyclic) {
+          while (true) {
+            trigger->signal.acquire();
+            if (st.stop_requested()) {
+              break;
+            }
+            if (!trigger->pending.exchange(false)) {
+              continue;
+            }
+            controlTick(groupName);
+          }
+          return;
+        }
+
+        // 首个有效输入到达后立即执行第一轮，之后输入仅覆盖缓存，计算保持固定周期。
+        trigger->signal.acquire();
+        if (st.stop_requested()) {
+          return;
+        }
+        trigger->pending.store(false);
+        controlTick(groupName);
+
+        const auto period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(calculationPeriodSeconds));
+        auto nextTick = std::chrono::steady_clock::now() + period;
+        while (!st.stop_requested()) {
+          // 即使输入通知持续到达，也不能推迟已经到期的周期计算。
+          if (std::chrono::steady_clock::now() >= nextTick) {
+            controlTick(groupName);
+            nextTick = std::chrono::steady_clock::now() + period;
+            continue;
+          }
+          if (trigger->signal.try_acquire_until(nextTick)) {
+            trigger->pending.store(false);
             continue;
           }
           controlTick(groupName);
+          nextTick = std::chrono::steady_clock::now() + period;
         }
       });
 
@@ -684,7 +750,11 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
           }
         }
       });
-  LOG_INFO("AGC 控制组已启用事件触发控制功能: group_name={}, conn_id={}, 订阅标签数={}", groupName, connId, tags.size());
+  LOG_INFO("AGC 控制组已启用控制功能: group_name={}, conn_id={}, 订阅标签数={}, 控制方式={}",
+           groupName,
+           connId,
+           tags.size(),
+           isDirectCyclicMode(g->config) ? "周期直分配" : "PI 事件触发");
 }
 
 grpc::Status GroupManager::StartGroup(const std::string &groupName) {
@@ -694,12 +764,14 @@ grpc::Status GroupManager::StartGroup(const std::string &groupName) {
   }
 
   bool alreadyRunning = false;
+  AGCProto::ControlMode controlMode = AGCProto::CONTROL_MODE_PI_EVENT;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = groupsByName_.find(groupName);
     if (it == groupsByName_.end()) {
       return makeNotFound(groupName);
     }
+    controlMode = effectiveControlMode(it->second.config);
     if (it->second.state == AGCProto::GROUP_STATE_RUNNING) {
       alreadyRunning = true;
     } else {
@@ -720,7 +792,9 @@ grpc::Status GroupManager::StartGroup(const std::string &groupName) {
   }
   publishControlStatePoints(groupName, "控制组启动");
   primeControlInputs(groupName);
-  LOG_INFO("AGC 控制组已启动事件触发控制功能: group_name={}", groupName);
+  LOG_INFO("AGC 控制组已启动控制功能: group_name={}, 控制方式={}",
+           groupName,
+           controlMode == AGCProto::CONTROL_MODE_DIRECT_CYCLIC ? "周期直分配" : "PI 事件触发");
   return grpc::Status::OK;
 }
 
@@ -768,7 +842,13 @@ grpc::Status GroupManager::StopGroup(const std::string &groupName) {
     std::fill(it->second.lastMemberSetpointPublishedAt.begin(),
               it->second.lastMemberSetpointPublishedAt.end(),
               std::chrono::steady_clock::time_point{});
-    std::fill(it->second.integralMemoryKw.begin(), it->second.integralMemoryKw.end(), 0.0);
+    std::fill(it->second.integralMemoryKw.begin(), it->second.integralMemoryKw.end(), Decimal{});
+    it->second.commandRevision = 0;
+    it->second.directResolvedCommandRevision = 0;
+    it->second.hasDirectResolvedDesiredTotalKw = false;
+    it->second.directResolvedDesiredTotalKw = Decimal{};
+    it->second.hasLastCommandPublishedAt = false;
+    it->second.lastCommandPublishedAt = std::chrono::steady_clock::time_point{};
     if (it->second.tuningStatus.state() == AGCProto::TUNING_STATE_RUNNING) {
       it->second.tuningStatus.set_state(AGCProto::TUNING_STATE_STOPPED);
       it->second.tuningStatus.set_last_error("控制组停止导致自动调试中止");
@@ -956,8 +1036,8 @@ grpc::Status GroupManager::ExecuteCommand(
     return grpc::Status::OK;
   }
 
-  double raw = 0.0;
-  if (!pointValueToDouble(request.value(), &raw)) {
+  Decimal raw;
+  if (!pointValueToDecimal(request.value(), &raw)) {
     response->set_status(DataCenterProto::COMMAND_REJECTED);
     response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSUPPORTED_POINT);
     response->set_reason("命令点值类型不支持");
@@ -979,6 +1059,7 @@ grpc::Status GroupManager::ExecuteCommand(
 
   AGCProto::GroupConfig config;
   uint32_t connId = 0;
+  bool directCyclic = false;
   ControlInput input;
   uint64_t controlRevision = 0;
   {
@@ -1025,6 +1106,7 @@ grpc::Status GroupManager::ExecuteCommand(
 
     config = it->second.config;
     connId = it->second.connId;
+    directCyclic = isDirectCyclicMode(config);
     input.hasCmdRaw = true;
     input.cmdRaw = raw;
     input.baseRawByTag = it->second.baseRawByTag;
@@ -1036,11 +1118,14 @@ grpc::Status GroupManager::ExecuteCommand(
     input.lastDesiredTotalKw = it->second.lastDesiredTotalKw;
     input.controlProfile = it->second.controlProfile;
     input.integralMemoryKw = it->second.integralMemoryKw;
+    input.enablePi = !directCyclic;
   }
 
   const auto defaultOutput = ComputeDefaultPointOutput(config, input);
-  response->set_lower_limit(defaultOutput.dynamicLowerKw);
-  response->set_upper_limit(defaultOutput.dynamicUpperKw);
+  response->set_lower_limit_decimal(defaultOutput.dynamicLowerKw.ToFixedString());
+  response->set_upper_limit_decimal(defaultOutput.dynamicUpperKw.ToFixedString());
+  response->set_lower_limit(numeric::ToLegacyDouble(defaultOutput.dynamicLowerKw));
+  response->set_upper_limit(numeric::ToLegacyDouble(defaultOutput.dynamicUpperKw));
 
   auto outputOpt = ComputeControlOutput(config, input, weightedStrategy_);
   if (!outputOpt) {
@@ -1050,13 +1135,14 @@ grpc::Status GroupManager::ExecuteCommand(
     return grpc::Status::OK;
   }
   const auto &output = *outputOpt;
-  response->set_requested_value(output.desiredTotalKw);
-  response->set_accepted_value(output.actualTargetKw);
+  response->set_requested_value_decimal(output.desiredTotalKw.ToFixedString());
+  response->set_accepted_value_decimal(output.actualTargetKw.ToFixedString());
+  response->set_requested_value(numeric::ToLegacyDouble(output.desiredTotalKw));
+  response->set_accepted_value(numeric::ToLegacyDouble(output.actualTargetKw));
 
-  constexpr double kEps = 1e-6;
-  if (std::fabs(output.unallocatedKw) > kEps) {
+  if (!output.unallocatedKw.IsZero()) {
     response->set_status(DataCenterProto::COMMAND_REJECTED);
-    if (output.unallocatedKw > 0.0) {
+    if (output.unallocatedKw > numeric::Zero()) {
       response->set_reject_code(DataCenterProto::COMMAND_REJECT_OVER_UPPER_LIMIT);
       response->set_reason("总有功目标超过当前可调上限");
     } else {
@@ -1065,11 +1151,11 @@ grpc::Status GroupManager::ExecuteCommand(
     }
     LOG_WARNING("AGC 拒绝同步总有功命令: group_name={}, requested_kw={}, lower_kw={}, upper_kw={}, actual_target_kw={}, unallocated_kw={}",
                 groupName,
-                output.desiredTotalKw,
-                defaultOutput.dynamicLowerKw,
-                defaultOutput.dynamicUpperKw,
-                output.actualTargetKw,
-                output.unallocatedKw);
+                output.desiredTotalKw.ToFixedString(),
+                defaultOutput.dynamicLowerKw.ToFixedString(),
+                defaultOutput.dynamicUpperKw.ToFixedString(),
+                output.actualTargetKw.ToFixedString(),
+                output.unallocatedKw.ToFixedString());
     return grpc::Status::OK;
   }
 
@@ -1081,6 +1167,38 @@ grpc::Status GroupManager::ExecuteCommand(
   commandUpdate.mutable_value()->CopyFrom(request.value());
   commandUpdate.set_ts_ms(request.ts_ms());
   commandUpdate.set_quality(request.quality());
+
+  if (directCyclic) {
+    // 周期直分配模式先完成同 PI 路径一致的范围/缺测校验，再仅缓存最新命令。
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = groupsByName_.find(groupName);
+      if (it == groupsByName_.end() || it->second.state != AGCProto::GROUP_STATE_RUNNING) {
+        response->set_status(DataCenterProto::COMMAND_REJECTED);
+        response->set_reject_code(DataCenterProto::COMMAND_REJECT_GROUP_NOT_RUNNING);
+        response->set_reason("AGC 控制组状态已变化，命令未排队");
+        return grpc::Status::OK;
+      }
+      it->second.cmdRaw = raw;
+      it->second.hasCmdRaw = true;
+      ++it->second.commandRevision;
+      it->second.hasDirectResolvedDesiredTotalKw = false;
+      ++it->second.controlRevision;
+      requestControlLocked(groupName, &it->second, "周期直分配同步命令", request.dst().tag());
+    }
+    publishCommandEchoPoint(connId, config.p_cmd(), commandUpdate);
+    publishDefaultLimitPoints(groupName, "周期直分配同步命令");
+    response->set_status(DataCenterProto::COMMAND_ACCEPTED);
+    response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSPECIFIED);
+    response->set_reason("AGC 周期直分配命令已缓存，将按计算与命令周期下发");
+    LOG_INFO("AGC 周期直分配模式缓存同步总有功命令: group_name={}, desired_total_kw={}, actual_target_kw={}, 计算周期={}秒, 命令周期={}秒",
+             groupName,
+             output.desiredTotalKw.ToFixedString(),
+             output.actualTargetKw.ToFixedString(),
+             config.calculation_execution_period_seconds(),
+             config.command_control_period_seconds());
+    return grpc::Status::OK;
+  }
 
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -1101,7 +1219,7 @@ grpc::Status GroupManager::ExecuteCommand(
     it->second.lastMemberTargetKw = output.nextLastMemberTargetKw;
     it->second.integralMemoryKw = output.nextIntegralMemoryKw;
     it->second.hasLastUnallocatedKw = false;
-    it->second.lastUnallocatedKw = 0.0;
+    it->second.lastUnallocatedKw = Decimal{};
   }
 
   publishCommandEchoPoint(connId, config.p_cmd(), commandUpdate);
@@ -1111,13 +1229,13 @@ grpc::Status GroupManager::ExecuteCommand(
   if (config.has_outputs()) {
     const auto &outputs = config.outputs();
     if (output.publishTotalMeas) {
-      (void)dataCenter_.PublishDouble(connId, outputs.p_total_meas().tag(), output.totalMeasKw, quality, 0);
+      (void)dataCenter_.PublishDecimal(connId, outputs.p_total_meas().tag(), output.totalMeasKw.ToFixedString(), quality, 0);
     }
     if (output.publishTotalTarget) {
-      (void)dataCenter_.PublishDouble(connId, outputs.p_total_target().tag(), output.actualTargetKw, quality, 0);
+      (void)dataCenter_.PublishDecimal(connId, outputs.p_total_target().tag(), output.actualTargetKw.ToFixedString(), quality, 0);
     }
     if (output.publishTotalError) {
-      (void)dataCenter_.PublishDouble(connId, outputs.p_total_error().tag(), output.totalErrorKw, quality, 0);
+      (void)dataCenter_.PublishDecimal(connId, outputs.p_total_error().tag(), output.totalErrorKw.ToFixedString(), quality, 0);
     }
   }
 
@@ -1135,25 +1253,47 @@ grpc::Status GroupManager::ExecuteCommand(
   response->set_reason("AGC 同步总有功命令已接受并执行");
   LOG_INFO("AGC 已执行同步总有功命令: group_name={}, requested_kw={}, actual_target_kw={}",
            groupName,
-           output.desiredTotalKw,
-           output.actualTargetKw);
+           output.desiredTotalKw.ToFixedString(),
+           output.actualTargetKw.ToFixedString());
   return grpc::Status::OK;
 }
 
-bool GroupManager::pointValueToDouble(const DataCenterProto::PointValue &v, double *out) {
+bool GroupManager::pointValueToDecimal(const DataCenterProto::PointValue &v, Decimal *out) {
   if (out == nullptr) {
     return false;
   }
   switch (v.kind_case()) {
-  case DataCenterProto::PointValue::kDoubleValue:
-    *out = v.double_value();
+  case DataCenterProto::PointValue::kDoubleValue: {
+    auto value = Decimal::FromDouble(v.double_value());
+    if (!value.has_value()) {
+      LOG_WARNING("AGC 拒绝非有限 double 点值");
+      return false;
+    }
+    *out = *value;
     return true;
-  case DataCenterProto::PointValue::kIntValue:
-    *out = static_cast<double>(v.int_value());
+  }
+  case DataCenterProto::PointValue::kIntValue: {
+    auto value = Decimal::FromInt64(v.int_value());
+    if (!value.has_value()) {
+      LOG_WARNING("AGC 整数点值超出 Decimal20 范围");
+      return false;
+    }
+    *out = *value;
     return true;
+  }
   case DataCenterProto::PointValue::kBoolValue:
-    *out = v.bool_value() ? 1.0 : 0.0;
+    *out = v.bool_value() ? numeric::One() : numeric::Zero();
     return true;
+  case DataCenterProto::PointValue::kDecimalValue: {
+    auto decimal = mskdsp::numeric::Decimal20::Parse(v.decimal_value());
+    if (!decimal.has_value()) {
+      LOG_WARNING("AGC decimal_value 解析失败: {}",
+                  mskdsp::numeric::DecimalErrorMessage(decimal.error()));
+      return false;
+    }
+    *out = *decimal;
+    return true;
+  }
   default:
     return false;
   }
@@ -1211,14 +1351,21 @@ void GroupManager::rebuildTagCache(GroupRuntime *g) {
 
   const auto memberCount = static_cast<size_t>(g->config.members_size());
   g->hasMemberMeasRaw.assign(memberCount, false);
-  g->memberMeasRaw.assign(memberCount, 0.0);
+  g->memberMeasRaw.assign(memberCount, Decimal{});
+  g->commandRevision = 0;
+  g->directResolvedCommandRevision = 0;
+  g->hasDirectResolvedDesiredTotalKw = false;
+  g->directResolvedDesiredTotalKw = Decimal{};
   g->hasLastMemberTargetKw.assign(memberCount, false);
-  g->lastMemberTargetKw.assign(memberCount, 0.0);
+  g->lastMemberTargetKw.assign(memberCount, Decimal{});
   g->hasLastPublishedMemberSetpoint.assign(memberCount, false);
-  g->lastPublishedMemberSetpointKw.assign(memberCount, 0.0);
+  g->lastPublishedMemberSetpointKw.assign(memberCount, Decimal{});
   g->lastMemberSetpointPublishedAt.assign(memberCount, std::chrono::steady_clock::time_point{});
   g->hasLastControlMemberMeasKw.assign(memberCount, false);
-  g->lastControlMemberMeasKw.assign(memberCount, 0.0);
+  g->lastControlMemberMeasKw.assign(memberCount, Decimal{});
+  g->hasLastCommandPublishedAt = false;
+  g->lastCommandPublishedAt = std::chrono::steady_clock::time_point{};
+  g->lastControlTickAt = std::chrono::steady_clock::time_point{};
   ++g->controlRevision;
 
   if (g->config.has_p_cmd() && g->config.p_cmd().has_signal()) {
@@ -1312,6 +1459,20 @@ void GroupManager::requestControlLocked(
   if (g == nullptr || g->state != AGCProto::GROUP_STATE_RUNNING || !g->controlTrigger) {
     return;
   }
+  if (isDirectCyclicMode(g->config)) {
+    const bool firstValidInput = g->hasCmdRaw && !g->hasLastCommandPublishedAt &&
+                                 g->lastControlTickAt.time_since_epoch().count() == 0;
+    g->controlTrigger->pending.store(true);
+    if (firstValidInput) {
+      g->controlTrigger->signal.release();
+    }
+    if (tag.empty()) {
+      LOG_DEBUG("AGC 周期直分配模式已缓存最新控制输入: group_name={}, 原因={}", groupName, reason);
+    } else {
+      LOG_DEBUG("AGC 周期直分配模式已缓存最新控制输入: group_name={}, 原因={}, tag={}", groupName, reason, tag);
+    }
+    return;
+  }
   if (!g->controlTrigger->pending.exchange(true)) {
     g->controlTrigger->signal.release();
     if (tag.empty()) {
@@ -1388,8 +1549,8 @@ bool GroupManager::handleUpdateLocked(GroupRuntime *g, const DataCenterProto::Po
     return false;
   }
   const auto &tag = update.dst_tag();
-  double raw = 0.0;
-  if (!pointValueToDouble(update.value(), &raw)) {
+  Decimal raw;
+  if (!pointValueToDecimal(update.value(), &raw)) {
     return false;
   }
 
@@ -1398,8 +1559,10 @@ bool GroupManager::handleUpdateLocked(GroupRuntime *g, const DataCenterProto::Po
     g->cmdRaw = raw;
     g->hasCmdRaw = true;
     if (changed) {
+      ++g->commandRevision;
+      g->hasDirectResolvedDesiredTotalKw = false;
       ++g->controlRevision;
-      std::fill(g->integralMemoryKw.begin(), g->integralMemoryKw.end(), 0.0);
+      std::fill(g->integralMemoryKw.begin(), g->integralMemoryKw.end(), Decimal{});
       LOG_DEBUG("AGC 收到新的总目标，已清空本次运行积分记忆: group_name={}, tag={}", g->config.group_name(), tag);
     }
     return changed;
@@ -1457,35 +1620,35 @@ void GroupManager::publishDefaultLimitPoints(const std::string &groupName, std::
   const auto theoreticalQuality = DataCenterProto::QUALITY_GOOD;
 
   const auto installedCapacityKw = ComputeInstalledCapacityKw(config);
-  auto status = dataCenter_.PublishDouble(connId, std::string(installedCapacityTag), installedCapacityKw, theoreticalQuality, 0);
+  auto status = dataCenter_.PublishDecimal(connId, std::string(installedCapacityTag), installedCapacityKw.ToFixedString(), theoreticalQuality, 0);
   if (!status.ok()) {
     LOG_ERROR("AGC 发布装机容量失败: group_name={}, tag={}, 触发来源={}, capacity_kw={}, 原因={}",
               groupName,
               installedCapacityTag,
               trigger,
-              installedCapacityKw,
+              installedCapacityKw.ToFixedString(),
               status.error_message());
   } else {
     LOG_DEBUG("AGC 已发布装机容量: group_name={}, tag={}, 触发来源={}, capacity_kw={}",
               groupName,
               installedCapacityTag,
               trigger,
-              installedCapacityKw);
+              installedCapacityKw.ToFixedString());
   }
 
-  status = dataCenter_.PublishDouble(connId, std::string(theoreticalLowerTag), defaultOutput.theoreticalLowerKw, theoreticalQuality, 0);
+  status = dataCenter_.PublishDecimal(connId, std::string(theoreticalLowerTag), defaultOutput.theoreticalLowerKw.ToFixedString(), theoreticalQuality, 0);
   if (!status.ok()) {
     LOG_ERROR("AGC 发布默认点失败: group_name={}, tag={}, 触发来源={}, 原因={}", groupName, theoreticalLowerTag, trigger, status.error_message());
   }
-  status = dataCenter_.PublishDouble(connId, std::string(theoreticalUpperTag), defaultOutput.theoreticalUpperKw, theoreticalQuality, 0);
+  status = dataCenter_.PublishDecimal(connId, std::string(theoreticalUpperTag), defaultOutput.theoreticalUpperKw.ToFixedString(), theoreticalQuality, 0);
   if (!status.ok()) {
     LOG_ERROR("AGC 发布默认点失败: group_name={}, tag={}, 触发来源={}, 原因={}", groupName, theoreticalUpperTag, trigger, status.error_message());
   }
-  status = dataCenter_.PublishDouble(connId, std::string(dynamicLowerTag), defaultOutput.dynamicLowerKw, defaultOutput.dynamicQuality, 0);
+  status = dataCenter_.PublishDecimal(connId, std::string(dynamicLowerTag), defaultOutput.dynamicLowerKw.ToFixedString(), defaultOutput.dynamicQuality, 0);
   if (!status.ok()) {
     LOG_ERROR("AGC 发布默认点失败: group_name={}, tag={}, 触发来源={}, 原因={}", groupName, dynamicLowerTag, trigger, status.error_message());
   }
-  status = dataCenter_.PublishDouble(connId, std::string(dynamicUpperTag), defaultOutput.dynamicUpperKw, defaultOutput.dynamicQuality, 0);
+  status = dataCenter_.PublishDecimal(connId, std::string(dynamicUpperTag), defaultOutput.dynamicUpperKw.ToFixedString(), defaultOutput.dynamicQuality, 0);
   if (!status.ok()) {
     LOG_ERROR("AGC 发布默认点失败: group_name={}, tag={}, 触发来源={}, 原因={}", groupName, dynamicUpperTag, trigger, status.error_message());
   }
@@ -1493,10 +1656,10 @@ void GroupManager::publishDefaultLimitPoints(const std::string &groupName, std::
       "AGC 已发布默认限值点: group_name={}, 触发来源={}, 理论下限={}, 理论上限={}, 当前下限={}, 当前上限={}, 当前质量={}, 不可控成员数={}, 缺测不可控成员数={}",
       groupName,
       trigger,
-      defaultOutput.theoreticalLowerKw,
-      defaultOutput.theoreticalUpperKw,
-      defaultOutput.dynamicLowerKw,
-      defaultOutput.dynamicUpperKw,
+      defaultOutput.theoreticalLowerKw.ToFixedString(),
+      defaultOutput.theoreticalUpperKw.ToFixedString(),
+      defaultOutput.dynamicLowerKw.ToFixedString(),
+      defaultOutput.dynamicUpperKw.ToFixedString(),
       static_cast<int>(defaultOutput.dynamicQuality),
       defaultOutput.uncontrollableMemberCount,
       defaultOutput.missingUncontrollableMemberCount);
@@ -1505,14 +1668,20 @@ void GroupManager::publishDefaultLimitPoints(const std::string &groupName, std::
 void GroupManager::publishCommandEchoPoint(
     uint32_t connId, const AGCProto::ValueSpec &commandSpec, const DataCenterProto::PointUpdate &update) {
   const auto commandEchoTag = defaultPointTag(AGCProto::DEFAULT_POINT_KIND_COMMAND_ECHO);
-  double value = 0.0;
-  if (!pointValueToDouble(update.value(), &value)) {
+  Decimal value;
+  if (!pointValueToDecimal(update.value(), &value)) {
     LOG_WARNING("AGC 发布调节返回值跳过: conn_id={}, tag={}, 原因=命令点值类型不支持", connId, commandEchoTag);
     return;
   }
 
   const auto echoValue = commandEchoEngineeringValue(commandSpec, value);
-  auto status = dataCenter_.PublishDouble(connId, std::string(commandEchoTag), echoValue, update.quality(), update.ts_ms());
+  if (!echoValue.has_value()) {
+    LOG_WARNING("AGC 发布调节返回值跳过: conn_id={}, tag={}, 原因={}",
+                connId, commandEchoTag,
+                mskdsp::numeric::DecimalErrorMessage(echoValue.error()));
+    return;
+  }
+  auto status = dataCenter_.PublishDecimal(connId, std::string(commandEchoTag), echoValue->ToFixedString(), update.quality(), update.ts_ms());
   if (!status.ok()) {
     LOG_ERROR("AGC 发布调节返回值失败: conn_id={}, tag={}, 原因={}", connId, commandEchoTag, status.error_message());
   } else {
@@ -1520,8 +1689,8 @@ void GroupManager::publishCommandEchoPoint(
         "AGC 已发布调节返回值: conn_id={}, tag={}, value={}, echo_kw={}, 质量={}, ts_ms={}",
         connId,
         commandEchoTag,
-        value,
-        echoValue,
+        value.ToFixedString(),
+        echoValue->ToFixedString(),
         static_cast<int>(update.quality()),
         update.ts_ms());
   }
@@ -1531,14 +1700,38 @@ bool GroupManager::publishMemberSetpoints(const std::string &groupName,
                                           uint32_t connId,
                                           const AGCProto::GroupConfig &config,
                                           const std::vector<bool> &memberPublish,
-                                          const std::vector<double> &memberPublishKw,
+                                          const std::vector<Decimal> &memberPublishKw,
                                           DataCenterProto::Quality quality,
                                           uint64_t expectedRevision,
-                                          std::string_view trigger) {
+                                          std::string_view trigger,
+                                          bool *publishedAny) {
+  if (publishedAny != nullptr) {
+    *publishedAny = false;
+  }
   const auto memberCount = static_cast<size_t>(config.members_size());
   size_t publishedCount = 0;
   size_t skippedCount = 0;
   bool allSucceeded = true;
+  bool cyclicCommandBlocked = false;
+  const auto commandNow = std::chrono::steady_clock::now();
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = groupsByName_.find(groupName);
+    if (it != groupsByName_.end() && isDirectCyclicMode(it->second.config) &&
+        it->second.hasLastCommandPublishedAt) {
+      const auto configuredSeconds = std::clamp(it->second.config.command_control_period_seconds(), 4.0, 30.0);
+      cyclicCommandBlocked = commandNow - it->second.lastCommandPublishedAt <
+                             std::chrono::duration<double>(configuredSeconds);
+      if (cyclicCommandBlocked) {
+        LOG_DEBUG("AGC 周期直分配命令限频，保留最新目标待下次周期下发: group_name={}, command_period_seconds={}",
+                  groupName,
+                  configuredSeconds);
+      }
+    }
+  }
+  if (cyclicCommandBlocked) {
+    return true;
+  }
 
   for (size_t i = 0; i < memberCount && i < memberPublish.size() && i < memberPublishKw.size(); ++i) {
     if (!memberPublish[i]) {
@@ -1583,14 +1776,14 @@ bool GroupManager::publishMemberSetpoints(const std::string &groupName,
     }
 
     const auto &tag = member.p_set().signal().tag();
-    auto status = dataCenter_.PublishDouble(connId, tag, memberPublishKw[i], quality, 0);
+    auto status = dataCenter_.PublishDecimal(connId, tag, memberPublishKw[i].ToFixedString(), quality, 0);
     if (!status.ok()) {
       allSucceeded = false;
       LOG_ERROR("AGC 发布成员设点失败: group_name={}, member_name={}, tag={}, value_kw={}, trigger={}, 原因={}",
                 groupName,
                 member.member_name(),
                 tag,
-                memberPublishKw[i],
+                memberPublishKw[i].ToFixedString(),
                 trigger,
                 status.error_message());
       continue;
@@ -1605,14 +1798,21 @@ bool GroupManager::publishMemberSetpoints(const std::string &groupName,
         it->second.hasLastPublishedMemberSetpoint[i] = true;
         it->second.lastPublishedMemberSetpointKw[i] = memberPublishKw[i];
         it->second.lastMemberSetpointPublishedAt[i] = publishedAt;
+        if (isDirectCyclicMode(it->second.config)) {
+          it->second.hasLastCommandPublishedAt = true;
+          it->second.lastCommandPublishedAt = publishedAt;
+        }
       }
     }
     ++publishedCount;
+    if (publishedAny != nullptr) {
+      *publishedAny = true;
+    }
     LOG_DEBUG("AGC 已发布成员设点: group_name={}, member_name={}, tag={}, value_kw={}, trigger={}, 低频刷新={}",
               groupName,
               member.member_name(),
               tag,
-              memberPublishKw[i],
+              memberPublishKw[i].ToFixedString(),
               trigger,
               refreshPublish);
   }
@@ -1648,6 +1848,7 @@ void GroupManager::controlTick(const std::string &groupName) {
   bool functionEnabled = true;
   ControlInput input;
   uint64_t controlRevision = 0;
+  uint64_t commandRevision = 0;
 
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -1663,6 +1864,7 @@ void GroupManager::controlTick(const std::string &groupName) {
     connId = it->second.connId;
     functionEnabled = it->second.functionEnabled;
     controlRevision = it->second.controlRevision;
+    commandRevision = it->second.commandRevision;
     input.hasCmdRaw = it->second.hasCmdRaw;
     input.cmdRaw = it->second.cmdRaw;
     input.baseRawByTag = it->second.baseRawByTag;
@@ -1674,6 +1876,14 @@ void GroupManager::controlTick(const std::string &groupName) {
     input.lastDesiredTotalKw = it->second.lastDesiredTotalKw;
     input.controlProfile = it->second.controlProfile;
     input.integralMemoryKw = it->second.integralMemoryKw;
+    input.enablePi = !isDirectCyclicMode(config);
+    const bool stableDeltaTarget = isDirectCyclicMode(config) && config.p_cmd().mode() == AGCProto::VALUE_MODE_DELTA &&
+                                   config.p_cmd().delta_base() == AGCProto::DELTA_BASE_LAST_TARGET;
+    if (stableDeltaTarget && it->second.hasDirectResolvedDesiredTotalKw &&
+        it->second.directResolvedCommandRevision == it->second.commandRevision) {
+      input.hasDesiredTotalOverride = true;
+      input.desiredTotalOverrideKw = it->second.directResolvedDesiredTotalKw;
+    }
     const auto now = std::chrono::steady_clock::now();
     if (it->second.lastControlTickAt.time_since_epoch().count() > 0) {
       input.controlPeriodSeconds = std::clamp(
@@ -1690,21 +1900,42 @@ void GroupManager::controlTick(const std::string &groupName) {
           static_cast<size_t>(i) >= it->second.hasMemberMeasRaw.size() || !it->second.hasMemberMeasRaw[static_cast<size_t>(i)]) {
         continue;
       }
-      const auto scale = member.p_meas().scale() == 0.0 ? 1.0 : member.p_meas().scale();
-      const auto measuredKw = it->second.memberMeasRaw[static_cast<size_t>(i)] * scale + member.p_meas().offset();
+      auto measuredKw = engineeringValue(
+          member.p_meas(), it->second.memberMeasRaw[static_cast<size_t>(i)]);
+      auto capacity = numeric::Capacity(member);
+      auto nearZeroRatio = Decimal::Parse("0.05");
+      auto nearZeroMinimum = Decimal::FromInt64(1);
+      if (!measuredKw.has_value() || !capacity.has_value() ||
+          !nearZeroRatio.has_value() || !nearZeroMinimum.has_value()) {
+        LOG_WARNING("AGC 资源下降检测跳过无效十进制参数: group_name={}, member_name={}",
+                    groupName, member.member_name());
+        continue;
+      }
+      auto capacityThreshold = capacity->Multiply(*nearZeroRatio);
+      if (!capacityThreshold.has_value()) {
+        continue;
+      }
+      const auto nearZeroThreshold = *capacityThreshold > *nearZeroMinimum
+                                         ? *capacityThreshold
+                                         : *nearZeroMinimum;
       hasMeasurement = true;
-      allMembersNearZero = allMembersNearZero && measuredKw <= std::max(1.0, member.capacity_kw() * 0.05);
+      allMembersNearZero = allMembersNearZero && *measuredKw <= nearZeroThreshold;
       if (static_cast<size_t>(i) < it->second.hasLastControlMemberMeasKw.size() &&
           it->second.hasLastControlMemberMeasKw[static_cast<size_t>(i)]) {
         hasComparableMeasurement = true;
-        if (measuredKw > it->second.lastControlMemberMeasKw[static_cast<size_t>(i)] - 0.5) {
+        auto declineThreshold = Decimal::Parse("0.5");
+        auto comparison = declineThreshold.has_value()
+                              ? it->second.lastControlMemberMeasKw[static_cast<size_t>(i)].Subtract(*declineThreshold)
+                              : std::expected<Decimal, numeric::DecimalError>(
+                                    std::unexpected(declineThreshold.error()));
+        if (!comparison.has_value() || *measuredKw > *comparison) {
           allMembersDeclining = false;
         }
       } else {
         allMembersDeclining = false;
       }
       if (static_cast<size_t>(i) < it->second.lastControlMemberMeasKw.size()) {
-        it->second.lastControlMemberMeasKw[static_cast<size_t>(i)] = measuredKw;
+        it->second.lastControlMemberMeasKw[static_cast<size_t>(i)] = *measuredKw;
         it->second.hasLastControlMemberMeasKw[static_cast<size_t>(i)] = true;
       }
     }
@@ -1716,7 +1947,14 @@ void GroupManager::controlTick(const std::string &groupName) {
     if (it->second.tuningStatus.state() == AGCProto::TUNING_STATE_RUNNING) {
       input.controlProfile = it->second.tuningStatus.candidate_profile();
       input.hasDesiredTotalOverride = true;
-      input.desiredTotalOverrideKw = it->second.tuningStatus.current_target_kw();
+      auto tuningTarget = numeric::Configured(
+          it->second.tuningStatus.current_target_kw_decimal(),
+          it->second.tuningStatus.current_target_kw());
+      if (tuningTarget.has_value()) {
+        input.desiredTotalOverrideKw = *tuningTarget;
+      } else {
+        input.hasDesiredTotalOverride = false;
+      }
     }
   }
 
@@ -1724,16 +1962,16 @@ void GroupManager::controlTick(const std::string &groupName) {
     return;
   }
   const auto quality = DataCenterProto::QUALITY_GOOD;
-  double totalMeasKw = 0.0;
+  Decimal totalMeasKw;
   if (const auto totalMeasPublishKw = ComputeTotalMeasKw(config, input, &totalMeasKw)) {
-    auto status = dataCenter_.PublishDouble(connId, config.outputs().p_total_meas().tag(), *totalMeasPublishKw, quality, 0);
+    auto status = dataCenter_.PublishDecimal(connId, config.outputs().p_total_meas().tag(), totalMeasPublishKw->ToFixedString(), quality, 0);
     if (!status.ok()) {
       LOG_ERROR(
           "AGC 发布总实时测量值失败: group_name={}, conn_id={}, tag={}, total_meas_kw={}, 原因={}",
           groupName,
           connId,
           config.outputs().p_total_meas().tag(),
-          totalMeasKw,
+          totalMeasKw.ToFixedString(),
           status.error_message());
     } else {
       LOG_DEBUG(
@@ -1741,11 +1979,11 @@ void GroupManager::controlTick(const std::string &groupName) {
           groupName,
           connId,
           config.outputs().p_total_meas().tag(),
-          totalMeasKw,
-          *totalMeasPublishKw);
+          totalMeasKw.ToFixedString(),
+          totalMeasPublishKw->ToFixedString());
     }
   }
-  publishDefaultLimitPoints(groupName, "事件触发控制");
+  publishDefaultLimitPoints(groupName, isDirectCyclicMode(config) ? "周期直分配控制" : "PI 事件触发控制");
 
   if (!functionEnabled) {
     LOG_DEBUG("AGC 跳过控制输出: group_name={}, 原因=AGC 功能未投入", groupName);
@@ -1757,6 +1995,23 @@ void GroupManager::controlTick(const std::string &groupName) {
     return;
   }
   const auto &output = *outputOpt;
+
+  const bool stableDeltaTarget = isDirectCyclicMode(config) && config.p_cmd().mode() == AGCProto::VALUE_MODE_DELTA &&
+                                 config.p_cmd().delta_base() == AGCProto::DELTA_BASE_LAST_TARGET;
+  if (stableDeltaTarget && !input.hasDesiredTotalOverride) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = groupsByName_.find(groupName);
+    if (it != groupsByName_.end() && it->second.state == AGCProto::GROUP_STATE_RUNNING &&
+        it->second.commandRevision == commandRevision && it->second.controlRevision == controlRevision) {
+      it->second.directResolvedCommandRevision = commandRevision;
+      it->second.directResolvedDesiredTotalKw = output.desiredTotalKw;
+      it->second.hasDirectResolvedDesiredTotalKw = true;
+      LOG_DEBUG("AGC 周期直分配已固定增量命令解析目标: group_name={}, command_revision={}, desired_total_kw={}",
+                groupName,
+                commandRevision,
+                output.desiredTotalKw.ToFixedString());
+    }
+  }
 
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -1771,13 +2026,14 @@ void GroupManager::controlTick(const std::string &groupName) {
   if (config.has_outputs()) {
     const auto &o = config.outputs();
     if (output.publishTotalTarget) {
-      (void)dataCenter_.PublishDouble(connId, o.p_total_target().tag(), output.actualTargetKw, quality, 0);
+      (void)dataCenter_.PublishDecimal(connId, o.p_total_target().tag(), output.actualTargetKw.ToFixedString(), quality, 0);
     }
     if (output.publishTotalError) {
-      (void)dataCenter_.PublishDouble(connId, o.p_total_error().tag(), output.totalErrorKw, quality, 0);
+      (void)dataCenter_.PublishDecimal(connId, o.p_total_error().tag(), output.totalErrorKw.ToFixedString(), quality, 0);
     }
   }
 
+  bool publishedAny = false;
   (void)publishMemberSetpoints(groupName,
                                connId,
                                config,
@@ -1785,7 +2041,8 @@ void GroupManager::controlTick(const std::string &groupName) {
                                output.memberPublishKw,
                                quality,
                                controlRevision,
-                               "事件触发控制");
+                               isDirectCyclicMode(config) ? "周期直分配控制" : "事件触发控制",
+                               &publishedAny);
 
   // 下发后更新状态（尽力而为）。
   bool shouldLogUnallocated = false;
@@ -1806,22 +2063,26 @@ void GroupManager::controlTick(const std::string &groupName) {
       return;
     }
 
-    it->second.hasLastDesiredTotalKw = output.hasLastDesiredTotalKw;
-    it->second.lastDesiredTotalKw = output.nextLastDesiredTotalKw;
-    it->second.hasLastMemberTargetKw = output.hasLastMemberTargetKw;
-    it->second.lastMemberTargetKw = output.nextLastMemberTargetKw;
-    it->second.integralMemoryKw = output.nextIntegralMemoryKw;
+    // PI_EVENT 在每轮计算后更新积分和上一轮目标；周期直分配仅在实际下发成员命令后更新应用目标。
+    if (!isDirectCyclicMode(config) || publishedAny) {
+      it->second.hasLastDesiredTotalKw = output.hasLastDesiredTotalKw;
+      it->second.lastDesiredTotalKw = output.nextLastDesiredTotalKw;
+      it->second.hasLastMemberTargetKw = output.hasLastMemberTargetKw;
+      it->second.lastMemberTargetKw = output.nextLastMemberTargetKw;
+      if (!isDirectCyclicMode(config)) {
+        it->second.integralMemoryKw = output.nextIntegralMemoryKw;
+      }
+    }
 
-    constexpr double kEps = 1e-6;
-    if (std::fabs(unallocatedKw) > kEps) {
-      if (!it->second.hasLastUnallocatedKw || std::fabs(unallocatedKw - it->second.lastUnallocatedKw) > kEps) {
+    if (!unallocatedKw.IsZero()) {
+      if (!it->second.hasLastUnallocatedKw || unallocatedKw != it->second.lastUnallocatedKw) {
         shouldLogUnallocated = true;
         it->second.hasLastUnallocatedKw = true;
         it->second.lastUnallocatedKw = unallocatedKw;
       }
     } else {
       it->second.hasLastUnallocatedKw = false;
-      it->second.lastUnallocatedKw = 0.0;
+      it->second.lastUnallocatedKw = Decimal{};
     }
   }
 
@@ -1829,11 +2090,11 @@ void GroupManager::controlTick(const std::string &groupName) {
     LOG_WARNING(
         "AGC 分配受限: group_name={}, unallocated_kw={}, target_controllable_kw={}, passive_kw={}, desired_total_kw={}, actual_target_kw={}",
         groupName,
-        unallocatedKw,
-        targetControllableKw,
-        passiveKw,
-        desiredTotalKw,
-        actualTargetKw);
+        unallocatedKw.ToFixedString(),
+        targetControllableKw.ToFixedString(),
+        passiveKw.ToFixedString(),
+        desiredTotalKw.ToFixedString(),
+        actualTargetKw.ToFixedString());
   }
 }
 
@@ -1914,7 +2175,7 @@ grpc::Status GroupManager::ConfirmControlProfile(
   }
   controlProfilesByGroup_[profile.group_name()] = confirmed;
   groupIt->second.controlProfile = makeDefaultControlProfileLocked(groupIt->second);
-  std::fill(groupIt->second.integralMemoryKw.begin(), groupIt->second.integralMemoryKw.end(), 0.0);
+  std::fill(groupIt->second.integralMemoryKw.begin(), groupIt->second.integralMemoryKw.end(), Decimal{});
 
   status = saveControlProfilesLocked();
   if (!status.ok()) {
@@ -1961,16 +2222,29 @@ grpc::Status GroupManager::StartTuning(
   if (!status.ok()) {
     return status;
   }
-  double installedCapacityKw = 0.0;
-  for (const auto &member : it->second.config.members()) {
-    installedCapacityKw += member.capacity_kw();
+  const auto installedCapacityKw = ComputeInstalledCapacityKw(it->second.config);
+  auto targetLower = numeric::TuningLower(request.config());
+  auto targetUpper = numeric::TuningUpper(request.config());
+  auto tolerance = numeric::TuningTolerance(request.config());
+  auto toleranceRatio = Decimal::Parse("0.003");
+  auto maximumFixedTolerance = Decimal::FromInt64(300);
+  if (!targetLower.has_value() || !targetUpper.has_value() ||
+      !tolerance.has_value() || !toleranceRatio.has_value() ||
+      !maximumFixedTolerance.has_value()) {
+    return makeInvalid("调试十进制配置解析失败");
   }
-  const auto maximumToleranceKw = std::min(300.0, installedCapacityKw * 0.003);
-  if (request.config().target_lower_kw() < 0.0 || request.config().target_upper_kw() > installedCapacityKw) {
+  auto capacityTolerance = installedCapacityKw.Multiply(*toleranceRatio);
+  if (!capacityTolerance.has_value()) {
+    return makeInvalid("调试精度上限计算溢出");
+  }
+  const auto maximumToleranceKw = *capacityTolerance < *maximumFixedTolerance
+                                      ? *capacityTolerance
+                                      : *maximumFixedTolerance;
+  if (*targetLower < numeric::Zero() || *targetUpper > installedCapacityKw) {
     return makeInvalid("调试目标范围必须落在控制组装机容量范围内");
   }
-  if (request.config().total_tolerance_kw() > maximumToleranceKw) {
-    return makeInvalid(std::format("调试总量精度不能超过 300kW 或装机容量 0.3%% 中的较小值: 最大允许={}kW", maximumToleranceKw));
+  if (*tolerance > maximumToleranceKw) {
+    return makeInvalid(std::format("调试总量精度不能超过 300kW 或装机容量 0.3%% 中的较小值: 最大允许={}kW", maximumToleranceKw.ToFixedString()));
   }
   if (it->second.tuningStatus.state() == AGCProto::TUNING_STATE_RUNNING) {
     return makePreconditionFailed("该控制组已有调试任务在运行");
@@ -1988,7 +2262,8 @@ grpc::Status GroupManager::StartTuning(
   it->second.tuningStatus.set_direction(AGCProto::TUNING_DIRECTION_UP);
   it->second.tuningStatus.set_started_at_ms(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::system_clock::now().time_since_epoch()).count()));
-  it->second.tuningStatus.set_current_target_kw(request.config().target_upper_kw());
+  it->second.tuningStatus.set_current_target_kw_decimal(targetUpper->ToFixedString());
+  it->second.tuningStatus.set_current_target_kw(numeric::ToLegacyDouble(*targetUpper));
   *it->second.tuningStatus.mutable_candidate_profile() = makeDefaultControlProfileLocked(it->second);
   it->second.tuningPhaseStartedAt = std::chrono::steady_clock::now();
   it->second.tuningTaskStartedAt = it->second.tuningPhaseStartedAt;
@@ -2016,37 +2291,97 @@ grpc::Status GroupManager::StartTuning(
               break;
             }
             auto &group = groupIt->second;
+            auto failTuningForDecimalError =
+                [&](std::string_view stage, numeric::DecimalError error) {
+                  const auto message = std::format(
+                      "自动调试十进制计算失败: 阶段={}, 原因={}", stage,
+                      mskdsp::numeric::DecimalErrorMessage(error));
+                  group.tuningStatus.set_state(AGCProto::TUNING_STATE_FAILED);
+                  group.tuningStatus.set_last_error(message);
+                  group.state = AGCProto::GROUP_STATE_STOPPED;
+                  ++group.controlRevision;
+                  finish = true;
+                  if (group.dcSubscribeThread.joinable()) {
+                    group.dcSubscribeThread.request_stop();
+                  }
+                  if (group.controlThread.joinable()) {
+                    group.controlThread.request_stop();
+                  }
+                  if (group.controlTrigger) {
+                    group.controlTrigger->signal.release();
+                  }
+                  LOG_ERROR("AGC {}: group_name={}", message, groupName);
+                };
             const auto now = std::chrono::steady_clock::now();
             const auto elapsedSeconds = std::chrono::duration_cast<std::chrono::duration<double>>(now - group.tuningPhaseStartedAt).count();
             const auto totalElapsedSeconds = std::chrono::duration_cast<std::chrono::duration<double>>(
                 now - group.tuningTaskStartedAt).count();
-            double totalMeasKw = 0.0;
+            Decimal totalMeasKw;
+            bool measurementFailed = false;
             for (int i = 0; i < group.config.members_size(); ++i) {
               if (static_cast<size_t>(i) >= group.memberMeasRaw.size() ||
                   static_cast<size_t>(i) >= group.hasMemberMeasRaw.size() || !group.hasMemberMeasRaw[static_cast<size_t>(i)]) {
                 continue;
               }
-              const auto &signal = group.config.members(i).p_meas();
-              const auto scale = signal.scale() == 0.0 ? 1.0 : signal.scale();
-              totalMeasKw += group.memberMeasRaw[static_cast<size_t>(i)] * scale + signal.offset();
+              auto measured = engineeringValue(
+                  group.config.members(i).p_meas(),
+                  group.memberMeasRaw[static_cast<size_t>(i)]);
+              if (!measured.has_value()) {
+                failTuningForDecimalError("换算成员量测", measured.error());
+                measurementFailed = true;
+                break;
+              }
+              auto nextTotal = totalMeasKw.Add(*measured);
+              if (!nextTotal.has_value()) {
+                failTuningForDecimalError("汇总成员量测", nextTotal.error());
+                measurementFailed = true;
+                break;
+              }
+              totalMeasKw = *nextTotal;
+            }
+            if (measurementFailed) {
+              continue;
             }
             if (!group.tuningInitialCaptured) {
-              group.tuningPhaseInitialMeasKw.assign(group.memberMeasRaw.size(), 0.0);
+              group.tuningPhaseInitialMeasKw.assign(group.memberMeasRaw.size(), Decimal{});
+              bool initialMeasurementFailed = false;
               for (int i = 0; i < group.config.members_size(); ++i) {
                 if (static_cast<size_t>(i) < group.memberMeasRaw.size() &&
                     static_cast<size_t>(i) < group.hasMemberMeasRaw.size() && group.hasMemberMeasRaw[static_cast<size_t>(i)]) {
-                  const auto &signal = group.config.members(i).p_meas();
-                  const auto scale = signal.scale() == 0.0 ? 1.0 : signal.scale();
-                  group.tuningPhaseInitialMeasKw[static_cast<size_t>(i)] = group.memberMeasRaw[static_cast<size_t>(i)] * scale + signal.offset();
+                  auto measured = engineeringValue(
+                      group.config.members(i).p_meas(),
+                      group.memberMeasRaw[static_cast<size_t>(i)]);
+                  if (!measured.has_value()) {
+                    failTuningForDecimalError("记录调试初始量测",
+                                              measured.error());
+                    initialMeasurementFailed = true;
+                    break;
+                  }
+                  group.tuningPhaseInitialMeasKw[static_cast<size_t>(i)] = *measured;
                 }
+              }
+              if (initialMeasurementFailed) {
+                continue;
               }
               group.tuningInitialCaptured = true;
               group.tuningPreviousTargetKw = totalMeasKw;
             }
-            group.tuningStatus.set_current_total_meas_kw(totalMeasKw);
-            const auto errorKw = group.tuningStatus.current_target_kw() - totalMeasKw;
-            const auto tolerance = group.tuningConfig.total_tolerance_kw();
-            if (std::fabs(errorKw) <= tolerance) {
+            group.tuningStatus.set_current_total_meas_kw_decimal(totalMeasKw.ToFixedString());
+            group.tuningStatus.set_current_total_meas_kw(numeric::ToLegacyDouble(totalMeasKw));
+            auto currentTarget = numeric::Configured(
+                group.tuningStatus.current_target_kw_decimal(),
+                group.tuningStatus.current_target_kw());
+            auto errorKw = currentTarget.has_value()
+                               ? currentTarget->Subtract(totalMeasKw)
+                               : std::expected<Decimal, numeric::DecimalError>(
+                                     std::unexpected(currentTarget.error()));
+            auto absoluteError = errorKw.has_value()
+                                     ? numeric::Absolute(*errorKw)
+                                     : std::expected<Decimal, numeric::DecimalError>(
+                                           std::unexpected(errorKw.error()));
+            auto tolerance = numeric::TuningTolerance(group.tuningConfig);
+            if (absoluteError.has_value() && tolerance.has_value() &&
+                *absoluteError <= *tolerance) {
               if (!group.tuningInRange) {
                 group.tuningInRange = true;
                 group.tuningEnteredRangeAt = now;
@@ -2061,10 +2396,18 @@ grpc::Status GroupManager::StartTuning(
                   group.tuningStatus.set_completed_down_tests(group.tuningStatus.completed_down_tests() + 1);
                 }
                 auto *candidate = group.tuningStatus.mutable_candidate_profile();
-                double totalWeight = 0.0;
+                Decimal totalWeight;
                 for (const auto &member : group.config.members()) {
                   if (member.controllable()) {
-                    totalWeight += member.weight() > 0.0 ? member.weight() : 1.0;
+                    auto weight = numeric::Weight(member);
+                    const auto effectiveWeight =
+                        weight.has_value() && *weight > numeric::Zero()
+                            ? *weight
+                            : numeric::One();
+                    auto nextWeight = totalWeight.Add(effectiveWeight);
+                    if (nextWeight.has_value()) {
+                      totalWeight = *nextWeight;
+                    }
                   }
                 }
                 for (int i = 0; i < group.config.members_size(); ++i) {
@@ -2082,29 +2425,98 @@ grpc::Status GroupManager::StartTuning(
                   if (profile == nullptr) {
                     continue;
                   }
-                  const auto share = member.weight() > 0.0 ? member.weight() : 1.0;
-                  const auto correction = errorKw * (totalWeight > 0.0 ? share / totalWeight : 0.0);
-                  const auto currentMeasured = static_cast<size_t>(i) < group.memberMeasRaw.size()
-                                                   ? group.memberMeasRaw[static_cast<size_t>(i)] *
-                                                         (group.config.members(i).p_meas().scale() == 0.0 ? 1.0 : group.config.members(i).p_meas().scale()) +
-                                                         group.config.members(i).p_meas().offset()
-                                                   : 0.0;
-                  const auto initialMeasured = static_cast<size_t>(i) < group.tuningPhaseInitialMeasKw.size() ? group.tuningPhaseInitialMeasKw[static_cast<size_t>(i)] : currentMeasured;
-                  if (std::fabs(group.tuningStatus.current_target_kw() - group.tuningPreviousTargetKw) > 1e-6 &&
-                      std::fabs(currentMeasured - initialMeasured) > 1e-3) {
-                    const auto expectedMemberDelta = (group.tuningStatus.current_target_kw() - group.tuningPreviousTargetKw) *
-                                                     (totalWeight > 0.0 ? share / totalWeight : 0.0);
-                    const auto estimatedGain = std::clamp(std::fabs(expectedMemberDelta / (currentMeasured - initialMeasured)), 0.05, 10.0);
-                    if (group.tuningStatus.direction() == AGCProto::TUNING_DIRECTION_UP) {
-                      profile->set_up_p_gain(estimatedGain);
-                    } else {
-                      profile->set_down_p_gain(estimatedGain);
+                  auto configuredWeight = numeric::Weight(member);
+                  const auto share = configuredWeight.has_value() &&
+                                             *configuredWeight > numeric::Zero()
+                                         ? *configuredWeight
+                                         : numeric::One();
+                  auto shareRatio = share.Divide(totalWeight);
+                  auto correction = errorKw.has_value() && shareRatio.has_value()
+                                        ? errorKw->Multiply(*shareRatio)
+                                        : std::expected<Decimal, numeric::DecimalError>(
+                                              std::unexpected(
+                                                  errorKw.has_value()
+                                                      ? shareRatio.error()
+                                                      : errorKw.error()));
+                  Decimal currentMeasured;
+                  if (static_cast<size_t>(i) < group.memberMeasRaw.size()) {
+                    auto measured = engineeringValue(
+                        group.config.members(i).p_meas(),
+                        group.memberMeasRaw[static_cast<size_t>(i)]);
+                    if (measured.has_value()) {
+                      currentMeasured = *measured;
                     }
                   }
-                  if (group.tuningStatus.direction() == AGCProto::TUNING_DIRECTION_UP) {
-                    profile->set_up_bias_kw(std::max(0.0, profile->up_bias_kw() + correction));
-                  } else {
-                    profile->set_down_bias_kw(std::max(0.0, profile->down_bias_kw() - correction));
+                  const auto initialMeasured =
+                      static_cast<size_t>(i) < group.tuningPhaseInitialMeasKw.size()
+                          ? group.tuningPhaseInitialMeasKw[static_cast<size_t>(i)]
+                          : currentMeasured;
+                  auto targetDelta = currentTarget.has_value()
+                                         ? currentTarget->Subtract(group.tuningPreviousTargetKw)
+                                         : std::expected<Decimal, numeric::DecimalError>(
+                                               std::unexpected(currentTarget.error()));
+                  auto measuredDelta = currentMeasured.Subtract(initialMeasured);
+                  auto absoluteTargetDelta = targetDelta.has_value()
+                                                 ? numeric::Absolute(*targetDelta)
+                                                 : std::expected<Decimal, numeric::DecimalError>(
+                                                       std::unexpected(targetDelta.error()));
+                  auto absoluteMeasuredDelta = measuredDelta.has_value()
+                                                   ? numeric::Absolute(*measuredDelta)
+                                                   : std::expected<Decimal, numeric::DecimalError>(
+                                                         std::unexpected(measuredDelta.error()));
+                  auto targetThreshold = Decimal::Parse("0.000001");
+                  auto measuredThreshold = Decimal::Parse("0.001");
+                  if (absoluteTargetDelta.has_value() && absoluteMeasuredDelta.has_value() &&
+                      targetThreshold.has_value() && measuredThreshold.has_value() &&
+                      *absoluteTargetDelta > *targetThreshold &&
+                      *absoluteMeasuredDelta > *measuredThreshold && shareRatio.has_value()) {
+                    auto expectedMemberDelta = targetDelta->Multiply(*shareRatio);
+                    auto gain = expectedMemberDelta.has_value()
+                                    ? expectedMemberDelta->Divide(*measuredDelta)
+                                    : std::expected<Decimal, numeric::DecimalError>(
+                                          std::unexpected(expectedMemberDelta.error()));
+                    auto absoluteGain = gain.has_value()
+                                            ? numeric::Absolute(*gain)
+                                            : std::expected<Decimal, numeric::DecimalError>(
+                                                  std::unexpected(gain.error()));
+                    auto minimumGain = Decimal::Parse("0.05");
+                    auto maximumGain = Decimal::FromInt64(10);
+                    if (absoluteGain.has_value() && minimumGain.has_value() &&
+                        maximumGain.has_value()) {
+                      auto estimatedGain = mskdsp::numeric::Clamp(
+                          *absoluteGain, *minimumGain, *maximumGain);
+                      if (estimatedGain.has_value()) {
+                        if (group.tuningStatus.direction() == AGCProto::TUNING_DIRECTION_UP) {
+                          profile->set_up_p_gain_decimal(estimatedGain->ToFixedString());
+                          profile->set_up_p_gain(numeric::ToLegacyDouble(*estimatedGain));
+                        } else {
+                          profile->set_down_p_gain_decimal(estimatedGain->ToFixedString());
+                          profile->set_down_p_gain(numeric::ToLegacyDouble(*estimatedGain));
+                        }
+                      }
+                    }
+                  }
+                  if (correction.has_value()) {
+                    const bool upward = group.tuningStatus.direction() == AGCProto::TUNING_DIRECTION_UP;
+                    auto currentBias = upward ? numeric::UpBias(*profile)
+                                              : numeric::DownBias(*profile);
+                    auto nextBias = currentBias.has_value()
+                                        ? (upward ? currentBias->Add(*correction)
+                                                  : currentBias->Subtract(*correction))
+                                        : std::expected<Decimal, numeric::DecimalError>(
+                                              std::unexpected(currentBias.error()));
+                    if (nextBias.has_value() && *nextBias < numeric::Zero()) {
+                      nextBias = numeric::Zero();
+                    }
+                    if (nextBias.has_value()) {
+                      if (upward) {
+                        profile->set_up_bias_kw_decimal(nextBias->ToFixedString());
+                        profile->set_up_bias_kw(numeric::ToLegacyDouble(*nextBias));
+                      } else {
+                        profile->set_down_bias_kw_decimal(nextBias->ToFixedString());
+                        profile->set_down_bias_kw(numeric::ToLegacyDouble(*nextBias));
+                      }
+                    }
                   }
                 }
                 const bool enough = group.tuningStatus.completed_up_tests() >= group.tuningConfig.min_up_tests() &&
@@ -2115,14 +2527,20 @@ grpc::Status GroupManager::StartTuning(
                   ++group.controlRevision;
                   finish = true;
                 } else {
-                  const auto previousTargetKw = group.tuningStatus.current_target_kw();
+                  const auto previousTargetKw = numeric::Configured(
+                      group.tuningStatus.current_target_kw_decimal(),
+                      group.tuningStatus.current_target_kw()).value_or(Decimal{});
                   const auto nextDirection = group.tuningStatus.direction() == AGCProto::TUNING_DIRECTION_UP
                                                   ? AGCProto::TUNING_DIRECTION_DOWN
                                                   : AGCProto::TUNING_DIRECTION_UP;
                   group.tuningStatus.set_direction(nextDirection);
-                  group.tuningStatus.set_current_target_kw(nextDirection == AGCProto::TUNING_DIRECTION_UP
-                                                                ? group.tuningConfig.target_upper_kw()
-                                                                : group.tuningConfig.target_lower_kw());
+                  const auto nextTarget = nextDirection == AGCProto::TUNING_DIRECTION_UP
+                                              ? numeric::TuningUpper(group.tuningConfig)
+                                              : numeric::TuningLower(group.tuningConfig);
+                  if (nextTarget.has_value()) {
+                    group.tuningStatus.set_current_target_kw_decimal(nextTarget->ToFixedString());
+                    group.tuningStatus.set_current_target_kw(numeric::ToLegacyDouble(*nextTarget));
+                  }
                   ++group.controlRevision;
                   group.tuningPhaseStartedAt = now;
                   group.tuningPreviousTargetKw = previousTargetKw;
@@ -2137,14 +2555,20 @@ grpc::Status GroupManager::StartTuning(
               group.tuningStatus.set_stable_elapsed_seconds(0.0);
             }
             if (!finish && elapsedSeconds > static_cast<double>(group.tuningConfig.attempt_max_time_minutes()) * 60.0) {
-              const auto previousTargetKw = group.tuningStatus.current_target_kw();
+              const auto previousTargetKw = numeric::Configured(
+                  group.tuningStatus.current_target_kw_decimal(),
+                  group.tuningStatus.current_target_kw()).value_or(Decimal{});
               const auto nextDirection = group.tuningStatus.direction() == AGCProto::TUNING_DIRECTION_UP
                                               ? AGCProto::TUNING_DIRECTION_DOWN
                                               : AGCProto::TUNING_DIRECTION_UP;
               group.tuningStatus.set_direction(nextDirection);
-              group.tuningStatus.set_current_target_kw(nextDirection == AGCProto::TUNING_DIRECTION_UP
-                                                            ? group.tuningConfig.target_upper_kw()
-                                                            : group.tuningConfig.target_lower_kw());
+              const auto nextTarget = nextDirection == AGCProto::TUNING_DIRECTION_UP
+                                          ? numeric::TuningUpper(group.tuningConfig)
+                                          : numeric::TuningLower(group.tuningConfig);
+              if (nextTarget.has_value()) {
+                group.tuningStatus.set_current_target_kw_decimal(nextTarget->ToFixedString());
+                group.tuningStatus.set_current_target_kw(numeric::ToLegacyDouble(*nextTarget));
+              }
               ++group.controlRevision;
               group.tuningPhaseStartedAt = now;
               group.tuningInRange = false;
@@ -2191,7 +2615,7 @@ grpc::Status GroupManager::StartTuning(
   lock.unlock();
   primeControlInputs(groupName);
   LOG_INFO("AGC 已创建自动调试任务: group_name={}, 目标范围=[{}, {}]kW, 总时间={}min, 最低上调/下调={}/{}",
-           request.group_name(), request.config().target_lower_kw(), request.config().target_upper_kw(),
+           request.group_name(), targetLower->ToFixedString(), targetUpper->ToFixedString(),
            request.config().total_time_minutes(), request.config().min_up_tests(), request.config().min_down_tests());
   return grpc::Status::OK;
 }

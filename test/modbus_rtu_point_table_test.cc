@@ -239,8 +239,8 @@ TEST(ModbusRtuPointTableTest, UpsertMergeUpdatesExistingFields) {
 
   auto updated = table.FindByTag("A");
   ASSERT_TRUE(updated.has_value());
-  EXPECT_DOUBLE_EQ(updated->scale, 2.5);
-  EXPECT_DOUBLE_EQ(updated->offset, -1.0);
+  EXPECT_EQ(updated->scale.ToFixedString(), "2.50000000000000000000");
+  EXPECT_EQ(updated->offset.ToFixedString(), "-1.00000000000000000000");
 
   auto tags = table.Tags();
   ASSERT_EQ(tags.size(), 2u);
@@ -264,19 +264,96 @@ TEST(ModbusRtuPointTableTest, NormalizesScaleAndKeepsDeadband) {
 
   auto updated = table.FindByTag("A");
   ASSERT_TRUE(updated.has_value());
-  EXPECT_DOUBLE_EQ(updated->scale, 1.0);
-  EXPECT_DOUBLE_EQ(updated->offset, 1.5);
-  EXPECT_DOUBLE_EQ(updated->deadband, 2.0);
+  EXPECT_EQ(updated->scale.ToFixedString(), "1.00000000000000000000");
+  EXPECT_EQ(updated->offset.ToFixedString(), "1.50000000000000000000");
+  EXPECT_EQ(updated->deadband.ToFixedString(), "2.00000000000000000000");
 
   ModbusRTUProto::PointTable out;
   table.ToProto("conn-1", &out);
   ASSERT_EQ(out.points_size(), 1);
   EXPECT_DOUBLE_EQ(out.points(0).scale(), 1.0);
   EXPECT_DOUBLE_EQ(out.points(0).deadband(), 2.0);
+  EXPECT_EQ(out.points(0).scale_decimal(), "1.00000000000000000000");
+  EXPECT_EQ(out.points(0).offset_decimal(), "1.50000000000000000000");
+  EXPECT_EQ(out.points(0).deadband_decimal(), "2.00000000000000000000");
 }
 
-// 验证：死区为负时拒绝。
-TEST(ModbusRtuPointTableTest, RejectsNegativeDeadband) {
+// 验证：十进制文本配置优先于旧 double 字段，并按 20 位小数规范回写。
+TEST(ModbusRtuPointTableTest, DecimalEngineeringFieldsTakePrecedenceAndRoundTrip) {
+  PointTable table;
+
+  ModbusRTUProto::UpsertPointTableRequest req;
+  auto point = MakePoint("decimal-point",
+                         ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS,
+                         10,
+                         ModbusRTUProto::DATA_TYPE_UINT16);
+  point.set_scale(9.0);
+  point.set_offset(9.0);
+  point.set_deadband(9.0);
+  point.set_scale_decimal("0.100000000000000000005");
+  point.set_offset_decimal("-2.5e-1");
+  point.set_deadband_decimal("0.2");
+  *req.add_points() = point;
+  req.set_replace(true);
+
+  ASSERT_TRUE(table.Upsert(req.points(), req.replace()).ok());
+  const auto stored = table.FindByTag("decimal-point");
+  ASSERT_TRUE(stored.has_value());
+  EXPECT_EQ(stored->scale.ToFixedString(), "0.10000000000000000001");
+  EXPECT_EQ(stored->offset.ToFixedString(), "-0.25000000000000000000");
+  EXPECT_EQ(stored->deadband.ToFixedString(), "0.20000000000000000000");
+
+  ModbusRTUProto::PointTable out;
+  table.ToProto("conn-decimal", &out);
+  ASSERT_EQ(out.points_size(), 1);
+  EXPECT_EQ(out.points(0).scale_decimal(), "0.10000000000000000001");
+  EXPECT_EQ(out.points(0).offset_decimal(), "-0.25000000000000000000");
+  EXPECT_EQ(out.points(0).deadband_decimal(), "0.20000000000000000000");
+}
+
+// 验证：十进制文本字段非空但格式非法时不回退到旧 double 配置。
+TEST(ModbusRtuPointTableTest, RejectsInvalidDecimalEngineeringField) {
+  PointTable table;
+
+  ModbusRTUProto::UpsertPointTableRequest req;
+  auto point = MakePoint("invalid-decimal",
+                         ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS,
+                         10,
+                         ModbusRTUProto::DATA_TYPE_UINT16);
+  point.set_scale(1.0);
+  point.set_scale_decimal("1.2.3");
+  *req.add_points() = point;
+  req.set_replace(true);
+
+  const auto status = table.Upsert(req.points(), req.replace());
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  EXPECT_NE(status.error_message().find("scale_decimal"), std::string::npos);
+}
+
+// 验证：精确十进制死区为负数时允许配置，并按不过滤语义规范回写。
+TEST(ModbusRtuPointTableTest, AcceptsNegativeDecimalDeadbandAsDisabled) {
+  PointTable table;
+
+  ModbusRTUProto::UpsertPointTableRequest req;
+  auto point = MakePoint("negative-deadband",
+                         ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS,
+                         10,
+                         ModbusRTUProto::DATA_TYPE_UINT16);
+  point.set_deadband_decimal("-0.00000000000000000001");
+  *req.add_points() = point;
+  req.set_replace(true);
+
+  const auto status = table.Upsert(req.points(), req.replace());
+  ASSERT_TRUE(status.ok()) << status.error_message();
+  ModbusRTUProto::PointTable out;
+  table.ToProto("conn-negative-decimal-deadband", &out);
+  ASSERT_EQ(out.points_size(), 1);
+  EXPECT_EQ(out.points(0).deadband_decimal(),
+            "-0.00000000000000000001");
+}
+
+// 验证：旧 double 负死区继续加载，并按不过滤语义转换为 Decimal20。
+TEST(ModbusRtuPointTableTest, AcceptsNegativeLegacyDeadbandAsDisabled) {
   PointTable table;
 
   ModbusRTUProto::UpsertPointTableRequest req;
@@ -285,8 +362,12 @@ TEST(ModbusRtuPointTableTest, RejectsNegativeDeadband) {
   *req.add_points() = p;
   req.set_replace(true);
 
-  auto st = table.Upsert(req.points(), req.replace());
-  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  const auto status = table.Upsert(req.points(), req.replace());
+  ASSERT_TRUE(status.ok()) << status.error_message();
+  const auto stored = table.FindByTag("A");
+  ASSERT_TRUE(stored.has_value());
+  EXPECT_EQ(stored->deadband.ToFixedString(),
+            "-0.10000000000000000000");
 }
 
 // 验证：replace=true 会清理已有点表，只保留新的点集合。

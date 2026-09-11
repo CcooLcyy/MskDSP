@@ -84,7 +84,8 @@ private:
     std::mutex requestMutex;
     std::mutex pendingMutex;
     std::unordered_map<std::string, std::shared_ptr<PendingResponse>> pending;
-    std::unordered_map<std::string, double> lastReportedByTag;
+    std::unordered_map<std::string, mskdsp::numeric::Decimal20>
+        lastReportedByTag;
   };
 
   struct Frame {
@@ -160,10 +161,16 @@ private:
 
   grpc::Status parseResponsePayload(const std::string &payloadBase64, Frame *outFrame, std::string *error);
 
-  static bool pointValueToDouble(const DataCenterProto::PointValue &value, double *out);
+  static bool pointValueToDecimal(
+      const DataCenterProto::PointValue &value,
+      mskdsp::numeric::Decimal20 *out);
   static bool pointValueToBool(const DataCenterProto::PointValue &value, bool *out);
   static bool pointValueToString(const DataCenterProto::PointValue &value, std::string *out);
-  static bool reverseScale(double value, double scale, double offset, double *out);
+  static std::expected<mskdsp::numeric::Decimal20,
+                       mskdsp::numeric::DecimalError>
+  reverseScale(const mskdsp::numeric::Decimal20 &value,
+               const mskdsp::numeric::Decimal20 &scale,
+               const mskdsp::numeric::Decimal20 &offset);
 
   std::string nextToken();
   void shutdownForDestroy() noexcept;

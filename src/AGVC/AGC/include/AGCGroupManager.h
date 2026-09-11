@@ -23,6 +23,7 @@
 #include "AGCGroupStore.h"
 #include "AgvcDataCenterClient.h"
 #include "AgvcStrategy.h"
+#include "mskdsp/Decimal20.hpp"
 
 namespace AGC {
 
@@ -50,6 +51,8 @@ public:
   void TryAutoStartReadyGroups(std::string_view trigger);
 
 private:
+  using Decimal = mskdsp::numeric::Decimal20;
+
   struct ControlTrigger {
     std::atomic<bool> pending{false};
     std::counting_semaphore<1024> signal{0};
@@ -79,37 +82,43 @@ private:
     std::vector<std::string> subscribeTags;
 
     bool hasCmdRaw{false};
-    double cmdRaw{0.0};
-    std::unordered_map<std::string, double> baseRawByTag;
+    Decimal cmdRaw;
+    uint64_t commandRevision{0};
+    uint64_t directResolvedCommandRevision{0};
+    bool hasDirectResolvedDesiredTotalKw{false};
+    Decimal directResolvedDesiredTotalKw;
+    std::unordered_map<std::string, Decimal> baseRawByTag;
     std::vector<bool> hasMemberMeasRaw;
-    std::vector<double> memberMeasRaw;
+    std::vector<Decimal> memberMeasRaw;
 
     bool hasLastDesiredTotalKw{false};
-    double lastDesiredTotalKw{0.0};
+    Decimal lastDesiredTotalKw;
 
     std::vector<bool> hasLastMemberTargetKw;
-    std::vector<double> lastMemberTargetKw;
+    std::vector<Decimal> lastMemberTargetKw;
     std::vector<bool> hasLastPublishedMemberSetpoint;
-    std::vector<double> lastPublishedMemberSetpointKw;
+    std::vector<Decimal> lastPublishedMemberSetpointKw;
     std::vector<std::chrono::steady_clock::time_point> lastMemberSetpointPublishedAt;
+    bool hasLastCommandPublishedAt{false};
+    std::chrono::steady_clock::time_point lastCommandPublishedAt{};
     std::vector<bool> hasLastControlMemberMeasKw;
-    std::vector<double> lastControlMemberMeasKw;
+    std::vector<Decimal> lastControlMemberMeasKw;
 
     AGCProto::GroupControlProfile controlProfile;
-    std::vector<double> integralMemoryKw;
+    std::vector<Decimal> integralMemoryKw;
     std::chrono::steady_clock::time_point lastControlTickAt{};
     AGCProto::TuningConfig tuningConfig;
     AGCProto::TuningStatus tuningStatus;
     std::chrono::steady_clock::time_point tuningPhaseStartedAt{};
     std::chrono::steady_clock::time_point tuningTaskStartedAt{};
     std::chrono::steady_clock::time_point tuningEnteredRangeAt{};
-    std::vector<double> tuningPhaseInitialMeasKw;
-    double tuningPreviousTargetKw{0.0};
+    std::vector<Decimal> tuningPhaseInitialMeasKw;
+    Decimal tuningPreviousTargetKw;
     bool tuningInitialCaptured{false};
     bool tuningInRange{false};
 
     bool hasLastUnallocatedKw{false};
-    double lastUnallocatedKw{0.0};
+    Decimal lastUnallocatedKw;
   };
 
   grpc::Status validateGroupName(const std::string &groupName) const;
@@ -135,15 +144,16 @@ private:
                               uint32_t connId,
                               const AGCProto::GroupConfig &config,
                               const std::vector<bool> &memberPublish,
-                              const std::vector<double> &memberPublishKw,
+                              const std::vector<Decimal> &memberPublishKw,
                               DataCenterProto::Quality quality,
                               uint64_t expectedRevision,
-                              std::string_view trigger);
+                              std::string_view trigger,
+                              bool *publishedAny = nullptr);
 
   bool handleUpdateLocked(GroupRuntime *g, const DataCenterProto::PointUpdate &update);
   void controlTick(const std::string &groupName);
 
-  static bool pointValueToDouble(const DataCenterProto::PointValue &v, double *out);
+  static bool pointValueToDecimal(const DataCenterProto::PointValue &v, Decimal *out);
 
   static std::unordered_set<std::string> collectAllTags(const AGCProto::GroupConfig &config);
   static void rebuildTagCache(GroupRuntime *g);

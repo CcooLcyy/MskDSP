@@ -24,6 +24,8 @@ ConfigPusherProto::CalcConfig MakeCalcConfig(bool start) {
   upsert->set_create_only(false);
   auto *group = upsert->mutable_config();
   group->set_group_name("calc-1");
+  group->set_trigger_mode(CalcProto::TRIGGER_MODE_PERIODIC);
+  group->set_period_ms(1000);
   auto *item = group->add_items();
   item->set_item_name("sum");
   item->set_operator_kind(CalcProto::OPERATOR_KIND_ADD);
@@ -60,6 +62,8 @@ TEST(ConfigPusherApplyCalcTest, UpsertGroupSuccessWhenStartFlagIsTrue) {
                           const CalcProto::UpsertGroupRequest &req,
                           CalcProto::CalcGroupInfo *resp) {
         EXPECT_EQ(req.config().group_name(), "calc-1");
+        EXPECT_EQ(req.config().trigger_mode(), CalcProto::TRIGGER_MODE_PERIODIC);
+        EXPECT_EQ(req.config().period_ms(), 1000u);
         EXPECT_EQ(req.config().items_size(), 1);
         EXPECT_EQ(req.config().items(0).operator_kind(), CalcProto::OPERATOR_KIND_ADD);
         EXPECT_EQ(req.config().items(0).right_operand().source_kind(), CalcProto::OPERAND_SOURCE_CONSTANT);
