@@ -123,7 +123,8 @@ bool DeviceInfo::RegisterDataCenter() {
     return false;
   }
   connectionId_ = response.conn_id();
-  LOG_INFO("DeviceInfo DataCenter 连接已注册: conn_id={}", connectionId_);
+  LOG_INFO("DeviceInfo DataCenter 连接已注册: conn_id={}",
+           connectionId_.load(std::memory_order_relaxed));
   return true;
 }
 
