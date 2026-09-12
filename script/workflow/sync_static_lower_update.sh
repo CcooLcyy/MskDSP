@@ -118,6 +118,11 @@ require_cmd ssh
 require_cmd scp
 require_cmd curl
 require_cmd python3
+require_cmd awk
+require_cmd stat
+require_cmd date
+require_cmd basename
+require_cmd timeout
 
 TMP_DIR="$(mktemp -d)"
 KEY_PATH="${TMP_DIR}/mskdsp-lower-static-update-key"
@@ -145,11 +150,107 @@ SCP_OPTIONS=(
   -o IdentitiesOnly=yes
 )
 
+format_bytes() {
+  awk -v bytes="$1" '
+    BEGIN {
+      split("B KiB MiB GiB TiB", units, " ")
+      value = bytes + 0
+      unit = 1
+      while (value >= 1024 && unit < 5) {
+        value /= 1024
+        unit++
+      }
+      if (unit == 1) {
+        printf "%.0f %s", value, units[unit]
+      } else {
+        printf "%.2f %s", value, units[unit]
+      }
+    }
+  '
+}
+
+format_duration() {
+  local seconds="$1"
+  if ((seconds < 60)); then
+    printf '%ss' "${seconds}"
+  elif ((seconds < 3600)); then
+    printf '%dm %02ds' "$((seconds / 60))" "$((seconds % 60))"
+  else
+    printf '%dh %02dm %02ds' "$((seconds / 3600))" "$(((seconds % 3600) / 60))" "$((seconds % 60))"
+  fi
+}
+
+monitor_upload_progress() {
+  local scp_pid="$1"
+  local remote_package_path="$2"
+  local total_bytes="$3"
+  local started_at="$4"
+  local remote_package_quoted
+  local remote_stat_command
+
+  printf -v remote_package_quoted '%q' "${remote_package_path}"
+  remote_stat_command="stat -c %s -- ${remote_package_quoted} 2>/dev/null || true"
+
+  while kill -0 "${scp_pid}" 2>/dev/null; do
+    sleep 10
+    if ! kill -0 "${scp_pid}" 2>/dev/null; then
+      break
+    fi
+
+    local uploaded_bytes
+    uploaded_bytes="$(timeout 8s ssh "${SSH_OPTIONS[@]}" "${TARGET}" "${remote_stat_command}" 2>/dev/null || true)"
+    uploaded_bytes="${uploaded_bytes//$'\n'/}"
+    if [[ ! "${uploaded_bytes}" =~ ^[0-9]+$ ]]; then
+      echo "上传进度: 远端文件尚未可读，已等待 $(format_duration "$(( $(date +%s) - started_at ))")"
+      continue
+    fi
+
+    local now elapsed speed_bytes remaining_bytes eta percent
+    now="$(date +%s)"
+    elapsed=$((now - started_at))
+    ((elapsed > 0)) || elapsed=1
+    ((uploaded_bytes <= total_bytes)) || uploaded_bytes="${total_bytes}"
+    speed_bytes=$((uploaded_bytes / elapsed))
+    remaining_bytes=$((total_bytes - uploaded_bytes))
+    if ((speed_bytes > 0)); then
+      eta=$(( (remaining_bytes + speed_bytes - 1) / speed_bytes ))
+    else
+      eta=0
+    fi
+    percent="$(awk -v uploaded="${uploaded_bytes}" -v total="${total_bytes}" 'BEGIN {
+      if (total > 0) {
+        printf "%.1f", uploaded * 100 / total
+      } else {
+        printf "0.0"
+      }
+    }')"
+    echo "上传进度: $(format_bytes "${uploaded_bytes}") / $(format_bytes "${total_bytes}") (${percent}%)，速度 $(format_bytes "${speed_bytes}")/s，预计剩余 $(format_duration "${eta}")"
+  done
+}
+
 echo "准备远端下位机静态更新目录: ${REMOTE_ASSET_DIR}"
 ssh "${SSH_OPTIONS[@]}" "${TARGET}" "mkdir -p '${REMOTE_ASSET_DIR}' '${REMOTE_CHANNEL_DIR}'"
 
-echo "上传下位机安装包和校验文件"
-scp "${SCP_OPTIONS[@]}" "${PACKAGE_FILE}" "${CHECKSUM_FILE}" "${TARGET}:${REMOTE_ASSET_DIR}/"
+PACKAGE_SIZE_BYTES="$(stat -c '%s' -- "${PACKAGE_FILE}")"
+PACKAGE_BASENAME="$(basename -- "${PACKAGE_FILE}")"
+REMOTE_PACKAGE_PATH="${REMOTE_ASSET_DIR}/${PACKAGE_BASENAME}"
+UPLOAD_STARTED_AT="$(date +%s)"
+echo "上传下位机安装包和校验文件（安装包大小: $(format_bytes "${PACKAGE_SIZE_BYTES}")，每 10 秒显示一次进度）"
+scp "${SCP_OPTIONS[@]}" "${PACKAGE_FILE}" "${CHECKSUM_FILE}" "${TARGET}:${REMOTE_ASSET_DIR}/" &
+SCP_PID=$!
+monitor_upload_progress "${SCP_PID}" "${REMOTE_PACKAGE_PATH}" "${PACKAGE_SIZE_BYTES}" "${UPLOAD_STARTED_AT}" &
+PROGRESS_PID=$!
+if wait "${SCP_PID}"; then
+  SCP_STATUS=0
+else
+  SCP_STATUS=$?
+fi
+kill "${PROGRESS_PID}" 2>/dev/null || true
+wait "${PROGRESS_PID}" 2>/dev/null || true
+if ((SCP_STATUS != 0)); then
+  die "安装包和校验文件上传失败，scp 退出码: ${SCP_STATUS}"
+fi
+echo "安装包和校验文件上传完成"
 
 echo "最后上传 latest.json"
 scp "${SCP_OPTIONS[@]}" "${MANIFEST_FILE}" "${TARGET}:${REMOTE_CHANNEL_DIR}/latest.json"
