@@ -253,14 +253,40 @@ file(GET_RUNTIME_DEPENDENCIES
   POST_INCLUDE_REGEXES "${_mskdsp_allow_regex}"
   POST_EXCLUDE_REGEXES ".*"
 )
-if(_mskdsp_unresolved)
-  message(STATUS "以下依赖未解析，将被忽略: ${_mskdsp_unresolved}")
+# c-ares 和 SQLite 在当前交叉构建中会被错误列为未解析；仅允许这两个
+# 已确认的 vcpkg 依赖在运行时目录中回退查找，其他缺库必须立即失败。
+set(_mskdsp_fallback_dependencies "libcares.so.2" "libsqlite3.so")
+set(_mskdsp_unresolved_remaining "")
+foreach(_mskdsp_unresolved_dep IN LISTS _mskdsp_unresolved)
+  if(_mskdsp_unresolved_dep IN_LIST _mskdsp_fallback_dependencies)
+    unset(_mskdsp_fallback_path)
+    find_file(_mskdsp_fallback_path
+      NAMES "${_mskdsp_unresolved_dep}"
+      PATHS ${_mskdsp_search_dirs}
+      NO_DEFAULT_PATH
+      NO_CACHE
+    )
+    if(_mskdsp_fallback_path)
+      message(STATUS "通过运行时目录补充依赖库: ${_mskdsp_fallback_path}")
+      list(APPEND _mskdsp_deps "${_mskdsp_fallback_path}")
+    else()
+      list(APPEND _mskdsp_unresolved_remaining "${_mskdsp_unresolved_dep}")
+    endif()
+  else()
+    list(APPEND _mskdsp_unresolved_remaining "${_mskdsp_unresolved_dep}")
+  endif()
+endforeach()
+if(_mskdsp_unresolved_remaining)
+  message(FATAL_ERROR
+    "以下运行时依赖未能收集到 package/lib，拒绝生成不可运行的交付包: "
+    "${_mskdsp_unresolved_remaining}")
 endif()
+
 list(REMOVE_DUPLICATES _mskdsp_deps)
 foreach(_dep IN LISTS _mskdsp_deps)
   message(STATUS "复制依赖库: ${_dep}")
-  execute_process(COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                  "${_dep}" "${CMAKE_INSTALL_PREFIX}/lib")
+  file(COPY "${_dep}" DESTINATION "${CMAKE_INSTALL_PREFIX}/lib"
+       FOLLOW_SYMLINK_CHAIN)
 endforeach()
 message(STATUS "开始收集 C++ 运行时库到: ${CMAKE_INSTALL_PREFIX}/lib")
 set(_mskdsp_runtime_libs "libstdc++.so.6" "libgcc_s.so.1" "libatomic.so.1")
