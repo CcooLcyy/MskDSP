@@ -253,29 +253,36 @@ file(GET_RUNTIME_DEPENDENCIES
   POST_INCLUDE_REGEXES "${_mskdsp_allow_regex}"
   POST_EXCLUDE_REGEXES ".*"
 )
-# c-ares 和 SQLite 在当前交叉构建中会被错误列为未解析；仅允许这两个
-# 已确认的 vcpkg 依赖在运行时目录中回退查找，其他缺库必须立即失败。
-set(_mskdsp_fallback_dependencies "libcares.so.2" "libsqlite3.so")
-set(_mskdsp_unresolved_remaining "")
-foreach(_mskdsp_unresolved_dep IN LISTS _mskdsp_unresolved)
-  if(_mskdsp_unresolved_dep IN_LIST _mskdsp_fallback_dependencies)
-    unset(_mskdsp_fallback_path)
-    find_file(_mskdsp_fallback_path
-      NAMES "${_mskdsp_unresolved_dep}"
-      PATHS ${_mskdsp_search_dirs}
-      NO_DEFAULT_PATH
-      NO_CACHE
-    )
-    if(_mskdsp_fallback_path)
-      message(STATUS "通过运行时目录补充依赖库: ${_mskdsp_fallback_path}")
-      list(APPEND _mskdsp_deps "${_mskdsp_fallback_path}")
-    else()
-      list(APPEND _mskdsp_unresolved_remaining "${_mskdsp_unresolved_dep}")
-    endif()
+# c-ares 和 SQLite 可能先被主机系统库解析，再被 POST_EXCLUDE_REGEXES
+# 排除，因而不会出现在 _mskdsp_unresolved 中。必须始终从目标架构的
+# vcpkg 运行时目录显式收集这两个依赖，不能只依赖未解析回退逻辑。
+set(_mskdsp_required_vcpkg_dependencies "libcares.so.2" "libsqlite3.so")
+set(_mskdsp_required_vcpkg_resolved "")
+set(_mskdsp_required_vcpkg_missing "")
+foreach(_mskdsp_required_dep IN LISTS _mskdsp_required_vcpkg_dependencies)
+  unset(_mskdsp_required_path)
+  find_file(_mskdsp_required_path
+    NAMES "${_mskdsp_required_dep}"
+    PATHS ${_mskdsp_search_dirs}
+    NO_DEFAULT_PATH
+    NO_CACHE
+  )
+  if(_mskdsp_required_path)
+    message(STATUS "显式收集目标架构依赖库: ${_mskdsp_required_path}")
+    list(APPEND _mskdsp_deps "${_mskdsp_required_path}")
+    list(APPEND _mskdsp_required_vcpkg_resolved "${_mskdsp_required_dep}")
   else()
+    list(APPEND _mskdsp_required_vcpkg_missing "${_mskdsp_required_dep}")
+  endif()
+endforeach()
+
+set(_mskdsp_unresolved_remaining ${_mskdsp_required_vcpkg_missing})
+foreach(_mskdsp_unresolved_dep IN LISTS _mskdsp_unresolved)
+  if(NOT _mskdsp_unresolved_dep IN_LIST _mskdsp_required_vcpkg_resolved)
     list(APPEND _mskdsp_unresolved_remaining "${_mskdsp_unresolved_dep}")
   endif()
 endforeach()
+list(REMOVE_DUPLICATES _mskdsp_unresolved_remaining)
 if(_mskdsp_unresolved_remaining)
   message(FATAL_ERROR
     "以下运行时依赖未能收集到 package/lib，拒绝生成不可运行的交付包: "
