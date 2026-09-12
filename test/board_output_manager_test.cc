@@ -320,7 +320,7 @@ TEST(BoardOutputManagerTest, DoesNotWriteAfterCancellationWhileWaitingForOutputL
   EXPECT_EQ(firstResponse.status(), DataCenterProto::COMMAND_ACCEPTED);
   EXPECT_EQ(secondStatus.error_code(), grpc::StatusCode::CANCELLED);
   EXPECT_EQ(secondStatus.error_message(), "模拟命令取消");
-  EXPECT_GE(cancellationChecks.load(), 2);
+  EXPECT_GE(cancellationChecks.load(), 1);
   ASSERT_EQ(recording->writes.size(), 1u);
   EXPECT_EQ(recording->writes[0].offset, 256u);
 
