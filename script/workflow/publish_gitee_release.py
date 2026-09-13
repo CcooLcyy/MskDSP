@@ -26,6 +26,8 @@ from urllib.request import Request, urlopen
 
 API_BASE = "https://gitee.com/api/v5"
 CHUNK_SIZE = 1024 * 1024
+SSH_NOTIFY_RETRIES = 3
+SSH_NOTIFY_DELAYS = (0, 5, 15)
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -170,6 +172,7 @@ def notify_server(args: argparse.Namespace) -> None:
         remote_command = " ".join(shlex.quote(part) for part in remote_parts)
         command = [
             "ssh",
+            "-4",
             "-i",
             str(key_path),
             "-p",
@@ -179,7 +182,7 @@ def notify_server(args: argparse.Namespace) -> None:
             "-o",
             "IdentitiesOnly=yes",
             "-o",
-            "ConnectTimeout=15",
+            "ConnectTimeout=10",
             "-o",
             "ServerAliveInterval=15",
             "-o",
@@ -188,7 +191,20 @@ def notify_server(args: argparse.Namespace) -> None:
             remote_command,
         ]
         print(f"Gitee Release 上传完成，通知服务器立即同步：{args.tag}", flush=True)
-        subprocess.run(command, check=True)
+        last_error: subprocess.CalledProcessError | None = None
+        for attempt in range(1, SSH_NOTIFY_RETRIES + 1):
+            delay = SSH_NOTIFY_DELAYS[attempt - 1]
+            if delay:
+                print(f"通知服务器连接失败，{delay}s 后重试（第 {attempt}/{SSH_NOTIFY_RETRIES} 次）", flush=True)
+                time.sleep(delay)
+            print(f"通知服务器：尝试 {attempt}/{SSH_NOTIFY_RETRIES}", flush=True)
+            try:
+                subprocess.run(command, check=True)
+                print(f"服务器同步通知成功：{args.tag}", flush=True)
+                return
+            except subprocess.CalledProcessError as exc:
+                last_error = exc
+        fail(f"SSH 通知服务器失败（退出码 {last_error.returncode if last_error else '未知'}），Gitee Release 已上传：{args.tag}")
     finally:
         key_path.unlink(missing_ok=True)
 
