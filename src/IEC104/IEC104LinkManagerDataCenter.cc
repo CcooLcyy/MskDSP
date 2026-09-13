@@ -932,9 +932,6 @@ grpc::Status LinkManager::handleTimeSyncCommand(const std::string& connName, int
     return grpc::Status::OK;
   }
 
-  uint32_t connId = 0;
-  std::string tag;
-  bool shouldSetSystemTime = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = linksByName_.find(connName);
@@ -942,47 +939,24 @@ grpc::Status LinkManager::handleTimeSyncCommand(const std::string& connName, int
       return makeNotFound(connName);
     }
     if (!isSlaveStation(it->second.config)) {
-      LOG_INFO("IEC104 非从站收到对时命令，忽略发布: conn_name={}", connName);
+      LOG_INFO("IEC104 非从站收到对时命令，忽略设置系统时间: conn_name={}", connName);
       return grpc::Status::OK;
     }
-    connId = it->second.connId;
-    tag = normalizeTimeSyncTag(it->second.config);
-    shouldSetSystemTime = it->second.config.set_system_time_on_sync();
   }
 
-  if (shouldSetSystemTime) {
-    auto status = systemTimeSetter_(tsMs);
-    if (!status.ok()) {
-      LOG_ERROR("IEC104 设置系统时间失败: conn_name={}, ts_ms={}, 原因={}",
-                connName, tsMs, status.error_message());
-      std::lock_guard<std::mutex> lock(mu_);
-      auto it = linksByName_.find(connName);
-      if (it != linksByName_.end()) {
-        it->second.lastError = status.error_message();
-      }
-      return status;
-    }
-    LOG_INFO("IEC104 已设置系统时间: conn_name={}, ts_ms={}", connName, tsMs);
-  }
-
-  if (tag.empty()) {
-    LOG_WARNING("IEC104 对时 tag 为空: conn_name={}", connName);
-    return grpc::Status::OK;
-  }
-
-  auto st = dataCenter_.PublishInt64(connId, tag, tsMs, DataCenterProto::QUALITY_GOOD, tsMs);
-  if (!st.ok()) {
-    LOG_WARNING("IEC104 发布对时事件失败: conn_name={}, tag={}, 错误={}", connName, tag, st.error_message());
+  auto status = systemTimeSetter_(tsMs);
+  if (!status.ok()) {
+    LOG_ERROR("IEC104 设置系统时间失败: conn_name={}, ts_ms={}, 原因={}",
+              connName, tsMs, status.error_message());
     std::lock_guard<std::mutex> lock(mu_);
     auto it = linksByName_.find(connName);
     if (it != linksByName_.end()) {
-      it->second.lastError = st.error_message();
+      it->second.lastError = status.error_message();
     }
-  } else {
-    LOG_INFO("IEC104 已发布对时事件: conn_name={}, tag={}, ts_ms={}", connName, tag, tsMs);
+    return status;
   }
-  // DataCenter 事件发布属于旁路通知，不应影响 IEC104 对时本身的协议确认。
-  // 只有系统时钟设置失败才返回 false，由传输层生成负确认。
+
+  LOG_INFO("IEC104 已设置系统时间: conn_name={}, ts_ms={}", connName, tsMs);
   return grpc::Status::OK;
 }
 

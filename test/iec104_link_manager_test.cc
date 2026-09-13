@@ -3,10 +3,12 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <boost/asio/io_context.hpp>
@@ -114,6 +116,10 @@ public:
 
   static grpc::Status HandleTimeSyncCommand(LinkManager& mgr, const std::string& connName, int64_t tsMs) {
     return mgr.handleTimeSyncCommand(connName, tsMs);
+  }
+
+  static void SetSystemTimeSetter(LinkManager& mgr, std::function<grpc::Status(int64_t)> setter) {
+    mgr.systemTimeSetter_ = std::move(setter);
   }
 
   static std::vector<PointValue> BuildInterrogationSnapshot(LinkManager& mgr, const std::string& connName) {
@@ -970,13 +976,18 @@ TEST(IEC104LinkManagerTest, HandleCommandValueIgnoredWhenMaster) {
   EXPECT_EQ(state.GetCommandCount(info.conn_id(), "F"), 0u);
 }
 
-// 验证：handleTimeSyncCommand 处理非法时间戳与正常发布。
-TEST(IEC104LinkManagerTest, HandleTimeSyncCommandPaths) {
+// 验证：handleTimeSyncCommand 忽略无效时间戳，并为默认从站设置系统时间且不发布事件。
+TEST(IEC104LinkManagerTest, HandleTimeSyncCommandIgnoresInvalidTimestampAndSetsSlaveSystemClock) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
   LinkManager mgr("IEC104");
   mgr.setDataCenterStub(stub);
+  int64_t requestedTsMs = 0;
+  IEC104LinkManagerTestPeer::SetSystemTimeSetter(mgr, [&requestedTsMs](int64_t tsMs) {
+    requestedTsMs = tsMs;
+    return grpc::Status::OK;
+  });
 
   auto req = MakeServerLinkReq("conn-ts", "0.0.0.0", AllocateFreeTcpPort());
   IEC104Proto::LinkInfo info;
@@ -984,9 +995,12 @@ TEST(IEC104LinkManagerTest, HandleTimeSyncCommandPaths) {
 
   auto st = IEC104LinkManagerTestPeer::HandleTimeSyncCommand(mgr, "conn-ts", 0);
   EXPECT_TRUE(st.ok());
+  EXPECT_EQ(requestedTsMs, 0);
 
   st = IEC104LinkManagerTestPeer::HandleTimeSyncCommand(mgr, "conn-ts", 1000);
   EXPECT_TRUE(st.ok());
+  EXPECT_EQ(requestedTsMs, 1000);
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "__time_sync__"), 0u);
 }
 
 // 验证：buildInterrogationSnapshot 能从 DataCenter 最新值生成快照。

@@ -453,20 +453,18 @@ TEST(IEC104LinkManagerHelperTest, HandleCommandValueReturnsRejectedWhenDataCente
   EXPECT_EQ(result.reason, "总量超过上限");
 }
 
-// 验证：handleTimeSyncCommand 在 tsMs<=0 时直接返回。
+// 验证：handleTimeSyncCommand 收到无效时间戳时不调用系统设时。
 TEST(IEC104LinkManagerHelperTest, HandleTimeSyncCommandIgnoresInvalidTs) {
-  LinkManager mgr("IEC104");
-  auto st = mgr.handleTimeSyncCommand("conn", 0);
-  EXPECT_TRUE(st.ok());
-}
-
-// 验证：handleTimeSyncCommand 在从站下发布对时事件。
-TEST(IEC104LinkManagerHelperTest, HandleTimeSyncCommandPublishesOnSlave) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
   LinkManager mgr("IEC104");
   mgr.setDataCenterStub(stub);
+  bool systemTimeSetterCalled = false;
+  mgr.systemTimeSetter_ = [&systemTimeSetterCalled](int64_t) {
+    systemTimeSetterCalled = true;
+    return grpc::Status::OK;
+  };
 
   LinkManager::LinkRuntime runtime;
   runtime.connId = 6;
@@ -474,32 +472,16 @@ TEST(IEC104LinkManagerHelperTest, HandleTimeSyncCommandPublishesOnSlave) {
   runtime.pointTable = MakePointTable();
   mgr.linksByName_.emplace("conn", std::move(runtime));
 
-  auto st = mgr.handleTimeSyncCommand("conn", 1000);
+  auto st = mgr.handleTimeSyncCommand("conn", 0);
   EXPECT_TRUE(st.ok());
+  EXPECT_FALSE(systemTimeSetterCalled);
+  EXPECT_EQ(state.GetPublishCount(6, "__time_sync__"), 0u);
 }
 
-// 验证：DataCenter 发布对时事件失败时仍保持协议业务成功，避免误发负确认。
-TEST(IEC104LinkManagerHelperTest, HandleTimeSyncCommandIgnoresPublishFailure) {
+// 验证：从站收到有效对时后无条件设置系统时间且不发布对时事件。
+TEST(IEC104LinkManagerHelperTest, HandleTimeSyncCommandSetsSystemClockWithoutPublishingEvent) {
   FakeDataCenterState state;
   state.FailPublishForTag("__time_sync__");
-  auto stub = MakeStub(&state);
-
-  LinkManager mgr("IEC104");
-  mgr.setDataCenterStub(stub);
-
-  LinkManager::LinkRuntime runtime;
-  runtime.connId = 7;
-  runtime.config = MakeClientConfig("conn", IEC104Proto::STATION_ROLE_SLAVE);
-  runtime.pointTable = MakePointTable();
-  mgr.linksByName_.emplace("conn", std::move(runtime));
-
-  auto st = mgr.handleTimeSyncCommand("conn", 1000);
-  EXPECT_TRUE(st.ok());
-}
-
-// 验证：开启从站直接设时后会调用系统设时适配器，并在成功后继续发布事件。
-TEST(IEC104LinkManagerHelperTest, HandleTimeSyncCommandSetsSystemClockWhenEnabled) {
-  FakeDataCenterState state;
   auto stub = MakeStub(&state);
 
   LinkManager mgr("IEC104");
@@ -513,37 +495,41 @@ TEST(IEC104LinkManagerHelperTest, HandleTimeSyncCommandSetsSystemClockWhenEnable
   LinkManager::LinkRuntime runtime;
   runtime.connId = 8;
   runtime.config = MakeClientConfig("conn", IEC104Proto::STATION_ROLE_SLAVE);
-  runtime.config.set_set_system_time_on_sync(true);
   runtime.pointTable = MakePointTable();
   mgr.linksByName_.emplace("conn", std::move(runtime));
 
   auto st = mgr.handleTimeSyncCommand("conn", 1710000000123);
   EXPECT_TRUE(st.ok());
   EXPECT_EQ(requestedTsMs, 1710000000123);
-  EXPECT_EQ(state.GetPublishCount(8, "__time_sync__"), 1u);
+  EXPECT_EQ(state.GetPublishCount(8, "__time_sync__"), 0u);
+  EXPECT_EQ(state.GetFailedPublishCount(8, "__time_sync__"), 0u);
 }
 
-// 验证：系统设时失败时对时业务失败，且不再发布成功事件。
+// 验证：系统设时失败时对时业务失败，且不发布任何对时事件。
 TEST(IEC104LinkManagerHelperTest, HandleTimeSyncCommandRejectsSystemClockFailure) {
   FakeDataCenterState state;
+  state.FailPublishForTag("__time_sync__");
   auto stub = MakeStub(&state);
 
   LinkManager mgr("IEC104");
   mgr.setDataCenterStub(stub);
-  mgr.systemTimeSetter_ = [](int64_t) {
+  int64_t requestedTsMs = 0;
+  mgr.systemTimeSetter_ = [&requestedTsMs](int64_t tsMs) {
+    requestedTsMs = tsMs;
     return grpc::Status(grpc::StatusCode::PERMISSION_DENIED, "测试设时权限不足");
   };
 
   LinkManager::LinkRuntime runtime;
   runtime.connId = 9;
   runtime.config = MakeClientConfig("conn", IEC104Proto::STATION_ROLE_SLAVE);
-  runtime.config.set_set_system_time_on_sync(true);
   runtime.pointTable = MakePointTable();
   mgr.linksByName_.emplace("conn", std::move(runtime));
 
   auto st = mgr.handleTimeSyncCommand("conn", 1710000000123);
   EXPECT_EQ(st.error_code(), grpc::StatusCode::PERMISSION_DENIED);
+  EXPECT_EQ(requestedTsMs, 1710000000123);
   EXPECT_EQ(state.GetPublishCount(9, "__time_sync__"), 0u);
+  EXPECT_EQ(state.GetFailedPublishCount(9, "__time_sync__"), 0u);
 }
 
 // 验证：buildInterrogationSnapshot 能根据最新值生成快照并处理异常数据。
