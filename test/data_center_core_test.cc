@@ -379,6 +379,52 @@ TEST(DataCenterCoreTest, PublishRoutesOneToMany) {
   EXPECT_EQ(dsts[1], (std::pair<uint32_t, std::string>{3u, "功率"}));
 }
 
+// 验证：多个源端点指向同一目标端点时，每次发布都生成独立更新，且最新值按处理顺序覆盖。
+TEST(DataCenterCoreTest, PublishRoutesManyToOnePreservesUpdatesAndLatestValue) {
+  DataCenterCore core;
+  InstallRouteConnections(core, {1, 2, 3});
+
+  DataCenterProto::UpsertRoutesRequest routes;
+  routes.set_replace(true);
+  *routes.add_routes() = MakeRoute(1, "功率A", 3, "功率");
+  *routes.add_routes() = MakeRoute(2, "功率B", 3, "功率");
+  ASSERT_TRUE(core.UpsertRoutes(routes).ok());
+
+  DataCenterProto::PublishRequest firstPublish;
+  firstPublish.set_conn_id(1);
+  firstPublish.set_tag("功率A");
+  firstPublish.mutable_value()->set_int_value(100);
+  std::vector<DataCenterProto::PointUpdate> firstUpdates;
+  ASSERT_TRUE(core.Publish(firstPublish, &firstUpdates).ok());
+  ASSERT_EQ(firstUpdates.size(), 1u);
+  EXPECT_EQ(firstUpdates[0].src_conn_id(), 1u);
+  EXPECT_EQ(firstUpdates[0].dst_conn_id(), 3u);
+  EXPECT_EQ(firstUpdates[0].dst_tag(), "功率");
+  EXPECT_EQ(firstUpdates[0].value().int_value(), 100);
+
+  DataCenterProto::PublishRequest secondPublish;
+  secondPublish.set_conn_id(2);
+  secondPublish.set_tag("功率B");
+  secondPublish.mutable_value()->set_int_value(200);
+  std::vector<DataCenterProto::PointUpdate> secondUpdates;
+  ASSERT_TRUE(core.Publish(secondPublish, &secondUpdates).ok());
+  ASSERT_EQ(secondUpdates.size(), 1u);
+  EXPECT_EQ(secondUpdates[0].src_conn_id(), 2u);
+  EXPECT_EQ(secondUpdates[0].dst_conn_id(), 3u);
+  EXPECT_EQ(secondUpdates[0].dst_tag(), "功率");
+  EXPECT_EQ(secondUpdates[0].value().int_value(), 200);
+
+  DataCenterProto::GetLatestRequest latestRequest;
+  latestRequest.set_conn_id(3);
+  latestRequest.add_tags("功率");
+  DataCenterProto::GetLatestResponse latestResponse;
+  ASSERT_TRUE(core.GetLatest(latestRequest, &latestResponse).ok());
+  ASSERT_EQ(latestResponse.updates_size(), 1);
+  EXPECT_EQ(latestResponse.updates(0).src_conn_id(), 2u);
+  EXPECT_EQ(latestResponse.updates(0).src_tag(), "功率B");
+  EXPECT_EQ(latestResponse.updates(0).value().int_value(), 200);
+}
+
 // 验证：同步命令匹配到多个正常业务目的端时必须拒绝歧义，不再特殊处理任何目的模块。
 TEST(DataCenterCoreTest, ResolveCommandRouteRejectsMultipleBusinessDestinations) {
   DataCenterCore core;

@@ -339,6 +339,44 @@ struct DataCenterGrpcServiceImpl::Impl {
     std::vector<std::shared_ptr<Subscriber>> subscribers;
   };
 
+  // 同一目标连接上的同步命令需要按 DataCenter 受理顺序串行调用目标模块。
+  // 不同目标连接使用不同的 lane，避免无关连接相互阻塞。
+  struct CommandLane {
+    std::mutex mu;
+    std::condition_variable cv;
+    uint64_t nextTicket{0};
+    uint64_t servingTicket{0};
+    std::unordered_set<uint64_t> cancelledTickets;
+  };
+
+  struct CommandLease {
+    std::shared_ptr<CommandLane> lane;
+    uint64_t ticket{0};
+    bool active{false};
+
+    ~CommandLease() { release(); }
+
+    void release() {
+      if (!active || !lane) {
+        return;
+      }
+      {
+        std::lock_guard<std::mutex> lock(lane->mu);
+        if (lane->servingTicket == ticket) {
+          ++lane->servingTicket;
+          while (lane->cancelledTickets.erase(lane->servingTicket) > 0) {
+            ++lane->servingTicket;
+          }
+        } else {
+          // 仅用于防御性处理；正常路径中持有 lease 的 ticket 必为当前服务号。
+          lane->cancelledTickets.erase(ticket);
+        }
+      }
+      active = false;
+      lane->cv.notify_all();
+    }
+  };
+
   static constexpr size_t kMaxQueueSize = 10000;
   static constexpr auto kSubscriberWaitTimeout = std::chrono::milliseconds(200);
   static constexpr auto kDropLogInterval = std::chrono::seconds(5);
@@ -347,8 +385,73 @@ struct DataCenterGrpcServiceImpl::Impl {
   DataCenterCore core;
   DataCenterStateStore stateStore;
 
+  std::mutex commandLanesMu;
+  std::unordered_map<std::string, std::shared_ptr<CommandLane>> commandLanes;
+
   uint64_t nextSubscriberId{0};
   std::unordered_map<uint32_t, std::unordered_map<uint64_t, std::shared_ptr<Subscriber>>> subscribersByConn;
+
+  static std::string commandLaneKey(const DataCenterProto::Endpoint& endpoint) {
+    std::string key;
+    key.reserve(endpoint.module_name().size() + endpoint.conn_name().size() + 1);
+    key.append(endpoint.module_name());
+    key.push_back('\0');
+    key.append(endpoint.conn_name());
+    return key;
+  }
+
+  std::shared_ptr<CommandLane> getCommandLane(const DataCenterProto::Endpoint& endpoint) {
+    const auto key = commandLaneKey(endpoint);
+    std::lock_guard<std::mutex> lock(commandLanesMu);
+    auto& lane = commandLanes[key];
+    if (!lane) {
+      lane = std::make_shared<CommandLane>();
+    }
+    return lane;
+  }
+
+  static uint64_t reserveCommandTicket(const std::shared_ptr<CommandLane>& lane) {
+    std::lock_guard<std::mutex> lock(lane->mu);
+    return lane->nextTicket++;
+  }
+
+  static grpc::Status waitCommandTicket(const std::shared_ptr<CommandLane>& lane,
+                                         uint64_t ticket,
+                                         grpc::ServerContext* context,
+                                         std::chrono::system_clock::time_point deadline,
+                                         CommandLease* lease) {
+    if (lease == nullptr) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "命令 lease 为空");
+    }
+    std::unique_lock<std::mutex> lock(lane->mu);
+    while (lane->servingTicket != ticket) {
+      if (context != nullptr && context->IsCancelled()) {
+        lane->cancelledTickets.emplace(ticket);
+        while (lane->cancelledTickets.erase(lane->servingTicket) > 0) {
+          ++lane->servingTicket;
+        }
+        lock.unlock();
+        lane->cv.notify_all();
+        return grpc::Status(grpc::StatusCode::CANCELLED, "DataCenter 同步命令排队期间已取消");
+      }
+      if (deadline <= std::chrono::system_clock::now()) {
+        lane->cancelledTickets.emplace(ticket);
+        while (lane->cancelledTickets.erase(lane->servingTicket) > 0) {
+          ++lane->servingTicket;
+        }
+        lock.unlock();
+        lane->cv.notify_all();
+        return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "DataCenter 同步命令排队超时");
+      }
+      const auto wakeAt = std::min(deadline,
+                                   std::chrono::system_clock::now() + std::chrono::milliseconds(5));
+      lane->cv.wait_until(lock, wakeAt);
+    }
+    lease->lane = lane;
+    lease->ticket = ticket;
+    lease->active = true;
+    return grpc::Status::OK;
+  }
 
   std::vector<std::shared_ptr<Subscriber>> matchSubscribersLocked(uint32_t dstConnId, const std::string& dstTag) {
     std::vector<std::shared_ptr<Subscriber>> result;
@@ -841,11 +944,13 @@ grpc::Status DataCenterGrpcServiceImpl::Publish(grpc::ServerContext*, const Data
                qualityToString(update.quality()), update.ts_ms(), subs.size());
       deliveries.emplace_back(Impl::Delivery{.update = &update, .subscribers = std::move(subs)});
     }
-  }
 
-  for (const auto& delivery : deliveries) {
-    for (const auto& sub : delivery.subscribers) {
-      Impl::enqueue(sub, *delivery.update);
+    // 在保护 DataCenter 核心状态的同一把锁内完成入队，确保并发 Publish
+    // 按核心处理顺序进入同一订阅者队列，避免解锁后投递顺序反转。
+    for (const auto& delivery : deliveries) {
+      for (const auto& sub : delivery.subscribers) {
+        Impl::enqueue(sub, *delivery.update);
+      }
     }
   }
   LOG_DEBUG("DataCenter 发布: conn_id={}, tag={}, 更新数={}, 投递数={}",
@@ -918,6 +1023,30 @@ grpc::Status DataCenterGrpcServiceImpl::ExecuteCommand(
                 response->reason());
     return grpc::Status::OK;
   }
+
+  std::shared_ptr<Impl::CommandLane> commandLane;
+  uint64_t commandTicket = 0;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    commandLane = impl_->getCommandLane(routeResp.dst());
+    // 在核心锁保护下领取序号，避免同一目标连接的并发命令发生顺序反转。
+    commandTicket = Impl::reserveCommandTicket(commandLane);
+  }
+  Impl::CommandLease commandLease;
+  auto commandWaitStatus = Impl::waitCommandTicket(
+      commandLane, commandTicket, context, upstreamDeadline, &commandLease);
+  if (!commandWaitStatus.ok()) {
+    LOG_WARNING("DataCenter 同步命令等待目标连接顺序号失败: src={}, dst={}, ticket={}, 原因={}",
+                formatEndpointForLog(request->src()),
+                formatEndpointForLog(routeResp.dst()),
+                commandTicket,
+                commandWaitStatus.error_message());
+    return commandWaitStatus;
+  }
+  LOG_DEBUG("DataCenter 同步命令取得目标连接顺序号: src={}, dst={}, ticket={}",
+            formatEndpointForLog(request->src()),
+            formatEndpointForLog(routeResp.dst()),
+            commandTicket);
 
   const auto beforeTargetNow = std::chrono::system_clock::now();
   if (upstreamDeadline <= beforeTargetNow) {
@@ -1106,6 +1235,13 @@ grpc::Status DataCenterGrpcServiceImpl::BatchPublish(grpc::ServerContext*, const
                qualityToString(update.quality()), update.ts_ms(), subs.size());
       deliveries.emplace_back(Impl::Delivery{.update = &update, .subscribers = std::move(subs)});
     }
+
+    // 批量发布同样在核心锁内完成订阅队列入队，保持与单点发布一致的 FIFO 语义。
+    for (const auto& delivery : deliveries) {
+      for (const auto& sub : delivery.subscribers) {
+        Impl::enqueue(sub, *delivery.update);
+      }
+    }
   }
 
   size_t noRouteCount = 0;
@@ -1119,11 +1255,6 @@ grpc::Status DataCenterGrpcServiceImpl::BatchPublish(grpc::ServerContext*, const
     }
   }
 
-  for (const auto& delivery : deliveries) {
-    for (const auto& sub : delivery.subscribers) {
-      Impl::enqueue(sub, *delivery.update);
-    }
-  }
   LOG_INFO("DataCenter 批量发布完成: 点数={}, 更新数={}, 投递数={}, 未匹配路由点数={}",
            request->points_size(), updateCount, deliveries.size(), noRouteCount);
   return grpc::Status::OK;
@@ -1264,8 +1395,10 @@ grpc::Status DataCenterGrpcServiceImpl::Subscribe(grpc::ServerContext* context, 
     }
   }
 
-  markClosed();
+  // 统一按 impl_->mu -> subscriber->mu 的顺序收尾，避免与 DeleteConnection
+  // 持有核心锁关闭订阅时形成锁顺序反转。
   impl_->removeSubscriber(subscriber->connId, subscriber->id);
+  markClosed();
   uint64_t dropped = 0;
   {
     std::lock_guard<std::mutex> lock(subscriber->mu);

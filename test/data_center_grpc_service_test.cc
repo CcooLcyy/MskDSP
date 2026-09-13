@@ -12,6 +12,7 @@
 #include <tuple>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include <grpcpp/client_context.h>
 #include <grpcpp/create_channel.h>
@@ -117,6 +118,65 @@ private:
   bool cancelled_{false};
   std::chrono::system_clock::time_point deadline_ =
       std::chrono::system_clock::time_point::max();
+};
+
+class OrderedCommandExecutor final : public DataCenterProto::CommandExecutor::Service {
+public:
+  grpc::Status ExecuteCommand(
+      grpc::ServerContext* context,
+      const DataCenterProto::ExecuteCommandRequest* request,
+      DataCenterProto::ExecuteCommandResponse* response) override {
+    const auto requestId = request == nullptr ? std::string() : request->request_id();
+    bool block = false;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      requestIds_.push_back(requestId);
+      block = requestIds_.size() == 1;
+    }
+    cv_.notify_all();
+
+    if (block) {
+      std::unique_lock<std::mutex> lock(mu_);
+      cv_.wait(lock, [this, context]() {
+        return releaseFirst_ || (context != nullptr && context->IsCancelled());
+      });
+      if (context != nullptr && context->IsCancelled()) {
+        return grpc::Status(grpc::StatusCode::CANCELLED, "首条测试命令被取消");
+      }
+    }
+
+    if (response != nullptr) {
+      response->set_status(DataCenterProto::COMMAND_ACCEPTED);
+      if (request != nullptr && request->has_dst()) {
+        *response->mutable_dst() = request->dst();
+      }
+    }
+    return grpc::Status::OK;
+  }
+
+  bool waitForCount(size_t count, std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mu_);
+    return cv_.wait_for(lock, timeout, [this, count]() { return requestIds_.size() >= count; });
+  }
+
+  void releaseFirst() {
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      releaseFirst_ = true;
+    }
+    cv_.notify_all();
+  }
+
+  std::vector<std::string> requestIds() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return requestIds_;
+  }
+
+private:
+  mutable std::mutex mu_;
+  std::condition_variable cv_;
+  std::vector<std::string> requestIds_;
+  bool releaseFirst_{false};
 };
 
 class DataCenterGrpcServiceTest : public ::testing::Test {
@@ -417,6 +477,197 @@ TEST_F(DataCenterGrpcServiceTest, PublishSubscribeSnapshotFilteringAndDeleteConn
   EXPECT_FALSE(reader->Read(&ignored));
   auto finishStatus = reader->Finish();
   EXPECT_TRUE(finishStatus.ok()) << finishStatus.error_message();
+}
+
+// 验证：多个源连接映射到同一目标点时，订阅流按 DataCenter 处理顺序逐条投递。
+TEST_F(DataCenterGrpcServiceTest, MultiSourceRouteToSameTargetPreservesPublishOrder) {
+  const auto srcA = GetOrCreateConnection("IEC104", "src-a");
+  const auto srcB = GetOrCreateConnection("IEC104", "src-b");
+  const auto dst = GetOrCreateConnection("IEC104", "dst");
+
+  UpsertConnTags(srcA.conn_id(), {"A"});
+  UpsertConnTags(srcB.conn_id(), {"A"});
+  UpsertConnTags(dst.conn_id(), {"Y"});
+  UpsertRoutes({
+      {srcA.conn_id(), "A", dst.conn_id(), "Y"},
+      {srcB.conn_id(), "A", dst.conn_id(), "Y"},
+  });
+
+  grpc::ClientContext subCtx;
+  subCtx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+  DataCenterProto::SubscribeRequest subReq;
+  subReq.set_conn_id(dst.conn_id());
+  subReq.add_tags("Y");
+  subReq.set_snapshot(false);
+  auto reader = stub_->Subscribe(&subCtx, subReq);
+
+  {
+    grpc::ClientContext ctx;
+    DataCenterProto::PublishRequest req;
+    req.set_conn_id(srcA.conn_id());
+    req.set_tag("A");
+    req.mutable_value()->set_int_value(1);
+    DataCenterProto::Empty resp;
+    ASSERT_TRUE(stub_->Publish(&ctx, req, &resp).ok());
+  }
+  {
+    grpc::ClientContext ctx;
+    DataCenterProto::PublishRequest req;
+    req.set_conn_id(srcB.conn_id());
+    req.set_tag("A");
+    req.mutable_value()->set_int_value(2);
+    DataCenterProto::Empty resp;
+    ASSERT_TRUE(stub_->Publish(&ctx, req, &resp).ok());
+  }
+
+  DataCenterProto::PointUpdate first;
+  ASSERT_TRUE(reader->Read(&first));
+  EXPECT_EQ(first.src_conn_id(), srcA.conn_id());
+  EXPECT_EQ(first.dst_conn_id(), dst.conn_id());
+  EXPECT_EQ(first.dst_tag(), "Y");
+  EXPECT_EQ(first.value().int_value(), 1);
+
+  DataCenterProto::PointUpdate second;
+  ASSERT_TRUE(reader->Read(&second));
+  EXPECT_EQ(second.src_conn_id(), srcB.conn_id());
+  EXPECT_EQ(second.dst_conn_id(), dst.conn_id());
+  EXPECT_EQ(second.dst_tag(), "Y");
+  EXPECT_EQ(second.value().int_value(), 2);
+
+  subCtx.TryCancel();
+  EXPECT_FALSE(reader->Read(&second));
+  EXPECT_TRUE(reader->Finish().ok());
+}
+
+// 验证：多个源连接对同一目标连接执行同步命令时，目标模块按 DataCenter 顺序串行接收。
+TEST_F(DataCenterGrpcServiceTest, MultiSourceCommandsToSameTargetAreSerialized) {
+  std::filesystem::create_directories("socket");
+  const auto targetSocket = std::filesystem::absolute("socket/IEC61850.sock").string();
+
+  OrderedCommandExecutor targetService;
+  grpc::ServerBuilder targetBuilder;
+  targetBuilder.RegisterService(&targetService);
+  targetBuilder.AddListeningPort("unix:" + targetSocket,
+                                 grpc::InsecureServerCredentials());
+  auto targetServer = targetBuilder.BuildAndStart();
+  ASSERT_NE(targetServer, nullptr);
+
+  const auto sourceA = GetOrCreateConnection("IEC104", "command-source-a");
+  const auto sourceB = GetOrCreateConnection("IEC104", "command-source-b");
+  const auto target = GetOrCreateConnection("IEC61850", "command-target");
+  UpsertConnTags(sourceA.conn_id(), {"CommandA"});
+  UpsertConnTags(sourceB.conn_id(), {"CommandB"});
+  UpsertConnTags(target.conn_id(), {"Command"});
+  UpsertStableRoutes({
+      {"IEC104", "command-source-a", "CommandA", "IEC61850", "command-target", "Command"},
+      {"IEC104", "command-source-b", "CommandB", "IEC61850", "command-target", "Command"},
+  });
+
+  DataCenterProto::ExecuteCommandRequest firstRequest;
+  firstRequest.mutable_src()->set_conn_id(sourceA.conn_id());
+  firstRequest.mutable_src()->set_tag("CommandA");
+  firstRequest.mutable_value()->set_bool_value(true);
+  firstRequest.set_request_id("command-a");
+  firstRequest.set_timeout_ms(10000);
+  grpc::ClientContext firstContext;
+  firstContext.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+  DataCenterProto::ExecuteCommandResponse firstResponse;
+  auto firstCall = std::async(std::launch::async, [&]() {
+    return stub_->ExecuteCommand(&firstContext, firstRequest, &firstResponse);
+  });
+
+  ASSERT_TRUE(targetService.waitForCount(1, std::chrono::seconds(2)));
+
+  DataCenterProto::ExecuteCommandRequest secondRequest;
+  secondRequest.mutable_src()->set_conn_id(sourceB.conn_id());
+  secondRequest.mutable_src()->set_tag("CommandB");
+  secondRequest.mutable_value()->set_bool_value(false);
+  secondRequest.set_request_id("command-b");
+  secondRequest.set_timeout_ms(10000);
+  grpc::ClientContext secondContext;
+  secondContext.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+  DataCenterProto::ExecuteCommandResponse secondResponse;
+  auto secondCall = std::async(std::launch::async, [&]() {
+    return stub_->ExecuteCommand(&secondContext, secondRequest, &secondResponse);
+  });
+
+  EXPECT_FALSE(targetService.waitForCount(2, std::chrono::milliseconds(200)));
+  targetService.releaseFirst();
+
+  ASSERT_EQ(firstCall.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+  ASSERT_TRUE(firstCall.get().ok());
+  ASSERT_EQ(secondCall.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+  ASSERT_TRUE(secondCall.get().ok());
+  EXPECT_EQ(firstResponse.status(), DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_EQ(secondResponse.status(), DataCenterProto::COMMAND_ACCEPTED);
+  const auto requestIds = targetService.requestIds();
+  ASSERT_EQ(requestIds.size(), 2u);
+  EXPECT_EQ(requestIds[0], "command-a");
+  EXPECT_EQ(requestIds[1], "command-b");
+
+  targetServer->Shutdown();
+}
+
+// 验证：订阅流结束与删除目标连接并发发生时，收尾锁顺序一致且不会死锁。
+TEST_F(DataCenterGrpcServiceTest, SubscribeCleanupConcurrentWithDeleteConnectionDoesNotDeadlock) {
+  const auto src = GetOrCreateConnection("IEC104", "src-cleanup");
+  const auto dst = GetOrCreateConnection("IEC104", "dst-cleanup");
+  UpsertConnTags(src.conn_id(), {"A"});
+  UpsertConnTags(dst.conn_id(), {"Y"});
+  UpsertRoutes({{src.conn_id(), "A", dst.conn_id(), "Y"}});
+
+  {
+    grpc::ClientContext publishCtx;
+    DataCenterProto::PublishRequest publishReq;
+    publishReq.set_conn_id(src.conn_id());
+    publishReq.set_tag("A");
+    publishReq.mutable_value()->set_int_value(1);
+    DataCenterProto::Empty publishResp;
+    ASSERT_TRUE(stub_->Publish(&publishCtx, publishReq, &publishResp).ok());
+  }
+
+  grpc::ClientContext subCtx;
+  subCtx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+  DataCenterProto::SubscribeRequest subReq;
+  subReq.set_conn_id(dst.conn_id());
+  subReq.add_tags("Y");
+  subReq.set_snapshot(true);
+  auto reader = stub_->Subscribe(&subCtx, subReq);
+
+  auto readFuture = std::async(std::launch::async, [&reader]() {
+    DataCenterProto::PointUpdate update;
+    return reader->Read(&update);
+  });
+
+  if (readFuture.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+    subCtx.TryCancel();
+    ADD_FAILURE() << "订阅快照未在期限内到达";
+    EXPECT_TRUE(readFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    return;
+  }
+  ASSERT_TRUE(readFuture.get());
+
+  auto endFuture = std::async(std::launch::async, [&reader]() {
+    DataCenterProto::PointUpdate update;
+    return reader->Read(&update);
+  });
+
+  grpc::ClientContext deleteCtx;
+  DataCenterProto::DeleteConnectionRequest deleteReq;
+  deleteReq.mutable_key()->set_module_name("IEC104");
+  deleteReq.mutable_key()->set_conn_name("dst-cleanup");
+  DataCenterProto::Empty deleteResp;
+  const auto deleteStatus = stub_->DeleteConnection(&deleteCtx, deleteReq, &deleteResp);
+  ASSERT_TRUE(deleteStatus.ok()) << deleteStatus.error_message();
+
+  if (endFuture.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+    subCtx.TryCancel();
+    ADD_FAILURE() << "删除连接后订阅流未在期限内结束";
+    EXPECT_TRUE(endFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    return;
+  }
+  EXPECT_FALSE(endFuture.get());
+  EXPECT_TRUE(reader->Finish().ok());
 }
 
 // 验证：gRPC 路由接口支持稳定连接主键配置，ListRoutes 会返回当前 conn_id 与稳定字段。
