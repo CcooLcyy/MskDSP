@@ -43,32 +43,46 @@ def parse_args() -> argparse.Namespace:
 
 def fetch_json(url: str) -> object:
     request = Request(url, headers={"Accept": "application/json", "User-Agent": "mskdsp-update-relay/1"})
-    try:
-        with urlopen(request, timeout=60) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except Exception as exc:  # pragma: no cover - 网络错误由运行环境决定
-        fail(f"请求 {url} 失败：{exc}")
+    last_error: Exception | None = None
+    for attempt in range(1, 6):
+        try:
+            with urlopen(request, timeout=60) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except Exception as exc:  # pragma: no cover - 网络错误由运行环境决定
+            last_error = exc
+            if attempt < 5:
+                delay = min(2 ** (attempt - 1), 8)
+                print(f"请求 Gitee 失败，{delay}s 后重试（第 {attempt}/5 次）：{exc}", flush=True)
+                time.sleep(delay)
+    fail(f"请求 {url} 失败：{last_error}")
 
 
 def download(url: str, destination: Path) -> int:
     request = Request(url, headers={"User-Agent": "mskdsp-update-relay/1"})
-    started = time.monotonic()
-    total = 0
-    try:
-        with urlopen(request, timeout=120) as response, destination.open("wb") as output:
-            while True:
-                chunk = response.read(CHUNK_SIZE)
-                if not chunk:
-                    break
-                output.write(chunk)
-                total += len(chunk)
-                if total == len(chunk) or total % (16 * CHUNK_SIZE) == 0:
-                    elapsed = max(time.monotonic() - started, 0.001)
-                    speed = total / elapsed / 1024 / 1024
-                    print(f"下载 {destination.name}：{total / 1024 / 1024:.2f} MiB，{speed:.2f} MiB/s", flush=True)
-    except Exception as exc:  # pragma: no cover - 网络错误由运行环境决定
-        fail(f"下载 {url} 失败：{exc}")
-    return total
+    last_error: Exception | None = None
+    for attempt in range(1, 6):
+        started = time.monotonic()
+        total = 0
+        try:
+            with urlopen(request, timeout=120) as response, destination.open("wb") as output:
+                while True:
+                    chunk = response.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    output.write(chunk)
+                    total += len(chunk)
+                    if total == len(chunk) or total % (16 * CHUNK_SIZE) == 0:
+                        elapsed = max(time.monotonic() - started, 0.001)
+                        speed = total / elapsed / 1024 / 1024
+                        print(f"下载 {destination.name}：{total / 1024 / 1024:.2f} MiB，{speed:.2f} MiB/s", flush=True)
+            return total
+        except Exception as exc:  # pragma: no cover - 网络错误由运行环境决定
+            last_error = exc
+            if attempt < 5:
+                delay = min(2 ** (attempt - 1), 8)
+                print(f"下载失败，{delay}s 后重试（第 {attempt}/5 次）：{exc}", flush=True)
+                time.sleep(delay)
+    fail(f"下载 {url} 失败：{last_error}")
 
 
 def verify_checksums(staging: Path, checksum_path: Path) -> None:
