@@ -40,7 +40,6 @@ VSCode CMake Tools（用户确认可用的配置命令）：
 - 回复使用中文，必要时可使用英文术语。
 - 代码审查结果（review findings / 审查结论）统一使用中文汇报。
 - 修改完代码后，不要自动执行编译/构建/测试动作（如 `cmake --build ...`、`ctest` 等）；因为其他 AGENT 可能同步修改导致构建失败；仅在用户明确要求时才执行。
-- 除非用户允许，否则不要执行任何 `git ...` 命令（包括 `git status/diff/add/restore/commit/reset` 等）；需要 git 操作时要询问并请求用户统一。
 - 所有模块配置统一由 configPusher 通过 gRPC 下发；涉及配置来源或下发流程的变更时先询问用户是否需要修改，否则默认继续使用 configPusher。
 - 上位机默认直接与各模块的 gRPC 接口通信，不通过 ConfigPusher 作为统一入口；讨论联机场景、启动方式或接口调用链时应以此为准。
 - 所有代码改动也要增加日志。
