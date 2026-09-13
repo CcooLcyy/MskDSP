@@ -161,22 +161,31 @@ grpc::Status TcpLink::Start() {
 
 void TcpLink::Stop() {
   if (!thread_.joinable()) {
+    setConnectionState(IEC104Proto::CONNECTION_STATE_DISCONNECTED);
     return;
   }
   LOG_INFO("IEC104 链路停止: conn_name={}", config_.conn_name());
   thread_.request_stop();
   thread_.join();
 
-  std::lock_guard<std::mutex> lock(mu_);
-  session_.reset();
-  acceptor_.reset();
-  resolver_.reset();
-  reconnectTimer_.reset();
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    session_.reset();
+    acceptor_.reset();
+    resolver_.reset();
+    reconnectTimer_.reset();
+  }
+  setConnectionState(IEC104Proto::CONNECTION_STATE_DISCONNECTED);
 }
 
 bool TcpLink::IsRunning() const {
   std::lock_guard<std::mutex> lock(mu_);
   return thread_.joinable();
+}
+
+IEC104Proto::ConnectionState TcpLink::ConnectionState() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return connectionState_;
 }
 
 void TcpLink::SendPointValue(const PointValue& value, uint8_t cause) {
@@ -286,6 +295,11 @@ void TcpLink::SetCommandExecutionModeCallback(CommandExecutionModeCallback cb) {
   }
 }
 
+void TcpLink::SetConnectionStateCallback(ConnectionStateCallback cb) {
+  std::lock_guard<std::mutex> lock(mu_);
+  onConnectionState_ = std::move(cb);
+}
+
 void TcpLink::run(std::stop_token st) {
   boost::asio::executor_work_guard<boost::asio::io_context::executor_type> guard(io_.get_executor());
   std::stop_callback cb(st, [this]() {
@@ -359,6 +373,12 @@ void TcpLink::startAccept() {
     }
 
     auto newSession = std::make_shared<TcpSession>(io_, config_, false);
+    newSession->SetConnectionStateCallback(
+        [this, weakSession = std::weak_ptr<TcpSession>(newSession)](IEC104Proto::ConnectionState state) {
+          if (auto session = weakSession.lock()) {
+            handleSessionConnectionState(session, state);
+          }
+        });
     {
       std::lock_guard<std::mutex> lock(mu_);
       if (session_) {
@@ -386,6 +406,7 @@ void TcpLink::startConnect() {
   if (thread_.get_stop_token().stop_requested()) {
     return;
   }
+  setConnectionState(IEC104Proto::CONNECTION_STATE_CONNECTING);
 
   auto host = config_.remote().ip();
   auto port = std::to_string(config_.remote().port());
@@ -431,20 +452,26 @@ void TcpLink::startConnect() {
       }
       auto newSession = std::make_shared<TcpSession>(io_, config_, true);
       newSession->SetClosedCallback([this]() { scheduleReconnect(kDefaultReconnectDelay); });
+      newSession->SetConnectionStateCallback(
+          [this, weakSession = std::weak_ptr<TcpSession>(newSession)](IEC104Proto::ConnectionState state) {
+            if (auto session = weakSession.lock()) {
+              handleSessionConnectionState(session, state);
+            }
+          });
       {
         std::lock_guard<std::mutex> lock(mu_);
         if (session_) {
           session_->Stop();
         }
-      session_ = newSession;
-      session_->SetPointValueCallback(onPointValue_);
-      session_->SetInterrogationSnapshotProvider(interrogationSnapshotProvider_);
-      session_->SetSoeReplayProvider(soeReplayProvider_);
-      session_->SetSoeAcknowledgedCallback(onSoeAcknowledged_);
-      session_->SetTimeSyncCallback(onTimeSync_);
-      session_->SetCommandCallback(onCommand_);
-      session_->SetCommandExecutionModeCallback(onCommandExecutionMode_);
-    }
+        session_ = newSession;
+        session_->SetPointValueCallback(onPointValue_);
+        session_->SetInterrogationSnapshotProvider(interrogationSnapshotProvider_);
+        session_->SetSoeReplayProvider(soeReplayProvider_);
+        session_->SetSoeAcknowledgedCallback(onSoeAcknowledged_);
+        session_->SetTimeSyncCallback(onTimeSync_);
+        session_->SetCommandCallback(onCommand_);
+        session_->SetCommandExecutionModeCallback(onCommandExecutionMode_);
+      }
       newSession->Start(std::move(*sock));
     });
   });
@@ -457,6 +484,7 @@ void TcpLink::scheduleReconnect(std::chrono::milliseconds delay) {
   if (thread_.get_stop_token().stop_requested()) {
     return;
   }
+  setConnectionState(IEC104Proto::CONNECTION_STATE_CONNECTING);
   if (!reconnectTimer_) {
     reconnectTimer_.emplace(io_);
   }
@@ -473,6 +501,52 @@ void TcpLink::scheduleReconnect(std::chrono::milliseconds delay) {
 void TcpLink::setSession(std::shared_ptr<TcpSession> session) {
   std::lock_guard<std::mutex> lock(mu_);
   session_ = std::move(session);
+}
+
+void TcpLink::handleSessionConnectionState(const std::shared_ptr<TcpSession>& session,
+                                           IEC104Proto::ConnectionState state) {
+  ConnectionStateCallback callback;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!session_ || session_.get() != session.get()) {
+      LOG_DEBUG("IEC104 忽略非当前会话的连接状态回调: conn_name={}, 状态={}",
+                config_.conn_name(),
+                state == IEC104Proto::CONNECTION_STATE_CONNECTED ? "已连接" :
+                    state == IEC104Proto::CONNECTION_STATE_CONNECTING ? "连接中" : "已断开");
+      return;
+    }
+    if (connectionState_ == state) {
+      return;
+    }
+    connectionState_ = state;
+    callback = onConnectionState_;
+  }
+  LOG_INFO("IEC104 TCP 链路连接状态变化: conn_name={}, 状态={}",
+           config_.conn_name(),
+           state == IEC104Proto::CONNECTION_STATE_CONNECTED ? "已连接" :
+               state == IEC104Proto::CONNECTION_STATE_CONNECTING ? "连接中" : "已断开");
+  if (callback) {
+    callback(state);
+  }
+}
+
+void TcpLink::setConnectionState(IEC104Proto::ConnectionState state) {
+  ConnectionStateCallback callback;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (connectionState_ == state) {
+      return;
+    }
+    connectionState_ = state;
+    callback = onConnectionState_;
+  }
+  LOG_INFO("IEC104 TCP 链路连接状态变化: conn_name={}, 状态={}",
+           config_.conn_name(),
+           state == IEC104Proto::CONNECTION_STATE_CONNECTED ? "已连接" :
+               state == IEC104Proto::CONNECTION_STATE_CONNECTING ? "连接中" : "已断开");
+  if (callback) {
+    callback(state);
+  }
 }
 
 std::shared_ptr<TcpSession> TcpLink::session() const {

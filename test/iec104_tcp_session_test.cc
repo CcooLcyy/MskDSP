@@ -25,6 +25,7 @@ using tcp = boost::asio::ip::tcp;
 constexpr uint8_t kApduStart = 0x68;
 constexpr uint8_t kUStartDtAct = 0x07;
 constexpr uint8_t kUStartDtCon = 0x0B;
+constexpr uint8_t kUTestFrAct = 0x43;
 constexpr uint8_t kTypeIdSinglePoint = 1;
 constexpr uint8_t kTypeIdSinglePointWithTime = 30;
 constexpr uint8_t kTypeIdMeasuredValueShort = 13;
@@ -293,6 +294,78 @@ IEC104Proto::LinkConfig MakeConfig(const std::string& name,
   return config;
 }
 }  // 命名空间结束
+
+// 验证 TCP 会话建立和停止时都会回调独立的连接状态。
+TEST(IEC104TcpSessionTest, ConnectionStateCallbackTracksStartAndStop) {
+  auto io = std::make_shared<boost::asio::io_context>();
+  auto sockets = MakeConnectedSockets(*io);
+  auto config = MakeConfig("connection-state", IEC104Proto::ROLE_SERVER, 2, 2, 1, 5, 8);
+  auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
+
+  std::promise<IEC104Proto::ConnectionState> connectedPromise;
+  std::promise<IEC104Proto::ConnectionState> disconnectedPromise;
+  std::atomic<bool> connectedDelivered{false};
+  std::atomic<bool> disconnectedDelivered{false};
+  session->SetConnectionStateCallback([&](IEC104Proto::ConnectionState state) {
+    if (state == IEC104Proto::CONNECTION_STATE_CONNECTED &&
+        !connectedDelivered.exchange(true)) {
+      connectedPromise.set_value(state);
+    } else if (state == IEC104Proto::CONNECTION_STATE_DISCONNECTED &&
+               !disconnectedDelivered.exchange(true)) {
+      disconnectedPromise.set_value(state);
+    }
+  });
+  session->Start(std::move(sockets.session_socket));
+  std::jthread sessionThread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME, [&]() { io->run(); });
+
+  auto connected = connectedPromise.get_future();
+  ASSERT_EQ(connected.wait_for(std::chrono::milliseconds(1000)), std::future_status::ready);
+  EXPECT_EQ(connected.get(), IEC104Proto::CONNECTION_STATE_CONNECTED);
+
+  session->Stop();
+  auto disconnected = disconnectedPromise.get_future();
+  ASSERT_EQ(disconnected.wait_for(std::chrono::milliseconds(1000)), std::future_status::ready);
+  EXPECT_EQ(disconnected.get(), IEC104Proto::CONNECTION_STATE_DISCONNECTED);
+  io->stop();
+}
+
+// 验证 t3 发送 TESTFR_ACT 后，未收到 TESTFR_CON 会在下一次 t3 超时时关闭会话并回调断开状态。
+TEST(IEC104TcpSessionTest, T3TestFrameConfirmationTimeoutClosesSession) {
+  auto io = std::make_shared<boost::asio::io_context>();
+  auto sockets = MakeConnectedSockets(*io);
+  auto config = MakeConfig("t3-test-confirm-timeout", IEC104Proto::ROLE_SERVER, 5, 5, 1, 1, 8);
+  auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
+
+  std::promise<void> disconnectedPromise;
+  session->SetConnectionStateCallback([&](IEC104Proto::ConnectionState state) {
+    if (state == IEC104Proto::CONNECTION_STATE_DISCONNECTED) {
+      try {
+        disconnectedPromise.set_value();
+      } catch (const std::future_error&) {
+      }
+    }
+  });
+  session->Start(std::move(sockets.session_socket));
+  std::jthread sessionThread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME, [&]() { io->run(); });
+
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildUFrame(kUStartDtAct)));
+  auto startCon = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "STARTDT_CON");
+  ASSERT_FALSE(startCon.empty());
+  ASSERT_EQ(startCon[2], kUStartDtCon);
+
+  auto testAct = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2500), "TESTFR_ACT");
+  ASSERT_FALSE(testAct.empty());
+  EXPECT_EQ(testAct[2], kUTestFrAct);
+
+  auto disconnected = disconnectedPromise.get_future();
+  ASSERT_EQ(disconnected.wait_for(std::chrono::milliseconds(2500)), std::future_status::ready);
+  EXPECT_TRUE(WaitReadable(sockets.peer_socket, std::chrono::milliseconds(100)));
+  boost::system::error_code ec;
+  sockets.peer_socket.close(ec);
+  io->stop();
+}
 
 // 验证：客户端在收到 STARTDT 确认后会自动发送总召。
 TEST(IEC104TcpSessionTest, ClientAutoInterrogationAfterStartDt) {

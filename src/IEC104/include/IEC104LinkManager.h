@@ -71,6 +71,7 @@ private:
     IEC104Proto::LinkConfig config;
     uint32_t connId = 0;
     IEC104Proto::LinkState state = IEC104Proto::LINK_STATE_STOPPED;
+    IEC104Proto::ConnectionState connectionState = IEC104Proto::CONNECTION_STATE_DISCONNECTED;
     std::string lastError;
     PointTable pointTable;
     bool pointTableConfigured = false;
@@ -113,6 +114,8 @@ private:
   bool persistenceEnabled() const;
 
   void configureTransportCallbacksLocked(const std::string &connName, LinkRuntime *link);
+  void handleTransportConnectionState(const std::string &connName,
+                                      IEC104Proto::ConnectionState state);
   void startDataCenterSubscribeLocked(const std::string &connName, LinkRuntime *link);
   void stopDataCenterSubscribeLocked(LinkRuntime *link);
   void startTimeSyncSubscribeLocked(const std::string &connName, LinkRuntime *link);

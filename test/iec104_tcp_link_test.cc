@@ -9,6 +9,7 @@
 #include <boost/asio/write.hpp>
 #include <chrono>
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <poll.h>
 #include <string>
@@ -23,6 +24,7 @@ using tcp = asio::ip::tcp;
 constexpr uint8_t kApduStart = 0x68;
 constexpr uint8_t kStartDtAct = 0x07;
 constexpr uint8_t kStartDtCon = 0x0B;
+constexpr uint8_t kTestFrAct = 0x43;
 
 uint16_t ReserveLoopbackPort() {
   asio::io_context io;
@@ -102,6 +104,70 @@ void SendStartDtAct(tcp::socket &socket) {
 }
 
 }  // namespace
+
+// 验证服务端 TcpLink 在无会话、建立会话和对端断开时报告连接状态。
+TEST(IEC104TcpLinkTest, ServerConnectionStateTracksAcceptedSession) {
+  auto config = MakeServerConfig("");
+  IEC104::TcpLink link(config);
+  std::promise<IEC104Proto::ConnectionState> connectedPromise;
+  std::promise<IEC104Proto::ConnectionState> disconnectedPromise;
+  link.SetConnectionStateCallback([&](IEC104Proto::ConnectionState state) {
+    if (state == IEC104Proto::CONNECTION_STATE_CONNECTED) {
+      try {
+        connectedPromise.set_value(state);
+      } catch (const std::future_error&) {
+      }
+    } else if (state == IEC104Proto::CONNECTION_STATE_DISCONNECTED) {
+      try {
+        disconnectedPromise.set_value(state);
+      } catch (const std::future_error&) {
+      }
+    }
+  });
+
+  ASSERT_TRUE(link.Start().ok());
+  EXPECT_EQ(link.ConnectionState(), IEC104Proto::CONNECTION_STATE_DISCONNECTED);
+
+  auto client = ConnectLoopback(static_cast<uint16_t>(config.local().port()));
+  SendStartDtAct(client.socket);
+  EXPECT_TRUE(ReadStartDtCon(client.socket));
+
+  auto connected = connectedPromise.get_future();
+  ASSERT_EQ(connected.wait_for(std::chrono::milliseconds(1000)), std::future_status::ready);
+  EXPECT_EQ(connected.get(), IEC104Proto::CONNECTION_STATE_CONNECTED);
+  EXPECT_EQ(link.ConnectionState(), IEC104Proto::CONNECTION_STATE_CONNECTED);
+
+  boost::system::error_code ec;
+  client.socket.shutdown(tcp::socket::shutdown_both, ec);
+  client.socket.close(ec);
+  auto disconnected = disconnectedPromise.get_future();
+  ASSERT_EQ(disconnected.wait_for(std::chrono::milliseconds(1000)), std::future_status::ready);
+  EXPECT_EQ(disconnected.get(), IEC104Proto::CONNECTION_STATE_DISCONNECTED);
+  EXPECT_EQ(link.ConnectionState(), IEC104Proto::CONNECTION_STATE_DISCONNECTED);
+  link.Stop();
+}
+
+// 验证服务端接受连接后，IEC104 会话会按 t3 发送 TESTFR_ACT；该行为属于连接存活检测。
+TEST(IEC104TcpLinkTest, ServerSessionSendsTestFrameForT3Keepalive) {
+  auto config = MakeServerConfig("");
+  config.mutable_apci()->set_t3(1);
+  IEC104::TcpLink link(config);
+  ASSERT_TRUE(link.Start().ok());
+
+  auto client = ConnectLoopback(static_cast<uint16_t>(config.local().port()));
+  SendStartDtAct(client.socket);
+  EXPECT_TRUE(ReadStartDtCon(client.socket));
+  ASSERT_TRUE(WaitReadable(client.socket, std::chrono::milliseconds(2500)));
+
+  std::array<uint8_t, 6> frame{};
+  boost::system::error_code ec;
+  asio::read(client.socket, asio::buffer(frame), ec);
+  ASSERT_FALSE(ec);
+  EXPECT_EQ(frame[0], kApduStart);
+  EXPECT_EQ(frame[2], kTestFrAct);
+
+  link.Stop();
+}
 
 // 验证 ROLE_SERVER 仅接受来源地址命中 remote.ip 白名单的 TCP client。
 TEST(IEC104TcpLinkTest, ServerAcceptsWhitelistedClientIp) {

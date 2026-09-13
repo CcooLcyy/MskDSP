@@ -145,6 +145,7 @@ TEST(IEC104LinkManagerTest, UpsertLinkCreateOnlyReturnsConnId) {
   ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
   EXPECT_NE(info.conn_id(), 0u);
   EXPECT_EQ(info.state(), IEC104Proto::LINK_STATE_STOPPED);
+  EXPECT_EQ(info.connection_state(), IEC104Proto::CONNECTION_STATE_DISCONNECTED);
   EXPECT_EQ(info.config().conn_name(), "conn-1");
   EXPECT_TRUE(state.HasConnection("IEC104", "conn-1"));
 }

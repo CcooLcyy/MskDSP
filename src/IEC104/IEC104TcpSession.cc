@@ -148,6 +148,7 @@ void TcpSession::Start(boost::asio::ip::tcp::socket socket) {
   recvSeqExpected_ = 0;
   sendUnacked_ = 0;
   recvSinceLastAck_ = 0;
+  testFramePending_ = false;
   pendingAsdu_.clear();
   sentIFrameSoeSequences_.clear();
   soeReplayLoaded_ = false;
@@ -156,6 +157,7 @@ void TcpSession::Start(boost::asio::ip::tcp::socket socket) {
   writeQueue_.clear();
   clearRemoteControlState();
   writing_ = false;
+  setConnectionState(IEC104Proto::CONNECTION_STATE_CONNECTED);
 
   LOG_INFO("IEC104 会话启动: conn_name={}, 角色={}, k={}, w={}, t0={}, t1={}, t2={}, t3={}", config_.conn_name(), isClient_ ? "客户端" : "服务端", apci_.k, apci_.w, apci_.t0, apci_.t1, apci_.t2, apci_.t3);
   LOG_INFO("IEC104 点值上送参数: conn_name={}, 窗口毫秒={}, 最大ASDU字节={}, 标准上限={}, 去重={}, 带时标={}", config_.conn_name(), pointBatchWindow_.count(), pointMaxAsduBytes_, config_.point_use_standard_limit(), pointDedupe_, pointWithTime_);
@@ -201,6 +203,8 @@ void TcpSession::Stop() {
     self->pointFlushScheduled_ = false;
     self->clearRemoteControlState();
     self->writing_ = false;
+    self->testFramePending_ = false;
+    self->setConnectionState(IEC104Proto::CONNECTION_STATE_DISCONNECTED);
     if (onClosed) {
       onClosed();
     }
@@ -233,6 +237,10 @@ void TcpSession::SetCommandCallback(CommandCallback cb) {
 
 void TcpSession::SetCommandExecutionModeCallback(CommandExecutionModeCallback cb) {
   onCommandExecutionMode_ = std::move(cb);
+}
+
+void TcpSession::SetConnectionStateCallback(ConnectionStateCallback cb) {
+  onConnectionState_ = std::move(cb);
 }
 
 void TcpSession::SetClosedCallback(std::function<void()> cb) {
@@ -578,7 +586,11 @@ void TcpSession::handleRead() {
           self->Stop();
           return;
         }
-        self->restartT3();
+        // 未等待测试确认时，任意合法报文都说明连接仍有活动；等待 TESTFR_CON
+        // 期间保持当前 t3 计时，避免没有测试确认的半开连接被误判为在线。
+        if (!self->testFramePending_) {
+          self->restartT3();
+        }
 
         std::istream is(&self->buffer_);
         std::vector<uint8_t> apdu(length);
@@ -709,6 +721,8 @@ void TcpSession::handleUFrame(const std::vector<uint8_t> &apdu) {
     break;
   case UFrameType::TESTFR_CON:
     LOG_DEBUG("IEC104 接收 TESTFR_CON: conn_name={}", config_.conn_name());
+    testFramePending_ = false;
+    restartT3();
     break;
   }
 }
@@ -2172,10 +2186,30 @@ void TcpSession::onT3Timeout(const boost::system::error_code &ec) {
     return;
   }
   if (dataTransferActive_) {
+    if (testFramePending_) {
+      LOG_WARNING("IEC104 t3 测试确认超时，判定 TCP 会话断开: conn_name={}, t3={}", config_.conn_name(), apci_.t3);
+      Stop();
+      return;
+    }
     LOG_DEBUG("IEC104 t3 超时: conn_name={}, t3={}", config_.conn_name(), apci_.t3);
+    testFramePending_ = true;
     sendUFrame(UFrameType::TESTFR_ACT);
   }
   restartT3();
+}
+
+void TcpSession::setConnectionState(IEC104Proto::ConnectionState state) {
+  if (connectionState_ == state) {
+    return;
+  }
+  connectionState_ = state;
+  LOG_INFO("IEC104 TCP 会话连接状态变化: conn_name={}, 状态={}",
+           config_.conn_name(),
+           state == IEC104Proto::CONNECTION_STATE_CONNECTED ? "已连接" :
+               state == IEC104Proto::CONNECTION_STATE_CONNECTING ? "连接中" : "已断开");
+  if (onConnectionState_) {
+    onConnectionState_(state);
+  }
 }
 
 }  // namespace IEC104

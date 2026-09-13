@@ -304,6 +304,7 @@ grpc::Status LinkManager::fillLinkInfoLocked(const LinkRuntime &link, IEC104Prot
   out->set_conn_id(link.connId);
   out->set_state(link.state);
   out->set_last_error(link.lastError);
+  out->set_connection_state(link.connectionState);
   return grpc::Status::OK;
 }
 
@@ -724,6 +725,7 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
       }
 
       it->second.config = config;
+      it->second.connectionState = IEC104Proto::CONNECTION_STATE_DISCONNECTED;
       it->second.lastError.clear();
       status = saveLinksLocked();
       if (!status.ok()) {
@@ -814,6 +816,7 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
       }
 
       it->second.config = config;
+      it->second.connectionState = IEC104Proto::CONNECTION_STATE_DISCONNECTED;
       it->second.lastError.clear();
       if (isServer) {
         reservedServerListenByName_[connName] = desiredListen;
@@ -833,6 +836,7 @@ grpc::Status LinkManager::UpsertLink(const IEC104Proto::UpsertLinkRequest &reque
       it->second.config = config;
       it->second.connId = connInfo.conn_id();
       it->second.state = IEC104Proto::LINK_STATE_STOPPED;
+      it->second.connectionState = IEC104Proto::CONNECTION_STATE_DISCONNECTED;
       it->second.lastError.clear();
       status = saveLinksLocked();
       if (!status.ok()) {
@@ -1066,6 +1070,9 @@ void LinkManager::configureTransportCallbacksLocked(const std::string &connName,
   if (link == nullptr || !link->transport) {
     return;
   }
+  link->transport->SetConnectionStateCallback([this, connName](IEC104Proto::ConnectionState state) {
+    handleTransportConnectionState(connName, state);
+  });
   if (isMasterStation(link->config)) {
     link->transport->SetPointValueCallback([this, connName](const PointValue &pv) {
       (void)handleClientPointValue(connName, pv);
@@ -1134,6 +1141,33 @@ void LinkManager::configureTransportCallbacksLocked(const std::string &connName,
       });
 }
 
+void LinkManager::handleTransportConnectionState(const std::string &connName,
+                                                  IEC104Proto::ConnectionState state) {
+  std::lock_guard<std::mutex> lock(mu_);
+  auto it = linksByName_.find(connName);
+  if (it == linksByName_.end()) {
+    LOG_DEBUG("IEC104 忽略不存在链路的连接状态回调: conn_name={}, 状态={}",
+              connName,
+              state == IEC104Proto::CONNECTION_STATE_CONNECTED ? "已连接" :
+                  state == IEC104Proto::CONNECTION_STATE_CONNECTING ? "连接中" : "已断开");
+    return;
+  }
+  if (!it->second.transport && state != IEC104Proto::CONNECTION_STATE_DISCONNECTED) {
+    LOG_DEBUG("IEC104 忽略已停止链路的连接状态回调: conn_name={}, 状态={}",
+              connName,
+              state == IEC104Proto::CONNECTION_STATE_CONNECTED ? "已连接" : "连接中");
+    return;
+  }
+  if (it->second.connectionState == state) {
+    return;
+  }
+  it->second.connectionState = state;
+  LOG_INFO("IEC104 链路连接状态更新: conn_name={}, 状态={}",
+           connName,
+           state == IEC104Proto::CONNECTION_STATE_CONNECTED ? "已连接" :
+               state == IEC104Proto::CONNECTION_STATE_CONNECTING ? "连接中" : "已断开");
+}
+
 grpc::Status LinkManager::StartLink(const std::string &connName) {
   auto status = validateConnName(connName);
   if (!status.ok()) {
@@ -1158,12 +1192,16 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
   }
 
   link.lastReportedByTag.clear();
+  link.connectionState = link.config.role() == IEC104Proto::ROLE_CLIENT
+                             ? IEC104Proto::CONNECTION_STATE_CONNECTING
+                             : IEC104Proto::CONNECTION_STATE_DISCONNECTED;
   link.transport = std::make_unique<TcpLink>(link.config);
   configureTransportCallbacksLocked(connName, &link);
 
   status = link.transport->Start();
   if (!status.ok()) {
     link.lastError = status.error_message();
+    link.connectionState = IEC104Proto::CONNECTION_STATE_DISCONNECTED;
     link.transport.reset();
     return status;
   }
@@ -1199,6 +1237,7 @@ grpc::Status LinkManager::StopLink(const std::string &connName) {
     stopTimeSyncSubscribeLocked(&it->second);
     stopCommandSubscribeLocked(&it->second);
     transport = std::move(it->second.transport);
+    it->second.connectionState = IEC104Proto::CONNECTION_STATE_DISCONNECTED;
     it->second.state = pendingDelete ? IEC104Proto::LINK_STATE_PENDING_DELETE : IEC104Proto::LINK_STATE_STOPPED;
   }
 

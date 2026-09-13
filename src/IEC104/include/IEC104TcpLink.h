@@ -60,6 +60,7 @@ public:
   using CommandCallback = std::function<CommandResult(const CommandValue&)>;
   using CommandExecutionModeCallback =
       std::function<std::optional<IEC104Proto::CommandExecutionMode>(uint32_t)>;
+  using ConnectionStateCallback = std::function<void(IEC104Proto::ConnectionState)>;
 
   explicit TcpLink(IEC104Proto::LinkConfig config);
   ~TcpLink();
@@ -70,6 +71,7 @@ public:
   grpc::Status Start();
   void Stop();
   bool IsRunning() const;
+  IEC104Proto::ConnectionState ConnectionState() const;
 
   void SendPointValue(const PointValue& value, uint8_t cause);
   void SendSoe(const SoeEvent& event);
@@ -87,6 +89,7 @@ public:
   void SetTimeSyncCallback(TimeSyncCallback cb);
   void SetCommandCallback(CommandCallback cb);
   void SetCommandExecutionModeCallback(CommandExecutionModeCallback cb);
+  void SetConnectionStateCallback(ConnectionStateCallback cb);
 
 private:
   void run(std::stop_token st);
@@ -94,6 +97,9 @@ private:
   void startAccept();
   void startConnect();
   void scheduleReconnect(std::chrono::milliseconds delay);
+  void handleSessionConnectionState(const std::shared_ptr<class TcpSession>& session,
+                                    IEC104Proto::ConnectionState state);
+  void setConnectionState(IEC104Proto::ConnectionState state);
 
   void setSession(std::shared_ptr<class TcpSession> session);
   std::shared_ptr<class TcpSession> session() const;
@@ -110,6 +116,7 @@ private:
   std::optional<boost::asio::steady_timer> reconnectTimer_;
 
   std::shared_ptr<TcpSession> session_;
+  IEC104Proto::ConnectionState connectionState_ = IEC104Proto::CONNECTION_STATE_DISCONNECTED;
   PointValueCallback onPointValue_;
   SnapshotProvider interrogationSnapshotProvider_;
   SoeReplayProvider soeReplayProvider_;
@@ -117,6 +124,7 @@ private:
   TimeSyncCallback onTimeSync_;
   CommandCallback onCommand_;
   CommandExecutionModeCallback onCommandExecutionMode_;
+  ConnectionStateCallback onConnectionState_;
 };
 
 }  // namespace IEC104

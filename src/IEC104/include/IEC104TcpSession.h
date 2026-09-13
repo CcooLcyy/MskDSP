@@ -59,6 +59,7 @@ public:
   using TimeSyncCallback = TcpLink::TimeSyncCallback;
   using CommandCallback = TcpLink::CommandCallback;
   using CommandExecutionModeCallback = TcpLink::CommandExecutionModeCallback;
+  using ConnectionStateCallback = std::function<void(IEC104Proto::ConnectionState)>;
 
   TcpSession(boost::asio::io_context& io, IEC104Proto::LinkConfig config, bool isClient);
   ~TcpSession();
@@ -83,6 +84,7 @@ public:
   void SetTimeSyncCallback(TimeSyncCallback cb);
   void SetCommandCallback(CommandCallback cb);
   void SetCommandExecutionModeCallback(CommandExecutionModeCallback cb);
+  void SetConnectionStateCallback(ConnectionStateCallback cb);
   void SetClosedCallback(std::function<void()> cb);
 
 private:
@@ -126,6 +128,8 @@ private:
   bool closing_ = false;
   bool ackPending_ = false;
   bool autoInterrogationSent_ = false;
+  bool testFramePending_ = false;
+  IEC104Proto::ConnectionState connectionState_ = IEC104Proto::CONNECTION_STATE_DISCONNECTED;
 
   std::deque<std::vector<uint8_t>> writeQueue_;
   struct PendingAsdu {
@@ -144,6 +148,7 @@ private:
   TimeSyncCallback onTimeSync_;
   CommandCallback onCommand_;
   CommandExecutionModeCallback onCommandExecutionMode_;
+  ConnectionStateCallback onConnectionState_;
   std::function<void()> onClosed_;
 
   struct PendingPointValue {
@@ -280,6 +285,7 @@ private:
 
   void restartT3();
   void onT3Timeout(const boost::system::error_code& ec);
+  void setConnectionState(IEC104Proto::ConnectionState state);
 };
 
 }  // namespace IEC104
