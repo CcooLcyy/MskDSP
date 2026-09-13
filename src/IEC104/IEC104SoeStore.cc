@@ -18,6 +18,7 @@ namespace IEC104 {
 namespace {
 
 constexpr size_t kMarkAcknowledgedBatchSize = 500;
+constexpr size_t kDefaultQueryPageSize = 100;
 
 std::string sqliteError(sqlite3* db) {
   if (db == nullptr) {
@@ -344,6 +345,87 @@ grpc::Status loadRecords(sqlite3* db,
   return grpc::Status::OK;
 }
 
+grpc::Status validateQueryOptions(const SoeQueryOptions& options, size_t* pageSize) {
+  if (pageSize == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "SOE 分页大小输出参数为空");
+  }
+  *pageSize = options.pageSize == 0 ? kDefaultQueryPageSize : options.pageSize;
+  if (*pageSize > IEC104SoeStore::kCapacityPerConnection) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "SOE 分页大小不能超过 8000");
+  }
+  if (options.startTsMs.has_value() && options.endTsMs.has_value() &&
+      options.startTsMs.value() > options.endTsMs.value()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "SOE 查询起始时标不能晚于结束时标");
+  }
+  if (options.ioa.has_value() && options.ioa.value() > 0xFFFFFFu) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "SOE 信息对象地址超出 24 位范围");
+  }
+  if (options.beforeEventSequence.has_value() && options.beforeEventSequence.value() == 0) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "SOE 翻页游标必须大于 0");
+  }
+  switch (options.acknowledgedFilter) {
+    case SoeAcknowledgedFilter::kAll:
+    case SoeAcknowledgedFilter::kAcknowledged:
+    case SoeAcknowledgedFilter::kUnacknowledged:
+      break;
+    default:
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "SOE 确认状态筛选值非法");
+  }
+  return grpc::Status::OK;
+}
+
+std::string queryFilterSql(const SoeQueryOptions& options) {
+  std::string sql = " WHERE conn_name=?";
+  if (options.startTsMs.has_value()) {
+    sql += " AND ts_ms>=?";
+  }
+  if (options.endTsMs.has_value()) {
+    sql += " AND ts_ms<=?";
+  }
+  if (options.ioa.has_value()) {
+    sql += " AND ioa=?";
+  }
+  if (options.acknowledgedFilter == SoeAcknowledgedFilter::kAcknowledged) {
+    sql += " AND acknowledged=1";
+  } else if (options.acknowledgedFilter == SoeAcknowledgedFilter::kUnacknowledged) {
+    sql += " AND acknowledged=0";
+  }
+  return sql;
+}
+
+grpc::Status bindQueryFilters(sqlite3* db,
+                              sqlite3_stmt* statement,
+                              std::string_view connName,
+                              const SoeQueryOptions& options,
+                              int* nextIndex) {
+  if (nextIndex == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "SOE 查询参数索引输出为空");
+  }
+  int index = 1;
+  auto status = bindText(db, statement, index++, connName);
+  if (status.ok() && options.startTsMs.has_value()) {
+    status = bindInt64(db, statement, index++, options.startTsMs.value());
+  }
+  if (status.ok() && options.endTsMs.has_value()) {
+    status = bindInt64(db, statement, index++, options.endTsMs.value());
+  }
+  if (status.ok() && options.ioa.has_value()) {
+    status = bindInt64(db, statement, index++, options.ioa.value());
+  }
+  *nextIndex = index;
+  return status;
+}
+
+SoeRecord readRecord(sqlite3_stmt* statement, std::string_view connName) {
+  return SoeRecord{static_cast<uint64_t>(sqlite3_column_int64(statement, 0)),
+                   std::string(connName),
+                   static_cast<uint32_t>(sqlite3_column_int64(statement, 1)),
+                   sqlite3_column_int(statement, 2) != 0,
+                   sqlite3_column_int64(statement, 3),
+                   static_cast<uint8_t>(sqlite3_column_int(statement, 4)),
+                   sqlite3_column_int(statement, 5) != 0};
+}
+
 }  // 匿名命名空间结束
 
 IEC104SoeStore::IEC104SoeStore(std::filesystem::path databasePath) :
@@ -540,6 +622,106 @@ grpc::Status IEC104SoeStore::LoadRecent(std::string_view connName,
     return status;
   }
   return loadRecords(db.get(), connName, false, records);
+}
+
+grpc::Status IEC104SoeStore::Query(std::string_view connName,
+                                   const SoeQueryOptions& options,
+                                   SoeQueryResult* result) const {
+  if (result == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "SOE 查询结果不能为空");
+  }
+  auto status = validateConnectionName(connName);
+  if (!status.ok()) {
+    return status;
+  }
+  size_t pageSize = 0;
+  status = validateQueryOptions(options, &pageSize);
+  if (!status.ok()) {
+    return status;
+  }
+
+  SqliteDb db;
+  status = openStore(databasePath_, &db);
+  if (!status.ok()) {
+    LOG_ERROR("IEC104 SOE 存储打开失败: conn_name={}, 错误={}", connName, status.error_message());
+    return status;
+  }
+
+  const std::string filterSql = queryFilterSql(options);
+  Statement countStatement(
+      db.get(),
+      "SELECT COUNT(*), COALESCE(SUM(CASE WHEN acknowledged=0 THEN 1 ELSE 0 END), 0) "
+      "FROM iec104_soe_events" +
+          filterSql);
+  if (!countStatement.status().ok()) {
+    return countStatement.status();
+  }
+  int nextIndex = 0;
+  status = bindQueryFilters(db.get(), countStatement.get(), connName, options, &nextIndex);
+  if (!status.ok()) {
+    return status;
+  }
+  if (sqlite3_step(countStatement.get()) != SQLITE_ROW) {
+    return internalError(db.get(), "统计 SOE 查询结果失败");
+  }
+  result->records.clear();
+  result->hasMore = false;
+  result->nextEventSequence.reset();
+  result->totalCount = static_cast<size_t>(sqlite3_column_int64(countStatement.get(), 0));
+  result->unacknowledgedCount = static_cast<size_t>(sqlite3_column_int64(countStatement.get(), 1));
+
+  std::string querySql =
+      "SELECT event_sequence, ioa, bool_value, ts_ms, quality, acknowledged "
+      "FROM iec104_soe_events" +
+      filterSql;
+  if (options.beforeEventSequence.has_value()) {
+    querySql += " AND event_sequence<?";
+  }
+  querySql += " ORDER BY event_sequence DESC LIMIT ?";
+
+  Statement queryStatement(db.get(), querySql);
+  if (!queryStatement.status().ok()) {
+    return queryStatement.status();
+  }
+  status = bindQueryFilters(db.get(), queryStatement.get(), connName, options, &nextIndex);
+  if (!status.ok()) {
+    return status;
+  }
+  if (options.beforeEventSequence.has_value()) {
+    if (options.beforeEventSequence.value() > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "SOE 翻页游标超出 SQLite 整数范围");
+    }
+    status = bindInt64(db.get(),
+                       queryStatement.get(),
+                       nextIndex++,
+                       static_cast<int64_t>(options.beforeEventSequence.value()));
+  }
+  if (status.ok()) {
+    status = bindInt64(db.get(), queryStatement.get(), nextIndex, static_cast<int64_t>(pageSize + 1));
+  }
+  if (!status.ok()) {
+    return status;
+  }
+
+  int rc = SQLITE_ROW;
+  while ((rc = sqlite3_step(queryStatement.get())) == SQLITE_ROW) {
+    result->records.push_back(readRecord(queryStatement.get(), connName));
+  }
+  if (rc != SQLITE_DONE) {
+    return internalError(db.get(), "查询 SOE 历史分页失败");
+  }
+  if (result->records.size() > pageSize) {
+    result->records.resize(pageSize);
+    result->hasMore = true;
+    result->nextEventSequence = result->records.back().eventSequence;
+  }
+  LOG_DEBUG("IEC104 SOE 历史查询完成: conn_name={}, 返回条数={}, 总条数={}, 未确认条数={}, 是否有更早记录={}",
+            connName,
+            result->records.size(),
+            result->totalCount,
+            result->unacknowledgedCount,
+            result->hasMore);
+  return grpc::Status::OK;
 }
 
 grpc::Status IEC104SoeStore::MarkAcknowledged(std::string_view connName,

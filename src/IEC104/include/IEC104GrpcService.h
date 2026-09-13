@@ -20,6 +20,7 @@ public:
   grpc::Status StopLink(grpc::ServerContext *context, const IEC104Proto::StopLinkRequest *request, IEC104Proto::Empty *) override;
   grpc::Status UpsertPointTable(grpc::ServerContext *context, const IEC104Proto::UpsertPointTableRequest *request, IEC104Proto::Empty *) override;
   grpc::Status GetPointTable(grpc::ServerContext *context, const IEC104Proto::GetPointTableRequest *request, IEC104Proto::PointTable *response) override;
+  grpc::Status QuerySoe(grpc::ServerContext *context, const IEC104Proto::QuerySoeRequest *request, IEC104Proto::QuerySoeResponse *response) override;
   grpc::Status SendTimeSync(grpc::ServerContext *context, const IEC104Proto::SendTimeSyncRequest *request, IEC104Proto::Empty *) override;
   grpc::Status GenerateSimulationValues(grpc::ServerContext *context, const IEC104Proto::SimulationRequest *request, IEC104Proto::SimulationSnapshot *response) override;
   grpc::Status GetSimulationSnapshot(grpc::ServerContext *context, const IEC104Proto::SimulationRequest *request, IEC104Proto::SimulationSnapshot *response) override;

@@ -1333,6 +1333,86 @@ grpc::Status LinkManager::GetPointTable(const std::string &connName, IEC104Proto
   return grpc::Status::OK;
 }
 
+grpc::Status LinkManager::QuerySoe(const IEC104Proto::QuerySoeRequest &request,
+                                   IEC104Proto::QuerySoeResponse *out) const {
+  if (out == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
+  }
+  const auto validation = validateConnName(request.conn_name());
+  if (!validation.ok()) {
+    return validation;
+  }
+
+  SoeQueryOptions options;
+  if (request.has_start_ts_ms()) {
+    options.startTsMs = request.start_ts_ms();
+  }
+  if (request.has_end_ts_ms()) {
+    options.endTsMs = request.end_ts_ms();
+  }
+  if (request.has_ioa()) {
+    options.ioa = request.ioa();
+  }
+  switch (request.acknowledged_filter()) {
+    case IEC104Proto::SOE_ACKNOWLEDGED_FILTER_ALL:
+      options.acknowledgedFilter = SoeAcknowledgedFilter::kAll;
+      break;
+    case IEC104Proto::SOE_ACKNOWLEDGED_FILTER_ACKNOWLEDGED:
+      options.acknowledgedFilter = SoeAcknowledgedFilter::kAcknowledged;
+      break;
+    case IEC104Proto::SOE_ACKNOWLEDGED_FILTER_UNACKNOWLEDGED:
+      options.acknowledgedFilter = SoeAcknowledgedFilter::kUnacknowledged;
+      break;
+    default:
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "SOE 确认状态筛选值非法");
+  }
+  options.pageSize = request.page_size();
+  if (request.has_before_event_sequence()) {
+    options.beforeEventSequence = request.before_event_sequence();
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (linksByName_.find(request.conn_name()) == linksByName_.end()) {
+      return makeNotFound(request.conn_name());
+    }
+  }
+  if (!soeStore_) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "SOE 存储未启用");
+  }
+
+  SoeQueryResult queryResult;
+  auto status = soeStore_->Query(request.conn_name(), options, &queryResult);
+  if (!status.ok()) {
+    LOG_ERROR("IEC104 查询 SOE 历史失败: conn_name={}, 原因={}", request.conn_name(), status.error_message());
+    return status;
+  }
+
+  out->Clear();
+  for (const auto &record : queryResult.records) {
+    auto *event = out->add_events();
+    event->set_event_sequence(record.eventSequence);
+    event->set_conn_name(record.connName);
+    event->set_ioa(record.ioa);
+    event->set_state(record.state);
+    event->set_ts_ms(record.tsMs);
+    event->set_quality(record.quality);
+    event->set_acknowledged(record.acknowledged);
+  }
+  out->set_has_more(queryResult.hasMore);
+  if (queryResult.nextEventSequence.has_value()) {
+    out->set_next_event_sequence(queryResult.nextEventSequence.value());
+  }
+  out->set_total_count(static_cast<uint32_t>(queryResult.totalCount));
+  out->set_unacknowledged_count(static_cast<uint32_t>(queryResult.unacknowledgedCount));
+  LOG_DEBUG("IEC104 SOE 历史查询返回: conn_name={}, 返回条数={}, 总条数={}, 未确认条数={}",
+            request.conn_name(),
+            out->events_size(),
+            out->total_count(),
+            out->unacknowledged_count());
+  return grpc::Status::OK;
+}
+
 grpc::Status LinkManager::SendTimeSync(const std::string &connName, int64_t tsMs) {
   auto status = validateConnName(connName);
   if (!status.ok()) {

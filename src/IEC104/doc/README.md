@@ -230,6 +230,10 @@ ctest --test-dir build -R iec104TcpSession_test --output-on-failure
 - IEC104 会发送 `C_CS_NA_1` 并记录日志；主站发送对时时不会修改本机系统时间
 - 从站收到有效对时后会直接设置系统时间；设置失败返回负确认。
 
+### SOE 历史查询
+
+上位机可调用只读 `QuerySoe` 查询指定连接已落盘的 SOE。请求必须提供 `conn_name`，可选按北京时间对应的 Unix 毫秒时标、IOA 和确认状态筛选；`page_size` 取 1～8000，0 使用默认值。首次查询返回最新一页，设置 `before_event_sequence` 后返回序号更小的更早记录，结果按序号从新到旧排列。`total_count` 和 `unacknowledged_count` 统计整个筛选条件，不受当前页游标影响；查询不会改变确认状态或触发补传。
+
 ### 请求示例
 IEC104 `UpsertLink`（ROLE_CLIENT + STATION_ROLE_MASTER）：
 ```jsonc

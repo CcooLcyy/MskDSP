@@ -125,3 +125,67 @@ TEST(IEC104SoeStoreTest, RenamesAndDeletesConnectionHistory) {
   ASSERT_TRUE(store.Append("new-name", 3, true, 1700000000002LL, 0, &result).ok());
   EXPECT_EQ(result.record.eventSequence, 1u);
 }
+
+// 验证：SOE 查询支持时间、IOA、确认状态筛选及向更早事件翻页，并返回正确统计值。
+TEST(IEC104SoeStoreTest, QueriesHistoryWithFiltersAndCursor) {
+  ScopedSoeTempDir dir;
+  IEC104::IEC104SoeStore store(dir.path() / "config.db");
+  IEC104::SoeAppendResult result;
+  ASSERT_TRUE(store.Append("channel", 10, false, 1000, 0x01, &result).ok());
+  ASSERT_TRUE(store.Append("channel", 11, true, 2000, 0x02, &result).ok());
+  ASSERT_TRUE(store.Append("channel", 10, true, 3000, 0x03, &result).ok());
+  ASSERT_TRUE(store.Append("channel", 12, false, 4000, 0x04, &result).ok());
+  const std::array<uint64_t, 2> acknowledged{2, 4};
+  ASSERT_TRUE(store.MarkAcknowledged("channel", acknowledged).ok());
+
+  IEC104::SoeQueryOptions options;
+  options.pageSize = 2;
+  IEC104::SoeQueryResult page;
+  ASSERT_TRUE(store.Query("channel", options, &page).ok());
+  ASSERT_EQ(page.records.size(), 2u);
+  EXPECT_EQ(page.records[0].eventSequence, 4u);
+  EXPECT_EQ(page.records[1].eventSequence, 3u);
+  EXPECT_TRUE(page.hasMore);
+  ASSERT_TRUE(page.nextEventSequence.has_value());
+  EXPECT_EQ(page.nextEventSequence.value(), 3u);
+  EXPECT_EQ(page.totalCount, 4u);
+  EXPECT_EQ(page.unacknowledgedCount, 2u);
+
+  options.beforeEventSequence = page.nextEventSequence;
+  ASSERT_TRUE(store.Query("channel", options, &page).ok());
+  ASSERT_EQ(page.records.size(), 2u);
+  EXPECT_EQ(page.records[0].eventSequence, 2u);
+  EXPECT_EQ(page.records[1].eventSequence, 1u);
+  EXPECT_FALSE(page.hasMore);
+  EXPECT_FALSE(page.nextEventSequence.has_value());
+
+  options = {};
+  options.ioa = 10;
+  options.startTsMs = 1500;
+  options.endTsMs = 3500;
+  options.acknowledgedFilter = IEC104::SoeAcknowledgedFilter::kUnacknowledged;
+  ASSERT_TRUE(store.Query("channel", options, &page).ok());
+  ASSERT_EQ(page.records.size(), 1u);
+  EXPECT_EQ(page.records.front().eventSequence, 3u);
+  EXPECT_EQ(page.totalCount, 1u);
+  EXPECT_EQ(page.unacknowledgedCount, 1u);
+}
+
+// 验证：SOE 查询拒绝空连接名、非法时间范围、非法页大小和零游标。
+TEST(IEC104SoeStoreTest, RejectsInvalidQueryOptions) {
+  ScopedSoeTempDir dir;
+  IEC104::IEC104SoeStore store(dir.path() / "config.db");
+  IEC104::SoeQueryOptions options;
+  IEC104::SoeQueryResult result;
+
+  EXPECT_EQ(store.Query("", options, &result).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  options.startTsMs = 20;
+  options.endTsMs = 10;
+  EXPECT_EQ(store.Query("channel", options, &result).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  options = {};
+  options.pageSize = IEC104::IEC104SoeStore::kCapacityPerConnection + 1;
+  EXPECT_EQ(store.Query("channel", options, &result).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  options = {};
+  options.beforeEventSequence = 0;
+  EXPECT_EQ(store.Query("channel", options, &result).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}

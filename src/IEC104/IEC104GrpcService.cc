@@ -210,6 +210,29 @@ grpc::Status IEC104GrpcServiceImpl::GetPointTable(
   return status;
 }
 
+grpc::Status IEC104GrpcServiceImpl::QuerySoe(
+    grpc::ServerContext *, const IEC104Proto::QuerySoeRequest *request, IEC104Proto::QuerySoeResponse *response) {
+  if (iec104_ == nullptr) {
+    LOG_ERROR("IEC104 服务未就绪");
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
+  }
+  if (request == nullptr || response == nullptr) {
+    LOG_ERROR("IEC104 SOE 查询请求为空");
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
+  }
+  auto status = iec104_->linkManager().QuerySoe(*request, response);
+  if (!status.ok()) {
+    LOG_ERROR("IEC104 查询 SOE 历史失败: conn_name={}, 原因={}", request->conn_name(), status.error_message());
+  } else {
+    LOG_DEBUG("IEC104 查询 SOE 历史成功: conn_name={}, 返回条数={}, 总条数={}, 未确认条数={}",
+              request->conn_name(),
+              response->events_size(),
+              response->total_count(),
+              response->unacknowledged_count());
+  }
+  return status;
+}
+
 grpc::Status IEC104GrpcServiceImpl::SendTimeSync(
     grpc::ServerContext *, const IEC104Proto::SendTimeSyncRequest *request, IEC104Proto::Empty *) {
   if (iec104_ == nullptr) {

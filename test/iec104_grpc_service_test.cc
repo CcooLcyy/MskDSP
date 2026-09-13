@@ -30,6 +30,11 @@ TEST(IEC104GrpcServiceTest, RejectsWhenModuleNotReady) {
   IEC104Proto::ListLinksResponse listResp;
   st = service.ListLinks(&ctx, nullptr, &listResp);
   EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+
+  IEC104Proto::QuerySoeRequest soeReq;
+  IEC104Proto::QuerySoeResponse soeResp;
+  st = service.QuerySoe(&ctx, &soeReq, &soeResp);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
 }
 
 // 验证：请求/响应为空时返回 INVALID_ARGUMENT。
@@ -47,6 +52,9 @@ TEST(IEC104GrpcServiceTest, RejectsNullRequestOrResponse) {
   EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
 
   st = service.RenameLink(&ctx, nullptr, nullptr);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+
+  st = service.QuerySoe(&ctx, nullptr, nullptr);
   EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
 }
 
@@ -72,4 +80,10 @@ TEST(IEC104GrpcServiceTest, DelegatesToLinkManager) {
   IEC104Proto::ListLinksResponse listResp;
   st = service.ListLinks(&ctx, nullptr, &listResp);
   EXPECT_TRUE(st.ok());
+
+  IEC104Proto::QuerySoeRequest soeReq;
+  soeReq.set_conn_name("missing");
+  IEC104Proto::QuerySoeResponse soeResp;
+  st = service.QuerySoe(&ctx, &soeReq, &soeResp);
+  EXPECT_EQ(st.error_code(), grpc::StatusCode::NOT_FOUND);
 }

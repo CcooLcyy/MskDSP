@@ -31,6 +31,29 @@ struct SoeAppendResult {
   std::optional<uint64_t> oldestOverwrittenSequence;
 };
 
+enum class SoeAcknowledgedFilter {
+  kAll,
+  kAcknowledged,
+  kUnacknowledged,
+};
+
+struct SoeQueryOptions {
+  std::optional<int64_t> startTsMs;
+  std::optional<int64_t> endTsMs;
+  std::optional<uint32_t> ioa;
+  SoeAcknowledgedFilter acknowledgedFilter = SoeAcknowledgedFilter::kAll;
+  size_t pageSize = 100;
+  std::optional<uint64_t> beforeEventSequence;
+};
+
+struct SoeQueryResult {
+  std::vector<SoeRecord> records;
+  bool hasMore = false;
+  std::optional<uint64_t> nextEventSequence;
+  size_t totalCount = 0;
+  size_t unacknowledgedCount = 0;
+};
+
 class IEC104SoeStore {
 public:
   static constexpr size_t kCapacityPerConnection = 8000;
@@ -46,6 +69,10 @@ public:
 
   grpc::Status LoadUnacknowledged(std::string_view connName, std::vector<SoeRecord>* records) const;
   grpc::Status LoadRecent(std::string_view connName, std::vector<SoeRecord>* records) const;
+  // 按筛选条件分页读取历史事件；结果按事件序号从新到旧排列。
+  grpc::Status Query(std::string_view connName,
+                     const SoeQueryOptions& options,
+                     SoeQueryResult* result) const;
 
   grpc::Status MarkAcknowledged(std::string_view connName,
                                 std::span<const uint64_t> sequences,
