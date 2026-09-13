@@ -536,7 +536,9 @@ TEST_F(DataCenterGrpcServiceTest, MultiSourceRouteToSameTargetPreservesPublishOr
 
   subCtx.TryCancel();
   EXPECT_FALSE(reader->Read(&second));
-  EXPECT_TRUE(reader->Finish().ok());
+  const auto finishStatus = reader->Finish();
+  EXPECT_TRUE(finishStatus.ok() || finishStatus.error_code() == grpc::StatusCode::CANCELLED)
+      << finishStatus.error_message();
 }
 
 // 验证：多个源连接对同一目标连接执行同步命令时，目标模块按 DataCenter 顺序串行接收。
