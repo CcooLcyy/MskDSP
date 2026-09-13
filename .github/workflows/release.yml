@@ -19,13 +19,10 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  GITEE_OWNER: ${{ vars.GITEE_OWNER || 'CcooLcyy' }}
-  GITEE_REPO: ${{ vars.GITEE_REPO || 'mskdsp-update' }}
-  STATIC_UPDATE_BASE_URL: ${{ vars.LOWER_UPDATE_STATIC_BASE_URL || vars.UPDATE_STATIC_BASE_URL || 'https://update.clsclear.top/mskdsp-lower' }}
-  STATIC_UPDATE_SSH_HOST: ${{ vars.LOWER_UPDATE_STATIC_SSH_HOST || vars.UPDATE_STATIC_SSH_HOST || 'clsclear.top' }}
-  STATIC_UPDATE_SSH_PORT: ${{ vars.LOWER_UPDATE_STATIC_SSH_PORT || vars.UPDATE_STATIC_SSH_PORT || '32118' }}
-  STATIC_UPDATE_SSH_USER: ${{ vars.LOWER_UPDATE_STATIC_SSH_USER || vars.UPDATE_STATIC_SSH_USER || 'daniel' }}
-  STATIC_UPDATE_REMOTE_ROOT: ${{ vars.LOWER_UPDATE_STATIC_REMOTE_ROOT || vars.UPDATE_STATIC_REMOTE_ROOT || '/home/daniel/update-server/www/mskdsp-lower' }}
+  R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+  R2_BUCKET: ${{ vars.R2_BUCKET || 'mskdsp-update' }}
+  R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL || 'https://pub-19f3d71852b04011b120b1b814141c12.r2.dev' }}
+  STATIC_UPDATE_BASE_URL: ${{ vars.LOWER_UPDATE_STATIC_BASE_URL || 'https://pub-19f3d71852b04011b120b1b814141c12.r2.dev/mskdsp-lower' }}
 
 jobs:
   arm64-release:
@@ -125,7 +122,8 @@ jobs:
             ninja-build \
             ccache \
             gcc-14 \
-            g++-14
+            g++-14 \
+            awscli
 
       - name: 安装 vcpkg
         shell: bash
@@ -269,19 +267,29 @@ jobs:
             --source-ref "${RELEASE_TAG}" \
             --source-sha "${SOURCE_SHA}"
 
-      - name: 发布稳定包到 Gitee 并通知服务器
+      - name: 发布稳定包到 Cloudflare R2
         shell: bash
         env:
-          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-          STATIC_UPDATE_SSH_KEY: ${{ secrets.LOWER_UPDATE_STATIC_SSH_KEY || secrets.UPDATE_STATIC_SSH_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
           set -euo pipefail
-          ASSETS=("images/${{ steps.meta.outputs.archive_name }}")
-          if [[ -f "${{ steps.meta.outputs.debug_archive_name }}.tar.gz" ]]; then ASSETS+=("${{ steps.meta.outputs.debug_archive_name }}.tar.gz"); fi
-          ASSETS+=(SHA256SUMS latest.json)
-          ARGS=(--owner "${GITEE_OWNER}" --repo "${GITEE_REPO}" --tag "lower-stable-${RELEASE_TAG}" --name "MSKDSP 下位机正式版 ${RELEASE_TAG}" --product lower --channel stable --platform linux-arm64 --remote-root "${STATIC_UPDATE_REMOTE_ROOT}" --ssh-host "${STATIC_UPDATE_SSH_HOST}" --ssh-port "${STATIC_UPDATE_SSH_PORT}" --ssh-user "${STATIC_UPDATE_SSH_USER}" --remote-script "/home/daniel/update-server/relay/sync_gitee_release.py")
-          for asset in "${ASSETS[@]}"; do ARGS+=(--asset "${asset}"); done
-          python3 script/workflow/publish_gitee_release.py "${ARGS[@]}"
+          DEBUG_FILE=""
+          if [[ -f "${{ steps.meta.outputs.debug_archive_name }}.tar.gz" ]]; then
+            DEBUG_FILE="${{ steps.meta.outputs.debug_archive_name }}.tar.gz"
+          fi
+          R2_ARGS=( \
+            --endpoint "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+            --bucket "${R2_BUCKET}" \
+            --prefix "mskdsp-lower/stable" \
+            --public-base-url "${R2_PUBLIC_BASE_URL}" \
+            --platform linux-arm64 \
+            --package-file "images/${{ steps.meta.outputs.archive_name }}" \
+            --checksum-file SHA256SUMS \
+            --manifest-file latest.json \
+          )
+          if [[ -n "${DEBUG_FILE}" ]]; then R2_ARGS+=(--debug-file "${DEBUG_FILE}"); fi
+          bash script/workflow/upload_r2.sh "${R2_ARGS[@]}"
 
       - name: 创建或更新 GitHub Release
         shell: bash

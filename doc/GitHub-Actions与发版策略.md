@@ -329,3 +329,25 @@
 - 安装包命名规则、自解压脚本行为与 Release 页面资产是否同步变化
 - `protobuf` 子模块访问方式与密钥命名是否变化
 - vcpkg triplet 或其引用文件变化时，是否同步纳入 vcpkg 缓存 key 的 `hashFiles`
+
+## 13. Cloudflare R2 更新包发布
+
+当前构建完成后，CI、Nightly、Beta 和 Stable workflow 会直接将下位机更新资产上传到 Cloudflare R2，Gitee 与服务器 SSH 中转链路已停用。R2 对象路径为：
+
+```text
+mskdsp-lower/<channel>/<platform>/<资产文件>
+mskdsp-lower/<channel>/latest.json
+```
+
+安装包、调试包和 `SHA256SUMS` 先上传，`latest.json` 最后上传。上传完成后仅清理同一渠道和平台下不再使用的旧对象，不影响其他渠道。客户端清单地址示例：
+
+```text
+https://pub-19f3d71852b04011b120b1b814141c12.r2.dev/mskdsp-lower/stable/latest.json
+```
+
+首次启用前，在仓库 `Settings → Secrets and variables → Actions` 配置：
+
+- Secrets：`R2_ACCOUNT_ID`、`R2_ACCESS_KEY_ID`、`R2_SECRET_ACCESS_KEY`
+- Variables：`R2_BUCKET`（默认 `mskdsp-update`）、`R2_PUBLIC_BASE_URL`（当前为上述 `r2.dev` 地址）
+
+`r2.dev` 仅用于当前开发联调；绑定自定义域名后，可通过修改 `R2_PUBLIC_BASE_URL` 和对应的更新基地址切换正式地址，无需修改清单格式或下载逻辑。

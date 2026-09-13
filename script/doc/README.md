@@ -91,7 +91,7 @@ MSKDSP_VERSION=<version> bash script/make_image.sh
 ## workflow 静态更新发布脚本
 
 ### 用途
-`script/workflow/write_lower_update_manifest.py` 用于生成下位机静态更新清单 `latest.json`；`script/workflow/sync_static_lower_update.sh` 用于把自解压安装包、`SHA256SUMS` 和 `latest.json` 同步到静态文件服务器。
+`script/workflow/write_lower_update_manifest.py` 用于生成下位机更新清单 `latest.json`；`script/workflow/upload_r2.sh` 使用 AWS CLI 的 S3 兼容接口把自解压安装包、`SHA256SUMS` 和 `latest.json` 发布到 Cloudflare R2。
 
 静态发布链路面向上位机使用：下位机不直接访问静态文件服务器，上位机读取 `latest.json` 后下载安装包，再下发到下位机执行安装。
 
@@ -109,14 +109,14 @@ MSKDSP_VERSION=<version> bash script/make_image.sh
 发布 workflow 在镜像构建完成后读取 Docker image ID，并将其写入 `latest.json`。上位机选择发布通道后，可通过 SSH 查询目标机 `mskdsp` 容器的运行状态与 image ID，将其与清单中的 `image_id` 比较。`asset.sha256` 只用于安装包传输完整性校验，不代表当前容器运行身份。
 
 ### 静态目录约定
-默认 URL 结构：
+默认 R2 公共开发 URL 结构：
 ```
-https://update.clsclear.top/mskdsp-lower/<channel>/latest.json
-https://update.clsclear.top/mskdsp-lower/<channel>/linux-arm64/<package>
-https://update.clsclear.top/mskdsp-lower/<channel>/linux-arm64/SHA256SUMS
+https://pub-19f3d71852b04011b120b1b814141c12.r2.dev/mskdsp-lower/<channel>/latest.json
+https://pub-19f3d71852b04011b120b1b814141c12.r2.dev/mskdsp-lower/<channel>/linux-arm64/<package>
+https://pub-19f3d71852b04011b120b1b814141c12.r2.dev/mskdsp-lower/<channel>/linux-arm64/SHA256SUMS
 ```
 
-同步脚本会先上传安装包和 `SHA256SUMS`，最后上传 `latest.json`，避免上位机读到已更新但资产尚未上传完成的清单。
+R2 上传脚本会先上传安装包和 `SHA256SUMS`，最后上传 `latest.json`，并仅清理同一渠道/平台下不再使用的旧对象，避免上位机读到已更新但资产尚未上传完成的清单。
 
 ## new_module.sh（模块脚手架）
 

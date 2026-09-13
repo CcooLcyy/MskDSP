@@ -1,10 +1,10 @@
-# Gitee 更新包中转
+# Gitee 更新包中转（已弃用）
 
 ## 目标
 
-GitHub Actions 将上位机、下位机更新产物上传到公开 Gitee 仓库的 Release 附件；上传完成后，工作流通过现有 SSH 链路发送一条小命令，服务器立即从 Gitee 下载并校验，再发布到现有 nginx 静态目录。客户端更新地址保持不变。
+更新包发布已迁移到 Cloudflare R2，当前工作流不再使用 Gitee 或服务器 SSH 中转。本文档保留作历史记录；当前方案请参阅《GitHub Actions 与发版策略》中的 Cloudflare R2 章节。
 
-## GitHub 配置
+## 历史 GitHub 配置
 
 在仓库 Actions Secrets 中配置 `GITEE_TOKEN`。可通过 Actions Variables 覆盖 `GITEE_OWNER`、`GITEE_REPO`；默认值为 `CcooLcyy`、`mskdsp-update`。Token 只用于创建 Release 和上传附件，不能写入日志或提交到仓库。
 
