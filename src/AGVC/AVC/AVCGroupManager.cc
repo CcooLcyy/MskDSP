@@ -659,11 +659,16 @@ void GroupManager::startThreadsLocked(const std::string& groupName, GroupRuntime
       [this, groupName, ctx, connId, tags](std::stop_token st) {
         std::stop_callback cb(st, [&ctx]() { ctx->TryCancel(); });
 
-        auto reader = dataCenter_.Subscribe(ctx.get(), connId, tags, false);
+        // 启动订阅时先加载最新输入快照，避免量测在订阅线程建立前发布而丢失。
+        auto reader = dataCenter_.Subscribe(ctx.get(), connId, tags, true);
         if (!reader) {
           LOG_ERROR("AVC 建立 DataCenter 订阅失败: group_name={}, conn_id={}, 标签数={}", groupName, connId, tags.size());
           return;
         }
+        LOG_INFO("AVC 已建立 DataCenter 订阅并加载初始快照: group_name={}, conn_id={}, 标签数={}",
+                 groupName,
+                 connId,
+                 tags.size());
 
         DataCenterProto::PointUpdate update;
         while (reader->Read(&update)) {
