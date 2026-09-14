@@ -16,7 +16,7 @@ env:
   R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
   R2_BUCKET: ${{ vars.R2_BUCKET || 'mskdsp-update' }}
   R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL || 'https://pub-19f3d71852b04011b120b1b814141c12.r2.dev' }}
-  STATIC_UPDATE_BASE_URL: ${{ vars.LOWER_UPDATE_STATIC_BASE_URL || 'https://pub-19f3d71852b04011b120b1b814141c12.r2.dev/mskdsp-lower' }}
+  STATIC_UPDATE_BASE_URL: ${{ format('{0}/mskdsp-lower', vars.R2_PUBLIC_BASE_URL || 'https://pub-19f3d71852b04011b120b1b814141c12.r2.dev') }}
 
 jobs:
   arm64-nightly:
@@ -119,7 +119,8 @@ jobs:
             ccache \
             gcc-14 \
             g++-14 \
-            awscli
+            curl \
+            unzip
 
       - name: 安装 vcpkg
         shell: bash
@@ -179,7 +180,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ccache --show-stats
+          if command -v ccache >/dev/null 2>&1; then
+            ccache --show-stats
+          else
+            echo "ccache 不可用，跳过统计输出"
+          fi
 
       - name: 安装运行产物到 package
         shell: bash
@@ -266,6 +271,19 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
           set -euo pipefail
+          if ! command -v aws >/dev/null 2>&1; then
+            AWS_ARCH=""
+            case "$(uname -m)" in
+              aarch64|arm64) AWS_ARCH="aarch64" ;;
+              x86_64|amd64) AWS_ARCH="x86_64" ;;
+              *) echo "不支持的 Runner 架构: $(uname -m)" >&2; exit 1 ;;
+            esac
+            AWS_TMP_DIR="$(mktemp -d "${RUNNER_TEMP}/awscli.XXXXXX")"
+            curl -fsSL --retry 3 "https://awscli.amazonaws.com/awscli-exe-linux-${AWS_ARCH}.zip" -o "${AWS_TMP_DIR}/awscliv2.zip"
+            unzip -q "${AWS_TMP_DIR}/awscliv2.zip" -d "${AWS_TMP_DIR}"
+            sudo "${AWS_TMP_DIR}/aws/install" --update
+          fi
+          aws --version
           DEBUG_FILE=""
           if [[ -f "${{ steps.meta.outputs.debug_archive_name }}.tar.gz" ]]; then
             DEBUG_FILE="${{ steps.meta.outputs.debug_archive_name }}.tar.gz"

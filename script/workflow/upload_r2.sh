@@ -61,6 +61,8 @@ require_cmd aws
 [[ -n "$PUBLIC_BASE_URL" ]] || die "--public-base-url 不能为空"
 [[ "$PUBLIC_BASE_URL" == http://* || "$PUBLIC_BASE_URL" == https://* ]] || die "--public-base-url 必须使用 http 或 https"
 [[ -n "$PLATFORM" ]] || die "--platform 不能为空"
+[[ -n "${AWS_ACCESS_KEY_ID:-}" ]] || die "缺少 AWS_ACCESS_KEY_ID，请配置 R2_ACCESS_KEY_ID secret"
+[[ -n "${AWS_SECRET_ACCESS_KEY:-}" ]] || die "缺少 AWS_SECRET_ACCESS_KEY，请配置 R2_SECRET_ACCESS_KEY secret"
 [[ -f "$PACKAGE_FILE" ]] || die "未找到安装包: $PACKAGE_FILE"
 [[ -f "$CHECKSUM_FILE" ]] || die "未找到校验文件: $CHECKSUM_FILE"
 [[ -f "$MANIFEST_FILE" ]] || die "未找到清单文件: $MANIFEST_FILE"
