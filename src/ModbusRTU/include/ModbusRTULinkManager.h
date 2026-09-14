@@ -160,6 +160,8 @@ private:
     MqttKey mqttKey;
     uint32_t connId = 0;
     ModbusRTUProto::LinkState state = ModbusRTUProto::LINK_STATE_STOPPED;
+    ModbusRTUProto::CommunicationState communicationState =
+        ModbusRTUProto::COMMUNICATION_STATE_UNSPECIFIED;
     std::string lastError;
     std::string pollingError;
     std::string commandError;
@@ -183,6 +185,8 @@ private:
   static MqttKey makeMqttKey(const ModbusRTUProto::LinkConfig& config);
 
   grpc::Status fillLinkInfoLocked(const LinkRuntime& link, ModbusRTUProto::LinkInfo* out) const;
+  void setCommunicationState(const std::string& connName,
+                              ModbusRTUProto::CommunicationState state);
   ModbusRTUProto::LinksConfig dumpLinksConfigLocked() const;
   ModbusRTUProto::PointTablesConfig dumpPointTablesConfigLocked() const;
   grpc::Status saveLinksConfig(const ModbusRTUProto::LinksConfig& config);

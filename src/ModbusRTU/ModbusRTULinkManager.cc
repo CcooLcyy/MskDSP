@@ -831,7 +831,25 @@ grpc::Status LinkManager::fillLinkInfoLocked(const LinkRuntime& link, ModbusRTUP
   out->set_conn_id(link.connId);
   out->set_state(link.state);
   out->set_last_error(link.lastError);
+  out->set_communication_state(link.communicationState);
   return grpc::Status::OK;
+}
+
+void LinkManager::setCommunicationState(
+    const std::string& connName,
+    ModbusRTUProto::CommunicationState state) {
+  std::lock_guard<std::mutex> lock(mu_);
+  auto it = linksByName_.find(connName);
+  if (it == linksByName_.end() || it->second.state != ModbusRTUProto::LINK_STATE_RUNNING) {
+    return;
+  }
+  if (it->second.communicationState == state) {
+    return;
+  }
+  it->second.communicationState = state;
+  LOG_INFO("ModbusRTU 通信健康状态更新: conn_name={}, 状态={}",
+           connName,
+           ModbusRTUProto::CommunicationState_Name(state));
 }
 
 ModbusRTUProto::LinksConfig LinkManager::dumpLinksConfigLocked() const {
@@ -1619,6 +1637,7 @@ grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& re
       it->second.config = normalized;
       it->second.serialKey = serialKey;
       it->second.mqttKey = mqttKey;
+      it->second.communicationState = ModbusRTUProto::COMMUNICATION_STATE_UNSPECIFIED;
       clearLastErrorLocked(&it->second, LastErrorSource::kLifecycle);
       clearLastErrorLocked(&it->second, LastErrorSource::kCommand);
       clearLastErrorLocked(&it->second, LastErrorSource::kSubscription);
@@ -1711,6 +1730,7 @@ grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& re
     link.mqttKey = mqttKey;
     link.connId = connInfo.conn_id();
     link.state = ModbusRTUProto::LINK_STATE_STOPPED;
+    link.communicationState = ModbusRTUProto::COMMUNICATION_STATE_UNSPECIFIED;
     clearLastErrorLocked(&link, LastErrorSource::kLifecycle);
     auto [it, inserted] = linksByName_.emplace(connName, std::move(link));
     if (!inserted) {
@@ -2042,6 +2062,7 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
     }
     link.bus = bus;
     link.state = ModbusRTUProto::LINK_STATE_RUNNING;
+    link.communicationState = ModbusRTUProto::COMMUNICATION_STATE_UNSPECIFIED;
     clearLastErrorLocked(&link, LastErrorSource::kLifecycle);
     clearLastErrorLocked(&link, LastErrorSource::kCommand);
     clearLastErrorLocked(&link, LastErrorSource::kSubscription);
@@ -2109,6 +2130,7 @@ grpc::Status LinkManager::StopLink(const std::string& connName) {
     }
     it->second.bus.reset();
     it->second.state = pendingDelete ? ModbusRTUProto::LINK_STATE_PENDING_DELETE : ModbusRTUProto::LINK_STATE_STOPPED;
+    it->second.communicationState = ModbusRTUProto::COMMUNICATION_STATE_UNSPECIFIED;
   }
 
   if (commandReadThread.joinable()) {
@@ -2312,6 +2334,7 @@ void LinkManager::pollLoop(std::string connName,
   if (!useExplicitPlan) {
     while (!stopToken.stop_requested()) {
       uint64_t pollingErrorRevision = 0;
+      size_t roundSuccessCount = 0;
       {
         std::lock_guard<std::mutex> lock(mu_);
         auto it = linksByName_.find(connName);
@@ -2342,6 +2365,7 @@ void LinkManager::pollLoop(std::string connName,
           bool value = false;
           status = bus->ReadCoil(static_cast<uint8_t>(config.device_id()), static_cast<uint16_t>(address), &value);
           if (status.ok()) {
+            roundSuccessCount += 1;
             auto dc = dataCenter_.PublishBool(connId, point.tag, value, DataCenterProto::QUALITY_GOOD, 0);
             if (!dc.ok()) {
               updateLastError(connName, dc.error_message());
@@ -2399,6 +2423,8 @@ void LinkManager::pollLoop(std::string connName,
                         raw,
                         point.bitIndex.value(),
                         bitValue);
+              // 现场帧已成功接收并解析，通信健康不依赖 DataCenter 上报结果。
+              roundSuccessCount += 1;
               auto dc = dataCenter_.PublishBool(connId, point.tag, bitValue, DataCenterProto::QUALITY_GOOD, 0);
               if (!dc.ok()) {
                 updateLastError(connName, dc.error_message());
@@ -2500,6 +2526,8 @@ void LinkManager::pollLoop(std::string connName,
             status = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "寄存器点位类型不支持");
           }
           if (status.ok() && engValue.has_value()) {
+            // 工程量换算成功即视为有效抄读，死区过滤不影响通信健康统计。
+            roundSuccessCount += 1;
             std::optional<Decimal20> last;
             auto lastIt = lastReportedByTag.find(point.tag);
             if (lastIt != lastReportedByTag.end()) {
@@ -2548,6 +2576,10 @@ void LinkManager::pollLoop(std::string connName,
       if (cycleSucceeded) {
         clearLastError(connName, LastErrorSource::kPolling);
       }
+      setCommunicationState(
+          connName,
+          roundSuccessCount > 0 ? ModbusRTUProto::COMMUNICATION_STATE_HEALTHY
+                                : ModbusRTUProto::COMMUNICATION_STATE_UNHEALTHY);
       std::this_thread::sleep_for(interval);
     }
 
@@ -2657,6 +2689,7 @@ void LinkManager::pollLoop(std::string connName,
 
   while (!stopToken.stop_requested()) {
     uint64_t pollingErrorRevision = 0;
+    size_t roundSuccessCount = 0;
     {
       std::lock_guard<std::mutex> lock(mu_);
       auto it = linksByName_.find(connName);
@@ -2791,6 +2824,7 @@ void LinkManager::pollLoop(std::string connName,
             LOG_ERROR("ModbusRTU 发布点值失败: conn_name={}, tag={}, 原因={}", connName, point.tag, dc.error_message());
           }
           matchedPoints += 1;
+          roundSuccessCount += 1;
           continue;
         }
         if (point.type == ModbusRTUProto::DATA_TYPE_UINT16) {
@@ -2903,6 +2937,9 @@ void LinkManager::pollLoop(std::string connName,
           LOG_WARNING("ModbusRTU 轮询区间点位类型不支持: conn_name={}, tag={}", connName, point.tag);
           continue;
         }
+        // 工程量已成功解析，平台上报或死区过滤不影响现场通信健康统计。
+        matchedPoints += 1;
+        roundSuccessCount += 1;
         std::optional<Decimal20> last;
         auto lastIt = lastReportedByTag.find(point.tag);
         if (lastIt != lastReportedByTag.end()) {
@@ -2928,7 +2965,6 @@ void LinkManager::pollLoop(std::string connName,
         } else {
           lastReportedByTag[point.tag] = engValue;
         }
-        matchedPoints += 1;
       }
 
       if (matchedPoints == 0) {
@@ -2948,6 +2984,7 @@ void LinkManager::pollLoop(std::string connName,
                                   static_cast<uint16_t>(point.address),
                                   &value);
       if (status.ok()) {
+        roundSuccessCount += 1;
         auto dc = dataCenter_.PublishBool(connId, point.tag, value, DataCenterProto::QUALITY_GOOD, 0);
         if (!dc.ok()) {
           updateLastError(connName, dc.error_message());
@@ -2971,6 +3008,10 @@ void LinkManager::pollLoop(std::string connName,
     if (cycleSucceeded) {
       clearLastError(connName, LastErrorSource::kPolling);
     }
+    setCommunicationState(
+        connName,
+        roundSuccessCount > 0 ? ModbusRTUProto::COMMUNICATION_STATE_HEALTHY
+                              : ModbusRTUProto::COMMUNICATION_STATE_UNHEALTHY);
     std::this_thread::sleep_for(interval);
   }
 

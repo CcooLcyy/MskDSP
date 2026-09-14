@@ -800,6 +800,7 @@ grpc::Status LinkManager::UpsertLink(const DLT645Proto::UpsertLinkRequest &reque
       stopArchiveRetryLocked(it->second.get(), &archiveRetryThread);
       stopMqttSubscribeLocked(it->second.get());
       it->second->config = normalized;
+      it->second->communicationState = DLT645Proto::COMMUNICATION_STATE_UNSPECIFIED;
       it->second->lastError.clear();
       linksConfig = dumpLinksConfigLocked();
       pointTablesConfig = dumpPointTablesConfigLocked();
@@ -910,6 +911,7 @@ grpc::Status LinkManager::UpsertLink(const DLT645Proto::UpsertLinkRequest &reque
       it->second->config = normalized;
       it->second->connId = connInfo.conn_id();
       it->second->state = DLT645Proto::LINK_STATE_STOPPED;
+      it->second->communicationState = DLT645Proto::COMMUNICATION_STATE_UNSPECIFIED;
       created = true;
       linksConfig = dumpLinksConfigLocked();
       pointTablesConfig = dumpPointTablesConfigLocked();
@@ -1283,9 +1285,10 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
       link->lastError = kShutdownStartRejected;
       shutdownAbort = true;
     } else {
+      link->state = DLT645Proto::LINK_STATE_RUNNING;
+      link->communicationState = DLT645Proto::COMMUNICATION_STATE_UNSPECIFIED;
       startPollingLocked(connName, link);
       startDataCenterSubscribeLocked(connName, link);
-      link->state = DLT645Proto::LINK_STATE_RUNNING;
       link->lastError.clear();
     }
   }
@@ -1331,6 +1334,7 @@ grpc::Status LinkManager::StopLink(const std::string &connName) {
   }
 
   std::unique_lock<std::mutex> reqLock(link->requestMutex);
+  bool alreadyStopped = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = linksByName_.find(connName);
@@ -1338,14 +1342,17 @@ grpc::Status LinkManager::StopLink(const std::string &connName) {
       return grpc::Status(grpc::StatusCode::NOT_FOUND, "连接不存在");
     }
     if (link->state == DLT645Proto::LINK_STATE_STOPPED) {
-      stopMqttSubscribeLocked(link.get());
       LOG_INFO("DLT645 停止连接功能跳过: conn_name={}, 原因=连接已停止", connName);
-      return grpc::Status::OK;
+      alreadyStopped = true;
     }
-
-    stopPollingLocked(link.get());
-    stopDataCenterSubscribeLocked(link.get());
   }
+  if (alreadyStopped) {
+    stopMqttSubscribeLocked(link.get());
+    return grpc::Status::OK;
+  }
+  // 停止并回收线程不能持有 mu_，否则轮询线程更新通信健康状态时会形成锁等待。
+  stopPollingLocked(link.get());
+  stopDataCenterSubscribeLocked(link.get());
 
   const bool useArchive = useArchiveManagement(link->config.comm_mode());
   const std::string archiveKey = useArchive ? makeArchiveKey(link->config) : std::string();
@@ -1424,6 +1431,7 @@ grpc::Status LinkManager::StopLink(const std::string &connName) {
     pendingDelete = (link->state == DLT645Proto::LINK_STATE_PENDING_DELETE);
     stopMqttSubscribeLocked(link.get());
     link->state = pendingDelete ? DLT645Proto::LINK_STATE_PENDING_DELETE : DLT645Proto::LINK_STATE_STOPPED;
+    link->communicationState = DLT645Proto::COMMUNICATION_STATE_UNSPECIFIED;
   }
   if (pendingDelete) {
     LOG_INFO("DLT645 停止连接功能完成并保持待删除状态: conn_name={}", connName);
@@ -1660,7 +1668,26 @@ grpc::Status LinkManager::fillLinkInfoLocked(const LinkRuntime &link, DLT645Prot
   out->set_conn_id(link.connId);
   out->set_state(link.state);
   out->set_last_error(link.lastError);
+  out->set_communication_state(link.communicationState);
   return grpc::Status::OK;
+}
+
+void LinkManager::setCommunicationState(
+    const std::string &connName,
+    DLT645Proto::CommunicationState state) {
+  std::lock_guard<std::mutex> lock(mu_);
+  auto it = linksByName_.find(connName);
+  if (it == linksByName_.end() || !it->second ||
+      it->second->state != DLT645Proto::LINK_STATE_RUNNING) {
+    return;
+  }
+  if (it->second->communicationState == state) {
+    return;
+  }
+  it->second->communicationState = state;
+  LOG_INFO("DLT645 通信健康状态更新: conn_name={}, 状态={}",
+           connName,
+           DLT645Proto::CommunicationState_Name(state));
 }
 
 DLT645Proto::LinksConfig LinkManager::dumpLinksConfigLocked() const {
@@ -1916,10 +1943,11 @@ void LinkManager::autoStartEligibleLinks(std::string_view trigger) {
               continue;
             }
 
+            link->state = DLT645Proto::LINK_STATE_RUNNING;
+            link->communicationState = DLT645Proto::COMMUNICATION_STATE_UNSPECIFIED;
             startMqttSubscribeLocked(connName, link);
             startPollingLocked(connName, link);
             startDataCenterSubscribeLocked(connName, link);
-            link->state = DLT645Proto::LINK_STATE_RUNNING;
             link->lastError.clear();
             handledConnNames.insert(connName);
             ++startedCount;
@@ -2189,9 +2217,10 @@ void LinkManager::runArchiveRetryLoop(std::string connName, std::shared_ptr<Link
       if (!st.stop_requested() && it != linksByName_.end() && it->second.get() == link.get() &&
           link->state != DLT645Proto::LINK_STATE_PENDING_DELETE &&
           !shuttingDown_.load(std::memory_order_acquire)) {
+        link->state = DLT645Proto::LINK_STATE_RUNNING;
+        link->communicationState = DLT645Proto::COMMUNICATION_STATE_UNSPECIFIED;
         startPollingLocked(connName, link);
         startDataCenterSubscribeLocked(connName, link);
-        link->state = DLT645Proto::LINK_STATE_RUNNING;
         link->lastError.clear();
         link->archiveRetrying = false;
         started = true;
@@ -2255,6 +2284,7 @@ void LinkManager::startPollingLocked(const std::string &connName, const std::sha
           }
         };
         while (!st.stop_requested()) {
+          size_t roundSuccessCount = 0;
           const auto &blocks = link->pointTable.Blocks();
           for (const auto &block : blocks) {
             if (st.stop_requested()) {
@@ -2290,7 +2320,9 @@ void LinkManager::startPollingLocked(const std::string &connName, const std::sha
               continue;
             }
             std::string error;
-            sendStatus = handleMonitorResponse(link.get(), payloadBase64, block, &error);
+            size_t validPointCount = 0;
+            sendStatus = handleMonitorResponse(link.get(), payloadBase64, block, &error, &validPointCount);
+            roundSuccessCount += validPointCount;
             if (!sendStatus.ok()) {
               LOG_WARNING("DLT645 数据块解析响应失败: conn_name={}, block_di={}, 原因={}", connName, block.diText, error);
               continue;
@@ -2342,7 +2374,11 @@ void LinkManager::startPollingLocked(const std::string &connName, const std::sha
               continue;
             }
             std::string error;
-            sendStatus = handleMonitorResponse(link.get(), payloadBase64, point, &error);
+            bool validPoint = false;
+            sendStatus = handleMonitorResponse(link.get(), payloadBase64, point, &error, &validPoint);
+            if (validPoint) {
+              roundSuccessCount += 1;
+            }
             if (!sendStatus.ok()) {
               LOG_WARNING("DLT645 解析响应失败: conn_name={}, tag={}, 原因={}", connName, point.tag, error);
               continue;
@@ -2351,6 +2387,10 @@ void LinkManager::startPollingLocked(const std::string &connName, const std::sha
           if (st.stop_requested()) {
             break;
           }
+          setCommunicationState(
+              connName,
+              roundSuccessCount > 0 ? DLT645Proto::COMMUNICATION_STATE_HEALTHY
+                                    : DLT645Proto::COMMUNICATION_STATE_UNHEALTHY);
           if (!sleepWithStop(st, roundInterval)) {
             break;
           }
@@ -2922,7 +2962,15 @@ grpc::Status LinkManager::sendMonitorRequest(LinkRuntime *link, const std::strin
   return grpc::Status::OK;
 }
 
-grpc::Status LinkManager::decodeAndPublish(LinkRuntime *link, const PointTable::Point &point, const std::vector<uint8_t> &payload, int64_t tsMs, bool trimRightSpace) {
+grpc::Status LinkManager::decodeAndPublish(LinkRuntime *link,
+                                           const PointTable::Point &point,
+                                           const std::vector<uint8_t> &payload,
+                                           int64_t tsMs,
+                                           bool trimRightSpace,
+                                           bool *outValidPoint) {
+  if (outValidPoint != nullptr) {
+    *outValidPoint = false;
+  }
   if (link == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "链路为空");
   }
@@ -2967,6 +3015,9 @@ grpc::Status LinkManager::decodeAndPublish(LinkRuntime *link, const PointTable::
     } else {
       value = payload[0] != 0;
     }
+    if (outValidPoint != nullptr) {
+      *outValidPoint = true;
+    }
     return dataCenter_.PublishBool(link->connId, point.tag, value, DataCenterProto::QUALITY_GOOD, tsMs);
   }
 
@@ -2976,6 +3027,9 @@ grpc::Status LinkManager::decodeAndPublish(LinkRuntime *link, const PointTable::
       while (!text.empty() && text.back() == ' ') {
         text.pop_back();
       }
+    }
+    if (outValidPoint != nullptr) {
+      *outValidPoint = true;
     }
     return dataCenter_.PublishString(link->connId, point.tag, text, DataCenterProto::QUALITY_GOOD, tsMs);
   }
@@ -3055,6 +3109,9 @@ grpc::Status LinkManager::decodeAndPublish(LinkRuntime *link, const PointTable::
                 mskdsp::numeric::DecimalErrorMessage(engineering.error()));
     return grpc::Status(grpc::StatusCode::OUT_OF_RANGE,
                         "工程量正向换算结果超出范围");
+  }
+  if (outValidPoint != nullptr) {
+    *outValidPoint = true;
   }
   if (!point.deadband.IsZero()) {
     auto lastIt = link->lastReportedByTag.find(point.tag);
@@ -3504,7 +3561,14 @@ void LinkManager::subOffset33(std::vector<uint8_t> *data) {
   }
 }
 
-grpc::Status LinkManager::handleMonitorResponse(LinkRuntime *link, const std::string &payloadBase64, const PointTable::Point &point, std::string *error) {
+grpc::Status LinkManager::handleMonitorResponse(LinkRuntime *link,
+                                                const std::string &payloadBase64,
+                                                const PointTable::Point &point,
+                                                std::string *error,
+                                                bool *outValidPoint) {
+  if (outValidPoint != nullptr) {
+    *outValidPoint = false;
+  }
   Frame frame;
   auto status = parseResponsePayload(payloadBase64, &frame, error);
   if (!status.ok()) {
@@ -3558,10 +3622,17 @@ grpc::Status LinkManager::handleMonitorResponse(LinkRuntime *link, const std::st
   }
   std::vector<uint8_t> payload(frame.data.begin() + diLen, frame.data.begin() + diLen + point.dataLen);
   LOG_INFO("DLT645 收到响应: conn_name={}, tag={}, payload={}", link->config.conn_name(), point.tag, formatHex(payload));
-  return decodeAndPublish(link, point, payload, nowMs(), false);
+  return decodeAndPublish(link, point, payload, nowMs(), false, outValidPoint);
 }
 
-grpc::Status LinkManager::handleMonitorResponse(LinkRuntime *link, const std::string &payloadBase64, const PointTable::Block &block, std::string *error) {
+grpc::Status LinkManager::handleMonitorResponse(LinkRuntime *link,
+                                                const std::string &payloadBase64,
+                                                const PointTable::Block &block,
+                                                std::string *error,
+                                                size_t *outValidPointCount) {
+  if (outValidPointCount != nullptr) {
+    *outValidPointCount = 0;
+  }
   Frame frame;
   auto status = parseResponsePayload(payloadBase64, &frame, error);
   if (!status.ok()) {
@@ -3630,7 +3701,11 @@ grpc::Status LinkManager::handleMonitorResponse(LinkRuntime *link, const std::st
       continue;
     }
     std::vector<uint8_t> itemPayload(payload.begin() + item.offset, payload.begin() + item.offset + item.point.dataLen);
-    auto itemStatus = decodeAndPublish(link, item.point, itemPayload, tsMs, item.trimRightSpace);
+    bool itemValid = false;
+    auto itemStatus = decodeAndPublish(link, item.point, itemPayload, tsMs, item.trimRightSpace, &itemValid);
+    if (itemValid && outValidPointCount != nullptr) {
+      *outValidPointCount += 1;
+    }
     if (!itemStatus.ok()) {
       hasError = true;
       lastError = itemStatus.error_message();

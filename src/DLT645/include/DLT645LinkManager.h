@@ -68,6 +68,8 @@ private:
     DLT645Proto::LinkConfig config;
     uint32_t connId = 0;
     DLT645Proto::LinkState state = DLT645Proto::LINK_STATE_STOPPED;
+    DLT645Proto::CommunicationState communicationState =
+        DLT645Proto::COMMUNICATION_STATE_UNSPECIFIED;
     std::string lastError;
     PointTable pointTable;
     bool pointTableConfigured = false;
@@ -97,6 +99,8 @@ private:
   grpc::Status validateConnName(const std::string &connName) const;
   grpc::Status normalizeLinkConfig(const DLT645Proto::LinkConfig &config, DLT645Proto::LinkConfig *out) const;
   grpc::Status fillLinkInfoLocked(const LinkRuntime &link, DLT645Proto::LinkInfo *out) const;
+  void setCommunicationState(const std::string &connName,
+                             DLT645Proto::CommunicationState state);
   DLT645Proto::LinksConfig dumpLinksConfigLocked() const;
   DLT645Proto::PointTablesConfig dumpPointTablesConfigLocked() const;
   grpc::Status saveLinksConfig(const DLT645Proto::LinksConfig &config);
@@ -131,7 +135,12 @@ private:
   grpc::Status sendMonitorRequest(LinkRuntime *link, const std::string &requestTopic, const std::string &responseTopic, const boost::json::object &obj, uint32_t timeoutMs, int32_t *outStatus, std::string *outPayloadBase64);
   grpc::Status runLoraSerialized(LinkRuntime *link, const char *operation, const std::string &topic, const std::function<grpc::Status()> &action);
 
-  grpc::Status decodeAndPublish(LinkRuntime *link, const PointTable::Point &point, const std::vector<uint8_t> &payload, int64_t tsMs, bool trimRightSpace);
+  grpc::Status decodeAndPublish(LinkRuntime *link,
+                                const PointTable::Point &point,
+                                const std::vector<uint8_t> &payload,
+                                int64_t tsMs,
+                                bool trimRightSpace,
+                                bool *outValidPoint = nullptr);
 
   static std::string makeMonitorRequestTopic(const DLT645Proto::LinkConfig &config);
   static std::string makeMonitorResponseTopic(const DLT645Proto::LinkConfig &config);
@@ -156,8 +165,16 @@ private:
   static void addOffset33(std::vector<uint8_t> *data);
   static void subOffset33(std::vector<uint8_t> *data);
 
-  grpc::Status handleMonitorResponse(LinkRuntime *link, const std::string &payloadBase64, const PointTable::Point &point, std::string *error);
-  grpc::Status handleMonitorResponse(LinkRuntime *link, const std::string &payloadBase64, const PointTable::Block &block, std::string *error);
+  grpc::Status handleMonitorResponse(LinkRuntime *link,
+                                     const std::string &payloadBase64,
+                                     const PointTable::Point &point,
+                                     std::string *error,
+                                     bool *outValidPoint = nullptr);
+  grpc::Status handleMonitorResponse(LinkRuntime *link,
+                                     const std::string &payloadBase64,
+                                     const PointTable::Block &block,
+                                     std::string *error,
+                                     size_t *outValidPointCount = nullptr);
 
   grpc::Status parseResponsePayload(const std::string &payloadBase64, Frame *outFrame, std::string *error);
 
