@@ -493,13 +493,32 @@ TEST_F(DataCenterGrpcServiceTest, MultiSourceRouteToSameTargetPreservesPublishOr
       {srcB.conn_id(), "A", dst.conn_id(), "Y"},
   });
 
+  // 先写入哨兵值，随后通过快照读取确认订阅服务端已经完成注册，
+  // 避免订阅尚未注册时首条发布被竞态丢弃。
+  {
+    grpc::ClientContext ctx;
+    DataCenterProto::PublishRequest req;
+    req.set_conn_id(srcA.conn_id());
+    req.set_tag("A");
+    req.mutable_value()->set_int_value(0);
+    DataCenterProto::Empty resp;
+    ASSERT_TRUE(stub_->Publish(&ctx, req, &resp).ok());
+  }
+
   grpc::ClientContext subCtx;
   subCtx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
   DataCenterProto::SubscribeRequest subReq;
   subReq.set_conn_id(dst.conn_id());
   subReq.add_tags("Y");
-  subReq.set_snapshot(false);
+  subReq.set_snapshot(true);
   auto reader = stub_->Subscribe(&subCtx, subReq);
+
+  DataCenterProto::PointUpdate snapshot;
+  ASSERT_TRUE(reader->Read(&snapshot));
+  EXPECT_EQ(snapshot.src_conn_id(), srcA.conn_id());
+  EXPECT_EQ(snapshot.dst_conn_id(), dst.conn_id());
+  EXPECT_EQ(snapshot.dst_tag(), "Y");
+  EXPECT_EQ(snapshot.value().int_value(), 0);
 
   {
     grpc::ClientContext ctx;
