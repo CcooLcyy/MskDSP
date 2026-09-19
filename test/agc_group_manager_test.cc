@@ -24,6 +24,11 @@ using AGC::GroupManager;
 using ::testing::_;
 using ::testing::Invoke;
 
+// 异步等待预算：CI 上 ctest 会并行执行多个测试，被等待的工作线程可能被延迟调度，
+// 因此给出较宽的轮询预算（500 次 × 10ms = 5s）来容忍调度延迟；它只影响"等多久"，
+// 条件始终不满足时仍然判定失败，不改变任何断言语义。
+constexpr int kAsyncWaitIterations = 500;
+
 class ScopedTempDir {
 public:
   ScopedTempDir() {
@@ -129,7 +134,7 @@ bool PointValueToDoubleForTest(const DataCenterProto::PointValue &value, double 
 }
 
 bool WaitForLatestDecimal(const FakeDataCenterState &state, uint32_t connId, const char *tag, std::string_view expected) {
-  for (int i = 0; i < 50; ++i) {
+  for (int i = 0; i < kAsyncWaitIterations; ++i) {
     DataCenterProto::GetLatestRequest req;
     req.set_conn_id(connId);
     req.add_tags(tag);
@@ -146,7 +151,7 @@ bool WaitForLatestDecimal(const FakeDataCenterState &state, uint32_t connId, con
 }
 
 bool WaitForLatestDouble(const FakeDataCenterState &state, uint32_t connId, const char *tag, double expected) {
-  for (int i = 0; i < 50; ++i) {
+  for (int i = 0; i < kAsyncWaitIterations; ++i) {
     DataCenterProto::GetLatestRequest req;
     req.set_conn_id(connId);
     req.add_tags(tag);
@@ -165,7 +170,7 @@ bool WaitForLatestDouble(const FakeDataCenterState &state, uint32_t connId, cons
 }
 
 bool WaitForLatestBool(const FakeDataCenterState &state, uint32_t connId, const char *tag, bool expected) {
-  for (int i = 0; i < 50; ++i) {
+  for (int i = 0; i < kAsyncWaitIterations; ++i) {
     DataCenterProto::GetLatestRequest req;
     req.set_conn_id(connId);
     req.add_tags(tag);
@@ -224,7 +229,7 @@ DataCenterProto::ExecuteCommandResponse ExecuteDecimalCommand(
 
 bool WaitForLatestDoubleWithQuality(
     const FakeDataCenterState &state, uint32_t connId, const char *tag, double expected, DataCenterProto::Quality quality) {
-  for (int i = 0; i < 50; ++i) {
+  for (int i = 0; i < kAsyncWaitIterations; ++i) {
     DataCenterProto::GetLatestRequest req;
     req.set_conn_id(connId);
     req.add_tags(tag);
@@ -244,7 +249,7 @@ bool WaitForLatestDoubleWithQuality(
 
 bool WaitForLatestDoubleWithQualityAndTs(
     const FakeDataCenterState &state, uint32_t connId, const char *tag, double expected, DataCenterProto::Quality quality, int64_t tsMs) {
-  for (int i = 0; i < 50; ++i) {
+  for (int i = 0; i < kAsyncWaitIterations; ++i) {
     DataCenterProto::GetLatestRequest req;
     req.set_conn_id(connId);
     req.add_tags(tag);
@@ -264,7 +269,7 @@ bool WaitForLatestDoubleWithQualityAndTs(
 }
 
 bool WaitForPublishCount(const FakeDataCenterState &state, uint32_t connId, const char *tag, size_t expected) {
-  for (int i = 0; i < 50; ++i) {
+  for (int i = 0; i < kAsyncWaitIterations; ++i) {
     if (state.GetPublishCount(connId, tag) >= expected) {
       return true;
     }
@@ -274,7 +279,7 @@ bool WaitForPublishCount(const FakeDataCenterState &state, uint32_t connId, cons
 }
 
 bool WaitForSubscriptionCount(const FakeDataCenterState &state, uint32_t connId, size_t expected) {
-  for (int i = 0; i < 50; ++i) {
+  for (int i = 0; i < kAsyncWaitIterations; ++i) {
     if (state.GetSubscriptionCount(connId) >= expected) {
       return true;
     }

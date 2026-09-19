@@ -15,6 +15,11 @@
 namespace {
 using Calc::GroupManager;
 
+// 异步等待预算：CI 上 ctest 会并行执行多个测试，被等待的工作线程可能被延迟调度，
+// 因此给出较宽的轮询预算（500 次 × 10ms = 5s）来容忍调度延迟；它只影响"等多久"，
+// 条件始终不满足时仍然判定失败，不改变任何断言语义。
+constexpr int kAsyncWaitIterations = 500;
+
 class ScopedTempDir {
 public:
   ScopedTempDir() {
@@ -146,7 +151,7 @@ bool WaitForIntLatestWithTimestamp(const FakeDataCenterState &state,
                                    const std::string &tag,
                                    int64_t expectedValue,
                                    int64_t expectedTsMs) {
-  for (int i = 0; i < 50; ++i) {
+  for (int i = 0; i < kAsyncWaitIterations; ++i) {
     DataCenterProto::GetLatestRequest req;
     req.set_conn_id(connId);
     req.add_tags(tag);
@@ -197,7 +202,7 @@ void PublishBoolPoint(FakeDataCenterState *state, uint32_t connId, const std::st
 }
 
 bool WaitForIntLatest(const FakeDataCenterState &state, uint32_t connId, const std::string &tag, int64_t expected) {
-  for (int i = 0; i < 50; ++i) {
+  for (int i = 0; i < kAsyncWaitIterations; ++i) {
     DataCenterProto::GetLatestRequest req;
     req.set_conn_id(connId);
     req.add_tags(tag);
@@ -214,7 +219,7 @@ bool WaitForIntLatest(const FakeDataCenterState &state, uint32_t connId, const s
 }
 
 bool WaitForDoubleLatest(const FakeDataCenterState &state, uint32_t connId, const std::string &tag, double expected) {
-  for (int i = 0; i < 50; ++i) {
+  for (int i = 0; i < kAsyncWaitIterations; ++i) {
     DataCenterProto::GetLatestRequest req;
     req.set_conn_id(connId);
     req.add_tags(tag);
@@ -234,7 +239,7 @@ bool WaitForDecimalLatest(const FakeDataCenterState &state,
                           uint32_t connId,
                           const std::string &tag,
                           const std::string &expected) {
-  for (int i = 0; i < 50; ++i) {
+  for (int i = 0; i < kAsyncWaitIterations; ++i) {
     DataCenterProto::GetLatestRequest req;
     req.set_conn_id(connId);
     req.add_tags(tag);
@@ -251,7 +256,7 @@ bool WaitForDecimalLatest(const FakeDataCenterState &state,
 }
 
 bool WaitForBoolLatest(const FakeDataCenterState &state, uint32_t connId, const std::string &tag, bool expected) {
-  for (int i = 0; i < 50; ++i) {
+  for (int i = 0; i < kAsyncWaitIterations; ++i) {
     DataCenterProto::GetLatestRequest req;
     req.set_conn_id(connId);
     req.add_tags(tag);
