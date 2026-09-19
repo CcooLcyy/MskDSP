@@ -3178,13 +3178,33 @@ TEST(IEC61850MmsWorkerTest, ReclaimsRcbAndGiAfterPreferredChannelDisconnects) {
 
   ASSERT_TRUE(worker.Start().ok());
   {
+    // 等的是「备用通道 B 已经历一次重建并完成完整重配」，而不是「B 首次出现 READY」：
+    // 后者在 B 首次会话即成功的时序下会提前满足，紧接着的 Stop() 会让 A 断线后的回收
+    // 永远不会发生，使本用例在机器较快时偶发失败（同一提交在不同 run 上表现不一致）。
+    std::unique_lock lock(state->mutex);
+    ASSERT_TRUE(state->condition.wait_for(lock, 30s, [&] {
+      std::size_t backupSessions = 0;
+      for (std::size_t index = 0; index < state->sessionChannels.size(); ++index) {
+        if (state->sessionChannels[index] != IEC61850Proto::NETWORK_CHANNEL_B) {
+          continue;
+        }
+        if (backupSessions++ > 0 && state->sessionSendCounts[index] >= 11) {
+          return true;
+        }
+      }
+      return false;
+    }));
+  }
+  {
+    // 再确认 B 的 READY 事件已经投递，避免 READY 回调尚未落地就被 Stop() 打断；
+    // 这里只是等事件到达，是否真的出现过由下方 EXPECT_TRUE(readyOnB) 判定。
     std::unique_lock lock(callbackMutex);
-    ASSERT_TRUE(callbackCondition.wait_for(lock, 10s, [&] {
+    callbackCondition.wait_for(lock, 5s, [&] {
       return std::any_of(events.begin(), events.end(), [](const auto& event) {
         return event.state == IEC61850::ProtocolSessionState::READY &&
                event.activeChannel == IEC61850Proto::NETWORK_CHANNEL_B;
       });
-    }));
+    });
   }
   worker.Stop();
 
