@@ -114,6 +114,10 @@ MSKDSP_VERSION=<version> bash script/make_image.sh
 https://pub-19f3d71852b04011b120b1b814141c12.r2.dev/mskdsp-lower/<channel>/latest.json
 https://pub-19f3d71852b04011b120b1b814141c12.r2.dev/mskdsp-lower/<channel>/linux-arm64/<package>
 https://pub-19f3d71852b04011b120b1b814141c12.r2.dev/mskdsp-lower/<channel>/linux-arm64/SHA256SUMS
+
+# x64 验证包使用独立前缀（platform=linux-x64），与 arm64 分开存放，避免 latest.json 互相覆盖
+https://pub-19f3d71852b04011b120b1b814141c12.r2.dev/mskdsp-lower-x64/<channel>/latest.json
+https://pub-19f3d71852b04011b120b1b814141c12.r2.dev/mskdsp-lower-x64/<channel>/linux-x64/<package>
 ```
 
 R2 上传脚本会先上传安装包和 `SHA256SUMS`，最后上传 `latest.json`，并仅清理同一渠道/平台下不再使用的旧对象，避免上位机读到已更新但资产尚未上传完成的清单。

@@ -14,7 +14,7 @@ Buildx 环境。
 安装包。
 
 若重新启用该方案，需要单独修改 workflow 的 `runs-on` 及交叉编译配置；当前 CI、
-Beta 和 Release 的 ARM64 构建与测试都由 GitHub 托管 runner 执行。
+Beta 和 Release 的 arm64 与 x64 构建与测试都由 GitHub 托管 runner 执行。
 
 ## 运行前提
 

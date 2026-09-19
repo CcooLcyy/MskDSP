@@ -6,13 +6,16 @@
 
 ## 2. 当前 workflow 概览
 
-当前仓库已落地 3 个 workflow：
+当前仓库已落地 4 个 workflow 文件，其中 `build-lower.yml` 是可复用工作流（只能被调用，不会自行触发）：
 
+- `build-lower.yml`
+  - 触发：`workflow_call`
+  - 作用：承载下位机公共构建链路 —— 编译 → 单元测试 → 装包 → IEC61850 交付包校验
+    → docker 镜像 → 自解压安装包 → 校验文件 → 更新清单 → artifact 上传 → R2 渠道发布
 - `ci.yml`
   - 触发：`pull_request`；`push` 到 `master`、`main`、`beta/**`
-  - 作用：
-    - 所有触发场景都在 GitHub 托管 ARM64 runner 上执行 `arm64 RelWithDebInfo` 编译与单元测试
-    - 当 `push` 到 `master/main` 时，在 ARM64 单元测试通过后继续产出测试安装包
+  - 作用：调用 `build-lower.yml` 两次，分别构建 `arm64` 与 `x64`
+  - 两个 job 都不声明 `needs`，由 GitHub Actions 并发调度到 `ubuntu-24.04-arm` 与 `ubuntu-24.04` 两个 runner 池
 - `beta.yml`
   - 触发：`push` 到 `beta/**`；`workflow_dispatch`
   - 作用：执行 ARM64 原生编译与单元测试，再产出 `arm64 Beta` 自解压安装包；同时创建 GitHub 预发布页面
@@ -20,9 +23,16 @@
   - 触发：`push` tag `v*`；`workflow_dispatch`
   - 作用：执行发布前 ARM64 原生编译与单元测试，再产出 `arm64` 正式安装包并创建/更新 GitHub Release
 
-## 3. 统一实现约定
+## 3. 公共构建工作流 `build-lower.yml`
 
-当前 3 个 workflow（`ci.yml`、`beta.yml`、`release.yml`）全部属于构建型 workflow，遵循以下统一约定：
+`build-lower.yml` 是 `workflow_call` 类型，把下位机各架构共用的构建链路收敛为一份定义；调用方（当前是 `ci.yml`）按架构各调用一次，架构差异全部通过输入参数表达。
+
+当前迁移状态：
+
+- `ci.yml` 已改为薄壳，只负责按架构调用本工作流
+- `beta.yml` 与 `release.yml` 仍是各自的内联实现，后续如需统一可继续迁移到本工作流
+
+统一约定：
 
 - 主仓库 checkout 时不直接拉取 submodule，随后单独准备 `protobuf` 子模块访问凭据，再执行 `git submodule update --init --recursive`
 - 子模块访问优先级：
@@ -30,36 +40,38 @@
   - 其次使用 `MSKDSP_PROTO_TOKEN`
   - 若均未配置，则回退为 HTTPS 方式拉取
 - `vcpkg` 不直接使用固定仓库分支，而是读取 `vcpkg-configuration.json` 中的 baseline，再 clone/checkout 对应版本
-- 所有构建型 workflow 都启用了两层缓存：
-  - `vcpkg` 二进制缓存
-  - `ccache` 编译缓存
-- `arm64` 构建统一使用：
-  - GitHub 托管 `ubuntu-24.04-arm` runner
-  - `gcc-14/g++-14`
-  - `Ninja`
-  - `RelWithDebInfo`
-  - `MSKDSP_BUILD_TESTS=ON`
-- `arm64` 构建使用 `VCPKG_HOST_TRIPLET=arm64-linux-dynamic` 和 `VCPKG_TARGET_TRIPLET=arm64-linux-dynamic`。
-- `arm64-linux-dynamic` 由仓库内 `cmake/vcpkg-triplets/arm64-linux-dynamic.cmake` 覆盖，并设置 `VCPKG_BUILD_TYPE=release`，因此 vcpkg 依赖只编译 Release；项目本体仍使用 `RelWithDebInfo` 并保留独立调试符号包。
-- 编译后直接在 ARM64 runner 上执行 `ctest --test-dir build-arm64 --output-on-failure --parallel "$(nproc)"`。
-- 当前构建型 workflow 不再包含独立 x64 编译、测试或 x64 artifact。
-- `arm64` 打包链路统一使用原生编译：
-  - `gcc-14/g++-14`
-  - `MSKDSP_STRIP_DEBUG=ON`
-- `arm64` 交付包的生成流程统一为：
-  1. ARM64 单元测试通过后，通过 `cmake --install build-arm64` 将运行产物落到 `package/`
+- 两层缓存，缓存键都按 vcpkg triplet 区分，因此不同架构互不干扰：
+  - `vcpkg` 二进制缓存：`vcpkg-bin-<runner.os>-gcc14-<triplet>-release-mainline-<hashFiles(vcpkg.json, vcpkg-configuration.json, triplet 文件)>`
+  - `ccache` 编译缓存：`ccache-<runner.os>-gcc14-<triplet>-v2-<run_id>-<run_attempt>`，并按前缀 `restore-keys` 恢复最近一份
+- 各架构都在对应架构的 GitHub 托管 runner 上**原生编译**，不使用交叉编译：
+
+  | 架构 | runner | vcpkg triplet | 更新清单 platform |
+  | --- | --- | --- | --- |
+  | `arm64` | `ubuntu-24.04-arm` | `arm64-linux-dynamic` | `linux-arm64` |
+  | `x64` | `ubuntu-24.04` | `x64-linux-dynamic` | `linux-x64` |
+
+- 两个架构的 triplet 都由仓库内 `cmake/vcpkg-triplets/` 的 overlay 覆盖并设置 `VCPKG_BUILD_TYPE=release`，因此 vcpkg 依赖只编译 Release；项目本体仍使用 `RelWithDebInfo`
+- 编译后在该 runner 上执行 `ctest --test-dir build-<架构> --output-on-failure --parallel "$(nproc)"`
+- 交付包生成流程对两个架构完全一致：
+  1. 单元测试通过后，通过 `cmake --install build-<架构>` 将运行产物落到 `package/`
   2. 清理 `package/` 根目录下的 `*_test` 测试可执行文件
-  3. 单独打包 `package/debug` 为调试符号包
-  4. 使用 `Dockerfile` 构建 `arm64` 镜像
+  3. 交付包校验：`script/check_iec61850_package.sh package <aarch64|x86-64> false true`
+  4. 使用 `Dockerfile` 构建对应架构镜像
   5. 读取 Docker image config ID，写入下位机 `latest.json` 的 `image_id`
   6. `docker save` 导出镜像 tar
   7. 调用 `script/make_exe.sh` 生成自解压安装包
   8. 生成 `SHA256SUMS`
+  9. 生成 `latest.json` 并发布到 R2 对应前缀
+
+调试信息策略按架构区分：
+
+- `arm64`（现场交付）：`MSKDSP_STRIP_DEBUG=ON`，剥离调试信息并额外产出独立调试符号包
+- `x64`（无设备时在 x86_64 服务器上验证）：不传该选项（默认 `OFF`），交付包内保留完整调试信息，因此不产出独立符号包
 
 需要注意：
 
 - 根目录 `Dockerfile` 默认基础镜像为 `localhost/arm64v8/ubuntu:noble`
-- 在 GitHub Actions 中会先将该镜像名替换为 `arm64v8/ubuntu:noble`，再执行 `docker buildx build`
+- 工作流会先把基础镜像与 `--platform` 替换成目标架构（`arm64v8/ubuntu:noble` + `linux/arm64`，或 `amd64/ubuntu:noble` + `linux/amd64`），再执行 `docker buildx build`
 
 ## 4. 分支与发布渠道
 
@@ -68,6 +80,7 @@
 - `CI`
   - 面向开发校验
   - 由 `pull_request`、`master/main` push、`beta/**` push 触发
+  - 分两个架构发布：`arm64` 写 `mskdsp-lower/ci`；`x64` 写独立前缀 `mskdsp-lower-x64/ci`，用于没有现场设备时在 x86_64 服务器上跑起下位机来模拟现场，不属于现场交付渠道
 - `Beta`
   - 常规功能候选包面向版本线 `beta/x.y`
   - 已发布 Stable 的 hotfix 建议按补丁版本派生 `beta/x.y.z` 维护线
@@ -81,6 +94,8 @@
 
 - `ci.yml` 为兼容历史仓库命名，同时监听 `master` 与 `main`
 - `release.yml` 要求正式 tag 对应的 commit 必须来自某条 `origin/beta/*` 版本线
+- `mskdsp-lower-x64` 是独立前缀，与 `mskdsp-lower/<channel>/latest.json` 分开存放，避免两个架构互相覆盖清单；上位机目前只读取 `mskdsp-lower`（`platform=linux-arm64`），不会消费 x64 前缀
+- 新增架构或渠道时，只需在 `ci.yml` 里按架构再增加一段 `uses:`，不需要复制构建逻辑
 
 ## 5. `ci.yml`
 
@@ -95,16 +110,21 @@
 
 ### 5.2 当前行为
 
-- `arm64-master-package`
-  - 所有触发场景都原生编译 `arm64 RelWithDebInfo` 并运行 ARM64 单元测试
-  - `pull_request` 和 `beta/**` push 只执行编译与测试，不生成交付包
-  - 仅在 `push` 到 `master/main` 时生成自解压测试安装包、调试符号包与 `SHA256SUMS`
-  - 主分支产物通过 artifact 上传，不创建 GitHub Release
+`ci.yml` 只包含两个 `uses:` 调用（`arm64-package`、`x64-package`），构建逻辑全部在 `build-lower.yml` 内：
+
+- `arm64-package`：在 `ubuntu-24.04-arm` 上原生编译 `arm64 RelWithDebInfo` 并运行单元测试
+- `x64-package`：在 `ubuntu-24.04` 上原生编译 `x64 RelWithDebInfo` 并运行单元测试
+- 两个 job 不声明 `needs`，并发执行，整轮墙钟取两者的较大值
+- `pull_request` 和 `beta/**` push 只执行编译与测试，不生成交付包
+- 仅在 `push` 到 `master/main` 时生成自解压测试安装包、调试符号包（仅 arm64）与 `SHA256SUMS`
+- 主分支产物通过 artifact 上传，不创建 GitHub Release
 
 ### 5.3 产物命名
 
-- 测试安装包：`mskdsp-<VERSION>-<branch>-ci-<YYYYMMDD>-<sha>-linux-arm64`
-- 调试符号包：`mskdsp-<VERSION>-<branch>-ci-<YYYYMMDD>-<sha>-debugsymbols-linux-arm64.tar.gz`
+- arm64 测试安装包：`mskdsp-<VERSION>-<branch>-ci-<YYYYMMDD>-<sha>-linux-arm64`
+- arm64 调试符号包：`mskdsp-<VERSION>-<branch>-ci-<YYYYMMDD>-<sha>-debugsymbols-linux-arm64.tar.gz`
+- x64 测试安装包：`mskdsp-<VERSION>-<branch>-ci-<YYYYMMDD>-<sha>-linux-x64`
+  - 内部保留完整调试信息，因此不产出独立调试符号包，体积明显大于 arm64 包
 
 ## 6. `beta.yml`
 
@@ -211,9 +231,10 @@
 当前各渠道的产物去向如下：
 
 - `CI`
-  - PR 与 `beta/**` push 仅执行 ARM64 编译和单元测试
-  - `master/main` push 上传 arm64 测试安装包等 GitHub Actions artifact
+  - PR 与 `beta/**` push 仅执行编译和单元测试（arm64 与 x64 各一份）
+  - `master/main` push 上传 arm64 / x64 测试安装包等 GitHub Actions artifact
   - 不创建 Release 页面
+  - 发布到 R2：arm64 → `mskdsp-lower/ci`；x64 → `mskdsp-lower-x64/ci`
 - `Beta`
   - 上传 GitHub Actions artifact
   - 创建 GitHub prerelease
@@ -222,7 +243,7 @@
 
 ## 9. 当前命名与交付清单
 
-当前 `arm64` 交付默认包含以下资产：
+当前 `arm64`（现场交付）默认包含以下资产：
 
 - 自解压安装包
 - 调试符号包（如 `package/debug` 存在）
@@ -233,7 +254,8 @@
 
 - 交付主包不是直接上传 `package/` 目录，而是上传由 `script/make_exe.sh` 生成的自解压安装包
 - `latest.json` 同时记录 Docker `image_id`，供上位机校验目标机实际运行的镜像构建
-- 生成交付包的流程都保留了独立调试符号包，便于问题定位
+- arm64 交付包保留独立调试符号包，便于问题定位
+- x64 验证包不剥离调试信息，调试信息内联在包内（体积更大，但无需再匹配符号包），因此不产出独立符号包
 
 ## 10. 维护建议
 
@@ -243,7 +265,10 @@
 - 正式发布是否仍要求 tag 来源于 `beta/*`
 - 安装包命名规则、自解压脚本行为与 Release 页面资产是否同步变化
 - `protobuf` 子模块访问方式与密钥命名是否变化
-- vcpkg triplet 或其引用文件变化时，是否同步纳入 vcpkg 缓存 key 的 `hashFiles`
+- 新增架构时，`build-lower.yml` 的输入参数、`ci.yml` 的调用段、`Dockerfile` 基础镜像与 `--platform` 的架构替换是否同步
+- vcpkg triplet 或其引用文件变化时，是否同步纳入两个架构各自的 vcpkg 缓存 key `hashFiles`
+- 缓存用量：仓库 Actions 缓存上限 10 GB；`vcpkg` 二进制缓存约 40 MB/架构（**必须保留**，它决定冷启动是 27 分钟还是几十秒），`ccache` 约 0.5~1 GB/run
+- `cancel-in-progress` 策略：主分支的长构建是否允许被后续 push 取消（会同时丢失当轮缓存保存）
 
 ## 11. Cloudflare R2 更新包发布
 
@@ -252,12 +277,17 @@
 ```text
 mskdsp-lower/<channel>/<platform>/<资产文件>
 mskdsp-lower/<channel>/latest.json
+
+# x64 验证包使用独立前缀，避免与 arm64 的 latest.json 互相覆盖
+mskdsp-lower-x64/<channel>/<platform>/<资产文件>
+mskdsp-lower-x64/<channel>/latest.json
 ```
 
 安装包、调试包和 `SHA256SUMS` 先上传，`latest.json` 最后上传。上传完成后仅清理同一渠道和平台下不再使用的旧对象，不影响其他渠道。客户端清单地址示例：
 
 ```text
 https://pub-19f3d71852b04011b120b1b814141c12.r2.dev/mskdsp-lower/stable/latest.json
+https://pub-19f3d71852b04011b120b1b814141c12.r2.dev/mskdsp-lower-x64/ci/latest.json
 ```
 
 首次启用前，在仓库 `Settings → Secrets and variables → Actions` 配置：
