@@ -247,7 +247,7 @@
 
 ## 11. Cloudflare R2 更新包发布
 
-当前构建完成后，CI、Beta 和 Stable workflow 会直接将下位机更新资产上传到 Cloudflare R2，Gitee 与服务器 SSH 中转链路已停用。R2 对象路径为：
+当前构建完成后，CI、Beta 和 Stable workflow 会直接将下位机更新资产上传到 Cloudflare R2。R2 对象路径为：
 
 ```text
 mskdsp-lower/<channel>/<platform>/<资产文件>
