@@ -6,30 +6,23 @@
 
 ## 2. 当前 workflow 概览
 
-当前仓库已落地 5 个 workflow：
+当前仓库已落地 3 个 workflow：
 
 - `ci.yml`
   - 触发：`pull_request`；`push` 到 `master`、`main`、`beta/**`
   - 作用：
     - 所有触发场景都在 GitHub 托管 ARM64 runner 上执行 `arm64 RelWithDebInfo` 编译与单元测试
     - 当 `push` 到 `master/main` 时，在 ARM64 单元测试通过后继续产出测试安装包
-- `nightly.yml`
-  - 触发：每日定时 + `workflow_dispatch`
-  - 来源：仓库当前 `default_branch`
-  - 作用：产出 `arm64 Nightly` 自解压安装包、调试符号包与校验文件
 - `beta.yml`
   - 触发：`push` 到 `beta/**`；`workflow_dispatch`
   - 作用：执行 ARM64 原生编译与单元测试，再产出 `arm64 Beta` 自解压安装包；同时创建 GitHub 预发布页面
-- `beta-promote.yml`
-  - 触发：定时；`workflow_dispatch`
-  - 作用：扫描所有 `beta/*` 分支，选出最近有新提交的最新 Beta；若其静默超过 72 小时且对应正式 tag 不存在，则自动创建 `v*` tag，并显式触发正式发布链路
 - `release.yml`
   - 触发：`push` tag `v*`；`workflow_dispatch`
   - 作用：执行发布前 ARM64 原生编译与单元测试，再产出 `arm64` 正式安装包并创建/更新 GitHub Release
 
 ## 3. 统一实现约定
 
-当前 5 个 workflow 中，涉及构建的 4 个 workflow（`ci.yml`、`nightly.yml`、`beta.yml`、`release.yml`）遵循以下统一约定：
+当前 3 个 workflow（`ci.yml`、`beta.yml`、`release.yml`）全部属于构建型 workflow，遵循以下统一约定：
 
 - 主仓库 checkout 时不直接拉取 submodule，随后单独准备 `protobuf` 子模块访问凭据，再执行 `git submodule update --init --recursive`
 - 子模块访问优先级：
@@ -75,22 +68,18 @@
 - `CI`
   - 面向开发校验
   - 由 `pull_request`、`master/main` push、`beta/**` push 触发
-- `Nightly`
-  - 面向默认开发主线的每日最新包
-  - 由 `nightly.yml` 从仓库当前 `default_branch` 构建
 - `Beta`
   - 常规功能候选包面向版本线 `beta/x.y`
   - 已发布 Stable 的 hotfix 建议按补丁版本派生 `beta/x.y.z` 维护线
   - 由 `beta.yml` 针对目标 `beta/*` 分支构建候选包
 - `Stable`
   - 面向正式交付
-  - 可由人工创建 `v*` tag，或由 `beta-promote.yml` 自动创建 `v*` tag
+  - 由人工创建 `v*` tag
   - 最终统一由 `release.yml` 构建并发布
 
 补充说明：
 
 - `ci.yml` 为兼容历史仓库命名，同时监听 `master` 与 `main`
-- `nightly.yml` 没有写死 `main`，而是跟随仓库的 `default_branch`
 - `release.yml` 要求正式 tag 对应的 commit 必须来自某条 `origin/beta/*` 版本线
 
 ## 5. `ci.yml`
@@ -117,46 +106,17 @@
 - 测试安装包：`mskdsp-<VERSION>-<branch>-ci-<YYYYMMDD>-<sha>-linux-arm64`
 - 调试符号包：`mskdsp-<VERSION>-<branch>-ci-<YYYYMMDD>-<sha>-debugsymbols-linux-arm64.tar.gz`
 
-## 6. `nightly.yml`
-
-`nightly.yml` 负责每日 Nightly 交付包。
-
-### 6.1 触发条件
-
-- `schedule`
-  - 当前 cron：`0 18 * * *`
-- `workflow_dispatch`
-
-说明：
-
-- GitHub Actions 的 cron 使用 UTC
-- 当前配置 `0 18 * * *` 对应北京时间次日 `02:00`
-
-### 6.2 当前行为
-
-- checkout 仓库 `default_branch`
-- 原生编译 `arm64 RelWithDebInfo` 并运行 ARM64 单元测试
-- 生成自解压 Nightly 安装包
-- 打包独立调试符号
-- 生成 `SHA256SUMS`
-- 通过 artifact 上传
-
-### 6.3 产物命名
-
-- Nightly 安装包：`mskdsp-<VERSION>-nightly-<YYYYMMDD>-<sha>-linux-arm64`
-- 调试符号包：`mskdsp-<VERSION>-nightly-<YYYYMMDD>-<sha>-debugsymbols-linux-arm64.tar.gz`
-
-## 7. `beta.yml`
+## 6. `beta.yml`
 
 `beta.yml` 负责 Beta 候选包与预发布页面。
 
-### 7.1 触发条件
+### 6.1 触发条件
 
 - `push` 到 `beta/**`
 - `workflow_dispatch`
   - 支持可选输入 `beta_ref`
 
-### 7.2 目标版本线解析规则
+### 6.2 目标版本线解析规则
 
 `beta.yml` 会按如下顺序解析本次要构建的目标 Beta 分支：
 
@@ -165,7 +125,7 @@
 
 若最终结果不匹配 `beta/*`，workflow 会直接失败。
 
-### 7.3 当前行为
+### 6.3 当前行为
 
 - 原生编译 `arm64 RelWithDebInfo` 并运行 ARM64 单元测试
 - 单元测试通过后执行 `arm64` 交付链路
@@ -175,7 +135,7 @@
 - 仅在 Beta 分支有新提交或手动指定目标分支时才会产出新 Beta
 - 不再按日历定时重建 Beta 候选包
 
-### 7.4 Beta 发布说明基线
+### 6.4 Beta 发布说明基线
 
 - 若仓库中存在最近的正式 tag（匹配 `v*`），则：
   - 以该 tag 作为 `--notes-start-tag`
@@ -185,7 +145,7 @@
   - 将本次视为该版本线的首个 Beta 预发布
   - 在附加说明中明确写入“当前仓库暂无正式版本 tag（匹配 v*）”
 
-### 7.5 当前保留策略
+### 6.5 当前保留策略
 
 当前实现不是“同一版本线保留多个 Beta 候选包”，而是：
 
@@ -194,7 +154,7 @@
 - 因此 GitHub Release 页面上默认只保留当前 Beta 线最新的一份预发布
 - 若同一条 Beta 线没有新提交，则不会生成新的 Beta prerelease
 
-### 7.6 产物命名
+### 6.6 产物命名
 
 - Beta 安装包：`mskdsp-<VERSION>-beta-<x.y>-<YYYYMMDD-HHMMSS>-<sha>-linux-arm64`
   - 实际文件名中的分支部分会将 `/` 转成 `-`
@@ -202,7 +162,7 @@
 - GitHub prerelease tag：`beta-<x.y>-<YYYYMMDD-HHMMSS>-<sha>`
 - GitHub prerelease 标题：`Beta <x.y> <YYYYMMDD-HHMMSS>-<sha>`
 
-### 7.7 Hotfix 维护线建议
+### 6.7 Hotfix 维护线建议
 
 - 若 `vX.Y.Z` 已经完成 Stable 发布，且发现必须尽快交付给当前 Stable 用户的紧急缺陷修复，则建议从 `vX.Y.Z` 对应提交派生 `beta/X.Y.(Z+1)` 维护线。
 - `beta/X.Y.(Z+1)` 维护线只承载本次 hotfix，不应混入下一功能版本（如 `beta/X.(Y+1)`）已经在开发中的新功能或重构。
@@ -211,60 +171,19 @@
 - 若团队希望长期维护同一条 `X.Y` 维护线，也可继续使用 `beta/X.Y` 承载多个补丁版本；但需接受 Beta 页面标题与最终 Stable tag 可能不完全一致。当前文档更推荐“一次 hotfix 对应一条 `beta/X.Y.(Z+1)` 维护线”，以便减少命名歧义。
 - Hotfix 发布完成后，应将相同修复同步到仍在推进的开发分支，例如 `master` 与下一条功能候选线；已完成使命、不再继续演进的旧 Beta 分支通常不需要回灌。
 - 若某个缺陷可以随下一功能版本一起交付，而不需要为当前 Stable 单独出补丁，则直接修入 `master` 并同步到对应的下一条 `beta/x.y` 即可，不需要额外创建 hotfix 维护线。
-- 自动晋升只考虑“最近一次提交时间最新”的最新 Beta；若某条旧维护线不是最新 Beta，但需要直接转正式版本，应手动打对应 `v*` tag。
+- 正式版本一律由人工打 `v*` tag（或手动触发 `release.yml`）产生；多条 Beta 线并存时，直接给需要转正的那条维护线打对应 `v*` tag 即可。
 
-## 8. `beta-promote.yml`
-
-`beta-promote.yml` 负责最新 Beta 的自动晋升。
-
-### 8.1 触发条件
-
-- `schedule`
-  - 当前 cron：`0 */6 * * *`
-- `workflow_dispatch`
-
-说明：
-
-- GitHub Actions 的 cron 使用 UTC
-- 当前配置会每 6 小时检查一次最新 Beta 是否满足自动晋升条件
-
-### 8.2 最新 Beta 判定规则
-
-- workflow 会拉取所有远端 `beta/*` 分支
-- 最新 Beta 仅按各分支 HEAD 最近一次提交时间判定
-- 不比较版本号大小
-- 若同时存在多条 Beta 线，只有最近一次提交时间最新的那一条有资格参与自动晋升
-
-### 8.3 自动晋升条件
-
-- 最新 Beta 最近 72 小时内没有新提交
-- 对应正式 tag `v<suffix>` 尚不存在
-- tag 映射规则为：`beta/<suffix> -> v<suffix>`
-
-### 8.4 去重与人工提前晋升
-
-- 只要 `v<suffix>` 已存在，就视为该 Beta 分支已经晋升过
-- 这个正式 tag 无论是人工手动创建还是自动晋升 workflow 创建，效果相同，后续都不会再次自动晋升
-- 若自动晋升 workflow 检测到正式 tag 已存在但 Release 页面尚未创建，会补触发 `release.yml`
-
-### 8.5 当前行为
-
-- 定时扫描所有 `beta/*` 分支并选出最新 Beta
-- 若最新 Beta 尚未静默满 72 小时，则记录日志并跳过
-- 若最新 Beta 已静默满 72 小时，则创建对应的 `v*` tag
-- 创建 tag 后显式触发 `release.yml`，进入正式发布链路
-
-## 9. `release.yml`
+## 7. `release.yml`
 
 `release.yml` 负责正式发布。
 
-### 9.1 触发条件
+### 7.1 触发条件
 
 - `push` tag `v*`
 - `workflow_dispatch`
   - 支持输入 `release_tag`
 
-### 9.2 发布前约束
+### 7.2 发布前约束
 
 正式发布前会执行以下校验：
 
@@ -272,22 +191,22 @@
 - 检查当前 tag 对应 commit 是否包含于至少一条 `origin/beta/*`
 - 若不属于任何 Beta 版本线，则 workflow 直接失败
 
-### 9.3 当前行为
+### 7.3 当前行为
 
 - 原生编译 `arm64 RelWithDebInfo` 并运行发布前 ARM64 单元测试
 - ARM64 单元测试通过后生成交付包
 - 生成正式自解压安装包、调试符号包与 `SHA256SUMS`
 - 若 GitHub Release 已存在，则执行 `gh release upload --clobber`
 - 若 GitHub Release 不存在，则执行 `gh release create --verify-tag --generate-notes`
-- `v*` tag 既可能由人工创建，也可能由 `beta-promote.yml` 自动创建
+- `v*` tag 一律由人工创建，不存在自动晋升链路
 - 无论 tag 来源如何，正式发布链路保持一致
 
-### 9.4 产物命名
+### 7.4 产物命名
 
 - 正式安装包：`mskdsp-<tag>-linux-arm64`
 - 调试符号包：`mskdsp-<tag>-debugsymbols-linux-arm64.tar.gz`
 
-## 10. 各渠道产物去向
+## 8. 各渠道产物去向
 
 当前各渠道的产物去向如下：
 
@@ -295,16 +214,13 @@
   - PR 与 `beta/**` push 仅执行 ARM64 编译和单元测试
   - `master/main` push 上传 arm64 测试安装包等 GitHub Actions artifact
   - 不创建 Release 页面
-- `Nightly`
-  - 上传 GitHub Actions artifact
-  - 不创建 Release 页面
 - `Beta`
   - 上传 GitHub Actions artifact
   - 创建 GitHub prerelease
 - `Stable`
   - 创建或更新 GitHub Release
 
-## 11. 当前命名与交付清单
+## 9. 当前命名与交付清单
 
 当前 `arm64` 交付默认包含以下资产：
 
@@ -319,20 +235,19 @@
 - `latest.json` 同时记录 Docker `image_id`，供上位机校验目标机实际运行的镜像构建
 - 生成交付包的流程都保留了独立调试符号包，便于问题定位
 
-## 12. 维护建议
+## 10. 维护建议
 
 后续如需调整 workflow，应优先同步关注以下点：
 
-- 仓库默认分支是否变化，避免 Nightly 来源与文档不一致
 - `beta.yml` 的目标分支解析逻辑是否变化
 - 正式发布是否仍要求 tag 来源于 `beta/*`
 - 安装包命名规则、自解压脚本行为与 Release 页面资产是否同步变化
 - `protobuf` 子模块访问方式与密钥命名是否变化
 - vcpkg triplet 或其引用文件变化时，是否同步纳入 vcpkg 缓存 key 的 `hashFiles`
 
-## 13. Cloudflare R2 更新包发布
+## 11. Cloudflare R2 更新包发布
 
-当前构建完成后，CI、Nightly、Beta 和 Stable workflow 会直接将下位机更新资产上传到 Cloudflare R2，Gitee 与服务器 SSH 中转链路已停用。R2 对象路径为：
+当前构建完成后，CI、Beta 和 Stable workflow 会直接将下位机更新资产上传到 Cloudflare R2，Gitee 与服务器 SSH 中转链路已停用。R2 对象路径为：
 
 ```text
 mskdsp-lower/<channel>/<platform>/<资产文件>

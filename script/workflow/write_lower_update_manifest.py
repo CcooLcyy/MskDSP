@@ -19,7 +19,7 @@ IMAGE_ID_PATTERN = re.compile(r"^sha256:[0-9a-fA-F]{64}$")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="生成下位机静态更新 latest.json")
-    parser.add_argument("--channel", required=True, help="发布通道，例如 stable/beta/nightly/ci")
+    parser.add_argument("--channel", required=True, help="发布通道，例如 stable/beta/ci")
     parser.add_argument("--platform", default="linux-arm64", help="目标平台，默认 linux-arm64")
     parser.add_argument("--version", required=True, help="完整包版本，通常与镜像 tag 一致")
     parser.add_argument("--display-version", default="", help="界面展示版本，默认从 --version 去掉平台后缀")

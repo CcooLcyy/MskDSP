@@ -87,7 +87,7 @@ test -n "${SHA_FILE}"
 
 如主线分支为 `main`，将 `CI_BRANCH=master` 改为 `CI_BRANCH=main`。
 
-如果要更新 Beta、Nightly 或 Stable 包，应改用对应 workflow 或 GitHub Release 资产；各渠道产物规则见 [GitHub Actions 与发版策略](./GitHub-Actions与发版策略.md)。
+如果要更新 Beta 或 Stable 包，应改用对应 workflow 或 GitHub Release 资产；各渠道产物规则见 [GitHub Actions 与发版策略](./GitHub-Actions与发版策略.md)。
 
 ## 5. 上传安装包到工作机
 

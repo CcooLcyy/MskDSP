@@ -98,7 +98,7 @@ MSKDSP_VERSION=<version> bash script/make_image.sh
 ### 清单结构
 `latest.json` 使用下位机专用格式，不复用 Tauri updater 格式。核心字段包括：
 - `product`：固定为 `mskdsp-lower`
-- `channel`：发布通道，例如 `stable`、`beta`、`nightly`、`ci`
+- `channel`：发布通道，例如 `stable`、`beta`、`ci`
 - `platform`：当前为 `linux-arm64`
 - `version`：界面展示版本
 - `package_version`：完整包版本，通常与镜像 tag 一致
