@@ -177,7 +177,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ctest --test-dir build-arm64 --output-on-failure --parallel "$(nproc)"
+          # 并行度固定为 2，而不是 $(nproc)：本套件里有大量依赖真实时间的断言
+          # （被测代码内部超时、测试侧轮询预算）。按 4 核并行跑会因 CPU 争抢让这些断言
+          # 随机超时，表现为"每次挂的用例都不一样"。降到 2 可显著降低争抢。
+          ctest --test-dir build-arm64 --output-on-failure --parallel 2
 
       - name: 输出 ccache 统计
         if: always()
