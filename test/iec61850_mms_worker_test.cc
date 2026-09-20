@@ -3158,16 +3158,29 @@ TEST(IEC61850MmsWorkerTest, ReclaimsRcbAndGiAfterPreferredChannelDisconnects) {
         return !preferredReady->load(std::memory_order_acquire);
       };
 
+  // 备用通道的会话序号：首个备用会话的响应固定全部丢弃。
+  // 必须让"B 首次建链无法完成配置、只能重连后重新接管"成为确定前提，本用例要验证的
+  // 回收才一定会发生；否则当线程时序偏向 B 先完成时，B 首次会话会直接配置成功、
+  // 产品判定无需回收，用例便只能在等待回收处超时失败（曾经表现为随机的短断言失败）。
+  auto backupSessionIndex = std::make_shared<std::atomic<std::size_t>>(0);
+
   IEC61850::MmsSessionWorker worker(
       MakeRcbPlan(), MakeBindingsAB(), std::move(callbacks),
-      [state, dropBackupResponsesUntilPreferredReady](
+      [state, dropBackupResponsesUntilPreferredReady, backupSessionIndex](
           const IEC61850::MmsTransportEndpoint&,
           IEC61850Proto::NetworkChannel channel) {
         std::lock_guard lock(state->mutex);
         ++state->factoryCalls;
         ScriptedTransport::ResponseDropPredicate responseDropPredicate;
         if (channel == IEC61850Proto::NETWORK_CHANNEL_B) {
-          responseDropPredicate = dropBackupResponsesUntilPreferredReady;
+          const std::size_t backupSession =
+              backupSessionIndex->fetch_add(1, std::memory_order_acq_rel);
+          responseDropPredicate =
+              [dropBackupResponsesUntilPreferredReady, backupSession](
+                  std::span<const std::uint8_t> payload) {
+                return backupSession == 0 ||
+                       dropBackupResponsesUntilPreferredReady(payload);
+              };
         }
         return std::make_unique<ScriptedTransport>(
             state, MakeRcbResponse, true, channel,
