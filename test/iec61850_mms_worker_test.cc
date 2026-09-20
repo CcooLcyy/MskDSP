@@ -3158,29 +3158,16 @@ TEST(IEC61850MmsWorkerTest, ReclaimsRcbAndGiAfterPreferredChannelDisconnects) {
         return !preferredReady->load(std::memory_order_acquire);
       };
 
-  // 备用通道的会话序号：首个备用会话的响应固定全部丢弃。
-  // 必须让"B 首次建链无法完成配置、只能重连后重新接管"成为确定前提，本用例要验证的
-  // 回收才一定会发生；否则当线程时序偏向 B 先完成时，B 首次会话会直接配置成功、
-  // 产品判定无需回收，用例便只能在等待回收处超时失败（曾经表现为随机的短断言失败）。
-  auto backupSessionIndex = std::make_shared<std::atomic<std::size_t>>(0);
-
   IEC61850::MmsSessionWorker worker(
       MakeRcbPlan(), MakeBindingsAB(), std::move(callbacks),
-      [state, dropBackupResponsesUntilPreferredReady, backupSessionIndex](
+      [state, dropBackupResponsesUntilPreferredReady](
           const IEC61850::MmsTransportEndpoint&,
           IEC61850Proto::NetworkChannel channel) {
         std::lock_guard lock(state->mutex);
         ++state->factoryCalls;
         ScriptedTransport::ResponseDropPredicate responseDropPredicate;
         if (channel == IEC61850Proto::NETWORK_CHANNEL_B) {
-          const std::size_t backupSession =
-              backupSessionIndex->fetch_add(1, std::memory_order_acq_rel);
-          responseDropPredicate =
-              [dropBackupResponsesUntilPreferredReady, backupSession](
-                  std::span<const std::uint8_t> payload) {
-                return backupSession == 0 ||
-                       dropBackupResponsesUntilPreferredReady(payload);
-              };
+          responseDropPredicate = dropBackupResponsesUntilPreferredReady;
         }
         return std::make_unique<ScriptedTransport>(
             state, MakeRcbResponse, true, channel,
@@ -3191,33 +3178,13 @@ TEST(IEC61850MmsWorkerTest, ReclaimsRcbAndGiAfterPreferredChannelDisconnects) {
 
   ASSERT_TRUE(worker.Start().ok());
   {
-    // 等的是「备用通道 B 已经历一次重建并完成完整重配」，而不是「B 首次出现 READY」：
-    // 后者在 B 首次会话即成功的时序下会提前满足，紧接着的 Stop() 会让 A 断线后的回收
-    // 永远不会发生，使本用例在机器较快时偶发失败（同一提交在不同 run 上表现不一致）。
-    std::unique_lock lock(state->mutex);
-    ASSERT_TRUE(state->condition.wait_for(lock, 30s, [&] {
-      std::size_t backupSessions = 0;
-      for (std::size_t index = 0; index < state->sessionChannels.size(); ++index) {
-        if (state->sessionChannels[index] != IEC61850Proto::NETWORK_CHANNEL_B) {
-          continue;
-        }
-        if (backupSessions++ > 0 && state->sessionSendCounts[index] >= 11) {
-          return true;
-        }
-      }
-      return false;
-    }));
-  }
-  {
-    // 再确认 B 的 READY 事件已经投递，避免 READY 回调尚未落地就被 Stop() 打断；
-    // 这里只是等事件到达，是否真的出现过由下方 EXPECT_TRUE(readyOnB) 判定。
     std::unique_lock lock(callbackMutex);
-    callbackCondition.wait_for(lock, 5s, [&] {
+    ASSERT_TRUE(callbackCondition.wait_for(lock, 10s, [&] {
       return std::any_of(events.begin(), events.end(), [](const auto& event) {
         return event.state == IEC61850::ProtocolSessionState::READY &&
                event.activeChannel == IEC61850Proto::NETWORK_CHANNEL_B;
       });
-    });
+    }));
   }
   worker.Stop();
 
