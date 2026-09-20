@@ -402,13 +402,38 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, Li
           LOG_DEBUG("IEC104 单点点值类型不匹配: conn_name={}, tag={}", connName, update.dst_tag());
           continue;
         }
+        // 遥信 SOE 只在变位（状态或品质变化）时形成事件：上游按轮询周期重复发布同一个值
+        // 不构成变位，否则会持续上送同值并击穿 SOE 容量、刷满主站与日志。
+        auto lastSoe = lastReportedSinglePoint(connName, update.dst_tag());
+        if (!detail::ShouldReportSoe(value, update.quality(), lastSoe)) {
+          LOG_DEBUG("IEC104 遥信未变位过滤上送: conn_name={}, tag={}, ioa={}, 状态={}, 品质={}, 基线状态={}, 基线品质={}",
+                    connName,
+                    update.dst_tag(),
+                    it->second.ioa,
+                    value ? "合" : "分",
+                    static_cast<int>(update.quality()),
+                    lastSoe->value ? "合" : "分",
+                    static_cast<int>(lastSoe->quality));
+          continue;
+        }
         PointValue pv;
         pv.ioa = it->second.ioa;
         pv.type = IEC104Proto::POINT_TYPE_SINGLE;
         pv.boolValue = value;
         pv.quality = toIec104Quality(update.quality());
         pv.tsMs = update.ts_ms();
-        (void)storeAndSendSoe(connName, pv, transport);
+        if (!storeAndSendSoe(connName, pv, transport)) {
+          // 落盘失败时不更新变位基线，下一次更新仍按变位重试上送。
+          continue;
+        }
+        rememberReportedSinglePoint(connName, update.dst_tag(), value, update.quality());
+        LOG_DEBUG("IEC104 遥信变位形成 SOE: conn_name={}, tag={}, ioa={}, 状态={}, 品质={}, 首次={}",
+                  connName,
+                  update.dst_tag(),
+                  it->second.ioa,
+                  value ? "合" : "分",
+                  static_cast<int>(update.quality()),
+                  lastSoe.has_value() ? "否" : "是");
       }
     }
 
@@ -431,6 +456,36 @@ bool LinkManager::isSimulationValueActive(const std::string& connName, const std
   std::lock_guard<std::mutex> lock(mu_);
   auto it = linksByName_.find(connName);
   return it != linksByName_.end() && it->second.simulationValues.contains(tag);
+}
+
+std::optional<detail::LastReportedSinglePoint> LinkManager::lastReportedSinglePoint(
+    const std::string& connName,
+    const std::string& tag) const {
+  std::lock_guard<std::mutex> lock(mu_);
+  auto it = linksByName_.find(connName);
+  if (it == linksByName_.end()) {
+    return std::nullopt;
+  }
+  auto stateIt = it->second.lastReportedSingleByTag.find(tag);
+  if (stateIt == it->second.lastReportedSingleByTag.end()) {
+    return std::nullopt;
+  }
+  return stateIt->second;
+}
+
+void LinkManager::rememberReportedSinglePoint(const std::string& connName,
+                                              const std::string& tag,
+                                              bool value,
+                                              DataCenterProto::Quality quality) {
+  std::lock_guard<std::mutex> lock(mu_);
+  auto it = linksByName_.find(connName);
+  if (it == linksByName_.end()) {
+    return;
+  }
+  it->second.lastReportedSingleByTag[tag] = detail::LastReportedSinglePoint{
+      .value = value,
+      .quality = quality,
+  };
 }
 
 void LinkManager::detachTimeSyncSubscribeLocked(LinkRuntime* link, SubscribeShutdown* out) {
@@ -1363,6 +1418,17 @@ grpc::Status LinkManager::ApplySimulationValues(const std::string& connName) {
       if (!storeAndSendSoe(connName, pv, link.transport.get())) {
         return grpc::Status(grpc::StatusCode::INTERNAL, "模拟遥信 SOE 落盘失败");
       }
+      // 人工注入的模拟遥信属显式事件，不受变位判定过滤；但必须同步更新变位基线，
+      // 否则清除模拟值后若真实值等于模拟前的基线，会被判为未变位而漏报，主站停在模拟值上。
+      link.lastReportedSingleByTag[tag] = detail::LastReportedSinglePoint{
+          .value = pv.boolValue,
+          .quality = toDataCenterQuality(pv.quality),
+      };
+      LOG_INFO("IEC104 模拟遥信已上送并更新变位基线: conn_name={}, tag={}, ioa={}, 状态={}",
+               connName,
+               tag,
+               pv.ioa,
+               pv.boolValue ? "合" : "分");
     } else {
       link.transport->SendPointValue(pv, kCotSpontaneous);
     }

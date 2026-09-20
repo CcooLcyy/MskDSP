@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <limits>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -120,6 +121,53 @@ TEST(IEC104ReportPolicyTest, DecimalValueAtDeadbandBoundaryReports) {
 
   EXPECT_TRUE(IEC104::detail::ShouldReportTelemetry(
       current, deadband, DataCenterProto::QUALITY_GOOD, 100, last));
+}
+
+// 验证：遥信无历史基线时（例如链路启动后的第一条更新）必须形成 SOE 事件。
+TEST(IEC104ReportPolicyTest, SinglePointFirstUpdateReports) {
+  EXPECT_TRUE(IEC104::detail::ShouldReportSoe(false, DataCenterProto::QUALITY_GOOD, std::nullopt));
+  EXPECT_TRUE(IEC104::detail::ShouldReportSoe(true, DataCenterProto::QUALITY_GOOD, std::nullopt));
+}
+
+// 验证：遥信状态与品质均未变化时不再重复形成 SOE 事件（仅时标变化不构成变位）。
+TEST(IEC104ReportPolicyTest, SinglePointUnchangedStateAndQualityIsFiltered) {
+  const IEC104::detail::LastReportedSinglePoint lastOff{
+      .value = false,
+      .quality = DataCenterProto::QUALITY_GOOD,
+  };
+  const IEC104::detail::LastReportedSinglePoint lastOn{
+      .value = true,
+      .quality = DataCenterProto::QUALITY_GOOD,
+  };
+
+  EXPECT_FALSE(IEC104::detail::ShouldReportSoe(false, DataCenterProto::QUALITY_GOOD, lastOff));
+  EXPECT_FALSE(IEC104::detail::ShouldReportSoe(true, DataCenterProto::QUALITY_GOOD, lastOn));
+}
+
+// 验证：遥信状态变位（分↔合）时必须形成 SOE 事件。
+TEST(IEC104ReportPolicyTest, SinglePointStateChangeReports) {
+  const IEC104::detail::LastReportedSinglePoint lastOff{
+      .value = false,
+      .quality = DataCenterProto::QUALITY_GOOD,
+  };
+  const IEC104::detail::LastReportedSinglePoint lastOn{
+      .value = true,
+      .quality = DataCenterProto::QUALITY_GOOD,
+  };
+
+  EXPECT_TRUE(IEC104::detail::ShouldReportSoe(true, DataCenterProto::QUALITY_GOOD, lastOff));
+  EXPECT_TRUE(IEC104::detail::ShouldReportSoe(false, DataCenterProto::QUALITY_GOOD, lastOn));
+}
+
+// 验证：遥信状态未变但品质变化（例如 GOOD→BAD/UNCERTAIN）时必须形成 SOE 事件。
+TEST(IEC104ReportPolicyTest, SinglePointQualityChangeReports) {
+  const IEC104::detail::LastReportedSinglePoint last{
+      .value = true,
+      .quality = DataCenterProto::QUALITY_GOOD,
+  };
+
+  EXPECT_TRUE(IEC104::detail::ShouldReportSoe(true, DataCenterProto::QUALITY_BAD, last));
+  EXPECT_TRUE(IEC104::detail::ShouldReportSoe(true, DataCenterProto::QUALITY_UNCERTAIN, last));
 }
 
 // 验证：validateLinkConfig 对缺失/非法字段返回错误。

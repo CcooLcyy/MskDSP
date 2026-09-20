@@ -18,6 +18,7 @@
 #include "IEC104.pb.h"
 #include "IEC104DataCenterClient.h"
 #include "IEC104PointTable.h"
+#include "IEC104ReportPolicy.hpp"
 #include "IEC104TcpLink.h"
 
 namespace IEC104 {
@@ -86,6 +87,9 @@ private:
     PointTable pointTable;
     bool pointTableConfigured = false;
     std::unordered_map<std::string, mskdsp::numeric::Decimal20> lastReportedByTag;
+    // 遥信 SOE 变位判定基线：按 tag 记录上一次已成功上送的 (状态, 品质)。
+    // 链路启动、点表更新与配置重载时清空，清空后每个点会重新上送一次（首次规则）。
+    std::unordered_map<std::string, detail::LastReportedSinglePoint> lastReportedSingleByTag;
     std::unordered_map<std::string, IEC104Proto::SimulationPoint> simulationValues;
 
     std::unique_ptr<TcpLink> transport;
@@ -160,6 +164,12 @@ private:
   grpc::Status handleTimeSyncCommand(const std::string &connName, int64_t tsMs);
   std::vector<PointValue> buildInterrogationSnapshot(const std::string &connName);
   bool isSimulationValueActive(const std::string &connName, const std::string &tag) const;
+  // 读取某条链路某 tag 的遥信变位基线；未记录时返回空，表示该点尚无历史基线（首次上送）。
+  std::optional<detail::LastReportedSinglePoint> lastReportedSinglePoint(const std::string &connName,
+                                                                        const std::string &tag) const;
+  // 记录某条链路某 tag 本次已成功上送的遥信状态，作为下一次变位判定的基线。
+  void rememberReportedSinglePoint(const std::string &connName, const std::string &tag, bool value,
+                                   DataCenterProto::Quality quality);
   grpc::Status fillSimulationSnapshotLocked(const LinkRuntime &link, IEC104Proto::SimulationSnapshot *out) const;
 
   static std::string normalizeTimeSyncTag(const IEC104Proto::LinkConfig &config);

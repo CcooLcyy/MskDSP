@@ -558,6 +558,7 @@ void LinkManager::loadPersistedConfig(std::string_view trigger) {
     runtime.state = persisted.pending_delete() ? IEC104Proto::LINK_STATE_PENDING_DELETE : IEC104Proto::LINK_STATE_STOPPED;
     runtime.lastError.clear();
     runtime.lastReportedByTag.clear();
+    runtime.lastReportedSingleByTag.clear();
 
     size_t pointCount = 0;
     auto tableIt = pointTablesByConn.find(connName);
@@ -1256,6 +1257,8 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
   detachCommandSubscribeLocked(&link, &staleCommandSubscribe);
 
   link.lastReportedByTag.clear();
+  // 清空遥信变位基线：本次启动后每个点重新按“首次”上送一次。
+  link.lastReportedSingleByTag.clear();
   link.connectionState = link.config.role() == IEC104Proto::ROLE_CLIENT
                              ? IEC104Proto::CONNECTION_STATE_CONNECTING
                              : IEC104Proto::CONNECTION_STATE_DISCONNECTED;
@@ -1423,6 +1426,7 @@ grpc::Status LinkManager::UpsertPointTable(const IEC104Proto::UpsertPointTableRe
     it->second.pointTable = std::move(next);
     it->second.pointTableConfigured = true;
     it->second.lastReportedByTag.clear();
+    it->second.lastReportedSingleByTag.clear();
     it->second.simulationValues.clear();
     status = savePointTablesLocked();
     if (!status.ok()) {

@@ -2,10 +2,12 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <chrono>
 #include <filesystem>
 #include <functional>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -1044,4 +1046,140 @@ TEST(IEC104LinkManagerTest, BuildInterrogationSnapshotUsesLatest) {
 
   auto snapshot = IEC104LinkManagerTestPeer::BuildInterrogationSnapshot(mgr, "conn-snap");
   ASSERT_EQ(snapshot.size(), 2u);
+}
+
+namespace {
+
+// 等待 DataCenter 订阅线程完成 Subscribe 注册（测试替身按调用次数计数）。
+bool WaitForSubscriptionCreated(const FakeDataCenterState& state, uint32_t connId) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (state.GetSubscriptionCreateCount(connId) >= 1) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return false;
+}
+
+// 等待订阅读取器因空闲超时关闭：表示已投递的更新都已被订阅线程取走。
+bool WaitForSubscriptionClosed(const FakeDataCenterState& state, uint32_t connId) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (state.GetSubscriptionCount(connId) == 0) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return false;
+}
+
+// 等待指定连接的 SOE 落盘条数达到期望值。
+bool WaitForSoeCountAtLeast(const LinkManager& mgr, const std::string& connName, int64_t expected) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < deadline) {
+    IEC104Proto::QuerySoeRequest request;
+    request.set_conn_name(connName);
+    IEC104Proto::QuerySoeResponse response;
+    if (mgr.QuerySoe(request, &response).ok() &&
+        static_cast<int64_t>(response.total_count()) >= expected) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return false;
+}
+
+// 查询指定连接已落盘的 SOE 总条数；查询失败返回 -1。
+int64_t QuerySoeTotal(const LinkManager& mgr, const std::string& connName) {
+  IEC104Proto::QuerySoeRequest request;
+  request.set_conn_name(connName);
+  IEC104Proto::QuerySoeResponse response;
+  if (!mgr.QuerySoe(request, &response).ok()) {
+    return -1;
+  }
+  return static_cast<int64_t>(response.total_count());
+}
+
+// 构造一条 DataCenter 投递给从站链路的单点遥信更新。
+DataCenterProto::PointUpdate MakeSinglePointUpdate(uint32_t connId, const std::string& tag, bool value, int64_t tsMs) {
+  DataCenterProto::PointUpdate update;
+  update.set_src_conn_id(connId);
+  update.set_src_tag(tag);
+  update.set_dst_conn_id(connId);
+  update.set_dst_tag(tag);
+  update.mutable_value()->set_bool_value(value);
+  update.set_quality(DataCenterProto::QUALITY_GOOD);
+  update.set_ts_ms(tsMs);
+  return update;
+}
+
+}  // 命名空间结束
+
+// 验证：上游按轮询周期重复发布同值遥信（仅时标刷新、状态与品质不变）时只形成一条 SOE。
+// 现场表现为每个遥信点按采集周期持续上送同值，修复前会把 8000 条 SOE 容量击穿。
+TEST(IEC104LinkManagerTest, RepeatedUnchangedSinglePointFormsSingleSoe) {
+  ScopedTempDir dir;
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("IEC104", dir.path() / "config.db");
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeServerLinkReq("conn-soe-stable", "0.0.0.0", AllocateFreeTcpPort());
+  IEC104Proto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+
+  IEC104Proto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-soe-stable");
+  *ptReq.add_points() = MakeBoolPoint("DI-1", 9);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+  ASSERT_TRUE(mgr.StartLink("conn-soe-stable").ok());
+
+  ASSERT_TRUE(WaitForSubscriptionCreated(state, info.conn_id()));
+
+  // 模拟现场轮询：状态恒为合、品质恒为良好，只有时标每次都刷新。
+  for (int64_t i = 0; i < 5; ++i) {
+    state.DeliverUpdate(MakeSinglePointUpdate(info.conn_id(), "DI-1", true, 1000 + i));
+  }
+
+  ASSERT_TRUE(WaitForSubscriptionClosed(state, info.conn_id()));
+  ASSERT_TRUE(WaitForSoeCountAtLeast(mgr, "conn-soe-stable", 1));
+  EXPECT_EQ(QuerySoeTotal(mgr, "conn-soe-stable"), 1);
+
+  ASSERT_TRUE(mgr.StopLink("conn-soe-stable").ok());
+}
+
+// 验证：遥信真实变位仍形成新的 SOE，变位判定不会吞掉真实事件。
+TEST(IEC104LinkManagerTest, ChangedSinglePointFormsAdditionalSoe) {
+  ScopedTempDir dir;
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("IEC104", dir.path() / "config.db");
+  mgr.setDataCenterStub(stub);
+
+  auto req = MakeServerLinkReq("conn-soe-change", "0.0.0.0", AllocateFreeTcpPort());
+  IEC104Proto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+
+  IEC104Proto::UpsertPointTableRequest ptReq;
+  ptReq.set_conn_name("conn-soe-change");
+  *ptReq.add_points() = MakeBoolPoint("DI-1", 9);
+  ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
+  ASSERT_TRUE(mgr.StartLink("conn-soe-change").ok());
+
+  ASSERT_TRUE(WaitForSubscriptionCreated(state, info.conn_id()));
+
+  // 首次（合）→ 变位（分）→ 两次同值重复（分），期望恰好 2 条事件。
+  state.DeliverUpdate(MakeSinglePointUpdate(info.conn_id(), "DI-1", true, 1000));
+  state.DeliverUpdate(MakeSinglePointUpdate(info.conn_id(), "DI-1", false, 1001));
+  state.DeliverUpdate(MakeSinglePointUpdate(info.conn_id(), "DI-1", false, 1002));
+  state.DeliverUpdate(MakeSinglePointUpdate(info.conn_id(), "DI-1", false, 1003));
+
+  ASSERT_TRUE(WaitForSubscriptionClosed(state, info.conn_id()));
+  ASSERT_TRUE(WaitForSoeCountAtLeast(mgr, "conn-soe-change", 2));
+  EXPECT_EQ(QuerySoeTotal(mgr, "conn-soe-change"), 2);
+
+  ASSERT_TRUE(mgr.StopLink("conn-soe-change").ok());
 }
