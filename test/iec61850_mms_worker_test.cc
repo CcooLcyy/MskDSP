@@ -1095,18 +1095,24 @@ public:
                                  IEC61850Proto::NETWORK_CHANNEL_UNSPECIFIED,
                              bool failWhenIdle = false,
                              ResponseDropPredicate responseDropPredicate = {},
-                             std::shared_ptr<SendGate> sendGate = {})
+                             std::shared_ptr<SendGate> sendGate = {},
+                             int failConnectAfter = -1)
       : state_(std::move(state)),
         responseBuilder_(std::move(responseBuilder)),
         includeWrite_(includeWrite),
         channel_(channel),
         failWhenIdle_(failWhenIdle),
         responseDropPredicate_(std::move(responseDropPredicate)),
-        sendGate_(std::move(sendGate)) {}
+        sendGate_(std::move(sendGate)),
+        failConnectAfter_(failConnectAfter) {}
 
   grpc::Status Connect(
       const IEC61850::MmsTransportEndpoint& endpoint,
       std::uint32_t timeoutMs = 0) override {
+    const bool rejectConnect =
+        failConnectAfter_ >= 0 &&
+        connectAttempts_ >= static_cast<std::size_t>(failConnectAfter_);
+    ++connectAttempts_;
     std::chrono::milliseconds connectDelay;
     {
       std::lock_guard lock(state_->mutex);
@@ -1116,10 +1122,18 @@ public:
       } else if (channel_ == IEC61850Proto::NETWORK_CHANNEL_B) {
         ++state_->connectCallsB;
       }
+      state_->connectTimeouts.emplace_back(timeoutMs);
+      if (rejectConnect) {
+        // 按测试策略拒绝建链：让该通道真正下线而不是反复重连。
+        // 不计入会话统计，避免被拒绝的尝试污染会话计数。
+        connected_ = false;
+        state_->condition.notify_all();
+        return grpc::Status(grpc::StatusCode::UNAVAILABLE,
+                            "脚本传输按测试策略拒绝建链");
+      }
       sessionIndex_ = state_->sessionSendCounts.size();
       state_->sessionSendCounts.emplace_back(0);
       state_->sessionChannels.emplace_back(channel_);
-      state_->connectTimeouts.emplace_back(timeoutMs);
       connectDelay = state_->connectDelay;
       connected_ = true;
       received_.push_back(MakeSessionAccept(includeWrite_));
@@ -1237,6 +1251,10 @@ private:
   bool failWhenIdle_ = false;
   ResponseDropPredicate responseDropPredicate_;
   std::shared_ptr<SendGate> sendGate_;
+  // 允许建链的次数；达到该次数后 Connect 一律返回失败，用于让某个通道真正下线。
+  // -1 表示不限制（默认，保持既有用例行为不变）。
+  int failConnectAfter_ = -1;
+  std::size_t connectAttempts_ = 0;
   std::size_t sessionIndex_ = std::numeric_limits<std::size_t>::max();
   bool connected_ = false;
 };
@@ -3169,17 +3187,27 @@ TEST(IEC61850MmsWorkerTest, ReclaimsRcbAndGiAfterPreferredChannelDisconnects) {
         if (channel == IEC61850Proto::NETWORK_CHANNEL_B) {
           responseDropPredicate = dropBackupResponsesUntilPreferredReady;
         }
+        // A 通道只允许建链一次：首个会话完成配置进入 READY 后，后续建链一律被拒绝，
+        // 使 A 真正下线。工作器的 TryClaimRcbConfiguration 只在"A 不处于 CONNECTING/
+        // CONNECTED"时才把 RCB 配置权交给 B，因此必须让 A 确实断开，本用例要验证的
+        // 回收（B 重建会话并完成完整重配）才是确定行为；否则 A 会不断重连复位，
+        // B 永远抢不到配置权，用例只能随机失败。
+        const int failConnectAfter =
+            channel == IEC61850Proto::NETWORK_CHANNEL_A ? 1 : -1;
         return std::make_unique<ScriptedTransport>(
             state, MakeRcbResponse, true, channel,
             channel == IEC61850Proto::NETWORK_CHANNEL_A ||
                 channel == IEC61850Proto::NETWORK_CHANNEL_B,
-            std::move(responseDropPredicate));
+            std::move(responseDropPredicate), nullptr, failConnectAfter);
       });
 
   ASSERT_TRUE(worker.Start().ok());
   {
+    // 确定性前提已由上面的 failConnectAfter 保证：A 首连成功后即永久下线，
+    // B 因此必定取得 RCB 配置权并完成一次完整重配，这里只需等它的 READY 事件。
+    // 上限取 20s：场景中 A 会话结束与通道重试各自带 1s 周期，且 CI 上测试并行执行。
     std::unique_lock lock(callbackMutex);
-    ASSERT_TRUE(callbackCondition.wait_for(lock, 10s, [&] {
+    ASSERT_TRUE(callbackCondition.wait_for(lock, 20s, [&] {
       return std::any_of(events.begin(), events.end(), [](const auto& event) {
         return event.state == IEC61850::ProtocolSessionState::READY &&
                event.activeChannel == IEC61850Proto::NETWORK_CHANNEL_B;
