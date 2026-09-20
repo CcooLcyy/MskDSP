@@ -169,5 +169,33 @@ bash script/strip_debug.sh <package_dir> <debug_dir> <strip_tool> <objcopy_tool>
 - 依赖 `file`、`strip`、`objcopy` 工具。
 - `debug_dir` 会被创建（如不存在）。
 
+## dev/lower_device_ssh.py（下位机真机免交互 SSH）
+
+### 用途
+在没有交互式终端的环境里（Windows 侧自动化、Agent 会话）连接下位机真机 `192.168.1.219:10022`，
+用同一套方式完成「连通自检 / 单行命令 / 多行脚本 / root 提权读取」，不必每次重新拼命令。
+
+### 用法
+```
+python script/dev/lower_device_ssh.py check                      # 连通自检（主机名/架构/用户/组）
+python script/dev/lower_device_ssh.py run  "ls -1 /data/mskdsp"  # 单行远端命令
+python script/dev/lower_device_ssh.py bash ./remote_check.sh     # 多行脚本（base64 传输）
+python script/dev/lower_device_ssh.py sudo "docker ps"           # 需要 root 的读取
+```
+默认 `user@host:port` 为 `megsky@192.168.1.219:10022`，可用 `--user`/`--host`/`--port` 覆盖。
+密码来自 `--password` 或环境变量 `SSH_DEVICE_PASSWORD`；`sudo` 默认复用该密码，可用 `--sudo-password` 单独指定。
+
+### 行为说明
+- `bash` 子命令把本地脚本的换行统一为 LF 后再 base64 传输，规避 Windows 侧 `\r` 污染远端 `fi`/`done`。
+- `sudo` 子命令用 `sudo -S -p ''`，sudo 密码经 SSH 通道标准输入发送，不进入命令行参数。
+- 输出按 UTF-8 解码；远端退出码即脚本退出码。
+- `check` 使用只读命令；`run`/`bash`/`sudo` 的远端命令由调用方提供。
+
+### 依赖与注意事项
+- 依赖 Python 3 与 `paramiko`（Windows 侧已验证 3.5.1）。
+- 脚本内不保存任何凭据。
+- 只读优先：脚本不限制远端命令，调用方需保证不改动设备上与任务无关的服务。
+- 真机连接信息（含端口与账号）记录在同级文档 `doc/工作机连接与APP更新.md`。
+
 ## 通用约定
 - 脚本本身不涉及线程创建；模块线程与日志的统一规则见 `src/core/ModuleManager/doc/README.md`。
