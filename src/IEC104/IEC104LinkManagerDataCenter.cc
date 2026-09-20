@@ -286,23 +286,26 @@ bool LinkManager::storeAndSendSoe(const std::string& connName,
   return true;
 }
 
-void LinkManager::stopDataCenterSubscribeLocked(LinkRuntime* link) {
-  if (link == nullptr) {
+void LinkManager::detachDataCenterSubscribeLocked(LinkRuntime* link, SubscribeShutdown* out) {
+  if (link == nullptr || out == nullptr) {
     return;
   }
-  if (link->dcSubscribeThread.joinable()) {
-    LOG_INFO("IEC104 停止 DataCenter 订阅: conn_name={}", link->config.conn_name());
-    link->dcSubscribeThread.request_stop();
-    link->dcSubscribeThread.join();
+  if (link->dcSubscribeThread.joinable() || link->dcSubscribeContext) {
+    LOG_INFO("IEC104 摘出 DataCenter 订阅，待锁外停止: conn_name={}", link->config.conn_name());
   }
-  link->dcSubscribeContext.reset();
+  out->connName = link->config.conn_name();
+  out->kind = "DataCenter 订阅";
+  // 只摘出，不在此处 request_stop()/join()：订阅线程的运行期回调会反向获取 mu_，
+  // 持锁 join 会死锁；真正的停止由 SubscribeShutdown 在锁外完成。
+  out->thread = std::move(link->dcSubscribeThread);
+  out->context = std::move(link->dcSubscribeContext);
 }
 
 void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, LinkRuntime* link) {
   if (link == nullptr || !isSlaveStation(link->config) || !link->transport) {
     return;
   }
-  stopDataCenterSubscribeLocked(link);
+  // 上一轮订阅线程已由 StartLink 在锁内摘出、锁外停止，这里直接启动新的订阅。
 
   auto tags = link->pointTable.Tags();
   struct PointMeta {
@@ -430,23 +433,24 @@ bool LinkManager::isSimulationValueActive(const std::string& connName, const std
   return it != linksByName_.end() && it->second.simulationValues.contains(tag);
 }
 
-void LinkManager::stopTimeSyncSubscribeLocked(LinkRuntime* link) {
-  if (link == nullptr) {
+void LinkManager::detachTimeSyncSubscribeLocked(LinkRuntime* link, SubscribeShutdown* out) {
+  if (link == nullptr || out == nullptr) {
     return;
   }
-  if (link->dcTimeSyncThread.joinable()) {
-    LOG_INFO("IEC104 停止对时订阅: conn_name={}", link->config.conn_name());
-    link->dcTimeSyncThread.request_stop();
-    link->dcTimeSyncThread.join();
+  if (link->dcTimeSyncThread.joinable() || link->dcTimeSyncContext) {
+    LOG_INFO("IEC104 摘出对时订阅，待锁外停止: conn_name={}", link->config.conn_name());
   }
-  link->dcTimeSyncContext.reset();
+  out->connName = link->config.conn_name();
+  out->kind = "对时订阅";
+  out->thread = std::move(link->dcTimeSyncThread);
+  out->context = std::move(link->dcTimeSyncContext);
 }
 
 void LinkManager::startTimeSyncSubscribeLocked(const std::string& connName, LinkRuntime* link) {
   if (link == nullptr || !isMasterStation(link->config) || !link->transport) {
     return;
   }
-  stopTimeSyncSubscribeLocked(link);
+  // 上一轮订阅线程已由 StartLink 在锁内摘出、锁外停止，这里直接启动新的订阅。
 
   const auto timeSyncTag = normalizeTimeSyncTag(link->config);
   if (timeSyncTag.empty()) {
@@ -524,23 +528,24 @@ void LinkManager::startTimeSyncSubscribeLocked(const std::string& connName, Link
   });
 }
 
-void LinkManager::stopCommandSubscribeLocked(LinkRuntime* link) {
-  if (link == nullptr) {
+void LinkManager::detachCommandSubscribeLocked(LinkRuntime* link, SubscribeShutdown* out) {
+  if (link == nullptr || out == nullptr) {
     return;
   }
-  if (link->dcCommandThread.joinable()) {
-    LOG_INFO("IEC104 停止命令订阅: conn_name={}", link->config.conn_name());
-    link->dcCommandThread.request_stop();
-    link->dcCommandThread.join();
+  if (link->dcCommandThread.joinable() || link->dcCommandContext) {
+    LOG_INFO("IEC104 摘出命令订阅，待锁外停止: conn_name={}", link->config.conn_name());
   }
-  link->dcCommandContext.reset();
+  out->connName = link->config.conn_name();
+  out->kind = "命令订阅";
+  out->thread = std::move(link->dcCommandThread);
+  out->context = std::move(link->dcCommandContext);
 }
 
 void LinkManager::startCommandSubscribeLocked(const std::string& connName, LinkRuntime* link) {
   if (link == nullptr || !isMasterStation(link->config) || !link->transport) {
     return;
   }
-  stopCommandSubscribeLocked(link);
+  // 上一轮订阅线程已由 StartLink 在锁内摘出、锁外停止，这里直接启动新的订阅。
 
   struct PointMeta {
     uint32_t ioa = 0;

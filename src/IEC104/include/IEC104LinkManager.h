@@ -68,6 +68,16 @@ private:
   };
 
   struct LinkRuntime {
+    LinkRuntime() = default;
+    // 析构前必须先摘除传输层回调：连接状态回调会反向获取 LinkManager::mu_，
+    // 若析构发生在持锁期间（例如模块启动阶段重载配置时替换链路表），
+    // 会因同一线程重入非递归互斥量而死锁。
+    ~LinkRuntime();
+    LinkRuntime(const LinkRuntime &) = delete;
+    LinkRuntime &operator=(const LinkRuntime &) = delete;
+    LinkRuntime(LinkRuntime &&) = default;
+    LinkRuntime &operator=(LinkRuntime &&) = default;
+
     IEC104Proto::LinkConfig config;
     uint32_t connId = 0;
     IEC104Proto::LinkState state = IEC104Proto::LINK_STATE_STOPPED;
@@ -88,6 +98,25 @@ private:
 
     std::shared_ptr<grpc::ClientContext> dcCommandContext;
     std::jthread dcCommandThread;
+  };
+
+  // 订阅线程（DataCenter 订阅 / 对时订阅 / 命令订阅）停止所需的临时承载物。
+  // 这些线程的运行期回调会反向获取 mu_，因此 request_stop() + join() 必须在锁外执行：
+  // 若在持锁期间 join，一旦被 join 的线程正卡在等待 mu_ 上，就会永久死锁。
+  // 使用方式：在获取 mu_ 之前声明本对象，锁内只把线程「摘出」，析构（此时锁已释放）完成停止与回收。
+  struct SubscribeShutdown {
+    SubscribeShutdown() = default;
+    SubscribeShutdown(const SubscribeShutdown &) = delete;
+    SubscribeShutdown &operator=(const SubscribeShutdown &) = delete;
+    SubscribeShutdown(SubscribeShutdown &&) = delete;
+    SubscribeShutdown &operator=(SubscribeShutdown &&) = delete;
+    ~SubscribeShutdown();
+
+    std::jthread thread;
+    std::shared_ptr<grpc::ClientContext> context;
+    // 仅用于停止日志，便于定位是哪条链路的哪类订阅被回收。
+    std::string connName;
+    std::string kind;
   };
 
   static grpc::Status validateConnName(const std::string &connName);
@@ -117,11 +146,12 @@ private:
   void handleTransportConnectionState(const std::string &connName,
                                       IEC104Proto::ConnectionState state);
   void startDataCenterSubscribeLocked(const std::string &connName, LinkRuntime *link);
-  void stopDataCenterSubscribeLocked(LinkRuntime *link);
+  // 仅把订阅线程与上下文摘出到 out，实际停止（request_stop + join）由 SubscribeShutdown 在锁外完成。
+  void detachDataCenterSubscribeLocked(LinkRuntime *link, SubscribeShutdown *out);
   void startTimeSyncSubscribeLocked(const std::string &connName, LinkRuntime *link);
-  void stopTimeSyncSubscribeLocked(LinkRuntime *link);
+  void detachTimeSyncSubscribeLocked(LinkRuntime *link, SubscribeShutdown *out);
   void startCommandSubscribeLocked(const std::string &connName, LinkRuntime *link);
-  void stopCommandSubscribeLocked(LinkRuntime *link);
+  void detachCommandSubscribeLocked(LinkRuntime *link, SubscribeShutdown *out);
 
   grpc::Status handleClientPointValue(const std::string &connName, const PointValue &pv);
   bool storeAndSendSoe(const std::string &connName, const PointValue &pv, TcpLink *transport);

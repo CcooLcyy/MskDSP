@@ -7,8 +7,13 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
+#include <functional>
+#include <future>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "IEC104LinkManager.h"
@@ -84,6 +89,32 @@ IEC104Proto::Point MakePoint(const char* tag, uint32_t ioa) {
   point.set_ioa(ioa);
   point.set_type(IEC104Proto::POINT_TYPE_FLOAT);
   return point;
+}
+
+// 看门狗执行器：用于验证「必须能返回」的调用没有发生死锁。
+// 死锁线程无法回收（它持有着目标对象与互斥量），因此一旦超时就直接打印中文失败信息并以失败码
+// 结束测试进程，避免测试自身被永久挂起、把整个 ctest 任务拖死而看不到失败原因。
+void RunWithDeadlockWatchdog(const char* what, const std::function<void()>& task,
+                             std::chrono::milliseconds timeout) {
+  std::promise<void> done;
+  auto future = done.get_future();
+  std::thread worker([&task, &done]() {
+    task();
+    done.set_value();
+  });
+
+  if (future.wait_for(timeout) == std::future_status::ready) {
+    // 任务已返回，先回收线程再让 promise/future 析构，避免与 set_value 竞争共享状态。
+    worker.join();
+    return;
+  }
+
+  worker.detach();
+  std::fflush(nullptr);
+  std::fprintf(stderr, "\n[死锁检测] %s 在 %lld ms 内未返回，判定为死锁\n", what,
+               static_cast<long long>(timeout.count()));
+  std::fflush(stderr);
+  std::_Exit(EXIT_FAILURE);
 }
 
 }  // 命名空间结束
@@ -356,5 +387,85 @@ TEST(IEC104PersistenceTest, ReloadsWithReassignedConnIdFromDataCenter) {
     ASSERT_TRUE(mgr.GetLink("conn-reassigned", &info).ok());
     EXPECT_EQ(info.conn_id(), newConnId);
     ASSERT_TRUE(mgr.StopLink("conn-reassigned").ok());
+  }
+}
+
+// 验证：模块启动阶段重载持久化配置、替换已自动启动的运行中链路时不会自锁；
+// 重载完成后管理器必须仍能响应 gRPC 接口（ListLinks 同样需要获取内部互斥量）。
+TEST(IEC104PersistenceTest, ReloadAfterAutoStartKeepsManagerResponsive) {
+  ScopedTempDir dir;
+  const auto configDbPath = dir.path() / "config.db";
+
+  // 本地监听端口：让客户端链路真正连上，使传输层稳定离开「已断开」初态，
+  // 从而确保重载时旧链路析构一定会触发连接状态回调（这是自锁的触发点）。
+  namespace asio = boost::asio;
+  using tcp = asio::ip::tcp;
+  asio::io_context listenIo;
+  tcp::acceptor listener(listenIo);
+  listener.open(tcp::v4());
+  listener.bind(tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+  listener.listen(1);
+  const auto listenPort = listener.local_endpoint().port();
+  // 收下并保持对端连接：既排空监听队列（便于重载后链路重连），又避免对端立刻看到 FIN 导致状态回落。
+  tcp::socket acceptedPeer(listenIo);
+
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  {
+    LinkManager mgr("IEC104", configDbPath);
+    mgr.setDataCenterStub(stub);
+
+    IEC104Proto::LinkInfo info;
+    auto linkReq = MakeClientLinkReq("conn-reload");
+    linkReq.mutable_config()->mutable_remote()->set_port(listenPort);
+    ASSERT_TRUE(mgr.UpsertLink(linkReq, &info).ok());
+
+    IEC104Proto::UpsertPointTableRequest pointReq;
+    pointReq.set_conn_name("conn-reload");
+    pointReq.set_replace(true);
+    *pointReq.add_points() = MakePoint("telemetry_a", 100);
+    ASSERT_TRUE(mgr.UpsertPointTable(pointReq).ok());
+  }
+
+  {
+    LinkManager mgr("IEC104", configDbPath);
+    // 注入 DataCenter Stub 会触发「设置 Stub 后重试」重载：链路被恢复并自动启动。
+    mgr.setDataCenterStub(stub);
+
+    // 等待传输层真正进入「已连接」：只有传输层状态不是「已断开」时，
+    // 重载替换链路才会回调 LinkManager，用例才是对该死锁的有效复现。
+    IEC104Proto::LinkInfo started;
+    bool connected = false;
+    const auto connectDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < connectDeadline) {
+      ASSERT_TRUE(mgr.GetLink("conn-reload", &started).ok());
+      if (started.connection_state() == IEC104Proto::CONNECTION_STATE_CONNECTED) {
+        connected = true;
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_TRUE(connected) << "客户端链路未在超时内进入已连接状态，无法复现启动阶段重载自锁";
+    ASSERT_EQ(started.state(), IEC104Proto::LINK_STATE_RUNNING);
+
+    boost::system::error_code acceptEc;
+    listener.accept(acceptedPeer, acceptEc);
+    if (acceptEc) {
+      std::fprintf(stderr, "[用例提示] 收下对端连接失败（不影响死锁复现）: %s\n", acceptEc.message().c_str());
+    }
+
+    // 模拟 IEC104::start() 的启动阶段重载：修复前会在持锁状态下析构运行中的链路并永久自锁。
+    RunWithDeadlockWatchdog(
+        "LoadPersistedConfig", [&mgr]() { mgr.LoadPersistedConfig(); },
+        std::chrono::seconds(10));
+
+    IEC104Proto::ListLinksResponse links;
+    RunWithDeadlockWatchdog(
+        "ListLinks", [&mgr, &links]() { (void)mgr.ListLinks(&links); },
+        std::chrono::seconds(10));
+    EXPECT_EQ(links.links_size(), 1);
+
+    ASSERT_TRUE(mgr.StopLink("conn-reload").ok());
   }
 }

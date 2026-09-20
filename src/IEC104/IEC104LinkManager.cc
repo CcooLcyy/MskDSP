@@ -65,6 +65,22 @@ void renamePersistedPointTableConfig(IEC104Proto::PointTablesConfig *config,
     }
   }
 }
+
+// 摘除传输层回调：连接状态回调会反向获取 LinkManager::mu_，
+// 因此凡是可能在持锁期间析构或替换传输层的位置，都必须先调用本函数。
+void detachTransportCallbacks(TcpLink *transport) {
+  if (transport == nullptr) {
+    return;
+  }
+  transport->SetConnectionStateCallback(nullptr);
+  transport->SetPointValueCallback(nullptr);
+  transport->SetInterrogationSnapshotProvider(nullptr);
+  transport->SetSoeReplayProvider(nullptr);
+  transport->SetSoeAcknowledgedCallback(nullptr);
+  transport->SetTimeSyncCallback(nullptr);
+  transport->SetCommandCallback(nullptr);
+  transport->SetCommandExecutionModeCallback(nullptr);
+}
 }  // namespace
 
 LinkManager::LinkManager(std::string moduleName, std::filesystem::path configDbPath) :
@@ -80,6 +96,24 @@ LinkManager::LinkManager(std::string moduleName, std::filesystem::path configDbP
 }
 
 LinkManager::~LinkManager() = default;
+
+LinkManager::LinkRuntime::~LinkRuntime() {
+  if (!transport) {
+    return;
+  }
+  detachTransportCallbacks(transport.get());
+  LOG_INFO("IEC104 链路析构前已摘除传输层回调: conn_name={}", config.conn_name());
+}
+
+LinkManager::SubscribeShutdown::~SubscribeShutdown() {
+  // 此处位于锁外：调用方必须在获取 mu_ 之前声明本对象。
+  if (thread.joinable()) {
+    LOG_INFO("IEC104 停止订阅线程（锁外回收）: conn_name={}, 订阅类型={}", connName, kind);
+    thread.request_stop();
+    thread.join();
+  }
+  context.reset();
+}
 
 void LinkManager::setDataCenterServerAddress(std::string address) {
   dataCenter_.setServerAddress(std::move(address));
@@ -572,12 +606,27 @@ void LinkManager::loadPersistedConfig(std::string_view trigger) {
   }
 
   const auto restoredCount = restoredLinks.size();
+  // 旧链路必须在锁外回收：LinkRuntime 析构会停止传输层与订阅线程，期间可能反向回调
+  // LinkManager 并获取 mu_；若在持锁期间析构，同一线程重入非递归互斥量会永久死锁。
+  std::unordered_map<std::string, LinkRuntime> replacedLinks;
+  std::unordered_map<std::string, ListenEndpoint> replacedServerListenByName;
   {
     std::lock_guard<std::mutex> lock(mu_);
+    // 用 swap 摘出旧表：保证锁内不发生任何链路析构。
+    replacedLinks.swap(linksByName_);
+    replacedServerListenByName.swap(reservedServerListenByName_);
     linksByName_ = std::move(restoredLinks);
     reservedServerListenByName_ = std::move(restoredServerListenByName);
     pendingCreateByName_.clear();
   }
+  if (!replacedLinks.empty() || !replacedServerListenByName.empty()) {
+    LOG_INFO("IEC104 重载配置替换旧链路运行态，旧链路将在锁外回收: 触发来源={}, 旧链路数={}, 旧监听端点数={}",
+             trigger,
+             replacedLinks.size(),
+             replacedServerListenByName.size());
+  }
+  replacedLinks.clear();
+  replacedServerListenByName.clear();
 
   // 仅回写已确认需要修正/清理的记录；DataCenter 瞬时失败的链路保留原持久化内容，留待下次恢复重试。
   if (needResaveLinks) {
@@ -1174,6 +1223,13 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
     return status;
   }
 
+  // 必须在获取 mu_ 之前声明：其析构（此时锁已释放）才执行 request_stop() + join()，
+  // 避免持锁 join 订阅线程造成死锁；同时保证被 join 的线程使用的 transport 仍然存活。
+  std::unique_ptr<TcpLink> staleTransport;
+  SubscribeShutdown staleDataCenterSubscribe;
+  SubscribeShutdown staleTimeSyncSubscribe;
+  SubscribeShutdown staleCommandSubscribe;
+
   std::lock_guard<std::mutex> lock(mu_);
   auto it = linksByName_.find(connName);
   if (it == linksByName_.end()) {
@@ -1191,10 +1247,19 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
     return status;
   }
 
+  // 先摘出上一轮可能残留的订阅线程，真正的停止延后到锁外完成（见上方声明说明）。
+  detachDataCenterSubscribeLocked(&link, &staleDataCenterSubscribe);
+  detachTimeSyncSubscribeLocked(&link, &staleTimeSyncSubscribe);
+  detachCommandSubscribeLocked(&link, &staleCommandSubscribe);
+
   link.lastReportedByTag.clear();
   link.connectionState = link.config.role() == IEC104Proto::ROLE_CLIENT
                              ? IEC104Proto::CONNECTION_STATE_CONNECTING
                              : IEC104Proto::CONNECTION_STATE_DISCONNECTED;
+  // 替换传输层前先摘除旧传输层回调：此处持锁，旧 transport 析构时若反向回调会重入 mu_ 而死锁。
+  // 旧 transport 同时可能仍被待停止的订阅线程以裸指针引用，因此一并摘出、延后到锁外回收。
+  detachTransportCallbacks(link.transport.get());
+  staleTransport = std::move(link.transport);
   link.transport = std::make_unique<TcpLink>(link.config);
   configureTransportCallbacksLocked(connName, &link);
 
@@ -1225,6 +1290,10 @@ grpc::Status LinkManager::StopLink(const std::string &connName) {
   }
 
   std::unique_ptr<TcpLink> transport;
+  // 与 StartLink 同理：订阅线程的停止必须在锁外完成，且 transport 必须先于订阅线程回收。
+  SubscribeShutdown dataCenterSubscribe;
+  SubscribeShutdown timeSyncSubscribe;
+  SubscribeShutdown commandSubscribe;
   bool pendingDelete = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -1233,9 +1302,9 @@ grpc::Status LinkManager::StopLink(const std::string &connName) {
       return makeNotFound(connName);
     }
     pendingDelete = (it->second.state == IEC104Proto::LINK_STATE_PENDING_DELETE);
-    stopDataCenterSubscribeLocked(&it->second);
-    stopTimeSyncSubscribeLocked(&it->second);
-    stopCommandSubscribeLocked(&it->second);
+    detachDataCenterSubscribeLocked(&it->second, &dataCenterSubscribe);
+    detachTimeSyncSubscribeLocked(&it->second, &timeSyncSubscribe);
+    detachCommandSubscribeLocked(&it->second, &commandSubscribe);
     transport = std::move(it->second.transport);
     it->second.connectionState = IEC104Proto::CONNECTION_STATE_DISCONNECTED;
     it->second.state = pendingDelete ? IEC104Proto::LINK_STATE_PENDING_DELETE : IEC104Proto::LINK_STATE_STOPPED;
