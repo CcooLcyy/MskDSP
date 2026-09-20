@@ -1225,7 +1225,10 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
 
   // 必须在获取 mu_ 之前声明：其析构（此时锁已释放）才执行 request_stop() + join()，
   // 避免持锁 join 订阅线程造成死锁；同时保证被 join 的线程使用的 transport 仍然存活。
+  // staleTransport 承载替换下来的旧传输层，failedTransport 承载启动失败的新传输层，
+  // 两者都在此处声明、在锁外析构，避免持锁销毁传输层。
   std::unique_ptr<TcpLink> staleTransport;
+  std::unique_ptr<TcpLink> failedTransport;
   SubscribeShutdown staleDataCenterSubscribe;
   SubscribeShutdown staleTimeSyncSubscribe;
   SubscribeShutdown staleCommandSubscribe;
@@ -1258,6 +1261,8 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
                              : IEC104Proto::CONNECTION_STATE_DISCONNECTED;
   // 替换传输层前先摘除旧传输层回调：此处持锁，旧 transport 析构时若反向回调会重入 mu_ 而死锁。
   // 旧 transport 同时可能仍被待停止的订阅线程以裸指针引用，因此一并摘出、延后到锁外回收。
+  // 说明：正常路径下「链路未运行 ⇒ transport 已被 StopLink 摘空」，此处属于兜底处理；
+  // 若日后要调整该不变式，必须保持同样的锁外回收方式，否则会重新引入持锁析构/悬垂引用。
   detachTransportCallbacks(link.transport.get());
   staleTransport = std::move(link.transport);
   link.transport = std::make_unique<TcpLink>(link.config);
@@ -1267,7 +1272,9 @@ grpc::Status LinkManager::StartLink(const std::string &connName) {
   if (!status.ok()) {
     link.lastError = status.error_message();
     link.connectionState = IEC104Proto::CONNECTION_STATE_DISCONNECTED;
-    link.transport.reset();
+    // 启动失败的传输层同样移出锁外回收，与上方替换路径保持一致，避免日后 Start 先起线程再失败时持锁析构。
+    detachTransportCallbacks(link.transport.get());
+    failedTransport = std::move(link.transport);
     return status;
   }
 
@@ -1290,7 +1297,8 @@ grpc::Status LinkManager::StopLink(const std::string &connName) {
   }
 
   std::unique_ptr<TcpLink> transport;
-  // 与 StartLink 同理：订阅线程的停止必须在锁外完成，且 transport 必须先于订阅线程回收。
+  // 与 StartLink 同理：订阅线程的停止必须在锁外完成；且 transport 必须在订阅线程回收之后再析构
+  // （订阅线程以裸指针引用 transport，不能先于它释放）。
   SubscribeShutdown dataCenterSubscribe;
   SubscribeShutdown timeSyncSubscribe;
   SubscribeShutdown commandSubscribe;
@@ -1342,8 +1350,11 @@ grpc::Status LinkManager::DeleteLink(const std::string &connName) {
     return dc;
   }
 
+  // 被删除链路的运行态必须在锁外回收：~LinkRuntime 会 join 订阅线程与传输线程，
+  // 而这些线程的回调要反向获取 mu_；此处只把节点摘出，节点句柄在本对象析构时（锁已释放）销毁元素。
+  std::unordered_map<std::string, LinkRuntime>::node_type removedLink;
   std::lock_guard<std::mutex> lock(mu_);
-  linksByName_.erase(connName);
+  removedLink = linksByName_.extract(connName);
   reservedServerListenByName_.erase(connName);
   status = saveLinksLocked();
   if (!status.ok()) {
