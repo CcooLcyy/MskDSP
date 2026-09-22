@@ -126,6 +126,12 @@ bool IsSameOid(const MmsAareView& aare,
 
 MmsInitiateRequest DefaultInitiateRequest(bool includeWrite) {
   MmsInitiateRequest request;
+  // 以下数值与实测被目标装置接受的关联报文一致：本地细节65000、并发服务数5、
+  // 结构嵌套层10，避免在关联协商阶段引入与参考实现无关的差异。
+  request.localDetailCalling = 65000;
+  request.proposedMaxServOutstandingCalling = 5;
+  request.proposedMaxServOutstandingCalled = 5;
+  request.proposedDataStructureNestingLevel = 10;
   request.proposedParameterSupport.size = 2;
   request.proposedParameterSupport.unusedBits = 5;
   request.proposedServiceSupport.size = 11;
@@ -2045,14 +2051,29 @@ grpc::Status MmsSessionWorker::Establish(Channel& channel,
   if (!status.ok()) {
     return status;
   }
+  // AARQ必须先包一层表示层CP，再作为Session CONNECT的用户数据；直接发裸AARQ
+  // 时实测装置会回Session ABORT。
+  std::array<std::uint8_t, kMmsPduBufferSize> cpBuffer{};
+  std::size_t cpSize = 0;
+  status = EncodeMmsPresentationCp(
+      std::span<const std::uint8_t>(aarqBuffer.data(), aarqSize),
+      kDefaultPresentationSelector, kDefaultPresentationSelector, cpBuffer,
+      &cpSize);
+  if (!status.ok()) {
+    return status;
+  }
   std::array<std::uint8_t, kMmsPduBufferSize> connectBuffer{};
   std::size_t connectSize = 0;
   status = EncodeIsoSessionConnect(
-      std::span<const std::uint8_t>(aarqBuffer.data(), aarqSize), connectBuffer,
+      std::span<const std::uint8_t>(cpBuffer.data(), cpSize), connectBuffer,
       &connectSize);
   if (!status.ok()) {
     return status;
   }
+  LOG_INFO("IEC61850 MMS发送Session CONNECT: 通道={}, 长度={}, 报文={}",
+           static_cast<int>(channel.channel), connectSize,
+           HexDump(std::span<const std::uint8_t>(connectBuffer.data(),
+                                                 connectSize)));
   remainingTimeout = RemainingTimeoutMs(deadline);
   if (remainingTimeout == 0) {
     return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED,
@@ -2092,12 +2113,29 @@ grpc::Status MmsSessionWorker::Establish(Channel& channel,
   IsoSessionPduView sessionPdu;
   status = DecodeIsoSessionPdu(received, &sessionPdu);
   if (!status.ok()) {
+    LOG_WARNING("IEC61850 MMS会话响应解码失败: 通道={}, 原因={}, 报文={}",
+                static_cast<int>(channel.channel), status.error_message(),
+                HexDump(received));
     return status;
   }
+  if (sessionPdu.type == IsoSessionPduType::REFUSE) {
+    // 装置在ACSE阶段拒绝关联时回REFUSE，需单独识别并保留原始报文用于定位。
+    LOG_ERROR("IEC61850 MMS收到Session REFUSE: 通道={}, 报文={}",
+              static_cast<int>(channel.channel), HexDump(received));
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                        "IEC61850 MMS服务端返回Session REFUSE，ACSE关联被拒绝");
+  }
   if (sessionPdu.type != IsoSessionPduType::ACCEPT) {
+    LOG_WARNING(
+        "IEC61850 MMS服务端未返回Session ACCEPT: 通道={}, SPDU类型={}, 报文={}",
+        static_cast<int>(channel.channel), static_cast<int>(sessionPdu.type),
+        HexDump(received));
     return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
                         "IEC61850 MMS服务端未返回Session ACCEPT");
   }
+  LOG_INFO("IEC61850 MMS收到Session ACCEPT: 通道={}, 长度={}, 报文={}",
+           static_cast<int>(channel.channel), received.size(),
+           HexDump(received));
   MmsAareView aare;
   status = DecodeMmsAare(sessionPdu.userData, &aare);
   if (!status.ok()) {
@@ -2112,6 +2150,8 @@ grpc::Status MmsSessionWorker::Establish(Channel& channel,
                         std::format("IEC61850 MMS关联被拒绝: result={}",
                                     aare.result));
   }
+  LOG_INFO("IEC61850 MMS AARE 关联已接受: 通道={}, result={}",
+           static_cast<int>(channel.channel), aare.result);
   MmsInitiateResponse response;
   status = DecodeMmsInitiateResponse(aare.mmsPdu, &response);
   if (!status.ok()) {
@@ -3155,9 +3195,14 @@ void MmsSessionWorker::Run(std::size_t index, std::stop_token stopToken) {
         }
         if (pdu.type == IsoSessionPduType::FINISH ||
             pdu.type == IsoSessionPduType::DISCONNECT ||
-            pdu.type == IsoSessionPduType::ABORT) {
-          status = grpc::Status(grpc::StatusCode::UNAVAILABLE,
-                                "IEC61850 MMS服务端关闭Session会话");
+            pdu.type == IsoSessionPduType::ABORT ||
+            pdu.type == IsoSessionPduType::REFUSE) {
+          // REFUSE同样表示对端拒绝或终止会话，需在日志中明确区分原因。
+          status = grpc::Status(
+              grpc::StatusCode::UNAVAILABLE,
+              pdu.type == IsoSessionPduType::REFUSE
+                  ? "IEC61850 MMS服务端返回Session REFUSE，会话被拒绝"
+                  : "IEC61850 MMS服务端关闭Session会话");
           break;
         }
         if (pdu.type != IsoSessionPduType::DATA) {

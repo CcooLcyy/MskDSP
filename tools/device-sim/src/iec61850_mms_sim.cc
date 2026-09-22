@@ -244,8 +244,18 @@ std::vector<std::uint8_t> MakeSessionAccept() {
   }
   std::array<std::uint8_t, 4096> session{};
   std::size_t sessionSize = 0;
+  // 与现场装置一致：AARE先包一层表示层CP，再作为Session ACCEPT的用户数据。
+  std::array<std::uint8_t, 4096> cp{};
+  std::size_t cpSize = 0;
+  if (!IEC61850::EncodeMmsPresentationCp(
+           std::span<const std::uint8_t>(aare.data(), aareSize),
+           IEC61850::kDefaultPresentationSelector,
+           IEC61850::kDefaultPresentationSelector, cp, &cpSize)
+           .ok()) {
+    return {};
+  }
   if (!IEC61850::EncodeIsoSessionAccept(
-           std::span<const std::uint8_t>(aare.data(), aareSize), session,
+           std::span<const std::uint8_t>(cp.data(), cpSize), session,
            &sessionSize)
            .ok()) {
     return {};
@@ -754,10 +764,24 @@ private:
       Log("警告", "Session CONNECT报文无效");
       return;
     }
+    // 兼容两种客户端：带表示层CP的新格式先取CP的user-data，旧的不带CP格式直接解析。
+    IEC61850::MmsAareView aarq;
+    if (!IEC61850::DecodeMmsAarq(connect.userData, &aarq).ok()) {
+      Log("警告", std::format("AARQ解码失败: 用户数据={}",
+                              HexDump(connect.userData)));
+      return;
+    }
+    IEC61850::MmsInitiateRequest initiate;
+    if (!IEC61850::DecodeMmsInitiateRequest(aarq.mmsPdu, &initiate).ok()) {
+      Log("警告", "AARQ中的MMS InitiateRequest无效");
+      return;
+    }
+    Log("信息", std::format("收到AARQ: 用户数据={}", HexDump(connect.userData)));
     const auto accept = MakeSessionAccept();
     if (accept.empty() || !SendCotpPayload(client, accept)) {
       return;
     }
+    Log("信息", "已发送Session ACCEPT与AARE");
 
     for (;;) {
       std::vector<std::uint8_t> payload;

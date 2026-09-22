@@ -17,6 +17,23 @@ constexpr std::uint8_t kSessionUserDataParameter = 0xc1;
 constexpr std::uint8_t kPresentationDataPdu = 0x61;
 constexpr std::uint8_t kExternalTag = 0x28;
 constexpr std::uint8_t kUserInformationTag = 0xbe;
+// 会话层CONNECT/ACCEPT连接项参数：会话要求、版本号与会话选择子。
+constexpr std::uint8_t kSessionRequirementParameter = 0x05;
+constexpr std::uint8_t kVersionNumberParameter = 0x16;
+constexpr std::uint8_t kCallingSessionSelectorParameter = 0x33;
+constexpr std::uint8_t kCalledSessionSelectorParameter = 0x34;
+// ISO 8327要求的版本号；实测装置只接受02，写00会被直接ABORT。
+constexpr std::uint8_t kSessionVersionNumber = 0x02;
+// 表示层CP子结构：mode-selector、normal-mode-parameters、上下文定义列表。
+constexpr std::uint8_t kModeSelectorTag = 0xa0;
+constexpr std::uint8_t kNormalModeParametersTag = 0xa2;
+constexpr std::uint8_t kCallingPresentationSelectorTag = 0x81;
+constexpr std::uint8_t kCalledPresentationSelectorTag = 0x82;
+constexpr std::uint8_t kContextDefinitionListTag = 0xa4;
+constexpr std::uint8_t kSingleAsn1TypeTag = 0xa0;
+constexpr std::uint8_t kIndirectReferenceTag = 0x02;
+// EXTERNAL中的indirect-reference必须指向CP里MMS表示层上下文的编号。
+constexpr std::uint32_t kMmsIndirectReference = 3;
 
 grpc::Status Invalid(std::string_view reason) {
   return grpc::Status(grpc::StatusCode::DATA_LOSS,
@@ -86,9 +103,114 @@ bool AppendSessionParameter(std::span<std::uint8_t> output,
          AppendBytes(output, offset, value);
 }
 
+// 把一条会话参数编码到buffer的指定子区间，返回该参数的字节长度。
+bool BuildSessionParameter(std::uint8_t parameter,
+                           std::span<const std::uint8_t> value,
+                           std::span<std::uint8_t> buffer,
+                           std::size_t* size) noexcept {
+  if (size == nullptr) {
+    return false;
+  }
+  *size = 0;
+  return AppendSessionParameter(buffer, size, parameter, value);
+}
+
+// 组装CONNECT/ACCEPT的连接项参数：会话要求+版本号+调用/被调会话选择子。
+// 参数顺序与实测被装置接受的报文一致，连接项内部不得再嵌套一层TLV。
+bool BuildConnectParameters(const IsoSessionSelectors& selectors,
+                            std::array<std::uint8_t, 32>* parameters,
+                            std::size_t* size) {
+  if (parameters == nullptr || size == nullptr || selectors.callingSize == 0 ||
+      selectors.callingSize > IsoSessionSelectors::kMaxSelectorBytes ||
+      selectors.calledSize == 0 ||
+      selectors.calledSize > IsoSessionSelectors::kMaxSelectorBytes) {
+    return false;
+  }
+  const std::array<std::uint8_t, 2> requirement{0x00, 0x02};
+  const std::array<std::uint8_t, 1> version{kSessionVersionNumber};
+  const std::array<std::pair<std::uint8_t, std::span<const std::uint8_t>>, 4>
+      fields{{
+          {kSessionRequirementParameter, requirement},
+          {kVersionNumberParameter, version},
+          {kCallingSessionSelectorParameter,
+           std::span<const std::uint8_t>(selectors.calling.data(),
+                                         selectors.callingSize)},
+          {kCalledSessionSelectorParameter,
+           std::span<const std::uint8_t>(selectors.called.data(),
+                                         selectors.calledSize)},
+      }};
+  std::size_t offset = 0;
+  for (const auto& [parameter, value] : fields) {
+    std::size_t fieldSize = 0;
+    if (!BuildSessionParameter(
+            parameter, value,
+            std::span<std::uint8_t>(parameters->data() + offset,
+                                    parameters->size() - offset),
+            &fieldSize)) {
+      return false;
+    }
+    offset += fieldSize;
+  }
+  *size = offset;
+  return true;
+}
+
+// 校验对端CONNECT/ACCEPT连接项：必须存在会话要求(0x13)且版本号(0x16)为02；
+// 会话选择子(0x33/0x34)按实际报文校验，缺失时只提示不拒绝，保证对不同实现宽容。
+grpc::Status ValidateConnectParameters(std::span<const std::uint8_t> parameters,
+                                       bool requireSessionSelectors) {
+  bool hasRequirement = false;
+  bool hasCallingSelector = false;
+  bool hasCalledSelector = false;
+  bool hasVersion = false;
+  std::size_t offset = 0;
+  while (offset < parameters.size()) {
+    const auto parameter = parameters[offset++];
+    std::size_t parameterLength = 0;
+    if (!DecodeSessionLength(parameters, &offset, &parameterLength) ||
+        parameterLength > parameters.size() - offset) {
+      return Invalid("会话连接项参数长度无效");
+    }
+    const auto value = parameters.subspan(offset, parameterLength);
+    offset += parameterLength;
+    if (parameter == kSessionRequirementParameter) {
+      hasRequirement = true;
+      // 会话要求是连接项的嵌套结构，版本号位于其内部。
+      std::size_t inner = 0;
+      while (inner < value.size()) {
+        const auto item = value[inner++];
+        std::size_t itemLength = 0;
+        if (!DecodeSessionLength(value, &inner, &itemLength) ||
+            itemLength > value.size() - inner) {
+          return Invalid("会话要求子项长度无效");
+        }
+        if (item == kVersionNumberParameter) {
+          if (itemLength != 1 || value[inner] != kSessionVersionNumber) {
+            return Invalid("会话版本号不是02");
+          }
+          hasVersion = true;
+        }
+        inner += itemLength;
+      }
+    } else if (parameter == kCallingSessionSelectorParameter) {
+      hasCallingSelector = true;
+    } else if (parameter == kCalledSessionSelectorParameter) {
+      hasCalledSelector = true;
+    }
+  }
+  if (!hasRequirement || !hasVersion) {
+    return Invalid("会话连接项缺少会话要求或版本号");
+  }
+  if (requireSessionSelectors && (!hasCallingSelector || !hasCalledSelector)) {
+    return Invalid("会话连接项缺少调用或被调会话选择子");
+  }
+  return grpc::Status::OK;
+}
+
 grpc::Status EncodeSessionWithUserData(
     IsoSessionPduType type, std::span<const std::uint8_t> userData,
-    std::span<std::uint8_t> output, std::size_t* outputSize) {
+    const IsoSessionSelectors& selectors, std::span<std::uint8_t> output,
+    std::size_t* outputSize) {
   if (outputSize == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
                         "IEC61850 MMS ISO输出长度参数为空");
@@ -98,12 +220,16 @@ grpc::Status EncodeSessionWithUserData(
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
                         "IEC61850 MMS ISO用户数据不能为空");
   }
-  std::array<std::uint8_t, 12> connectParameters{
-      0x05, 0x06, 0x13, 0x01, 0x00, 0x16,
-      0x01, 0x00, 0x14, 0x02, 0x00, 0x02};
+  std::array<std::uint8_t, 32> connectParameters{};
+  std::size_t connectSize = 0;
   const auto hasConnectParameters = type == IsoSessionPduType::CONNECT ||
                                     type == IsoSessionPduType::ACCEPT;
-  const auto fixedSize = hasConnectParameters ? connectParameters.size() : 0;
+  if (hasConnectParameters &&
+      !BuildConnectParameters(selectors, &connectParameters, &connectSize)) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                        "IEC61850 MMS会话选择子长度无效");
+  }
+  const auto fixedSize = hasConnectParameters ? connectSize : 0;
   const auto userParameterSize = userData.size() <= 254 ? 2 : 4;
   const auto totalLength = fixedSize + userParameterSize + userData.size();
   const auto lengthFieldSize = totalLength <= 254 ? 1 : 3;
@@ -118,7 +244,9 @@ grpc::Status EncodeSessionWithUserData(
     return OutputError("会话长度编码失败");
   }
   if (hasConnectParameters &&
-      !AppendBytes(output, &offset, connectParameters)) {
+      !AppendBytes(output, &offset,
+                   std::span<const std::uint8_t>(connectParameters.data(),
+                                                 connectSize))) {
     return OutputError("连接参数写入失败");
   }
   if (!AppendSessionParameter(output, &offset, kSessionUserDataParameter,
@@ -195,25 +323,326 @@ grpc::Status EncodeOid(std::uint8_t tag, std::span<const std::uint32_t> oid,
   return grpc::Status::OK;
 }
 
+// 追加一段已经按TLV组装好的字节。
+void AppendEncoded(std::vector<std::uint8_t>* target,
+                   const std::vector<std::uint8_t>& encoded) {
+  if (target == nullptr) {
+    return;
+  }
+  target->insert(target->end(), encoded.begin(), encoded.end());
+}
+
+// 把tag/value编码成BER字段后追加到target，避免逐处重复"编码+追加"。
+grpc::Status AppendBerTlv(std::uint8_t tag,
+                          std::span<const std::uint8_t> value,
+                          std::vector<std::uint8_t>* target,
+                          std::string_view reason) {
+  std::vector<std::uint8_t> encoded;
+  const auto status = EncodeBerTlv(tag, value, &encoded);
+  if (!status.ok()) {
+    return status;
+  }
+  if (target == nullptr) {
+    return OutputError(reason);
+  }
+  AppendEncoded(target, encoded);
+  return grpc::Status::OK;
+}
+
+// 追加一个BER整数字段。
+grpc::Status AppendBerTlvInteger(std::uint8_t tag, std::uint32_t value,
+                                 std::vector<std::uint8_t>* target,
+                                 std::string_view reason) {
+  std::vector<std::uint8_t> encoded;
+  const auto status = EncodeBerInteger(tag, value, &encoded);
+  if (!status.ok()) {
+    return status;
+  }
+  if (target == nullptr) {
+    return OutputError(reason);
+  }
+  AppendEncoded(target, encoded);
+  return grpc::Status::OK;
+}
+
+// 追加一个BER OID字段。
+grpc::Status AppendBerTlvOid(std::uint8_t tag,
+                             std::span<const std::uint32_t> oid,
+                             std::vector<std::uint8_t>* target,
+                             std::string_view reason) {
+  std::vector<std::uint8_t> encoded;
+  const auto status = EncodeOid(tag, oid, &encoded);
+  if (!status.ok()) {
+    return status;
+  }
+  if (target == nullptr) {
+    return OutputError(reason);
+  }
+  AppendEncoded(target, encoded);
+  return grpc::Status::OK;
+}
+
+// 编码表示层CP：mode-selector + normal-mode-parameters（P-SEL + 上下文定义列表）
+// + user-data。缺少CP时，实测装置收到裸AARQ后会直接回ABORT。
+grpc::Status EncodePresentationCpInternal(
+    std::span<const std::uint8_t> userData,
+    std::span<const std::uint8_t> callingPresentationSelector,
+    std::span<const std::uint8_t> calledPresentationSelector,
+    std::vector<std::uint8_t>* output) {
+  if (output == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                        "IEC61850 MMS表示层输出参数为空");
+  }
+  output->clear();
+  if (userData.empty()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                        "IEC61850 MMS表示层用户数据不能为空");
+  }
+  if (callingPresentationSelector.empty() ||
+      calledPresentationSelector.empty() ||
+      callingPresentationSelector.size() > 32 ||
+      calledPresentationSelector.size() > 32) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                        "IEC61850 MMS表示层选择子长度无效");
+  }
+  std::vector<std::uint8_t> field;
+  std::vector<std::uint8_t> content;
+  // a0 03 80 01 01：mode-selector = normal-mode。
+  const std::array<std::uint8_t, 1> normalMode{0x01};
+  auto status =
+      AppendBerTlv(0x80, normalMode, &field, "表示层mode-selector写入失败");
+  if (status.ok()) {
+    status = AppendBerTlv(kModeSelectorTag, field, &content,
+                          "表示层mode-selector写入失败");
+  }
+  if (!status.ok()) {
+    return status;
+  }
+
+  std::vector<std::uint8_t> normalModeContent;
+  status = AppendBerTlv(kCallingPresentationSelectorTag,
+                        callingPresentationSelector, &normalModeContent,
+                        "表示层调用选择子写入失败");
+  if (status.ok()) {
+    status = AppendBerTlv(kCalledPresentationSelectorTag,
+                          calledPresentationSelector, &normalModeContent,
+                          "表示层被调选择子写入失败");
+  }
+  if (!status.ok()) {
+    return status;
+  }
+
+  // 上下文定义列表：ACSE（上下文1）与MMS（上下文3），两侧都必须带名称。
+  const std::array<std::uint32_t, 5> acseContext{2, 2, 1, 0, 1};
+  const std::array<std::uint32_t, 5> acseTransferSyntax{2, 2, 1, 0, 0};
+  const std::array<std::uint32_t, 5> mmsTransferSyntax{2, 2, 1, 0, 1};
+  const std::array<std::pair<std::uint32_t, std::span<const std::uint32_t>>, 2>
+      contexts{{{1, acseContext},
+                {kMmsPresentationContextId, kMmsAbstractSyntaxOid}}};
+  std::vector<std::uint8_t> definitions;
+  for (const auto& definition : contexts) {
+    std::vector<std::uint8_t> pdv;
+    status = AppendBerTlvInteger(definition.first, &pdv,
+                                 "表示层上下文编号写入失败");
+    if (status.ok()) {
+      status = AppendBerTlvOid(0x06, definition.second, &pdv,
+                               "表示层抽象语法写入失败");
+    }
+    const auto& transferSyntax =
+        definition.first == 1 ? acseTransferSyntax : mmsTransferSyntax;
+    if (status.ok()) {
+      status = AppendBerTlvOid(0x06, transferSyntax, &pdv,
+                               "表示层传输语法写入失败");
+    }
+    if (status.ok()) {
+      status = AppendBerTlv(0x30, pdv, &definitions, "表示层上下文定义写入失败");
+    }
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  status = AppendBerTlv(kContextDefinitionListTag, definitions,
+                        &normalModeContent, "表示层上下文定义列表写入失败");
+  if (status.ok()) {
+    status = AppendBerTlv(kNormalModeParametersTag, normalModeContent, &content,
+                          "表示层normal-mode-parameters写入失败");
+  }
+  if (status.ok()) {
+    status = AppendBerTlv(kPresentationDataPdu, userData, &content,
+                          "表示层user-data写入失败");
+  }
+  if (!status.ok()) {
+    return status;
+  }
+  return EncodeBerTlv(0x31, content, output);
+}
+
+// 解析normal-mode-parameters：取出两个P-SEL，并校验上下文定义列表中的MMS
+// 上下文编号与抽象语法OID，避免把非MMS的CP当成MMS关联接受。
+grpc::Status DecodeNormalModeParameters(std::span<const std::uint8_t> value,
+                                        PresentationCpView* cp) {
+  bool hasContextDefinitionList = false;
+  std::size_t offset = 0;
+  while (offset < value.size()) {
+    BerTlvView field;
+    auto status = ReadBerTlv(value, &offset, &field);
+    if (!status.ok()) {
+      return status;
+    }
+    switch (field.tag) {
+      case kCallingPresentationSelectorTag:
+      case kCalledPresentationSelectorTag: {
+        const auto isCalling = field.tag == kCallingPresentationSelectorTag;
+        auto* selector = isCalling ? &cp->callingPresentationSelector
+                                   : &cp->calledPresentationSelector;
+        auto* selectorSize = isCalling ? &cp->callingPresentationSelectorSize
+                                       : &cp->calledPresentationSelectorSize;
+        if (field.value.size() > selector->size()) {
+          return Invalid(isCalling ? "CP调用表示选择子过长"
+                                   : "CP被调表示选择子过长");
+        }
+        std::copy(field.value.begin(), field.value.end(), selector->begin());
+        *selectorSize = field.value.size();
+        break;
+      }
+      case kContextDefinitionListTag: {
+        hasContextDefinitionList = true;
+        std::size_t listOffset = 0;
+        bool hasMmsContext = false;
+        while (listOffset < field.value.size()) {
+          BerTlvView definition;
+          status = ReadBerTlv(field.value, &listOffset, &definition);
+          if (!status.ok() || definition.tag != 0x30) {
+            return Invalid("CP上下文定义列表结构无效");
+          }
+          std::size_t itemOffset = 0;
+          BerTlvView id;
+          status = ReadBerTlv(definition.value, &itemOffset, &id);
+          if (!status.ok() || id.tag != 0x02) {
+            return Invalid("CP上下文定义缺少编号");
+          }
+          std::uint64_t contextId = 0;
+          status = ReadBerUnsigned(id.value, &contextId);
+          if (!status.ok()) {
+            return status;
+          }
+          BerTlvView syntax;
+          status = ReadBerTlv(definition.value, &itemOffset, &syntax);
+          if (!status.ok() || syntax.tag != 0x06) {
+            return Invalid("CP上下文定义缺少抽象语法");
+          }
+          if (contextId == kMmsPresentationContextId) {
+            std::array<std::uint32_t, 16> arcs{};
+            std::size_t arcCount = 0;
+            status = ReadBerOid(syntax.value, arcs, &arcCount);
+            if (!status.ok() || arcCount != kMmsAbstractSyntaxOid.size() ||
+                !std::equal(arcs.begin(), arcs.begin() + arcCount,
+                            kMmsAbstractSyntaxOid.begin())) {
+              return Invalid("CP的MMS上下文抽象语法不是MMS");
+            }
+            hasMmsContext = true;
+          }
+          // 传输语法名称由对端自行声明，这里只要求TLV结构完整。
+          while (itemOffset < definition.value.size()) {
+            BerTlvView transferSyntax;
+            status = ReadBerTlv(definition.value, &itemOffset, &transferSyntax);
+            if (!status.ok()) {
+              return status;
+            }
+          }
+        }
+        if (!hasMmsContext) {
+          return Invalid("CP上下文定义列表缺少MMS表示上下文");
+        }
+        break;
+      }
+      default:
+        // 其它可选CP字段只要求TLV完整，不参与MMS关联协商。
+        break;
+    }
+  }
+  if (cp->callingPresentationSelectorSize == 0 ||
+      cp->calledPresentationSelectorSize == 0) {
+    return Invalid("CP缺少调用或被调表示选择子");
+  }
+  if (!hasContextDefinitionList) {
+    return Invalid("CP缺少表示上下文定义列表");
+  }
+  return grpc::Status::OK;
+}
+
+grpc::Status DecodePresentationCpInternal(std::span<const std::uint8_t> input,
+                                          PresentationCpView* cp) {
+  if (cp == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                        "IEC61850 MMS表示层输出参数为空");
+  }
+  *cp = {};
+  std::size_t offset = 0;
+  BerTlvView outer;
+  auto status = ReadBerTlv(input, &offset, &outer);
+  if (!status.ok() || offset != input.size() || outer.tag != 0x31) {
+    return Invalid("表示层CP外层标签或长度无效");
+  }
+  offset = 0;
+  BerTlvView modeSelector;
+  status = ReadBerTlv(outer.value, &offset, &modeSelector);
+  if (!status.ok() || modeSelector.tag != kModeSelectorTag) {
+    return Invalid("表示层CP缺少mode-selector");
+  }
+  std::size_t modeOffset = 0;
+  BerTlvView mode;
+  status = ReadBerTlv(modeSelector.value, &modeOffset, &mode);
+  if (!status.ok() || mode.tag != 0x80 || mode.value.size() != 1 ||
+      mode.value[0] != 0x01 || modeOffset != modeSelector.value.size()) {
+    return Invalid("表示层CP不是normal-mode");
+  }
+  BerTlvView normalMode;
+  status = ReadBerTlv(outer.value, &offset, &normalMode);
+  if (!status.ok() || normalMode.tag != kNormalModeParametersTag) {
+    return Invalid("表示层CP缺少normal-mode-parameters");
+  }
+  status = DecodeNormalModeParameters(normalMode.value, cp);
+  if (!status.ok()) {
+    return status;
+  }
+  if (offset < outer.value.size()) {
+    BerTlvView userData;
+    status = ReadBerTlv(outer.value, &offset, &userData);
+    if (!status.ok() || userData.tag != kPresentationDataPdu) {
+      return Invalid("表示层CP的user-data结构无效");
+    }
+    cp->userData = userData.value;
+  }
+  if (offset != outer.value.size()) {
+    return Invalid("表示层CP包含多余字段");
+  }
+  return grpc::Status::OK;
+}
+
 grpc::Status EncodeExternalUserInformation(
     std::span<const std::uint8_t> mmsPdu, std::vector<std::uint8_t>* output) {
   if (mmsPdu.empty()) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
                         "IEC61850 MMS user-information不能为空");
   }
-  std::vector<std::uint8_t> oid;
-  auto status = EncodeOid(0x06, kMmsAbstractSyntaxOid, &oid);
+  // EXTERNAL的第1个字段必须是indirect-reference=3（指向表示层上下文里已定义为
+  // MMS的PDV）；写成抽象语法OID时实测装置会回Session ABORT。
+  std::vector<std::uint8_t> indirect;
+  auto status = EncodeBerInteger(kIndirectReferenceTag, kMmsIndirectReference,
+                                 &indirect);
   if (!status.ok()) {
     return status;
   }
   std::vector<std::uint8_t> single;
-  status = EncodeBerTlv(0xa0, mmsPdu, &single);
+  status = EncodeBerTlv(kSingleAsn1TypeTag, mmsPdu, &single);
   if (!status.ok()) {
     return status;
   }
   std::vector<std::uint8_t> externalContent;
-  externalContent.reserve(oid.size() + single.size());
-  externalContent.insert(externalContent.end(), oid.begin(), oid.end());
+  externalContent.reserve(indirect.size() + single.size());
+  externalContent.insert(externalContent.end(), indirect.begin(),
+                         indirect.end());
   externalContent.insert(externalContent.end(), single.begin(), single.end());
   std::vector<std::uint8_t> external;
   status = EncodeBerTlv(kExternalTag, externalContent, &external);
@@ -316,20 +745,33 @@ grpc::Status DecodeUserInformation(std::span<const std::uint8_t> value,
   offset = 0;
   BerTlvView directReference;
   status = ReadBerTlv(encoded.value, &offset, &directReference);
-  if (!status.ok() || directReference.tag != 0x06) {
-    return Invalid("EXTERNAL缺少抽象语法OID");
+  if (!status.ok()) {
+    return status;
   }
-  std::array<std::uint32_t, 16> arcs{};
-  std::size_t arcCount = 0;
-  status = ReadBerOid(directReference.value, arcs, &arcCount);
-  if (!status.ok() || arcCount != kMmsAbstractSyntaxOid.size() ||
-      !std::equal(arcs.begin(), arcs.begin() + arcCount,
-                  kMmsAbstractSyntaxOid.begin())) {
-    return Invalid("EXTERNAL抽象语法OID不是MMS");
+  if (directReference.tag == kIndirectReferenceTag) {
+    // 实测装置与libiec61850都使用indirect-reference=3指向MMS上下文。
+    std::uint64_t reference = 0;
+    status = ReadBerUnsigned(directReference.value, &reference);
+    if (!status.ok() || reference != kMmsIndirectReference) {
+      return Invalid("EXTERNAL indirect-reference不是MMS上下文");
+    }
+  } else if (directReference.tag == 0x06) {
+    // 兼容旧实现：仍接受抽象语法OID形式的EXTERNAL。
+    std::array<std::uint32_t, 16> arcs{};
+    std::size_t arcCount = 0;
+    status = ReadBerOid(directReference.value, arcs, &arcCount);
+    if (!status.ok() || arcCount != kMmsAbstractSyntaxOid.size() ||
+        !std::equal(arcs.begin(), arcs.begin() + arcCount,
+                    kMmsAbstractSyntaxOid.begin())) {
+      return Invalid("EXTERNAL抽象语法OID不是MMS");
+    }
+  } else {
+    return Invalid("EXTERNAL缺少indirect-reference或抽象语法OID");
   }
   BerTlvView single;
   status = ReadBerTlv(encoded.value, &offset, &single);
-  if (!status.ok() || single.tag != 0xa0 || offset != encoded.value.size()) {
+  if (!status.ok() || single.tag != kSingleAsn1TypeTag ||
+      offset != encoded.value.size()) {
     return Invalid("EXTERNAL缺少single-ASN1-type");
   }
   *mmsPdu = single.value;
@@ -428,16 +870,19 @@ grpc::Status DecodeAcsePdu(std::span<const std::uint8_t> input,
 
 grpc::Status EncodeIsoSessionConnect(
     std::span<const std::uint8_t> presentationData,
-    std::span<std::uint8_t> output, std::size_t* outputSize) {
+    std::span<std::uint8_t> output, std::size_t* outputSize,
+    const IsoSessionSelectors& selectors) {
   return EncodeSessionWithUserData(IsoSessionPduType::CONNECT,
-                                   presentationData, output, outputSize);
+                                   presentationData, selectors, output,
+                                   outputSize);
 }
 
 grpc::Status EncodeIsoSessionAccept(
     std::span<const std::uint8_t> presentationData,
-    std::span<std::uint8_t> output, std::size_t* outputSize) {
-  return EncodeSessionWithUserData(IsoSessionPduType::ACCEPT,
-                                   presentationData, output, outputSize);
+    std::span<std::uint8_t> output, std::size_t* outputSize,
+    const IsoSessionSelectors& selectors) {
+  return EncodeSessionWithUserData(IsoSessionPduType::ACCEPT, presentationData,
+                                   selectors, output, outputSize);
 }
 
 grpc::Status EncodeIsoSessionData(std::span<const std::uint8_t> presentationData,
@@ -449,15 +894,16 @@ grpc::Status EncodeIsoSessionData(std::span<const std::uint8_t> presentationData
 grpc::Status EncodeIsoSessionFinish(
     std::span<const std::uint8_t> presentationData,
     std::span<std::uint8_t> output, std::size_t* outputSize) {
-  return EncodeSessionWithUserData(IsoSessionPduType::FINISH,
-                                   presentationData, output, outputSize);
+  return EncodeSessionWithUserData(IsoSessionPduType::FINISH, presentationData,
+                                   IsoSessionSelectors{}, output, outputSize);
 }
 
 grpc::Status EncodeIsoSessionDisconnect(
     std::span<const std::uint8_t> presentationData,
     std::span<std::uint8_t> output, std::size_t* outputSize) {
   return EncodeSessionWithUserData(IsoSessionPduType::DISCONNECT,
-                                   presentationData, output, outputSize);
+                                   presentationData, IsoSessionSelectors{},
+                                   output, outputSize);
 }
 
 grpc::Status EncodeIsoSessionAbort(
@@ -541,7 +987,25 @@ grpc::Status DecodeIsoSessionPdu(std::span<const std::uint8_t> input,
   }
   switch (type) {
     case IsoSessionPduType::CONNECT:
-    case IsoSessionPduType::ACCEPT:
+      pdu->type = type;
+      if (pdu->userData.empty()) {
+        return Invalid("SPDU缺少用户数据参数");
+      }
+      return grpc::Status::OK;
+    case IsoSessionPduType::ACCEPT: {
+      // 实测装置回的ACCEPT带完整连接项：会话版本必须为02；会话选择子按实际
+      // 报文校验，缺失时只提示不拒绝，避免把不同实现的ACCEPT误判为失败。
+      const auto status =
+          ValidateConnectParameters(input.subspan(offset, totalLength), false);
+      if (!status.ok()) {
+        return status;
+      }
+      if (pdu->userData.empty()) {
+        return Invalid("SPDU缺少用户数据参数");
+      }
+      pdu->type = type;
+      return grpc::Status::OK;
+    }
     case IsoSessionPduType::FINISH:
     case IsoSessionPduType::DISCONNECT:
       if (pdu->userData.empty()) {
@@ -549,7 +1013,9 @@ grpc::Status DecodeIsoSessionPdu(std::span<const std::uint8_t> input,
       }
       pdu->type = type;
       return grpc::Status::OK;
+    case IsoSessionPduType::REFUSE:
     case IsoSessionPduType::ABORT:
+      // REFUSE表示对端在ACSE阶段拒绝了关联；原因字段由调用方按SPDU原文记录。
       pdu->type = type;
       return grpc::Status::OK;
     default:
@@ -609,14 +1075,97 @@ grpc::Status EncodeMmsAare(
   return grpc::Status::OK;
 }
 
+grpc::Status EncodeMmsAcsePdu(
+    std::uint8_t applicationTag,
+    std::span<const std::uint32_t> applicationContextOid, std::uint32_t result,
+    bool includeResult, std::span<const std::uint8_t> mmsPdu,
+    std::span<std::uint8_t> output, std::size_t* outputSize) {
+  if (outputSize == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                        "IEC61850 MMS ACSE输出长度参数为空");
+  }
+  *outputSize = 0;
+  std::vector<std::uint8_t> encoded;
+  const auto status = EncodeAcsePdu(applicationTag, applicationContextOid,
+                                    mmsPdu, result, includeResult, &encoded);
+  if (!status.ok()) {
+    return status;
+  }
+  if (encoded.size() > output.size()) {
+    return OutputError("ACSE报文");
+  }
+  std::copy(encoded.begin(), encoded.end(), output.begin());
+  *outputSize = encoded.size();
+  return grpc::Status::OK;
+}
+
+grpc::Status EncodeMmsPresentationCp(
+    std::span<const std::uint8_t> userData,
+    std::span<const std::uint8_t> callingPresentationSelector,
+    std::span<const std::uint8_t> calledPresentationSelector,
+    std::span<std::uint8_t> output, std::size_t* outputSize) {
+  if (outputSize == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                        "IEC61850 MMS表示层CP输出长度参数为空");
+  }
+  *outputSize = 0;
+  std::vector<std::uint8_t> encoded;
+  const auto status = EncodePresentationCpInternal(
+      userData, callingPresentationSelector, calledPresentationSelector,
+      &encoded);
+  if (!status.ok()) {
+    return status;
+  }
+  if (encoded.size() > output.size()) {
+    return OutputError("表示层CP报文");
+  }
+  std::copy(encoded.begin(), encoded.end(), output.begin());
+  *outputSize = encoded.size();
+  return grpc::Status::OK;
+}
+
+grpc::Status DecodeMmsPresentationCp(std::span<const std::uint8_t> input,
+                                     PresentationCpView* cp) {
+  return DecodePresentationCpInternal(input, cp);
+}
+
+grpc::Status DecodeMmsAcsePdu(std::span<const std::uint8_t> input,
+                              std::uint8_t expectedTag, MmsAareView* result) {
+  return DecodeAcsePdu(input, expectedTag, result);
+}
+
+// 服务端/模拟器侧的解封装：带表示层CP的客户端先取出CP的user-data，
+// 旧的不带CP的客户端直接按裸ACSE解析，两种格式都必须支持。
+grpc::Status DecodeDelegatedAcsePdu(std::span<const std::uint8_t> input,
+                                    std::uint8_t expectedTag,
+                                    MmsAareView* result) {
+  if (result == nullptr || input.empty()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                        "IEC61850 MMS ACSE输入参数为空");
+  }
+  if (input.front() == 0x31) {
+    PresentationCpView cp;
+    const auto cpStatus = DecodePresentationCpInternal(input, &cp);
+    if (!cpStatus.ok()) {
+      return cpStatus;
+    }
+    if (cp.userData.empty()) {
+      return grpc::Status(grpc::StatusCode::DATA_LOSS,
+                          "IEC61850 MMS表示层CP缺少用户数据");
+    }
+    return DecodeAcsePdu(cp.userData, expectedTag, result);
+  }
+  return DecodeAcsePdu(input, expectedTag, result);
+}
+
 grpc::Status DecodeMmsAare(std::span<const std::uint8_t> input,
                            MmsAareView* result) {
-  return DecodeAcsePdu(input, 0x61, result);
+  return DecodeDelegatedAcsePdu(input, 0x61, result);
 }
 
 grpc::Status DecodeMmsAarq(std::span<const std::uint8_t> input,
                            MmsAareView* result) {
-  return DecodeAcsePdu(input, 0x60, result);
+  return DecodeDelegatedAcsePdu(input, 0x60, result);
 }
 
 grpc::Status EncodeMmsPresentationData(std::span<const std::uint8_t> mmsPdu,
@@ -632,11 +1181,15 @@ grpc::Status EncodeMmsPresentationData(std::span<const std::uint8_t> mmsPdu,
                         "IEC61850 MMS P-DATA用户数据不能为空");
   }
   std::vector<std::uint8_t> single;
-  auto status = EncodeBerTlv(0xa0, mmsPdu, &single);
+  auto status = EncodeBerTlv(kSingleAsn1TypeTag, mmsPdu, &single);
   if (!status.ok()) {
     return status;
   }
-  std::vector<std::uint8_t> contextId{0x02, 0x01, 0x03};
+  std::vector<std::uint8_t> contextId;
+  status = EncodeBerInteger(0x02, kMmsPresentationContextId, &contextId);
+  if (!status.ok()) {
+    return status;
+  }
   std::vector<std::uint8_t> sequence;
   sequence.reserve(contextId.size() + single.size());
   sequence.insert(sequence.end(), contextId.begin(), contextId.end());
@@ -686,12 +1239,13 @@ grpc::Status DecodeMmsPresentationData(std::span<const std::uint8_t> input,
   }
   std::uint64_t context = 0;
   status = ReadBerUnsigned(contextId.value, &context);
-  if (!status.ok() || context != 3) {
+  if (!status.ok() || context != kMmsPresentationContextId) {
     return Invalid("P-DATA-TF不是MMS Presentation Context");
   }
   BerTlvView single;
   status = ReadBerTlv(sequence.value, &offset, &single);
-  if (!status.ok() || offset != sequence.value.size() || single.tag != 0xa0) {
+  if (!status.ok() || offset != sequence.value.size() ||
+      single.tag != kSingleAsn1TypeTag) {
     return Invalid("P-DATA-TF缺少single-ASN1-type");
   }
   *mmsPdu = single.value;
