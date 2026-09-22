@@ -2055,8 +2055,25 @@ grpc::Status MmsSessionWorker::Establish(Channel& channel,
   }
   std::array<std::uint8_t, kMmsPduBufferSize> connectBuffer{};
   std::size_t connectSize = 0;
+  // AARQ必须再包一层表示层CP：下位机A/B抓包（ab2.pcap）中，裸AARQ作为
+  // Session CONNECT用户数据会被装置回Session ABORT，带CP才回ACCEPT。
+  std::array<std::uint8_t, kMmsPduBufferSize> cpBuffer{};
+  std::size_t cpSize = 0;
+  status = EncodeMmsPresentationCp(
+      std::span<const std::uint8_t>(aarqBuffer.data(), aarqSize),
+      kDefaultPresentationSelector, kDefaultPresentationSelector, cpBuffer,
+      &cpSize);
+  if (!status.ok()) {
+    return status;
+  }
+  LOG_INFO(
+      "IEC61850 MMS表示层CP已生成: 通道={}, 长度={}, 调用/被调P-SEL长度={}, "
+      "报文={}",
+      static_cast<int>(channel.channel), cpSize,
+      kDefaultPresentationSelector.size(),
+      HexDump(std::span<const std::uint8_t>(cpBuffer.data(), cpSize)));
   status = EncodeIsoSessionConnect(
-      std::span<const std::uint8_t>(aarqBuffer.data(), aarqSize), connectBuffer,
+      std::span<const std::uint8_t>(cpBuffer.data(), cpSize), connectBuffer,
       &connectSize);
   if (!status.ok()) {
     return status;

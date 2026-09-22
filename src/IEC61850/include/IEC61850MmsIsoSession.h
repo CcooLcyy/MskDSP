@@ -27,12 +27,16 @@ struct IsoSessionPduView {
   std::span<const std::uint8_t> userData;
 };
 
-// 会话层S-SEL说明：实测可连通的参考客户端与目标装置都不使用33/34会话选择子，
-// 因此本模块既不发送也不要求会话选择子，只按会话要求内的版本号子项校验。
+// 会话层S-SEL说明：本模块按实测被装置接受的CONNECT发送33/34会话选择子；
+// 装置的ACCEPT不带这两个参数，因此解码侧只校验会话要求内的版本号子项。
 
-// IEC 61850不区分表示层P-SEL，缺省与实测被装置接受的CP一致。
-inline constexpr std::array<std::uint8_t, 5> kDefaultPresentationSelector{
-    0x00, 0x00, 0x00, 0x00, 0x01};
+// IEC 61850不区分表示层P-SEL，缺省与实测被装置接受的CONNECT一致。
+// 注意必须是4字节：下位机A/B抓包（ab2.pcap）中5字节P-SEL会被装置回Session ABORT。
+inline constexpr std::array<std::uint8_t, 4> kDefaultPresentationSelector{
+    0x00, 0x00, 0x00, 0x01};
+
+// ACSE的表示层上下文标识；AARQ/AARE以PDV-list形式承载时必须带该编号。
+inline constexpr std::uint32_t kAcsePresentationContextId = 1;
 
 // MMS的表示层上下文标识；AARQ/AARE与P-DATA必须使用同一个值。
 inline constexpr std::uint32_t kMmsPresentationContextId = 3;
@@ -84,6 +88,8 @@ struct PresentationCpView {
   std::array<std::uint8_t, 5> callingPresentationSelector{};
   std::size_t callingPresentationSelectorSize = 0;
   std::array<std::uint8_t, 5> calledPresentationSelector{};
+  // 装置的ACCEPT只回带[3]应答选择子（responding-presentation-selector），
+  // 此时它记录在calledPresentationSelector，callingPresentationSelectorSize为0。
   std::size_t calledPresentationSelectorSize = 0;
   // CP内user-data承载的ACSE用户数据；不带CP的旧格式为空。
   std::span<const std::uint8_t> userData;

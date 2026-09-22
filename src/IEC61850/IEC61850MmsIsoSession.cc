@@ -34,16 +34,18 @@ constexpr std::uint8_t kModeSelectorTag = 0xa0;
 constexpr std::uint8_t kNormalModeParametersTag = 0xa2;
 constexpr std::uint8_t kCallingPresentationSelectorTag = 0x81;
 constexpr std::uint8_t kCalledPresentationSelectorTag = 0x82;
-// 部分装置（含本现场目标装置）使用ISO 8823的全限定形式P-SEL标签0x83/0x84，
-// 解码时必须同时接受两种形式，否则真实ACCEPT的CP会被误判为无效。
-constexpr std::uint8_t kCallingPresentationSelectorQualifiedTag = 0x83;
+// 部分装置（含本现场目标装置）使用ISO 8823的全限定形式标签：CPA用[3]回带应答选择子，
+// 解码时必须同时接受这些形式，否则真实ACCEPT的CP会被误判为无效。
+constexpr std::uint8_t kRespondingPresentationSelectorTag = 0x83;
 constexpr std::uint8_t kCalledPresentationSelectorQualifiedTag = 0x84;
 constexpr std::uint8_t kContextDefinitionListTag = 0xa4;
-// 现场装置的ACCEPT使用 [5]（0xa5）作为"用户数据形式的上下文定义列表"，
-// 与libiec61850客户端的[4]（0xa4）等价，解码必须同时接受这两种标签。
+// 现场装置的ACCEPT使用 [5]（0xa5）承载"上下文定义结果列表"：每个条目是
+// 30 { result [0], transfer-syntax-name [1] }，与请求侧的[4]（0xa4）等价。
 constexpr std::uint8_t kContextDefinitionListUserDataTag = 0xa5;
 constexpr std::uint8_t kSingleAsn1TypeTag = 0xa0;
 constexpr std::uint8_t kIndirectReferenceTag = 0x02;
+// 表示层传输语法名称对应的OID：2.1.1（实测装置与参考客户端都用它）。
+constexpr std::array<std::uint32_t, 3> kPresentationTransferSyntaxOid{2, 1, 1};
 // EXTERNAL中的indirect-reference必须指向CP里MMS表示层上下文的编号。
 constexpr std::uint32_t kMmsIndirectReference = 3;
 
@@ -393,8 +395,10 @@ grpc::Status AppendBerTlvOid(std::uint8_t tag,
   return grpc::Status::OK;
 }
 
-// 编码表示层CP：mode-selector + normal-mode-parameters（P-SEL + 上下文定义列表）
-// + user-data。缺少CP时，实测装置收到裸AARQ后会直接回ABORT。
+// 编码表示层CP：mode-selector + normal-mode-parameters（P-SEL + 上下文定义列表
+// + 承载ACSE的user-data）。该布局与实测被装置接受的CONNECT逐字节一致：
+// 下位机A/B抓包（ab2.pcap）中，本布局被装置回Session ACCEPT；而把user-data移出
+// normal-mode-parameters（或缺少PDV-list包装、P-SEL写成5字节）都会被回Session ABORT。
 grpc::Status EncodePresentationCpInternal(
     std::span<const std::uint8_t> userData,
     std::span<const std::uint8_t> callingPresentationSelector,
@@ -444,13 +448,11 @@ grpc::Status EncodePresentationCpInternal(
   }
 
   // 上下文定义列表：ACSE（上下文1）与MMS（上下文3）。每个定义必须同时给出
-  // 抽象语法与传输语法名称；实测装置与libiec61850的ACSE传输语法都是
-  // 2.2.1.0.0，不能省略。
-  const std::array<std::uint32_t, 5> acseContext{2, 2, 1, 0, 1};
-  const std::array<std::uint32_t, 5> acseTransferSyntax{2, 2, 1, 0, 0};
-  const std::array<std::uint32_t, 5> mmsTransferSyntax{2, 2, 1, 0, 1};
+  // 抽象语法与传输语法名称；实测装置与参考客户端的传输语法都是 30 { 06 02 51 01 }
+  // （OID 2.1.1），不能省略。
+  const std::array<std::uint32_t, 5> acseAbstractSyntax{2, 2, 1, 0, 1};
   const std::array<std::pair<std::uint32_t, std::span<const std::uint32_t>>, 2>
-      contexts{{{1, acseContext},
+      contexts{{{kAcsePresentationContextId, acseAbstractSyntax},
                 {kMmsPresentationContextId, kMmsAbstractSyntaxOid}}};
   std::vector<std::uint8_t> definitions;
   for (const auto& definition : contexts) {
@@ -461,13 +463,14 @@ grpc::Status EncodePresentationCpInternal(
       status = AppendBerTlvOid(0x06, definition.second, &pdv,
                                "表示层抽象语法写入失败");
     }
-    // ACSE与MMS各自带传输语法名称（ACSE为2.2.1.0.0，MMS为2.2.1.0.1）。
-    const auto& transferSyntax =
-        definition.first == kMmsPresentationContextId ? mmsTransferSyntax
-                                                      : acseTransferSyntax;
     if (status.ok()) {
-      status = AppendBerTlvOid(0x06, transferSyntax, &pdv,
-                               "表示层传输语法写入失败");
+      std::vector<std::uint8_t> transferSyntax;
+      status = AppendBerTlvOid(0x06, kPresentationTransferSyntaxOid,
+                               &transferSyntax, "表示层传输语法写入失败");
+      if (status.ok()) {
+        status = AppendBerTlv(0x30, transferSyntax, &pdv,
+                              "表示层传输语法写入失败");
+      }
     }
     if (status.ok()) {
       status = AppendBerTlv(0x30, pdv, &definitions, "表示层上下文定义写入失败");
@@ -478,13 +481,28 @@ grpc::Status EncodePresentationCpInternal(
   }
   status = AppendBerTlv(kContextDefinitionListTag, definitions,
                         &normalModeContent, "表示层上下文定义列表写入失败");
+  // user-data：ACSE先包成PDV-list（30 { 02 01 <ACSE上下文编号>, a0 { ACSE } }），
+  // 再作为 61 放进normal-mode-parameters。实测缺少这层PDV-list包装时装置回ABORT。
+  if (status.ok()) {
+    std::vector<std::uint8_t> pdvList;
+    status = AppendBerTlvInteger(0x02, kAcsePresentationContextId, &pdvList,
+                                 "表示层ACSE上下文编号写入失败");
+    if (status.ok()) {
+      status = AppendBerTlv(kSingleAsn1TypeTag, userData, &pdvList,
+                            "表示层用户数据写入失败");
+    }
+    if (status.ok()) {
+      std::vector<std::uint8_t> sequence;
+      status = AppendBerTlv(0x30, pdvList, &sequence, "表示层PDV列表写入失败");
+      if (status.ok()) {
+        status = AppendBerTlv(kPresentationDataPdu, sequence,
+                              &normalModeContent, "表示层user-data写入失败");
+      }
+    }
+  }
   if (status.ok()) {
     status = AppendBerTlv(kNormalModeParametersTag, normalModeContent, &content,
                           "表示层normal-mode-parameters写入失败");
-  }
-  if (status.ok()) {
-    status = AppendBerTlv(kPresentationDataPdu, userData, &content,
-                          "表示层user-data写入失败");
   }
   if (!status.ok()) {
     return status;
@@ -492,11 +510,15 @@ grpc::Status EncodePresentationCpInternal(
   return EncodeBerTlv(0x31, content, output);
 }
 
-// 解析normal-mode-parameters：取出两个P-SEL，并校验上下文定义列表中的MMS
-// 上下文编号与抽象语法OID，避免把非MMS的CP当成MMS关联接受。
+// 解析normal-mode-parameters：取出P-SEL、上下文定义列表与user-data，并校验
+// 上下文定义里的MMS上下文，避免把非MMS的CP当成MMS关联接受。
 grpc::Status DecodeNormalModeParameters(std::span<const std::uint8_t> value,
                                         PresentationCpView* cp) {
   bool hasContextDefinitionList = false;
+  bool hasMmsContext = false;
+  // 装置的ACCEPT把user-data放在normal-mode-parameters内（[5]结果列表之后），
+  // 参考客户端与旧实现则与normal-mode-parameters平级，两种都要能解析。
+  bool hasResultList = false;
   std::size_t offset = 0;
   while (offset < value.size()) {
     BerTlvView field;
@@ -505,14 +527,14 @@ grpc::Status DecodeNormalModeParameters(std::span<const std::uint8_t> value,
       return status;
     }
     switch (field.tag) {
-      // 普通形式(81/82)与全限定形式(83/84)都表示P-SEL，必须都接受。
+      // 普通形式(81/82)与全限定形式(83/84)都表示表示选择子，必须都接受：
+      // 请求侧用81=调用/82=被调；装置的CPA只回带83（应答选择子）。
       case kCallingPresentationSelectorTag:
-      case kCallingPresentationSelectorQualifiedTag:
       case kCalledPresentationSelectorTag:
+      case kRespondingPresentationSelectorTag:
       case kCalledPresentationSelectorQualifiedTag: {
         const auto isCalling =
-            field.tag == kCallingPresentationSelectorTag ||
-            field.tag == kCallingPresentationSelectorQualifiedTag;
+            field.tag == kCallingPresentationSelectorTag;
         auto* selector = isCalling ? &cp->callingPresentationSelector
                                    : &cp->calledPresentationSelector;
         auto* selectorSize = isCalling ? &cp->callingPresentationSelectorSize
@@ -525,11 +547,17 @@ grpc::Status DecodeNormalModeParameters(std::span<const std::uint8_t> value,
         *selectorSize = field.value.size();
         break;
       }
+      case kPresentationDataPdu:
+        // normal-mode-parameters内的user-data（装置ACCEPT与参考客户端布局）。
+        cp->userData = field.value;
+        break;
       case kContextDefinitionListTag:
       case kContextDefinitionListUserDataTag: {
+        if (field.tag == kContextDefinitionListUserDataTag) {
+          hasResultList = true;
+        }
         hasContextDefinitionList = true;
         std::size_t listOffset = 0;
-        bool hasMmsContext = false;
         while (listOffset < field.value.size()) {
           BerTlvView definition;
           status = ReadBerTlv(field.value, &listOffset, &definition);
@@ -537,31 +565,40 @@ grpc::Status DecodeNormalModeParameters(std::span<const std::uint8_t> value,
             return Invalid("CP上下文定义列表结构无效");
           }
           std::size_t itemOffset = 0;
-          BerTlvView id;
-          status = ReadBerTlv(definition.value, &itemOffset, &id);
-          if (!status.ok() || id.tag != 0x02) {
-            return Invalid("CP上下文定义缺少编号");
-          }
-          std::uint64_t contextId = 0;
-          status = ReadBerUnsigned(id.value, &contextId);
+          BerTlvView first;
+          status = ReadBerTlv(definition.value, &itemOffset, &first);
           if (!status.ok()) {
             return status;
           }
-          BerTlvView syntax;
-          status = ReadBerTlv(definition.value, &itemOffset, &syntax);
-          if (!status.ok() || syntax.tag != 0x06) {
-            return Invalid("CP上下文定义缺少抽象语法");
-          }
-          if (contextId == kMmsPresentationContextId) {
-            std::array<std::uint32_t, 16> arcs{};
-            std::size_t arcCount = 0;
-            status = ReadBerOid(syntax.value, arcs, &arcCount);
-            if (!status.ok() || arcCount != kMmsAbstractSyntaxOid.size() ||
-                !std::equal(arcs.begin(), arcs.begin() + arcCount,
-                            kMmsAbstractSyntaxOid.begin())) {
-              return Invalid("CP的MMS上下文抽象语法不是MMS");
+          if (first.tag == 0x02) {
+            // 请求侧定义：{ 编号INTEGER, 抽象语法OID, 传输语法名称... }。
+            std::uint64_t contextId = 0;
+            status = ReadBerUnsigned(first.value, &contextId);
+            if (!status.ok()) {
+              return status;
             }
+            BerTlvView syntax;
+            status = ReadBerTlv(definition.value, &itemOffset, &syntax);
+            if (!status.ok() || syntax.tag != 0x06) {
+              return Invalid("CP上下文定义缺少抽象语法");
+            }
+            if (contextId == kMmsPresentationContextId) {
+              std::array<std::uint32_t, 16> arcs{};
+              std::size_t arcCount = 0;
+              status = ReadBerOid(syntax.value, arcs, &arcCount);
+              if (!status.ok() || arcCount != kMmsAbstractSyntaxOid.size() ||
+                  !std::equal(arcs.begin(), arcs.begin() + arcCount,
+                              kMmsAbstractSyntaxOid.begin())) {
+                return Invalid("CP的MMS上下文抽象语法不是MMS");
+              }
+              hasMmsContext = true;
+            }
+          } else if (first.tag == 0x80) {
+            // 装置CPA的结果列表：{ 结果[0], 传输语法名称[1] }，不回带抽象语法，
+            // 无法在此核对MMS OID，只要求TLV结构完整。
             hasMmsContext = true;
+          } else {
+            return Invalid("CP上下文定义结构无效");
           }
           // 传输语法名称由对端自行声明，这里只要求TLV结构完整。
           while (itemOffset < definition.value.size()) {
@@ -572,9 +609,6 @@ grpc::Status DecodeNormalModeParameters(std::span<const std::uint8_t> value,
             }
           }
         }
-        if (!hasMmsContext) {
-          return Invalid("CP上下文定义列表缺少MMS表示上下文");
-        }
         break;
       }
       default:
@@ -582,12 +616,16 @@ grpc::Status DecodeNormalModeParameters(std::span<const std::uint8_t> value,
         break;
     }
   }
-  if (cp->callingPresentationSelectorSize == 0 ||
+  // [3]应答选择子在CPA里替代调用/被调选择子，因此只要求至少出现一个。
+  if (cp->callingPresentationSelectorSize == 0 &&
       cp->calledPresentationSelectorSize == 0) {
-    return Invalid("CP缺少调用或被调表示选择子");
+    return Invalid("CP缺少表示选择子");
   }
   if (!hasContextDefinitionList) {
     return Invalid("CP缺少表示上下文定义列表");
+  }
+  if (!hasMmsContext && !hasResultList) {
+    return Invalid("CP上下文定义列表缺少MMS表示上下文");
   }
   return grpc::Status::OK;
 }
@@ -627,6 +665,8 @@ grpc::Status DecodePresentationCpInternal(std::span<const std::uint8_t> input,
   if (!status.ok()) {
     return status;
   }
+  // user-data通常已在normal-mode-parameters内被取出（实测装置ACCEPT与参考客户端
+  // 都用该布局）；这里兼容把它与normal-mode-parameters平级放置的形式。
   if (offset < outer.value.size()) {
     BerTlvView userData;
     status = ReadBerTlv(outer.value, &offset, &userData);
@@ -796,6 +836,80 @@ grpc::Status DecodeUserInformation(std::span<const std::uint8_t> value,
     return Invalid("EXTERNAL缺少single-ASN1-type");
   }
   *mmsPdu = single.value;
+  return grpc::Status::OK;
+}
+
+// 从表示层用户数据里剥出ACSE报文。三种形式都要能解：
+//   1) 裸ACSE：60(AARQ)/61(AARE)；
+//   2) 旧实现的 61 { 60 ... }（user-data直接包ACSE，没有PDV-list）；
+//   3) 实测装置与参考客户端的PDV-list：
+//      61 { 30 { 02 01 <ACSE上下文编号> a0 { 60 ... } } }，
+//      取出CP内部user-data的值时只剩下 30 { ... }，因此两种入口都要接受。
+grpc::Status ExtractAcsePdu(std::span<const std::uint8_t> input,
+                            std::span<const std::uint8_t>* acsePdu) {
+  if (acsePdu == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                        "IEC61850 MMS表示层用户数据输出参数为空");
+  }
+  *acsePdu = input;
+  if (input.empty()) {
+    return Invalid("表示层用户数据为空");
+  }
+  // 解析PDV-list：30 { 02 01 <上下文编号>, a0 { <ACSE> } }。
+  const auto unwrapPdvList = [acsePdu](
+                                 std::span<const std::uint8_t> sequence)
+      -> grpc::Status {
+    std::size_t offset = 0;
+    BerTlvView contextId;
+    auto status = ReadBerTlv(sequence, &offset, &contextId);
+    if (!status.ok() || contextId.tag != 0x02) {
+      return Invalid("表示层PDV-list缺少表示上下文编号");
+    }
+    std::uint64_t context = 0;
+    status = ReadBerUnsigned(contextId.value, &context);
+    if (!status.ok() || context != kAcsePresentationContextId) {
+      return Invalid("表示层PDV-list不是ACSE上下文");
+    }
+    BerTlvView single;
+    status = ReadBerTlv(sequence, &offset, &single);
+    if (!status.ok() || offset != sequence.size() ||
+        single.tag != kSingleAsn1TypeTag) {
+      return Invalid("表示层PDV-list缺少single-ASN1-type");
+    }
+    *acsePdu = single.value;
+    return grpc::Status::OK;
+  };
+
+  std::size_t offset = 0;
+  BerTlvView outer;
+  auto status = ReadBerTlv(input, &offset, &outer);
+  if (!status.ok() || offset != input.size()) {
+    return Invalid("表示层用户数据外层结构无效");
+  }
+  if (outer.tag == 0x30) {
+    // 入口就是PDV-list（CP的user-data字段值）。
+    return unwrapPdvList(outer.value);
+  }
+  if (outer.tag != kPresentationDataPdu) {
+    // 裸ACSE（60/61）直接交给ACSE解码器校验。
+    return grpc::Status::OK;
+  }
+  std::size_t innerOffset = 0;
+  BerTlvView inner;
+  status = ReadBerTlv(outer.value, &innerOffset, &inner);
+  if (!status.ok() || innerOffset != outer.value.size()) {
+    // 内容是多个字段，只能是裸AARE，不是user-data包装。
+    return grpc::Status::OK;
+  }
+  if (inner.tag == 0x30) {
+    return unwrapPdvList(inner.value);
+  }
+  if (inner.tag == 0x60 || inner.tag == 0x61) {
+    // 旧实现的 61 { 60 ... }：内层就是ACSE报文。
+    *acsePdu = outer.value;
+    return grpc::Status::OK;
+  }
+  // 其余情况按裸AARE处理（内容以80/a1等ACSE字段开头）。
   return grpc::Status::OK;
 }
 
@@ -1152,7 +1266,8 @@ grpc::Status DecodeMmsAcsePdu(std::span<const std::uint8_t> input,
 }
 
 // 服务端/模拟器侧的解封装：带表示层CP的客户端先取出CP的user-data，
-// 旧的不带CP的客户端直接按裸ACSE解析，两种格式都必须支持。
+// 旧的不带CP的客户端直接按裸ACSE解析，两种格式都必须支持；取出后再按
+// PDV-list/旧包装/裸ACSE三种形式剥到ACSE本体。
 grpc::Status DecodeDelegatedAcsePdu(std::span<const std::uint8_t> input,
                                     std::uint8_t expectedTag,
                                     MmsAareView* result) {
@@ -1160,6 +1275,7 @@ grpc::Status DecodeDelegatedAcsePdu(std::span<const std::uint8_t> input,
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
                         "IEC61850 MMS ACSE输入参数为空");
   }
+  std::span<const std::uint8_t> userData = input;
   if (input.front() == 0x31) {
     PresentationCpView cp;
     const auto cpStatus = DecodePresentationCpInternal(input, &cp);
@@ -1170,9 +1286,14 @@ grpc::Status DecodeDelegatedAcsePdu(std::span<const std::uint8_t> input,
       return grpc::Status(grpc::StatusCode::DATA_LOSS,
                           "IEC61850 MMS表示层CP缺少用户数据");
     }
-    return DecodeAcsePdu(cp.userData, expectedTag, result);
+    userData = cp.userData;
   }
-  return DecodeAcsePdu(input, expectedTag, result);
+  std::span<const std::uint8_t> acsePdu;
+  const auto status = ExtractAcsePdu(userData, &acsePdu);
+  if (!status.ok()) {
+    return status;
+  }
+  return DecodeAcsePdu(acsePdu, expectedTag, result);
 }
 
 grpc::Status DecodeMmsAare(std::span<const std::uint8_t> input,
