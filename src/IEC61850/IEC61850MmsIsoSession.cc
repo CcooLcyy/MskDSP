@@ -5,6 +5,7 @@
 #include <format>
 #include <limits>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "IEC61850MmsBer.h"
