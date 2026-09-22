@@ -529,6 +529,8 @@ add_executable(iec61850MmsIsoSession_test
   iec61850_mms_iso_session_test.cc
   ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsIsoSession.cc
   ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsBer.cc
+  # 关联报文golden用例会编码/解析MMS InitiateRequest(Response)，必须链接PDU实现。
+  ${CMAKE_SOURCE_DIR}/src/IEC61850/IEC61850MmsPdu.cc
 )
 
 target_include_directories(iec61850MmsIsoSession_test PRIVATE
