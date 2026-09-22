@@ -18,9 +18,13 @@ constexpr std::uint8_t kSessionUserDataParameter = 0xc1;
 constexpr std::uint8_t kPresentationDataPdu = 0x61;
 constexpr std::uint8_t kExternalTag = 0x28;
 constexpr std::uint8_t kUserInformationTag = 0xbe;
-// 会话层CONNECT/ACCEPT连接项参数：会话要求、版本号与会话选择子。
+// 会话层CONNECT/ACCEPT连接项参数：会话要求（含其嵌套子项与值）、版本号与会话选择子。
 constexpr std::uint8_t kSessionRequirementParameter = 0x05;
+// 0x05（会话要求）内部的嵌套子项：13=会话要求值，16=Version Number。
+constexpr std::uint8_t kSessionRequirementValueParameter = 0x13;
 constexpr std::uint8_t kVersionNumberParameter = 0x16;
+// 与0x05平级的会话要求值参数。
+constexpr std::uint8_t kSessionRequirementParameterValue = 0x14;
 constexpr std::uint8_t kCallingSessionSelectorParameter = 0x33;
 constexpr std::uint8_t kCalledSessionSelectorParameter = 0x34;
 // ISO 8327会话版本号：实测被装置接受的报文使用02，写00会被回ABORT。
@@ -123,25 +127,36 @@ bool BuildSessionParameter(std::uint8_t parameter,
   return AppendSessionParameter(buffer, size, parameter, value);
 }
 
-// 组装CONNECT/ACCEPT的连接项参数：会话要求+版本号+调用/被调会话选择子。
-// 参数顺序与实测被装置接受的报文一致，连接项内部不得再嵌套一层TLV。
+// 组装CONNECT/ACCEPT的连接项参数。连接项必须与实测被装置接受的报文一致：
+//   05 06 13 01 00 16 01 02 14 02 00 02 33 02 00 01 34 02 00 01
+// 其中 0x05（会话要求）的内容是嵌套子项 13 01 00（会话要求值）与 16 01 02
+// （Version Number=02），不能把版本号拆成与 0x05 平级的独立TLV。
 bool BuildConnectParameters(std::array<std::uint8_t, 32>* parameters,
                             std::size_t* size) {
   if (parameters == nullptr || size == nullptr) {
     return false;
   }
-  // 真机抓包中被装置接受的会话层连接项为：
-  //   05 06 13 01 00 16 01 02 14 02 00 02 33 02 00 01 34 02 00 01
-  // 即 Version Number = 02，且必须带 33/34 会话选择子（缺 SSEL 或版本写 00
-  // 时装置回 Session ABORT）。
-  const std::array<std::uint8_t, 2> requirement{0x00, 0x02};
-  const std::array<std::uint8_t, 1> version{kSessionVersionNumber};
+  // 先构造 0x05 的嵌套内容：13 01 00 16 01 02。
+  const std::array<std::uint8_t, 1> requirementValue{0x00};
+  const std::array<std::uint8_t, 1> versionValue{kSessionVersionNumber};
+  std::array<std::uint8_t, 8> requirementContent{};
+  std::size_t requirementSize = 0;
+  if (!AppendSessionParameter(requirementContent, &requirementSize,
+                              kSessionRequirementValueParameter,
+                              requirementValue) ||
+      !AppendSessionParameter(requirementContent, &requirementSize,
+                              kVersionNumberParameter, versionValue)) {
+    return false;
+  }
+  const std::array<std::uint8_t, 2> sessionRequirement{0x00, 0x02};
   const std::array<std::uint8_t, 2> callingSelector{0x00, 0x01};
   const std::array<std::uint8_t, 2> calledSelector{0x00, 0x01};
   const std::array<std::pair<std::uint8_t, std::span<const std::uint8_t>>, 4>
       fields{{
-          {kSessionRequirementParameter, requirement},
-          {kVersionNumberParameter, version},
+          {kSessionRequirementParameter,
+           std::span<const std::uint8_t>(requirementContent.data(),
+                                         requirementSize)},
+          {kSessionRequirementParameterValue, sessionRequirement},
           {kCallingSessionSelectorParameter, callingSelector},
           {kCalledSessionSelectorParameter, calledSelector},
       }};
