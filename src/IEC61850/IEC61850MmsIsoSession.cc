@@ -23,13 +23,17 @@ constexpr std::uint8_t kSessionRequirementParameter = 0x05;
 constexpr std::uint8_t kVersionNumberParameter = 0x16;
 constexpr std::uint8_t kCallingSessionSelectorParameter = 0x33;
 constexpr std::uint8_t kCalledSessionSelectorParameter = 0x34;
-// ISO 8327要求的版本号；实测装置只接受02，写00会被直接ABORT。
+// ISO 8327会话版本号：实测被装置接受的报文使用02，写00会被回ABORT。
 constexpr std::uint8_t kSessionVersionNumber = 0x02;
 // 表示层CP子结构：mode-selector、normal-mode-parameters、上下文定义列表。
 constexpr std::uint8_t kModeSelectorTag = 0xa0;
 constexpr std::uint8_t kNormalModeParametersTag = 0xa2;
 constexpr std::uint8_t kCallingPresentationSelectorTag = 0x81;
 constexpr std::uint8_t kCalledPresentationSelectorTag = 0x82;
+// 部分装置（含本现场目标装置）使用ISO 8823的全限定形式P-SEL标签0x83/0x84，
+// 解码时必须同时接受两种形式，否则真实ACCEPT的CP会被误判为无效。
+constexpr std::uint8_t kCallingPresentationSelectorQualifiedTag = 0x83;
+constexpr std::uint8_t kCalledPresentationSelectorQualifiedTag = 0x84;
 constexpr std::uint8_t kContextDefinitionListTag = 0xa4;
 constexpr std::uint8_t kSingleAsn1TypeTag = 0xa0;
 constexpr std::uint8_t kIndirectReferenceTag = 0x02;
@@ -118,27 +122,25 @@ bool BuildSessionParameter(std::uint8_t parameter,
 
 // 组装CONNECT/ACCEPT的连接项参数：会话要求+版本号+调用/被调会话选择子。
 // 参数顺序与实测被装置接受的报文一致，连接项内部不得再嵌套一层TLV。
-bool BuildConnectParameters(const IsoSessionSelectors& selectors,
-                            std::array<std::uint8_t, 32>* parameters,
+bool BuildConnectParameters(std::array<std::uint8_t, 32>* parameters,
                             std::size_t* size) {
-  if (parameters == nullptr || size == nullptr || selectors.callingSize == 0 ||
-      selectors.callingSize > IsoSessionSelectors::kMaxSelectorBytes ||
-      selectors.calledSize == 0 ||
-      selectors.calledSize > IsoSessionSelectors::kMaxSelectorBytes) {
+  if (parameters == nullptr || size == nullptr) {
     return false;
   }
+  // 真机抓包中被装置接受的会话层连接项为：
+  //   05 06 13 01 00 16 01 02 14 02 00 02 33 02 00 01 34 02 00 01
+  // 即 Version Number = 02，且必须带 33/34 会话选择子（缺 SSEL 或版本写 00
+  // 时装置回 Session ABORT）。
   const std::array<std::uint8_t, 2> requirement{0x00, 0x02};
   const std::array<std::uint8_t, 1> version{kSessionVersionNumber};
+  const std::array<std::uint8_t, 2> callingSelector{0x00, 0x01};
+  const std::array<std::uint8_t, 2> calledSelector{0x00, 0x01};
   const std::array<std::pair<std::uint8_t, std::span<const std::uint8_t>>, 4>
       fields{{
           {kSessionRequirementParameter, requirement},
           {kVersionNumberParameter, version},
-          {kCallingSessionSelectorParameter,
-           std::span<const std::uint8_t>(selectors.calling.data(),
-                                         selectors.callingSize)},
-          {kCalledSessionSelectorParameter,
-           std::span<const std::uint8_t>(selectors.called.data(),
-                                         selectors.calledSize)},
+          {kCallingSessionSelectorParameter, callingSelector},
+          {kCalledSessionSelectorParameter, calledSelector},
       }};
   std::size_t offset = 0;
   for (const auto& [parameter, value] : fields) {
@@ -156,13 +158,10 @@ bool BuildConnectParameters(const IsoSessionSelectors& selectors,
   return true;
 }
 
-// 校验对端CONNECT/ACCEPT连接项：必须存在会话要求(0x13)且版本号(0x16)为02；
-// 会话选择子(0x33/0x34)按实际报文校验，缺失时只提示不拒绝，保证对不同实现宽容。
-grpc::Status ValidateConnectParameters(std::span<const std::uint8_t> parameters,
-                                       bool requireSessionSelectors) {
+// 校验对端CONNECT/ACCEPT连接项：会话要求(0x05)内必须出现版本号(0x16)子项且为02；
+// 会话选择子(0x33/0x34)按实际报文校验，缺失只提示不拒绝，保证对不同实现宽容。
+grpc::Status ValidateConnectParameters(std::span<const std::uint8_t> parameters) {
   bool hasRequirement = false;
-  bool hasCallingSelector = false;
-  bool hasCalledSelector = false;
   bool hasVersion = false;
   std::size_t offset = 0;
   while (offset < parameters.size()) {
@@ -193,25 +192,18 @@ grpc::Status ValidateConnectParameters(std::span<const std::uint8_t> parameters,
         }
         inner += itemLength;
       }
-    } else if (parameter == kCallingSessionSelectorParameter) {
-      hasCallingSelector = true;
-    } else if (parameter == kCalledSessionSelectorParameter) {
-      hasCalledSelector = true;
     }
+    // 会话选择子(0x33/0x34)是可选字段：实测装置回的ACCEPT不带，不能因此拒绝。
   }
   if (!hasRequirement || !hasVersion) {
     return Invalid("会话连接项缺少会话要求或版本号");
-  }
-  if (requireSessionSelectors && (!hasCallingSelector || !hasCalledSelector)) {
-    return Invalid("会话连接项缺少调用或被调会话选择子");
   }
   return grpc::Status::OK;
 }
 
 grpc::Status EncodeSessionWithUserData(
     IsoSessionPduType type, std::span<const std::uint8_t> userData,
-    const IsoSessionSelectors& selectors, std::span<std::uint8_t> output,
-    std::size_t* outputSize) {
+    std::span<std::uint8_t> output, std::size_t* outputSize) {
   if (outputSize == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
                         "IEC61850 MMS ISO输出长度参数为空");
@@ -226,9 +218,9 @@ grpc::Status EncodeSessionWithUserData(
   const auto hasConnectParameters = type == IsoSessionPduType::CONNECT ||
                                     type == IsoSessionPduType::ACCEPT;
   if (hasConnectParameters &&
-      !BuildConnectParameters(selectors, &connectParameters, &connectSize)) {
+      !BuildConnectParameters(&connectParameters, &connectSize)) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
-                        "IEC61850 MMS会话选择子长度无效");
+                        "IEC61850 MMS会话连接项参数编码失败");
   }
   const auto fixedSize = hasConnectParameters ? connectSize : 0;
   const auto userParameterSize = userData.size() <= 254 ? 2 : 4;
@@ -433,7 +425,9 @@ grpc::Status EncodePresentationCpInternal(
     return status;
   }
 
-  // 上下文定义列表：ACSE（上下文1）与MMS（上下文3），两侧都必须带名称。
+  // 上下文定义列表：ACSE（上下文1）与MMS（上下文3）。每个定义必须同时给出
+  // 抽象语法与传输语法名称；实测装置与libiec61850的ACSE传输语法都是
+  // 2.2.1.0.0，不能省略。
   const std::array<std::uint32_t, 5> acseContext{2, 2, 1, 0, 1};
   const std::array<std::uint32_t, 5> acseTransferSyntax{2, 2, 1, 0, 0};
   const std::array<std::uint32_t, 5> mmsTransferSyntax{2, 2, 1, 0, 1};
@@ -449,8 +443,10 @@ grpc::Status EncodePresentationCpInternal(
       status = AppendBerTlvOid(0x06, definition.second, &pdv,
                                "表示层抽象语法写入失败");
     }
+    // ACSE与MMS各自带传输语法名称（ACSE为2.2.1.0.0，MMS为2.2.1.0.1）。
     const auto& transferSyntax =
-        definition.first == 1 ? acseTransferSyntax : mmsTransferSyntax;
+        definition.first == kMmsPresentationContextId ? mmsTransferSyntax
+                                                      : acseTransferSyntax;
     if (status.ok()) {
       status = AppendBerTlvOid(0x06, transferSyntax, &pdv,
                                "表示层传输语法写入失败");
@@ -491,9 +487,14 @@ grpc::Status DecodeNormalModeParameters(std::span<const std::uint8_t> value,
       return status;
     }
     switch (field.tag) {
+      // 普通形式(81/82)与全限定形式(83/84)都表示P-SEL，必须都接受。
       case kCallingPresentationSelectorTag:
-      case kCalledPresentationSelectorTag: {
-        const auto isCalling = field.tag == kCallingPresentationSelectorTag;
+      case kCallingPresentationSelectorQualifiedTag:
+      case kCalledPresentationSelectorTag:
+      case kCalledPresentationSelectorQualifiedTag: {
+        const auto isCalling =
+            field.tag == kCallingPresentationSelectorTag ||
+            field.tag == kCallingPresentationSelectorQualifiedTag;
         auto* selector = isCalling ? &cp->callingPresentationSelector
                                    : &cp->calledPresentationSelector;
         auto* selectorSize = isCalling ? &cp->callingPresentationSelectorSize
@@ -871,19 +872,16 @@ grpc::Status DecodeAcsePdu(std::span<const std::uint8_t> input,
 
 grpc::Status EncodeIsoSessionConnect(
     std::span<const std::uint8_t> presentationData,
-    std::span<std::uint8_t> output, std::size_t* outputSize,
-    const IsoSessionSelectors& selectors) {
+    std::span<std::uint8_t> output, std::size_t* outputSize) {
   return EncodeSessionWithUserData(IsoSessionPduType::CONNECT,
-                                   presentationData, selectors, output,
-                                   outputSize);
+                                   presentationData, output, outputSize);
 }
 
 grpc::Status EncodeIsoSessionAccept(
     std::span<const std::uint8_t> presentationData,
-    std::span<std::uint8_t> output, std::size_t* outputSize,
-    const IsoSessionSelectors& selectors) {
+    std::span<std::uint8_t> output, std::size_t* outputSize) {
   return EncodeSessionWithUserData(IsoSessionPduType::ACCEPT, presentationData,
-                                   selectors, output, outputSize);
+                                   output, outputSize);
 }
 
 grpc::Status EncodeIsoSessionData(std::span<const std::uint8_t> presentationData,
@@ -896,15 +894,14 @@ grpc::Status EncodeIsoSessionFinish(
     std::span<const std::uint8_t> presentationData,
     std::span<std::uint8_t> output, std::size_t* outputSize) {
   return EncodeSessionWithUserData(IsoSessionPduType::FINISH, presentationData,
-                                   IsoSessionSelectors{}, output, outputSize);
+                                   output, outputSize);
 }
 
 grpc::Status EncodeIsoSessionDisconnect(
     std::span<const std::uint8_t> presentationData,
     std::span<std::uint8_t> output, std::size_t* outputSize) {
   return EncodeSessionWithUserData(IsoSessionPduType::DISCONNECT,
-                                   presentationData, IsoSessionSelectors{},
-                                   output, outputSize);
+                                   presentationData, output, outputSize);
 }
 
 grpc::Status EncodeIsoSessionAbort(
@@ -994,10 +991,10 @@ grpc::Status DecodeIsoSessionPdu(std::span<const std::uint8_t> input,
       }
       return grpc::Status::OK;
     case IsoSessionPduType::ACCEPT: {
-      // 实测装置回的ACCEPT带完整连接项：会话版本必须为02；会话选择子按实际
-      // 报文校验，缺失时只提示不拒绝，避免把不同实现的ACCEPT误判为失败。
+      // 实测装置回的ACCEPT带完整连接项：必须含会话要求与版本号子项；
+      // 会话选择子按实际报文校验，缺失只提示不拒绝。
       const auto status =
-          ValidateConnectParameters(input.subspan(offset, totalLength), false);
+          ValidateConnectParameters(input.subspan(offset, totalLength));
       if (!status.ok()) {
         return status;
       }

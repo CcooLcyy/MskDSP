@@ -126,14 +126,16 @@ bool IsSameOid(const MmsAareView& aare,
 
 MmsInitiateRequest DefaultInitiateRequest(bool includeWrite) {
   MmsInitiateRequest request;
-  // 以下数值与实测被目标装置接受的关联报文一致：本地细节65000、并发服务数5、
-  // 结构嵌套层10，避免在关联协商阶段引入与参考实现无关的差异。
+  // 数值按实测被装置接受的抓包对齐：localDetailCalling=65000、并发服务数5、
+  // 结构嵌套层10、参数支持位全0（81 03 05 00 00）。
   request.localDetailCalling = 65000;
   request.proposedMaxServOutstandingCalling = 5;
   request.proposedMaxServOutstandingCalled = 5;
   request.proposedDataStructureNestingLevel = 10;
   request.proposedParameterSupport.size = 2;
   request.proposedParameterSupport.unusedBits = 5;
+  request.proposedParameterSupport.bytes[0] = 0x00;
+  request.proposedParameterSupport.bytes[1] = 0x00;
   request.proposedServiceSupport.size = 11;
   request.proposedServiceSupport.unusedBits = 3;
   // 服务支持位按MMS ConfirmedService顺序编码；includeWrite决定是否提出Write。
@@ -2051,21 +2053,10 @@ grpc::Status MmsSessionWorker::Establish(Channel& channel,
   if (!status.ok()) {
     return status;
   }
-  // AARQ必须先包一层表示层CP，再作为Session CONNECT的用户数据；直接发裸AARQ
-  // 时实测装置会回Session ABORT。
-  std::array<std::uint8_t, kMmsPduBufferSize> cpBuffer{};
-  std::size_t cpSize = 0;
-  status = EncodeMmsPresentationCp(
-      std::span<const std::uint8_t>(aarqBuffer.data(), aarqSize),
-      kDefaultPresentationSelector, kDefaultPresentationSelector, cpBuffer,
-      &cpSize);
-  if (!status.ok()) {
-    return status;
-  }
   std::array<std::uint8_t, kMmsPduBufferSize> connectBuffer{};
   std::size_t connectSize = 0;
   status = EncodeIsoSessionConnect(
-      std::span<const std::uint8_t>(cpBuffer.data(), cpSize), connectBuffer,
+      std::span<const std::uint8_t>(aarqBuffer.data(), aarqSize), connectBuffer,
       &connectSize);
   if (!status.ok()) {
     return status;

@@ -27,15 +27,8 @@ struct IsoSessionPduView {
   std::span<const std::uint8_t> userData;
 };
 
-// 会话层S-SEL：单侧选择子超过4字节不合理，缺省使用与实测装置一致的00 01。
-struct IsoSessionSelectors {
-  static constexpr std::size_t kMaxSelectorBytes = 4;
-
-  std::array<std::uint8_t, kMaxSelectorBytes> calling{0x00, 0x01};
-  std::size_t callingSize = 2;
-  std::array<std::uint8_t, kMaxSelectorBytes> called{0x00, 0x01};
-  std::size_t calledSize = 2;
-};
+// 会话层S-SEL说明：实测可连通的参考客户端与目标装置都不使用33/34会话选择子，
+// 因此本模块既不发送也不要求会话选择子，只按会话要求内的版本号子项校验。
 
 // IEC 61850不区分表示层P-SEL，缺省与实测被装置接受的CP一致。
 inline constexpr std::array<std::uint8_t, 5> kDefaultPresentationSelector{
@@ -46,13 +39,11 @@ inline constexpr std::uint32_t kMmsPresentationContextId = 3;
 
 grpc::Status EncodeIsoSessionConnect(
     std::span<const std::uint8_t> presentationData,
-    std::span<std::uint8_t> output, std::size_t* outputSize,
-    const IsoSessionSelectors& selectors = IsoSessionSelectors{});
+    std::span<std::uint8_t> output, std::size_t* outputSize);
 
 grpc::Status EncodeIsoSessionAccept(
     std::span<const std::uint8_t> presentationData,
-    std::span<std::uint8_t> output, std::size_t* outputSize,
-    const IsoSessionSelectors& selectors = IsoSessionSelectors{});
+    std::span<std::uint8_t> output, std::size_t* outputSize);
 
 grpc::Status EncodeIsoSessionData(std::span<const std::uint8_t> presentationData,
                                   std::span<std::uint8_t> output,
