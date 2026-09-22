@@ -139,10 +139,12 @@ TEST(IEC61850MmsIsoSessionTest, EncodesInitiateRequestAsAcceptedByDevice) {
   EXPECT_EQ(encoded[17], 0x16);
   EXPECT_EQ(encoded[2], 0x80);
   EXPECT_EQ(encoded[3], 0x03);
-  // 参数支持位：81 03 05 f1 00，声明Str1/Str2/Vnam/Valt。
-  EXPECT_EQ(encoded[21], 0x81);
-  EXPECT_EQ(encoded[23], 0x05);
-  EXPECT_EQ(encoded[24], 0xf1);
+  // 参数支持位：81 03 05 00 00（与被接受报文一致，不虚报参数支持）。
+  EXPECT_EQ(encoded[23], 0x81);
+  EXPECT_EQ(encoded[24], 0x03);
+  EXPECT_EQ(encoded[25], 0x05);
+  EXPECT_EQ(encoded[26], 0x00);
+  EXPECT_EQ(encoded[27], 0x00);
 }
 
 // 验证AARQ的user-information使用indirect-reference=3的EXTERNAL，
@@ -187,7 +189,7 @@ TEST(IEC61850MmsIsoSessionTest, EncodesPresentationCpAsAcceptedByDevice) {
   EXPECT_TRUE(std::equal(encoded.begin(), encoded.end(), expected.begin()));
   EXPECT_EQ(encoded[0], 0x31);
   EXPECT_EQ(encoded[2], 0xa0);
-  EXPECT_EQ(encoded[8], 0xa2);
+  EXPECT_EQ(encoded[7], 0xa2);
   // user-data必须原样承载AARQ，服务端据此解出ACSE关联。
   ASSERT_GE(encoded.size(), aarq.size());
   EXPECT_TRUE(std::equal(aarq.begin(), aarq.end(),
