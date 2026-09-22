@@ -113,6 +113,24 @@ CONNECT 就是实测被装置接受的那一帧（含 TPKT+COTP 共 163 字节�
   导致 ACCEPT 之后的 AARE 解析失败。
 - 新实现：`02`（indirect-reference，值 3）与 `06 …`（OID）都接受；仍强制 `a0` single-ASN1-type。
 
+### 修复 6：客户端不得因装置申报的服务支持超集拒绝关联
+
+- 位置：`IEC61850MmsWorker.cc` → `MmsSessionWorker::Establish()`（Initiate 协商校验）。
+- 现场现象：装置每次都回 `Session ACCEPT` 且 AARE `result=0`，但紧接着报
+  `错误码=9, 原因=IEC61850 MMS Initiate协商支持集合超出请求能力`，会话始终无法进入目录核对。
+- 位图对比（`82 0c` 后的 11 字节）：
+
+  ```text
+  本模块申报: 5e 08 00 00 00 00 00 00 00 e4 00
+  装置应答:   ee 1c 00 00 04 00 00 00 01 e4 18   (多出 status/identify 等服务位)
+  ```
+
+- 旧实现：要求装置应答的服务支持位必须是本模块申报集合的子集，否则直接失败。
+- 新实现：服务与参数支持位描述的是装置自身支持的集合，与调用侧申报的集合不是同一方向，
+  允许超集；仅保留版本号与并发数上限的严格校验，超集只记录中文告警，能力判定以装置
+  申报的集合为准。装置未申报本模块必需服务（NameList/Read/变量属性/Write）时仍按原逻辑拒绝。
+- 附带把断线重连间隔由 1 秒调整为 5 秒（`kMmsRetryDelayMs`），避免每秒一次的重连持续冲击装置。
+
 ### 其它同步改动
 
 - `IsoSessionPduType` 新增 `REFUSE = 0x0c`：装置在 ACSE 阶段拒绝关联时回 REFUSE；
@@ -137,6 +155,8 @@ CONNECT 就是实测被装置接受的那一帧（含 TPKT+COTP 共 163 字节�
   断言解出 AARE（result=0、MMS 应用上下文）与 InitiateResponse（nesting=5、version=1）。
 - 兼容用例：带 CP 的 AARQ、旧的不带 CP 的 AARQ、旧的 `61 { 60 … }`、`0x0c` REFUSE、
   错误会话版本号拒绝、截断报文拒绝。
+- `test/iec61850_mms_worker_test.cc` 的 `AcceptsDeviceServiceSupportSuperset` 用现场装置
+  147 字节 ACCEPT 的服务支持位图驱动完整建链，要求目录核对与 Identify 之后进入 `READY`。
 - 现场验收（由用户执行）：连接 `192.168.2.254:102` 后日志应依次出现
   `MMS ISO-on-TCP通道已建立` → `收到Session ACCEPT` → `AARE 关联已接受` →
   `在线目录核对完成` → RCB 配置/GI → `READY / 活动通道=1`。

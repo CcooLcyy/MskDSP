@@ -34,7 +34,9 @@ namespace {
 constexpr std::uint32_t kMmsIoTimeoutMs = 1000;
 constexpr std::uint32_t kMmsRunReceivePollMs = 50;
 constexpr std::uint32_t kMmsConnectTimeoutMs = 3000;
-constexpr std::uint32_t kMmsRetryDelayMs = 1000;
+// 建链失败后的重连间隔：现场装置在连续高频重连下会短暂拒连，
+// 因此按 5 秒节流，避免每秒一次的重连持续冲击装置。
+constexpr std::uint32_t kMmsRetryDelayMs = 5000;
 constexpr std::uint32_t kMmsCommandTerminationPollMs = 20;
 constexpr std::size_t kMmsPduBufferSize = 4096;
 constexpr std::size_t kMmsNameListPageLimit = 4096;
@@ -2177,13 +2179,24 @@ grpc::Status MmsSessionWorker::Establish(Channel& channel,
     return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
                         "IEC61850 MMS Initiate协商结果超过请求能力");
   }
-  if (response.negotiatedVersionNumber > request.proposedVersionNumber ||
-      !IsBitStringSubset(response.negotiatedParameterSupport,
-                         request.proposedParameterSupport) ||
-      !IsBitStringSubset(response.negotiatedServiceSupport,
-                         request.proposedServiceSupport)) {
+  if (response.negotiatedVersionNumber > request.proposedVersionNumber) {
     return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
-                        "IEC61850 MMS Initiate协商支持集合超出请求能力");
+                        "IEC61850 MMS Initiate协商版本号高于本模块申报版本");
+  }
+  // 参数与服务支持位描述的是装置自身支持的集合，与调用侧申报的集合不是同一方向，
+  // 现场装置就会多申报status/identify等服务；超集属于合法应答，这里只记录差异，
+  // 后续能力判定一律以装置申报的集合为准，不因超集拒绝关联。
+  if (!IsBitStringSubset(response.negotiatedParameterSupport,
+                         request.proposedParameterSupport)) {
+    LOG_WARNING(
+        "IEC61850 MMS装置申报的参数支持位超出本模块申报范围，按装置申报集合使用: 通道={}",
+        static_cast<int>(channel.channel));
+  }
+  if (!IsBitStringSubset(response.negotiatedServiceSupport,
+                         request.proposedServiceSupport)) {
+    LOG_WARNING(
+        "IEC61850 MMS装置申报的服务支持位超出本模块申报范围，按装置申报集合使用: 通道={}",
+        static_cast<int>(channel.channel));
   }
   const bool supportsNameList =
       response.negotiatedServiceSupport.size >= 1 &&

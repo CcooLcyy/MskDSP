@@ -95,7 +95,14 @@ void AppendTlv(std::vector<std::uint8_t>* output, std::uint8_t tag,
   AppendTlv(output, tag, std::span<const std::uint8_t>(value));
 }
 
-std::vector<std::uint8_t> MakeSessionAccept(bool includeWrite = false) {
+// 现场装置对本模块 CONNECT 回的 147 字节 Session ACCEPT 中申报的服务支持位
+// （03 ee 1c 00 00 04 00 00 00 01 e4 18）：装置会额外申报 status/identify 等服务，
+// 比本模块申报的集合（03 5e 08 00 00 00 00 00 00 00 e4 00）更大。
+constexpr std::array<std::uint8_t, 11> kDeviceServiceSupport{
+    0xee, 0x1c, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0xe4, 0x18};
+
+std::vector<std::uint8_t> MakeSessionAccept(bool includeWrite = false,
+                                            bool deviceNegotiation = false) {
   IEC61850::MmsInitiateResponse response;
   // 协商值不得超过客户端 Initiate 申报的并发数（DefaultInitiateRequest 申报 5/5/10），
   // 否则严格协商校验会拒绝关联；现场装置的应答同样不超过申报值。
@@ -109,6 +116,15 @@ std::vector<std::uint8_t> MakeSessionAccept(bool includeWrite = false) {
   response.negotiatedServiceSupport.bytes[0] =
       static_cast<std::uint8_t>(0x4a | (includeWrite ? 0x04 : 0));
   response.negotiatedServiceSupport.bytes[1] = 0x08;
+  if (deviceNegotiation) {
+    // 现场装置实测协商值：并发3/5、嵌套5，服务支持位按现场位图如实申报，
+    // 其中包含本模块未申报的服务位，用于验证客户端不得据此拒绝关联。
+    response.negotiatedMaxServOutstandingCalling = 3;
+    response.negotiatedMaxServOutstandingCalled = 5;
+    response.negotiatedDataStructureNestingLevel = 5;
+    std::copy(kDeviceServiceSupport.begin(), kDeviceServiceSupport.end(),
+              response.negotiatedServiceSupport.bytes.begin());
+  }
 
   std::array<std::uint8_t, 4096> initiateBuffer{};
   std::size_t initiateSize = 0;
@@ -227,6 +243,24 @@ std::vector<std::uint8_t> MakeNameListResponse(
   const std::array<std::uint8_t, 1> noMore{0x00};
   AppendTlv(&service, 0x81, noMore);
   return WrapMmsResponse(invokeId, 1, service);
+}
+
+// 构造Identify响应（服务选择3）：0x30包裹厂商、型号、版本三个可见字符串。
+std::vector<std::uint8_t> MakeIdentifyResponse(std::uint32_t invokeId) {
+  const auto appendString = [](std::vector<std::uint8_t>* output,
+                               std::uint8_t tag, std::string_view text) {
+    AppendTlv(output, tag,
+              std::span<const std::uint8_t>(
+                  reinterpret_cast<const std::uint8_t*>(text.data()),
+                  text.size()));
+  };
+  std::vector<std::uint8_t> fields;
+  appendString(&fields, 0x80, "PRSI");
+  appendString(&fields, 0x81, "PRS-7961G");
+  appendString(&fields, 0x82, "1.0");
+  std::vector<std::uint8_t> service;
+  AppendTlv(&service, 0x30, fields);
+  return WrapMmsResponse(invokeId, 3, service);
 }
 
 std::vector<std::uint8_t> MakeBooleanAttributesResponse(
@@ -357,6 +391,34 @@ ScriptedResponses MakeDirectoryResponse(
   if (request.serviceTag == 12) {
     return {MakeNamedVariableListResponse(request.invokeId, "IED1LD0",
                                           "LLN0$Beh$stVal")};
+  }
+  return {};
+}
+
+// 现场装置协商场景的脚本应答：只回空域目录和Identify，用于验证装置申报的
+// 服务支持集合大于本模块申报范围时仍能完成目录核对与Identify并进入READY。
+ScriptedResponses MakeDeviceNegotiationResponse(
+    std::span<const std::uint8_t> payload, std::size_t /*sendCount*/) {
+  IEC61850::IsoSessionPduView sessionPdu;
+  if (!IEC61850::DecodeIsoSessionPdu(payload, &sessionPdu).ok() ||
+      sessionPdu.type != IEC61850::IsoSessionPduType::DATA) {
+    return {};
+  }
+  std::span<const std::uint8_t> mmsPdu;
+  if (!IEC61850::DecodeMmsPresentationData(sessionPdu.userData, &mmsPdu)
+           .ok()) {
+    return {};
+  }
+  IEC61850::MmsConfirmedPduView request;
+  if (!IEC61850::DecodeMmsConfirmedRequest(mmsPdu, &request).ok()) {
+    return {};
+  }
+  if (request.serviceTag == 1) {
+    // 最小计划下目录只读一次域列表，回空列表即可收敛。
+    return {MakeNameListResponse(request.invokeId, {})};
+  }
+  if (request.serviceTag == 3) {
+    return {MakeIdentifyResponse(request.invokeId)};
   }
   return {};
 }
@@ -1101,7 +1163,8 @@ public:
                              bool failWhenIdle = false,
                              ResponseDropPredicate responseDropPredicate = {},
                              std::shared_ptr<SendGate> sendGate = {},
-                             int failConnectAfter = -1)
+                             int failConnectAfter = -1,
+                             bool deviceNegotiation = false)
       : state_(std::move(state)),
         responseBuilder_(std::move(responseBuilder)),
         includeWrite_(includeWrite),
@@ -1109,7 +1172,8 @@ public:
         failWhenIdle_(failWhenIdle),
         responseDropPredicate_(std::move(responseDropPredicate)),
         sendGate_(std::move(sendGate)),
-        failConnectAfter_(failConnectAfter) {}
+        failConnectAfter_(failConnectAfter),
+        deviceNegotiation_(deviceNegotiation) {}
 
   grpc::Status Connect(
       const IEC61850::MmsTransportEndpoint& endpoint,
@@ -1141,7 +1205,7 @@ public:
       state_->sessionChannels.emplace_back(channel_);
       connectDelay = state_->connectDelay;
       connected_ = true;
-      received_.push_back(MakeSessionAccept(includeWrite_));
+      received_.push_back(MakeSessionAccept(includeWrite_, deviceNegotiation_));
       state_->condition.notify_all();
     }
     endpoint_ = endpoint;
@@ -1251,6 +1315,7 @@ private:
   std::vector<std::vector<std::uint8_t>> sent_;
   ResponseBuilder responseBuilder_;
   bool includeWrite_ = false;
+  bool deviceNegotiation_ = false;
   IEC61850Proto::NetworkChannel channel_ =
       IEC61850Proto::NETWORK_CHANNEL_UNSPECIFIED;
   bool failWhenIdle_ = false;
@@ -1483,6 +1548,55 @@ TEST(IEC61850MmsWorkerTest, UsesInjectedTransportForMinimalSession) {
   EXPECT_EQ(state->endpoints.front().interfaceName, "test0");
   EXPECT_EQ(state->endpoints.front().remoteIp, "127.0.0.1");
   EXPECT_EQ(state->endpoints.front().remotePort, 102);
+}
+
+// 验证装置申报的服务支持集合大于本模块申报范围时不得拒绝关联：现场装置在
+// Session ACCEPT 里回的位图（03 ee 1c 00 00 04 00 00 00 01 e4 18）比本模块申报的
+// 集合（03 5e 08 00 00 00 00 00 00 00 e4 00）多出 status/identify 等服务，这是被调侧
+// 对自身能力的正常申报，工作器必须继续完成目录核对与Identify并进入READY。
+TEST(IEC61850MmsWorkerTest, AcceptsDeviceServiceSupportSuperset) {
+  auto state = std::make_shared<FactoryState>();
+  std::mutex callbackMutex;
+  std::condition_variable callbackCondition;
+  std::vector<IEC61850::MmsConnectionEvent> events;
+
+  IEC61850::ProtocolEventCallbacks callbacks;
+  callbacks.onMmsConnection = [&](IEC61850::MmsConnectionEvent event) {
+    std::lock_guard lock(callbackMutex);
+    events.emplace_back(std::move(event));
+    callbackCondition.notify_all();
+  };
+
+  IEC61850::MmsSessionWorker worker(
+      MakeMinimalPlan(), MakeBindings(), std::move(callbacks),
+      [state](const IEC61850::MmsTransportEndpoint&,
+              IEC61850Proto::NetworkChannel) {
+        std::lock_guard lock(state->mutex);
+        ++state->factoryCalls;
+        return std::make_unique<ScriptedTransport>(
+            state, MakeDeviceNegotiationResponse, /*includeWrite=*/false,
+            IEC61850Proto::NETWORK_CHANNEL_UNSPECIFIED, /*failWhenIdle=*/false,
+            ScriptedTransport::ResponseDropPredicate{},
+            std::shared_ptr<SendGate>{}, /*failConnectAfter=*/-1,
+            /*deviceNegotiation=*/true);
+      });
+
+  ASSERT_TRUE(worker.Start().ok());
+  {
+    std::unique_lock lock(callbackMutex);
+    ASSERT_TRUE(callbackCondition.wait_for(lock, 2s, [&] {
+      return std::any_of(events.begin(), events.end(), [](const auto& event) {
+        return event.state == IEC61850::ProtocolSessionState::READY;
+      });
+    })) << "装置申报更多服务位时关联仍必须继续到READY";
+  }
+  worker.Stop();
+
+  std::lock_guard lock(state->mutex);
+  EXPECT_EQ(state->factoryCalls, 1u);
+  EXPECT_EQ(state->connectCalls, 1u);
+  // Session CONNECT之外，目录核对（GetNameList）与Identify必须真正发出。
+  EXPECT_GE(state->sendCalls, 3u);
 }
 
 // 验证MMS关联建立的TCP/COTP和Session确认阶段共享一份递减的总超时预算。
