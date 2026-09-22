@@ -443,7 +443,7 @@ grpc::Status EncodePresentationCpInternal(
   std::vector<std::uint8_t> definitions;
   for (const auto& definition : contexts) {
     std::vector<std::uint8_t> pdv;
-    status = AppendBerTlvInteger(definition.first, &pdv,
+    status = AppendBerTlvInteger(0x02, definition.first, &pdv,
                                  "表示层上下文编号写入失败");
     if (status.ok()) {
       status = AppendBerTlvOid(0x06, definition.second, &pdv,
