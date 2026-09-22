@@ -193,6 +193,11 @@ std::vector<std::uint8_t> MakeNameListResponse(std::uint32_t invokeId) {
 
 std::vector<std::uint8_t> MakeSessionAccept() {
   IEC61850::MmsInitiateResponse response;
+  // 协商值不得超过客户端 Initiate 申报的并发数（DefaultInitiateRequest 申报 5/5/10），
+  // 否则严格协商校验会拒绝关联；现场装置的应答同样不超过申报值。
+  response.negotiatedMaxServOutstandingCalling = 5;
+  response.negotiatedMaxServOutstandingCalled = 5;
+  response.negotiatedDataStructureNestingLevel = 10;
   response.negotiatedParameterSupport.size = 2;
   response.negotiatedParameterSupport.unusedBits = 5;
   response.negotiatedServiceSupport.size = 11;

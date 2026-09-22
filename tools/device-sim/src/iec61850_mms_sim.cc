@@ -220,6 +220,11 @@ std::vector<std::uint8_t> WrapMmsPdu(std::span<const std::uint8_t> mmsPdu) {
 
 std::vector<std::uint8_t> MakeSessionAccept() {
   IEC61850::MmsInitiateResponse response;
+  // 协商值不得超过客户端 Initiate 申报的并发数（self-developed客户端与
+  // libiec61850 参考客户端都申报 5/5/10），否则客户端会以"协商结果超过请求能力"拒绝。
+  response.negotiatedMaxServOutstandingCalling = 5;
+  response.negotiatedMaxServOutstandingCalled = 5;
+  response.negotiatedDataStructureNestingLevel = 10;
   response.negotiatedParameterSupport.size = 2;
   response.negotiatedParameterSupport.unusedBits = 5;
   response.negotiatedServiceSupport.size = 11;
