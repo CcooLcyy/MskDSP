@@ -35,6 +35,9 @@ constexpr std::uint8_t kCalledPresentationSelectorTag = 0x82;
 constexpr std::uint8_t kCallingPresentationSelectorQualifiedTag = 0x83;
 constexpr std::uint8_t kCalledPresentationSelectorQualifiedTag = 0x84;
 constexpr std::uint8_t kContextDefinitionListTag = 0xa4;
+// 现场装置的ACCEPT使用 [5]（0xa5）作为"用户数据形式的上下文定义列表"，
+// 与libiec61850客户端的[4]（0xa4）等价，解码必须同时接受这两种标签。
+constexpr std::uint8_t kContextDefinitionListUserDataTag = 0xa5;
 constexpr std::uint8_t kSingleAsn1TypeTag = 0xa0;
 constexpr std::uint8_t kIndirectReferenceTag = 0x02;
 // EXTERNAL中的indirect-reference必须指向CP里MMS表示层上下文的编号。
@@ -507,7 +510,8 @@ grpc::Status DecodeNormalModeParameters(std::span<const std::uint8_t> value,
         *selectorSize = field.value.size();
         break;
       }
-      case kContextDefinitionListTag: {
+      case kContextDefinitionListTag:
+      case kContextDefinitionListUserDataTag: {
         hasContextDefinitionList = true;
         std::size_t listOffset = 0;
         bool hasMmsContext = false;
