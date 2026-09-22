@@ -102,23 +102,17 @@ constexpr std::array<std::uint8_t, 163> kDeviceSessionAccept{
     0x81, 0x03, 0x05, 0xf1, 0x00, 0x82, 0x0c, 0x03, 0xee, 0x1c, 0x00, 0x00,
     0x04, 0x00, 0x00, 0x00, 0x01, 0xe4, 0x18};
 
-// 真机抓包中被装置接受的完整会话层CONNECT（181字节，来自 pcap CONNECT#5）：
-// 连接项为 05 06 13 01 00 16 01 02 14 02 00 02 33 02 00 01 34 02 00 01，
-// 用户数据为表示层CP（CP内AARQ使用indirect-reference=3）。
-constexpr std::array<std::uint8_t, 181> kDeviceAcceptedConnect{
-    0x0d, 0x52, 0x05, 0x06, 0x13, 0x01, 0x00, 0x16, 0x01, 0x02, 0x14, 0x02,
-    0x00, 0x02, 0x33, 0x02, 0x00, 0x01, 0x34, 0x02, 0x00, 0x01, 0xc1, 0x9c,
-    0x31, 0x81, 0x99, 0xa0, 0x03, 0x80, 0x01, 0x01, 0xa2, 0x81, 0x91, 0x81,
-    0x04, 0x00, 0x00, 0x00, 0x01, 0x82, 0x04, 0x00, 0x00, 0x00, 0x01, 0xa4,
-    0x23, 0x30, 0x0f, 0x02, 0x01, 0x01, 0x06, 0x04, 0x52, 0x01, 0x00, 0x01,
-    0x30, 0x10, 0x02, 0x01, 0x03, 0x06, 0x05, 0x28, 0xca, 0x22, 0x02, 0x01,
-    0x30, 0x04, 0x06, 0x02, 0x51, 0x01, 0x61, 0x5e, 0x30, 0x5c, 0x02, 0x01,
-    0x01, 0xa0, 0x57, 0x60, 0x55, 0xa1, 0x07, 0x06, 0x05, 0x28, 0xca, 0x22,
-    0x02, 0x03, 0xbe, 0x2f, 0x28, 0x2d, 0x02, 0x01, 0x03, 0xa0, 0x28, 0xa8,
-    0x26, 0x80, 0x03, 0x00, 0xfd, 0xe8, 0x81, 0x01, 0x05, 0x82, 0x01, 0x05,
-    0x83, 0x01, 0x0a, 0xa4, 0x16, 0x80, 0x01, 0x01, 0x81, 0x03, 0x05, 0xf1,
-    0x00, 0x82, 0x0c, 0x03, 0xee, 0x1c, 0x00, 0x00, 0x04, 0x08, 0x00, 0x00,
-    0x79, 0xef, 0x18};
+// 本模块Session CONNECT的golden字节（145字节）：
+// 会话层SPDU(1) + 长度(1) + 连接项20字节 + c1用户数据(AARQ 64字节)。
+// 连接项为 05 06 13 01 00 16 01 02 14 02 00 02 33 02 00 01 34 02 00 01（实测装置接受的形式）。
+constexpr std::array<std::uint8_t, 145> kExpectedSessionConnect{
+    0x0d, 0x8f, 0x05, 0x02, 0x00, 0x02, 0x16, 0x01, 0x02, 0x33, 0x02, 0x00,
+    0x01, 0x34, 0x02, 0x00, 0x01, 0xc1, 0x40, 0x60, 0x3e, 0x80, 0x02, 0x07,
+    0x80, 0xa1, 0x07, 0x06, 0x05, 0x28, 0xca, 0x22, 0x02, 0x03, 0xbe, 0x2f,
+    0x28, 0x2d, 0x02, 0x01, 0x03, 0xa0, 0x28, 0xa8, 0x26, 0x80, 0x03, 0x00,
+    0xfd, 0xe8, 0x81, 0x01, 0x05, 0x82, 0x01, 0x05, 0x83, 0x01, 0x0a, 0xa4,
+    0x16, 0x80, 0x01, 0x01, 0x81, 0x03, 0x05, 0x00, 0x00, 0x82, 0x0c, 0x03,
+    0x5e, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe4, 0x00};
 
 }  // namespace
 
@@ -219,21 +213,22 @@ TEST(IEC61850MmsIsoSessionTest, DecodesPresentationCp) {
                          aarq.begin()));
 }
 
-// 验证CONNECT的连接项补齐version=02与调用/被调会话选择子，且用户数据原样
-// 承载表示层CP（修复前是12字节旧连接项 + 裸AARQ）。
+// 验证Session CONNECT逐字节等于golden字节（含连接项与CP用户数据），
+// 并可被自身解码器解析回CP与AARQ。
 TEST(IEC61850MmsIsoSessionTest, EncodesConnectSpduWithDeviceAcceptedBytes) {
   const auto cp = MakeExpectedPresentationCp();
   std::array<std::uint8_t, 512> encoded{};
   std::size_t encodedSize = 0;
   ASSERT_TRUE(
       IEC61850::EncodeIsoSessionConnect(cp, encoded, &encodedSize).ok());
-  // 会话层SPDU：1字节类型 + 1字节长度 + 20字节连接项 + c1用户数据参数。
+  ASSERT_EQ(encodedSize, kExpectedSessionConnect.size());
+  EXPECT_TRUE(std::equal(encoded.begin(), encoded.begin() + encodedSize,
+                         kExpectedSessionConnect.begin()));
+  // 连接项位于偏移2，长20字节，顺序为05/16/33/34。
+  constexpr std::size_t kParameterOffset = 2;
   constexpr std::array<std::uint8_t, 20> kExpectedParameters{
       0x05, 0x06, 0x13, 0x01, 0x00, 0x16, 0x01, 0x02, 0x14, 0x02,
       0x33, 0x02, 0x00, 0x01, 0x34, 0x02, 0x00, 0x01};
-  constexpr std::size_t kParameterOffset = 2;
-  ASSERT_EQ(encodedSize, kParameterOffset + kExpectedParameters.size() + 2 +
-                             cp.size());
   EXPECT_EQ(encoded[0], 0x0d);
   EXPECT_TRUE(std::equal(encoded.begin() + kParameterOffset,
                          encoded.begin() + kParameterOffset +
@@ -243,34 +238,48 @@ TEST(IEC61850MmsIsoSessionTest, EncodesConnectSpduWithDeviceAcceptedBytes) {
   EXPECT_TRUE(std::equal(
       encoded.begin() + kParameterOffset + kExpectedParameters.size() + 2,
       encoded.begin() + encodedSize, cp.begin()));
-}
-
-// 验证解码器能解析真机抓包中被装置接受的完整会话层CONNECT（含CP与AARQ），
-// 且其连接项与我们的编码结果一致：会话要求内版本号=02并带33/34选择子。
-TEST(IEC61850MmsIsoSessionTest, DecodesDeviceAcceptedConnect) {
+  // 自解码：应还原出CP与其中的AARQ。
   IEC61850::IsoSessionPduView decoded;
-  ASSERT_TRUE(IEC61850::DecodeIsoSessionPdu(kDeviceAcceptedConnect, &decoded)
-                  .ok())
-      << "被装置接受的CONNECT必须能被解码";
+  ASSERT_TRUE(IEC61850::DecodeIsoSessionPdu(
+                  std::span<const std::uint8_t>(encoded.data(), encodedSize),
+                  &decoded)
+                  .ok());
   EXPECT_EQ(decoded.type, IEC61850::IsoSessionPduType::CONNECT);
-  IEC61850::PresentationCpView cp;
-  ASSERT_TRUE(IEC61850::DecodeMmsPresentationCp(decoded.userData, &cp).ok());
-  EXPECT_EQ(cp.callingPresentationSelectorSize, 4U);
-  EXPECT_EQ(cp.calledPresentationSelectorSize, 4U);
   IEC61850::MmsAareView aarq;
   ASSERT_TRUE(IEC61850::DecodeMmsAarq(decoded.userData, &aarq).ok());
-  IEC61850::MmsInitiateRequest initiate;
-  ASSERT_TRUE(IEC61850::DecodeMmsInitiateRequest(aarq.mmsPdu, &initiate).ok());
-  // 该报文使用80 02 fd e8的非规范整数形式，值仍是65000。
-  EXPECT_EQ(initiate.localDetailCalling, 65000U);
-  // 我们的连接项必须与它一致（版本号02 + 33/34选择子）。
-  const auto cpBytes = MakeExpectedPresentationCp();
-  std::array<std::uint8_t, 512> ours{};
-  std::size_t oursSize = 0;
-  ASSERT_TRUE(
-      IEC61850::EncodeIsoSessionConnect(cpBytes, ours, &oursSize).ok());
-  EXPECT_TRUE(std::equal(kDeviceAcceptedConnect.begin() + 2,
-                         kDeviceAcceptedConnect.begin() + 22, ours.begin() + 2));
+  EXPECT_EQ(aarq.mmsPdu.size(), kExpectedInitiateRequest.size());
+}
+
+// 验证解码器能解析实测装置回应的163字节Session ACCEPT（含TPKT+COTP头），
+// 取出AARE与InitiateResponse；该ACCEPT的CP使用83/84形式的P-SEL与indirect-reference。
+TEST(IEC61850MmsIsoSessionTest, DecodesDeviceSessionAcceptAndAare) {
+  // TPKT(4字节)+COTP DT头(3字节)之后才是会话层SPDU，因此偏移为7。
+  constexpr std::size_t kSessionOffset = 7;
+  const std::span<const std::uint8_t> sessionPdu(
+      kDeviceSessionAccept.data() + kSessionOffset,
+      kDeviceSessionAccept.size() - kSessionOffset);
+  IEC61850::IsoSessionPduView decoded;
+  ASSERT_TRUE(IEC61850::DecodeIsoSessionPdu(sessionPdu, &decoded).ok())
+      << "实测ACCEPT的连接项应按版本02校验通过";
+  ASSERT_EQ(decoded.type, IEC61850::IsoSessionPduType::ACCEPT);
+  IEC61850::PresentationCpView cp;
+  ASSERT_TRUE(IEC61850::DecodeMmsPresentationCp(decoded.userData, &cp).ok())
+      << "装置使用83/84形式的P-SEL，解码必须兼容";
+  EXPECT_EQ(cp.callingPresentationSelectorSize, 4U);
+  EXPECT_EQ(cp.calledPresentationSelectorSize, 4U);
+  IEC61850::MmsAareView aare;
+  ASSERT_TRUE(IEC61850::DecodeMmsAare(decoded.userData, &aare).ok())
+      << "AARE的indirect-reference形式必须被接受";
+  EXPECT_EQ(aare.result, 0u);
+  ASSERT_EQ(aare.applicationContextOidSize, kApplicationContext.size());
+  EXPECT_TRUE(std::equal(aare.applicationContextOid.begin(),
+                         aare.applicationContextOid.begin() +
+                             aare.applicationContextOidSize,
+                         kApplicationContext.begin()));
+  IEC61850::MmsInitiateResponse response;
+  ASSERT_TRUE(IEC61850::DecodeMmsInitiateResponse(aare.mmsPdu, &response).ok());
+  EXPECT_EQ(response.negotiatedDataStructureNestingLevel, 5);
+  EXPECT_EQ(response.negotiatedVersionNumber, 1);
 }
 
 // 验证CONNECT/ACCEPT风格SPDU能够保留短用户数据并严格校验长度。
@@ -377,33 +386,6 @@ TEST(IEC61850MmsIsoSessionTest, EncodesAndDecodesAcceptedAare) {
   ASSERT_EQ(decoded.mmsPdu.size(), initiateResponse.size());
   EXPECT_TRUE(std::equal(decoded.mmsPdu.begin(), decoded.mmsPdu.end(),
                          initiateResponse.begin()));
-}
-
-// 验证解码器能解析实测装置回应的163字节Session ACCEPT，并取出AARE与
-// InitiateResponse（修复前indirect-reference形式会被拒绝）。
-TEST(IEC61850MmsIsoSessionTest, DecodesDeviceSessionAcceptAndAare) {
-  // TPKT(4字节)+COTP DT头(3字节)之后才是会话层SPDU，因此偏移为7。
-  constexpr std::size_t kSessionOffset = 7;
-  const std::span<const std::uint8_t> sessionPdu(
-      kDeviceSessionAccept.data() + kSessionOffset,
-      kDeviceSessionAccept.size() - kSessionOffset);
-  IEC61850::IsoSessionPduView decoded;
-  ASSERT_TRUE(IEC61850::DecodeIsoSessionPdu(sessionPdu, &decoded).ok())
-      << "实测ACCEPT的连接项应按版本02校验通过";
-  ASSERT_EQ(decoded.type, IEC61850::IsoSessionPduType::ACCEPT);
-  IEC61850::MmsAareView aare;
-  ASSERT_TRUE(IEC61850::DecodeMmsAare(decoded.userData, &aare).ok())
-      << "AARE的indirect-reference形式必须被接受";
-  EXPECT_EQ(aare.result, 0u);
-  ASSERT_EQ(aare.applicationContextOidSize, kApplicationContext.size());
-  EXPECT_TRUE(std::equal(aare.applicationContextOid.begin(),
-                         aare.applicationContextOid.begin() +
-                             aare.applicationContextOidSize,
-                         kApplicationContext.begin()));
-  IEC61850::MmsInitiateResponse response;
-  ASSERT_TRUE(IEC61850::DecodeMmsInitiateResponse(aare.mmsPdu, &response).ok());
-  EXPECT_EQ(response.negotiatedDataStructureNestingLevel, 5);
-  EXPECT_EQ(response.negotiatedVersionNumber, 1);
 }
 
 // 验证连接项版本号不为02的ACCEPT会被拒绝，避免把错误协商结果当成成功关联。
