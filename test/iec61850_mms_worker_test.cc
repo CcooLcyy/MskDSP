@@ -96,8 +96,9 @@ void AppendTlv(std::vector<std::uint8_t>* output, std::uint8_t tag,
 }
 
 // 现场装置对本模块 CONNECT 回的 147 字节 Session ACCEPT 中申报的服务支持位
-// （03 ee 1c 00 00 04 00 00 00 01 e4 18）：装置会额外申报 status/identify 等服务，
-// 比本模块申报的集合（03 5e 08 00 00 00 00 00 00 00 e4 00）更大。
+// （03 ee 1c 00 00 04 00 00 00 01 e4 18）：与本模块申报的集合
+// （03 5e 08 00 00 00 00 00 00 00 e4 00）互有出入——装置多申报 0x80/0x20、
+// 少申报 0x10，位图并不相等，也不构成单方向超集。
 constexpr std::array<std::uint8_t, 11> kDeviceServiceSupport{
     0xee, 0x1c, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0xe4, 0x18};
 
@@ -418,6 +419,8 @@ ScriptedResponses MakeDeviceNegotiationResponse(
     return {MakeNameListResponse(request.invokeId, {})};
   }
   if (request.serviceTag == 3) {
+    // 现场位图按当前位定义并不包含Identify，工作器不会走到这里；
+    // 保留该分支是为了位定义将来调整时用例仍能稳定应答，而不是靠超时失败。
     return {MakeIdentifyResponse(request.invokeId)};
   }
   return {};
@@ -1550,10 +1553,10 @@ TEST(IEC61850MmsWorkerTest, UsesInjectedTransportForMinimalSession) {
   EXPECT_EQ(state->endpoints.front().remotePort, 102);
 }
 
-// 验证装置申报的服务支持集合大于本模块申报范围时不得拒绝关联：现场装置在
-// Session ACCEPT 里回的位图（03 ee 1c 00 00 04 00 00 00 01 e4 18）比本模块申报的
-// 集合（03 5e 08 00 00 00 00 00 00 00 e4 00）多出 status/identify 等服务，这是被调侧
-// 对自身能力的正常申报，工作器必须继续完成目录核对与Identify并进入READY。
+// 验证装置申报的服务支持位与本模块申报范围不一致时不得拒绝关联：现场装置在
+// Session ACCEPT 里回的位图（03 ee 1c 00 00 04 00 00 00 01 e4 18）与本模块申报的
+// 集合（03 5e 08 00 00 00 00 00 00 00 e4 00）互有出入（装置多申报 0x80/0x20、少申报 0x10），
+// 这是被调侧对自身能力的正常申报，工作器必须照旧完成目录核对并进入READY。
 TEST(IEC61850MmsWorkerTest, AcceptsDeviceServiceSupportSuperset) {
   auto state = std::make_shared<FactoryState>();
   std::mutex callbackMutex;
@@ -1595,8 +1598,10 @@ TEST(IEC61850MmsWorkerTest, AcceptsDeviceServiceSupportSuperset) {
   std::lock_guard lock(state->mutex);
   EXPECT_EQ(state->factoryCalls, 1u);
   EXPECT_EQ(state->connectCalls, 1u);
-  // Session CONNECT之外，目录核对（GetNameList）与Identify必须真正发出。
-  EXPECT_GE(state->sendCalls, 3u);
+  // Session CONNECT之外必须真正发出目录核对请求：装置位图按当前位定义不含
+  // Identify（0xee & 0x10 == 0），因此这一步只应比只有CONNECT时多一次请求。
+  EXPECT_GE(state->sendCalls, 2u);
+  EXPECT_FALSE(events.empty());
 }
 
 // 验证MMS关联建立的TCP/COTP和Session确认阶段共享一份递减的总超时预算。

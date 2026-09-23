@@ -2184,18 +2184,19 @@ grpc::Status MmsSessionWorker::Establish(Channel& channel,
                         "IEC61850 MMS Initiate协商版本号高于本模块申报版本");
   }
   // 参数与服务支持位描述的是装置自身支持的集合，与调用侧申报的集合不是同一方向，
-  // 现场装置就会多申报status/identify等服务；超集属于合法应答，这里只记录差异，
-  // 后续能力判定一律以装置申报的集合为准，不因超集拒绝关联。
+  // 现场装置就与本模块申报范围互有出入（多申报status等、少申报本模块未实现的服务位）；
+  // 这属于合法应答，这里只记录差异，后续能力判定一律以装置申报的集合为准，
+  // 不因位图不一致拒绝关联。
   if (!IsBitStringSubset(response.negotiatedParameterSupport,
                          request.proposedParameterSupport)) {
     LOG_WARNING(
-        "IEC61850 MMS装置申报的参数支持位超出本模块申报范围，按装置申报集合使用: 通道={}",
+        "IEC61850 MMS装置申报的参数支持位与本模块申报范围不一致，按装置申报集合使用: 通道={}",
         static_cast<int>(channel.channel));
   }
   if (!IsBitStringSubset(response.negotiatedServiceSupport,
                          request.proposedServiceSupport)) {
     LOG_WARNING(
-        "IEC61850 MMS装置申报的服务支持位超出本模块申报范围，按装置申报集合使用: 通道={}",
+        "IEC61850 MMS装置申报的服务支持位与本模块申报范围不一致，按装置申报集合使用: 通道={}",
         static_cast<int>(channel.channel));
   }
   const bool supportsNameList =
