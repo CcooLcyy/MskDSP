@@ -159,7 +159,8 @@ CONNECT 就是实测被装置接受的那一帧（含 TPKT+COTP 共 163 字节�
 - 兼容用例：带 CP 的 AARQ、旧的不带 CP 的 AARQ、旧的 `61 { 60 … }`、`0x0c` REFUSE、
   错误会话版本号拒绝、截断报文拒绝。
 - `test/iec61850_mms_worker_test.cc` 的 `AcceptsDeviceServiceSupportSuperset` 用现场装置
-  147 字节 ACCEPT 的服务支持位图驱动完整建链，要求目录核对与 Identify 之后进入 `READY`。
+  147 字节 ACCEPT 的服务支持位图驱动完整建链，要求跨过 Initiate 校验、完成在线目录核对并
+  进入 `READY`（该位图按当前位定义不含 Identify，工作器按设计跳过厂商型号读取）。
 - 现场验收（由用户执行）：连接 `192.168.2.254:102` 后日志应依次出现
   `MMS ISO-on-TCP通道已建立` → `收到Session ACCEPT` → `AARE 关联已接受` →
   `在线目录核对完成` → RCB 配置/GI → `READY / 活动通道=1`。
