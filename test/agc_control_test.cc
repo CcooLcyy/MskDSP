@@ -64,6 +64,29 @@ AGCProto::GroupConfig MakeBaseConfig() {
   return cfg;
 }
 
+AGCProto::GroupConfig MakeFourMemberConfig() {
+  auto cfg = MakeBaseConfig();
+  cfg.clear_members();
+  constexpr const char *kMeasTags[] = {
+      "INV1_P_MEAS", "INV2_P_MEAS", "INV3_P_MEAS", "INV4_P_MEAS"};
+  constexpr const char *kSetTags[] = {
+      "INV1_P_SET", "INV2_P_SET", "INV3_P_SET", "INV4_P_SET"};
+  constexpr const char *kMemberNames[] = {"m1", "m2", "m3", "m4"};
+  for (int index = 0; index < 4; ++index) {
+    auto *member = cfg.add_members();
+    member->set_member_name(kMemberNames[index]);
+    member->set_controllable(true);
+    member->set_capacity_kw(150.0);
+    member->set_weight(1.0);
+    member->mutable_p_meas()->set_tag(kMeasTags[index]);
+    member->mutable_p_meas()->set_unit("kW");
+    member->mutable_p_set()->mutable_signal()->set_tag(kSetTags[index]);
+    member->mutable_p_set()->mutable_signal()->set_unit("kW");
+    member->mutable_p_set()->set_mode(AGCProto::VALUE_MODE_ABSOLUTE);
+  }
+  return cfg;
+}
+
 AGC::ControlInput MakeBaseInput(double cmdRaw, const std::vector<double>& measRaw) {
   AGC::ControlInput input;
   input.hasCmdRaw = true;
@@ -449,7 +472,48 @@ TEST(AgcControlTest, MemberSetpointPublishesEngineeringValueWithoutReverseScale)
   EXPECT_NEAR(Legacy(out->memberPublishKw[1]), 20.0, 1e-6);
 }
 
-// 验证：总实时输出发布工程量，不因 outputs.p_total_meas 的 scale/offset 被反向换算。
+// 验证：四路量测第一组求和时，总实时测量发布工程量且不受输出 scale/offset 反向影响。
+TEST(AgcControlTest, 四路量测第一组求和保持工程量) {
+  auto cfg = MakeFourMemberConfig();
+  cfg.mutable_outputs()->mutable_p_total_meas()->set_scale(2.0);
+  cfg.mutable_outputs()->mutable_p_total_meas()->set_offset(5.0);
+
+  auto input = MakeBaseInput(0.0, {35.895, 35.920, 35.901, 35.898});
+  auto totalMeasKw = Decimal("0");
+  const auto publishValue = AGC::ComputeTotalMeasKw(cfg, input, &totalMeasKw);
+  ASSERT_TRUE(publishValue.has_value());
+  EXPECT_EQ(totalMeasKw.ToFixedString(), "143.61400000000000000000");
+  EXPECT_EQ(publishValue->ToFixedString(), "143.61400000000000000000");
+}
+
+// 验证：四路量测第二组求和结果精确为 Modbus 工程量之和。
+TEST(AgcControlTest, 四路量测第二组求和保持工程量) {
+  auto cfg = MakeFourMemberConfig();
+  cfg.mutable_outputs()->mutable_p_total_meas()->set_scale(2.0);
+  cfg.mutable_outputs()->mutable_p_total_meas()->set_offset(5.0);
+
+  auto input = MakeBaseInput(0.0, {36.492, 36.485, 36.491, 36.506});
+  auto totalMeasKw = Decimal("0");
+  const auto publishValue = AGC::ComputeTotalMeasKw(cfg, input, &totalMeasKw);
+  ASSERT_TRUE(publishValue.has_value());
+  EXPECT_EQ(totalMeasKw.ToFixedString(), "145.97400000000000000000");
+  EXPECT_EQ(publishValue->ToFixedString(), "145.97400000000000000000");
+}
+
+// 验证：成员量测缺失时沿用现有接口的“仅汇总已到达成员”语义，不读取缺失槽位中的陈旧值。
+TEST(AgcControlTest, 缺失成员量测遵循现有汇总语义) {
+  auto cfg = MakeFourMemberConfig();
+  auto input = MakeBaseInput(0.0, {35.895, 999.0, 35.901, 35.898});
+  input.hasMemberMeasRaw[1] = false;
+
+  auto totalMeasKw = Decimal("0");
+  const auto publishValue = AGC::ComputeTotalMeasKw(cfg, input, &totalMeasKw);
+  ASSERT_TRUE(publishValue.has_value());
+  EXPECT_EQ(totalMeasKw.ToFixedString(), "107.69400000000000000000");
+  EXPECT_EQ(publishValue->ToFixedString(), "107.69400000000000000000");
+}
+
+// 验证：两路兼容场景下，总实时输出发布工程量，不因 outputs.p_total_meas 的 scale/offset 被反向换算。
 TEST(AgcControlTest, TotalMeasurementPublishesEngineeringValueWithoutReverseScale) {
   auto cfg = MakeBaseConfig();
   cfg.mutable_outputs()->mutable_p_total_meas()->set_scale(2.0);

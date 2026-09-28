@@ -90,6 +90,33 @@ AGCProto::UpsertGroupRequest MakeGroupReq(const char *groupName) {
   return req;
 }
 
+AGCProto::UpsertGroupRequest MakeFourMemberGroupReq(const char *groupName) {
+  auto req = MakeGroupReq(groupName);
+  auto *config = req.mutable_config();
+  config->clear_members();
+  config->mutable_outputs()->mutable_p_total_meas()->set_scale(2.0);
+  config->mutable_outputs()->mutable_p_total_meas()->set_offset(5.0);
+
+  constexpr const char *kMeasTags[] = {
+      "INV1_P_MEAS", "INV2_P_MEAS", "INV3_P_MEAS", "INV4_P_MEAS"};
+  constexpr const char *kSetTags[] = {
+      "INV1_P_SET", "INV2_P_SET", "INV3_P_SET", "INV4_P_SET"};
+  constexpr const char *kMemberNames[] = {"inv-1", "inv-2", "inv-3", "inv-4"};
+  for (int index = 0; index < 4; ++index) {
+    auto *member = config->add_members();
+    member->set_member_name(kMemberNames[index]);
+    member->set_controllable(true);
+    member->set_capacity_kw(150.0);
+    member->set_weight(1.0);
+    member->mutable_p_meas()->set_tag(kMeasTags[index]);
+    member->mutable_p_meas()->set_unit("kW");
+    member->mutable_p_set()->mutable_signal()->set_tag(kSetTags[index]);
+    member->mutable_p_set()->mutable_signal()->set_unit("kW");
+    member->mutable_p_set()->set_mode(AGCProto::VALUE_MODE_ABSOLUTE);
+  }
+  return req;
+}
+
 void PublishDoublePoint(FakeDataCenterState *state, uint32_t connId, const char *tag, double value) {
   ASSERT_NE(state, nullptr);
   DataCenterProto::PublishRequest req;
@@ -829,6 +856,42 @@ TEST(AgcGroupManagerTest, UpsertGroupRejectsReservedDefaultPointTag) {
   EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
 }
 
+// 验证：调节返回值等于 AGC 接受的工程控制值，并保留输入命令的质量和时间戳。
+TEST(AgcGroupManagerTest, 调节返回值等于接受控制值并保留质量时间戳) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  auto req = MakeGroupReq("g-accepted-command-echo");
+  req.mutable_config()->mutable_p_cmd()->mutable_signal()->set_scale(2.0);
+  req.mutable_config()->mutable_p_cmd()->mutable_signal()->set_offset(5.0);
+  req.mutable_config()->mutable_members(0)->set_capacity_kw(1000.0);
+  req.mutable_config()->mutable_members(1)->set_capacity_kw(1000.0);
+
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+
+  DataCenterProto::ExecuteCommandRequest command;
+  command.mutable_dst()->set_conn_id(info.conn_id());
+  command.mutable_dst()->set_conn_name("g-accepted-command-echo");
+  command.mutable_dst()->set_tag("P_CMD");
+  command.mutable_value()->set_int_value(30);
+  command.set_quality(DataCenterProto::QUALITY_BAD);
+  command.set_ts_ms(987654);
+
+  DataCenterProto::ExecuteCommandResponse response;
+  ASSERT_TRUE(mgr.ExecuteCommand(command, &response).ok());
+  ASSERT_EQ(response.status(), DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_DOUBLE_EQ(response.accepted_value(), 65.0);
+  EXPECT_EQ(response.accepted_value_decimal(), "65.00000000000000000000");
+  EXPECT_TRUE(WaitForLatestDoubleWithQualityAndTs(
+      state, info.conn_id(), "调节返回值", 65.0,
+      DataCenterProto::QUALITY_BAD, 987654));
+
+  ASSERT_TRUE(mgr.StopGroup("g-accepted-command-echo").ok());
+}
+
 // 验证：实时命令输入会将工程量、质量与时间戳回显到调节返回值默认点。
 TEST(AgcGroupManagerTest, RealtimeCommandPublishesEngineeringCommandEcho) {
   FakeDataCenterState state;
@@ -1069,7 +1132,45 @@ TEST(AgcGroupManagerTest, RuntimeCommandUpdateTriggersControlAfterStart) {
   ASSERT_TRUE(mgr.StopGroup("g-runtime-cmd").ok());
 }
 
-// 验证：未下发总设定时，成员量测快照与后续量测变化仍会驱动总实时测量值更新，但不会下发成员设定。
+// 验证：四路量测先后更新时，总实时测量始终发布四路工程量之和，即使没有新的控制命令。
+TEST(AgcGroupManagerTest, 四路量测实时汇总不依赖新命令) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  auto req = MakeFourMemberGroupReq("g-four-meas-total");
+
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+  ASSERT_TRUE(mgr.StopGroup("g-four-meas-total").ok());
+  PublishDoublePoint(&state, info.conn_id(), "INV1_P_MEAS", 35.895);
+  PublishDoublePoint(&state, info.conn_id(), "INV2_P_MEAS", 35.920);
+  PublishDoublePoint(&state, info.conn_id(), "INV3_P_MEAS", 35.901);
+  PublishDoublePoint(&state, info.conn_id(), "INV4_P_MEAS", 35.898);
+
+  ASSERT_TRUE(mgr.StartGroup("g-four-meas-total").ok());
+  ASSERT_TRUE(WaitForSubscriptionCount(state, info.conn_id(), 1u));
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "P_TOTAL", 143.614));
+  for (const char *tag : {"INV1_P_SET", "INV2_P_SET", "INV3_P_SET", "INV4_P_SET"}) {
+    EXPECT_EQ(state.GetPublishCount(info.conn_id(), tag), 0u);
+  }
+
+  const auto publishCountBeforeUpdate = state.GetPublishCount(info.conn_id(), "P_TOTAL");
+  PublishDoublePoint(&state, info.conn_id(), "INV1_P_MEAS", 36.492);
+  PublishDoublePoint(&state, info.conn_id(), "INV2_P_MEAS", 36.485);
+  PublishDoublePoint(&state, info.conn_id(), "INV3_P_MEAS", 36.491);
+  PublishDoublePoint(&state, info.conn_id(), "INV4_P_MEAS", 36.506);
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "P_TOTAL", 145.974));
+  EXPECT_GT(state.GetPublishCount(info.conn_id(), "P_TOTAL"), publishCountBeforeUpdate);
+  for (const char *tag : {"INV1_P_SET", "INV2_P_SET", "INV3_P_SET", "INV4_P_SET"}) {
+    EXPECT_EQ(state.GetPublishCount(info.conn_id(), tag), 0u);
+  }
+
+  ASSERT_TRUE(mgr.StopGroup("g-four-meas-total").ok());
+}
+
+// 验证：两路兼容场景下，未下发总设定时成员量测变化仍驱动总实时测量值更新。
 TEST(AgcGroupManagerTest, MeasurementUpdatesPublishRealtimeTotalWithoutCommand) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);

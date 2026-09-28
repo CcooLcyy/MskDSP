@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <boost/asio/ip/tcp.hpp>
@@ -209,6 +210,26 @@ std::vector<uint8_t> BuildSetpointCommandAsdu(uint32_t ioa, float value, bool se
   }
   asdu.emplace_back(qos);
   return asdu;
+}
+
+void ExpectSetpointConfirmation(const std::vector<uint8_t>& apdu,
+                                uint8_t expected_cot,
+                                bool expected_positive,
+                                const std::array<uint8_t, 4>& expected_float) {
+  ASSERT_EQ(FrameTypeOf(apdu), FrameType::I);
+  ASSERT_GE(apdu.size(), 20u);
+  EXPECT_EQ(apdu[6], kTypeIdSetpointShort);
+  EXPECT_EQ(static_cast<uint8_t>(apdu[8] & 0x3F), expected_cot);
+  if (expected_positive) {
+    EXPECT_EQ(static_cast<uint8_t>(apdu[8] & kCotNegative), 0);
+  } else {
+    EXPECT_NE(static_cast<uint8_t>(apdu[8] & kCotNegative), 0);
+  }
+  EXPECT_EQ(static_cast<uint32_t>(apdu[12]) |
+                (static_cast<uint32_t>(apdu[13]) << 8) |
+                (static_cast<uint32_t>(apdu[14]) << 16),
+            25089u);
+  EXPECT_TRUE(std::equal(expected_float.begin(), expected_float.end(), apdu.begin() + 15));
 }
 
 std::vector<uint8_t> BuildInterrogationAsdu(uint8_t cause, uint8_t qoi) {
@@ -1012,6 +1033,147 @@ TEST(IEC104TcpSessionTest, SetpointCommandRejectedByCallback) {
   EXPECT_EQ(cmd.ioa, 300u);
   EXPECT_EQ(cmd.type, IEC104Proto::POINT_TYPE_FLOAT);
   EXPECT_DOUBLE_EQ(cmd.doubleValue, 123.5);
+
+  session->Stop();
+  io->stop();
+}
+
+// 验证 IOA25089 的三组设点命令确认帧均回显当前命令的原始 FLOAT 字节。
+TEST(IEC104TcpSessionTest, 设点确认回显三组原始浮点字节) {
+  auto io = std::make_shared<boost::asio::io_context>();
+  auto sockets = MakeConnectedSockets(*io);
+  auto config = MakeConfig("setpoint-raw-float-confirm", IEC104Proto::ROLE_SERVER, 2, 2, 1, 5, 8);
+  auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
+  session->SetCommandCallback([](const IEC104::CommandValue&) { return IEC104::CommandResult{}; });
+  session->Start(std::move(sockets.session_socket));
+
+  std::jthread session_thread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [&]() { io->run(); });
+
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildUFrame(kUStartDtAct)));
+  auto start_con = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "设点确认测试启动确认");
+  ASSERT_FALSE(start_con.empty());
+  ASSERT_EQ(FrameTypeOf(start_con), FrameType::U);
+  EXPECT_EQ(start_con[2], kUStartDtCon);
+
+  struct SetpointInput {
+    float value;
+    std::array<uint8_t, 4> raw;
+  };
+  const std::array<SetpointInput, 3> inputs = {{
+      {0.143577F, {0xD9, 0x05, 0x13, 0x3E}},
+      {0.146034F, {0xF0, 0x89, 0x15, 0x3E}},
+      {0.145029F, {0x7B, 0x82, 0x14, 0x3E}},
+  }};
+
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    auto request = BuildIFrame(static_cast<uint16_t>(i), 0,
+                                BuildSetpointCommandAsdu(25089, inputs[i].value, false, kCotActivation));
+    boost::asio::write(sockets.peer_socket, boost::asio::buffer(request));
+
+    auto activation_con = ReadApduWithTimeout(
+        sockets.peer_socket, std::chrono::milliseconds(2000), "设点肯定激活确认");
+    auto termination = ReadApduWithTimeout(
+        sockets.peer_socket, std::chrono::milliseconds(2000), "设点肯定激活终止");
+    ASSERT_FALSE(activation_con.empty());
+    ASSERT_FALSE(termination.empty());
+    ExpectSetpointConfirmation(activation_con, kCotActivationCon, true, inputs[i].raw);
+    ExpectSetpointConfirmation(termination, kCotActivationTermination, true, inputs[i].raw);
+  }
+
+  session->Stop();
+  io->stop();
+}
+
+// 验证业务拒绝时返回负 COT7，且负确认仍携带被拒绝命令的 FLOAT 字节。
+TEST(IEC104TcpSessionTest, 业务拒绝设点确认回显当前命令) {
+  auto io = std::make_shared<boost::asio::io_context>();
+  auto sockets = MakeConnectedSockets(*io);
+  auto config = MakeConfig("setpoint-reject-current-value", IEC104Proto::ROLE_SERVER, 2, 2, 1, 5, 8);
+  auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
+  session->SetCommandCallback([](const IEC104::CommandValue&) {
+    IEC104::CommandResult result;
+    result.accepted = false;
+    result.reason = "测试拒绝";
+    return result;
+  });
+  session->Start(std::move(sockets.session_socket));
+
+  std::jthread session_thread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [&]() { io->run(); });
+
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildUFrame(kUStartDtAct)));
+  ASSERT_FALSE(ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "拒绝测试启动确认").empty());
+
+  const auto request = BuildIFrame(
+      0, 0, BuildSetpointCommandAsdu(25089, 0.146034F, false, kCotActivation));
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(request));
+  auto negative_con = ReadApduWithTimeout(
+      sockets.peer_socket, std::chrono::milliseconds(2000), "设点负激活确认");
+  ASSERT_FALSE(negative_con.empty());
+  ExpectSetpointConfirmation(negative_con,
+                             kCotActivationCon,
+                             false,
+                             {0xF0, 0x89, 0x15, 0x3E});
+  EXPECT_FALSE(WaitReadable(sockets.peer_socket, std::chrono::milliseconds(200)));
+
+  session->Stop();
+  io->stop();
+}
+
+// 验证连续排队的旧 0.6 设点帧与新命令确认不会发生顺序和值串用。
+TEST(IEC104TcpSessionTest, 设点确认队列不串用旧的零点六浮点值) {
+  auto io = std::make_shared<boost::asio::io_context>();
+  auto sockets = MakeConnectedSockets(*io);
+  auto config = MakeConfig("setpoint-confirm-queue-order", IEC104Proto::ROLE_SERVER, 2, 2, 1, 5, 8);
+  config.mutable_apci()->set_k(1);
+  auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
+  session->SetCommandCallback([](const IEC104::CommandValue&) { return IEC104::CommandResult{}; });
+  session->Start(std::move(sockets.session_socket));
+
+  std::jthread session_thread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [&]() { io->run(); });
+
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildUFrame(kUStartDtAct)));
+  ASSERT_FALSE(ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "队列测试启动确认").empty());
+
+  const auto old_frame = BuildIFrame(
+      0, 0, BuildSetpointCommandAsdu(25089, 0.6F, false, kCotActivation));
+  const auto new_frame = BuildIFrame(
+      1, 0, BuildSetpointCommandAsdu(25089, 0.143577F, false, kCotActivation));
+  std::vector<uint8_t> queued_frames = old_frame;
+  queued_frames.insert(queued_frames.end(), new_frame.begin(), new_frame.end());
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(queued_frames));
+
+  const std::array<uint8_t, 4> old_raw = {0x9A, 0x99, 0x19, 0x3F};
+  const std::array<uint8_t, 4> new_raw = {0xD9, 0x05, 0x13, 0x3E};
+  auto old_activation_con = ReadApduWithTimeout(
+      sockets.peer_socket, std::chrono::milliseconds(2000), "旧设点肯定激活确认");
+  ASSERT_FALSE(old_activation_con.empty());
+  EXPECT_EQ(ParseSeq(old_activation_con, 2), 0u);
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildSFrame(1)));
+  auto old_termination = ReadApduWithTimeout(
+      sockets.peer_socket, std::chrono::milliseconds(2000), "旧设点肯定激活终止");
+  ASSERT_FALSE(old_termination.empty());
+  EXPECT_EQ(ParseSeq(old_termination, 2), 1u);
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildSFrame(2)));
+  auto new_activation_con = ReadApduWithTimeout(
+      sockets.peer_socket, std::chrono::milliseconds(2000), "新设点肯定激活确认");
+  ASSERT_FALSE(new_activation_con.empty());
+  EXPECT_EQ(ParseSeq(new_activation_con, 2), 2u);
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildSFrame(3)));
+  auto new_termination = ReadApduWithTimeout(
+      sockets.peer_socket, std::chrono::milliseconds(2000), "新设点肯定激活终止");
+  ASSERT_FALSE(new_termination.empty());
+  EXPECT_EQ(ParseSeq(new_termination, 2), 3u);
+  ExpectSetpointConfirmation(old_activation_con, kCotActivationCon, true, old_raw);
+  ExpectSetpointConfirmation(old_termination, kCotActivationTermination, true, old_raw);
+  ExpectSetpointConfirmation(new_activation_con, kCotActivationCon, true, new_raw);
+  ExpectSetpointConfirmation(new_termination, kCotActivationTermination, true, new_raw);
+  EXPECT_FALSE(WaitReadable(sockets.peer_socket, std::chrono::milliseconds(200)));
 
   session->Stop();
   io->stop();

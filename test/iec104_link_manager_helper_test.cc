@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <cstdint>
+#include <cstring>
 #include <limits>
 #include <optional>
 #include <string>
@@ -617,6 +619,92 @@ TEST(IEC104LinkManagerHelperTest, BuildInterrogationSnapshotBuildsValues) {
 
   auto snapshot = mgr.buildInterrogationSnapshot("conn");
   EXPECT_FALSE(snapshot.empty());
+}
+
+// 验证：DataCenter 工程量经 IOA16386/16387 的 scale=1000 反向换算为 IEC104 原始 FLOAT，并保留质量、时间戳和 tag 到 IOA 映射。
+TEST(IEC104LinkManagerHelperTest, DataCenter工程量映射到IEC104原始FLOAT并保留元数据) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+
+  LinkManager::LinkRuntime runtime;
+  runtime.connId = 77;
+  runtime.config = MakeClientConfig("agc-boundary", IEC104Proto::STATION_ROLE_SLAVE);
+  IEC104Proto::UpsertPointTableRequest tableRequest;
+  auto *totalMeas = tableRequest.add_points();
+  totalMeas->set_tag("AGC全站有功出力");
+  totalMeas->set_ioa(16386);
+  totalMeas->set_type(IEC104Proto::POINT_TYPE_FLOAT);
+  totalMeas->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_TELEMETRY);
+  totalMeas->set_scale(1000.0);
+  auto *controlReturn = tableRequest.add_points();
+  controlReturn->set_tag("调节返回值");
+  controlReturn->set_ioa(16387);
+  controlReturn->set_type(IEC104Proto::POINT_TYPE_FLOAT);
+  controlReturn->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_TELEMETRY);
+  controlReturn->set_scale(1000.0);
+  ASSERT_TRUE(runtime.pointTable.Upsert(tableRequest.points(), true).ok());
+  runtime.pointTableConfigured = true;
+  mgr.linksByName_.emplace("agc-boundary", std::move(runtime));
+
+  DataCenterProto::PublishRequest totalPublish;
+  totalPublish.set_conn_id(77);
+  totalPublish.set_tag("AGC全站有功出力");
+  totalPublish.mutable_value()->set_decimal_value("143.614");
+  totalPublish.set_quality(DataCenterProto::QUALITY_GOOD);
+  totalPublish.set_ts_ms(1001);
+  ASSERT_TRUE(state.Publish(totalPublish).ok());
+
+  DataCenterProto::PublishRequest returnPublish;
+  returnPublish.set_conn_id(77);
+  returnPublish.set_tag("调节返回值");
+  returnPublish.mutable_value()->set_decimal_value("143.577");
+  returnPublish.set_quality(DataCenterProto::QUALITY_BAD);
+  returnPublish.set_ts_ms(1002);
+  ASSERT_TRUE(state.Publish(returnPublish).ok());
+
+  const auto snapshot = mgr.buildInterrogationSnapshot("agc-boundary");
+  ASSERT_EQ(snapshot.size(), 2u);
+  const auto findByIoa = [&snapshot](uint32_t ioa) -> const PointValue * {
+    for (const auto &point : snapshot) {
+      if (point.ioa == ioa) {
+        return &point;
+      }
+    }
+    return nullptr;
+  };
+
+  const auto *totalPoint = findByIoa(16386);
+  ASSERT_NE(totalPoint, nullptr);
+  EXPECT_NEAR(totalPoint->doubleValue, 0.143614, 1e-7);
+  float totalFloat = static_cast<float>(totalPoint->doubleValue);
+  uint32_t totalBits = 0;
+  std::memcpy(&totalBits, &totalFloat, sizeof(totalFloat));
+  EXPECT_EQ(totalBits, 0x3E130F8Cu);
+  EXPECT_EQ(totalPoint->quality, 0x00);
+  EXPECT_EQ(totalPoint->tsMs, 1001);
+  const auto totalMeta = mgr.linksByName_.at("agc-boundary").pointTable.FindByIoa(16386);
+  ASSERT_TRUE(totalMeta.has_value());
+  EXPECT_EQ(totalPoint->type, IEC104Proto::POINT_TYPE_FLOAT);
+  EXPECT_EQ(totalMeta->tag, "AGC全站有功出力");
+  EXPECT_EQ(totalMeta->scale.ToFixedString(), "1000.00000000000000000000");
+
+  const auto *returnPoint = findByIoa(16387);
+  ASSERT_NE(returnPoint, nullptr);
+  EXPECT_NEAR(returnPoint->doubleValue, 0.143577, 1e-7);
+  float returnFloat = static_cast<float>(returnPoint->doubleValue);
+  uint32_t returnBits = 0;
+  std::memcpy(&returnBits, &returnFloat, sizeof(returnFloat));
+  EXPECT_EQ(returnBits, 0x3E1305D9u);
+  EXPECT_EQ(returnPoint->quality, 0x80);
+  EXPECT_EQ(returnPoint->tsMs, 1002);
+  const auto returnMeta = mgr.linksByName_.at("agc-boundary").pointTable.FindByIoa(16387);
+  ASSERT_TRUE(returnMeta.has_value());
+  EXPECT_EQ(returnPoint->type, IEC104Proto::POINT_TYPE_FLOAT);
+  EXPECT_EQ(returnMeta->tag, "调节返回值");
+  EXPECT_EQ(returnMeta->scale.ToFixedString(), "1000.00000000000000000000");
 }
 
 // 验证：无 DataCenter Route 时遥测按 IOA 升序连续递增，并且重复查询不会改变快照。
