@@ -1179,6 +1179,81 @@ TEST(IEC104TcpSessionTest, 设点确认队列不串用旧的零点六浮点值) 
   io->stop();
 }
 
+// 验证发送窗口释放后，遥调确认优先于已经排队的遥测报文。
+TEST(IEC104TcpSessionTest, ControlConfirmationPrecedesQueuedTelemetry) {
+  auto io = std::make_shared<boost::asio::io_context>();
+  auto sockets = MakeConnectedSockets(*io);
+  auto config = MakeConfig("control-priority-over-telemetry", IEC104Proto::ROLE_SERVER, 2, 2, 1, 5, 8);
+  config.mutable_apci()->set_k(1);
+  config.set_point_batch_window_ms(1);
+  auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
+  session->SetCommandCallback([](const IEC104::CommandValue&) { return IEC104::CommandResult{}; });
+  session->Start(std::move(sockets.session_socket));
+
+  std::jthread session_thread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME,
+      [&]() { io->run(); });
+
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildUFrame(kUStartDtAct)));
+  ASSERT_FALSE(ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "控制优先级启动确认").empty());
+
+  IEC104::PointValue firstPoint;
+  firstPoint.ioa = 4002;
+  firstPoint.type = IEC104Proto::POINT_TYPE_FLOAT;
+  firstPoint.doubleValue = 1.0;
+  session->SendPointValue(firstPoint, kCotSpontaneous);
+  auto firstTelemetry = ReadApduWithTimeout(
+      sockets.peer_socket, std::chrono::milliseconds(2000), "首个遥测报文");
+  ASSERT_FALSE(firstTelemetry.empty());
+  ASSERT_EQ(FrameTypeOf(firstTelemetry), FrameType::I);
+  EXPECT_EQ(firstTelemetry[6], kTypeIdMeasuredValueShort);
+  EXPECT_EQ(ParseSeq(firstTelemetry, 2), 0u);
+
+  IEC104::PointValue secondPoint;
+  secondPoint.ioa = 4003;
+  secondPoint.type = IEC104Proto::POINT_TYPE_FLOAT;
+  secondPoint.doubleValue = 2.0;
+  session->SendPointValue(secondPoint, kCotSpontaneous);
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  EXPECT_FALSE(WaitReadable(sockets.peer_socket, std::chrono::milliseconds(100)));
+
+  const std::array<uint8_t, 4> commandRaw = {0xD9, 0x05, 0x13, 0x3E};
+  boost::asio::write(
+      sockets.peer_socket,
+      boost::asio::buffer(BuildIFrame(0, 0,
+                                      BuildSetpointCommandAsdu(25089, 0.143577F, false, kCotActivation))));
+
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildSFrame(1)));
+  auto activationCon = ReadApduWithTimeout(
+      sockets.peer_socket, std::chrono::milliseconds(2000), "遥调激活确认");
+  ASSERT_FALSE(activationCon.empty());
+  EXPECT_EQ(ParseSeq(activationCon, 2), 1u);
+  ExpectSetpointConfirmation(activationCon, kCotActivationCon, true, commandRaw);
+
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildSFrame(2)));
+  auto termination = ReadApduWithTimeout(
+      sockets.peer_socket, std::chrono::milliseconds(2000), "遥调激活结束");
+  ASSERT_FALSE(termination.empty());
+  EXPECT_EQ(ParseSeq(termination, 2), 2u);
+  ExpectSetpointConfirmation(termination, kCotActivationTermination, true, commandRaw);
+
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildSFrame(3)));
+  auto secondTelemetry = ReadApduWithTimeout(
+      sockets.peer_socket, std::chrono::milliseconds(2000), "排队遥测报文");
+  ASSERT_FALSE(secondTelemetry.empty());
+  ASSERT_EQ(FrameTypeOf(secondTelemetry), FrameType::I);
+  EXPECT_EQ(secondTelemetry[6], kTypeIdMeasuredValueShort);
+  EXPECT_EQ(ParseSeq(secondTelemetry, 2), 3u);
+  ASSERT_GE(secondTelemetry.size(), 20u);
+  EXPECT_EQ(static_cast<uint32_t>(secondTelemetry[12]) |
+                (static_cast<uint32_t>(secondTelemetry[13]) << 8) |
+                (static_cast<uint32_t>(secondTelemetry[14]) << 16),
+            4003u);
+
+  session->Stop();
+  io->stop();
+}
+
 // 验证 point_with_time=false 时上送点值使用不带时标类型。
 TEST(IEC104TcpSessionTest, PointWithoutTimeUsesNoTimestampTypes) {
   auto io = std::make_shared<boost::asio::io_context>();

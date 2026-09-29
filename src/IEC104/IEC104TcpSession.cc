@@ -59,6 +59,22 @@ constexpr uint32_t kDefaultPointBatchWindowMs = 20;
 constexpr size_t kSoeDedupeWindow = 8000;
 constexpr std::chrono::seconds kRemoteControlSelectTimeout{10};
 
+bool isControlAsdu(const std::vector<uint8_t> &asdu) {
+  if (asdu.empty()) {
+    return false;
+  }
+  switch (asdu.front()) {
+  case kTypeIdSingleCommand:
+  case kTypeIdDoubleCommand:
+  case kTypeIdSetpointShort:
+  case kTypeIdInterrogationCmd:
+  case kTypeIdTimeSyncCmd:
+    return true;
+  default:
+    return false;
+  }
+}
+
 size_t maxSq0Objects(uint32_t maxAsduBytes, uint32_t objectSize) {
   if (maxAsduBytes <= kAsduHeaderSize) {
     return 0;
@@ -149,6 +165,7 @@ void TcpSession::Start(boost::asio::ip::tcp::socket socket) {
   sendUnacked_ = 0;
   recvSinceLastAck_ = 0;
   testFramePending_ = false;
+  pendingControlAsdu_.clear();
   pendingAsdu_.clear();
   sentIFrameSoeSequences_.clear();
   soeReplayLoaded_ = false;
@@ -193,6 +210,7 @@ void TcpSession::Stop() {
     self->ackPending_ = false;
     self->recvSinceLastAck_ = 0;
     self->writeQueue_.clear();
+    self->pendingControlAsdu_.clear();
     self->pendingAsdu_.clear();
     self->sentIFrameSoeSequences_.clear();
     self->soeReplayLoaded_ = false;
@@ -1213,7 +1231,7 @@ void TcpSession::handleInterrogation(const std::vector<uint8_t> &asdu) {
   }
 
   LOG_INFO("IEC104 接收总召激活: conn_name={}, qoi={}", config_.conn_name(), qoi);
-  enqueueAsdu(buildInterrogationAsdu(kCotActivationCon, qoi));
+  enqueueAsdu(buildInterrogationAsdu(kCotActivationCon, qoi), std::nullopt, true);
 
   std::vector<PointValue> snapshot;
   if (interrogationSnapshotProvider_) {
@@ -1225,7 +1243,7 @@ void TcpSession::handleInterrogation(const std::vector<uint8_t> &asdu) {
     enqueuePointValuesBatch(std::move(snapshot), kCotInterrogatedByStation);
   }
 
-  enqueueAsdu(buildInterrogationAsdu(kCotActivationTermination, qoi));
+  enqueueAsdu(buildInterrogationAsdu(kCotActivationTermination, qoi), std::nullopt, false);
 }
 
 void TcpSession::handleTimeSyncCommand(const std::vector<uint8_t> &asdu) {
@@ -1267,12 +1285,18 @@ void TcpSession::handleTimeSyncCommand(const std::vector<uint8_t> &asdu) {
   }
 }
 
-void TcpSession::enqueueAsdu(std::vector<uint8_t> asdu, std::optional<uint64_t> soeEventSequence) {
+void TcpSession::enqueueAsdu(std::vector<uint8_t> asdu,
+                             std::optional<uint64_t> soeEventSequence,
+                             std::optional<bool> highPriority) {
   if (closing_) {
     return;
   }
-  pendingAsdu_.push_back(PendingAsdu{std::move(asdu), soeEventSequence});
-  LOG_DEBUG("IEC104 ASDU 入队: conn_name={}, 待处理={}, 激活={}", config_.conn_name(), pendingAsdu_.size(), dataTransferActive_);
+  const bool isHighPriority = highPriority.value_or(isControlAsdu(asdu));
+  auto &pendingQueue = isHighPriority ? pendingControlAsdu_ : pendingAsdu_;
+  pendingQueue.push_back(PendingAsdu{std::move(asdu), soeEventSequence, isHighPriority});
+  LOG_DEBUG("IEC104 ASDU 入队: conn_name={}, 类型={}, 控制队列={}, 普通队列={}, 激活={}",
+            config_.conn_name(), isHighPriority ? "控制" : "普通",
+            pendingControlAsdu_.size(), pendingAsdu_.size(), dataTransferActive_);
   trySendPending();
 }
 
@@ -1351,9 +1375,10 @@ void TcpSession::trySendPending() {
   if (closing_ || !dataTransferActive_) {
     return;
   }
-  while (!pendingAsdu_.empty() && sendUnacked_ < apci_.k) {
-    auto asdu = std::move(pendingAsdu_.front());
-    pendingAsdu_.pop_front();
+  while (sendUnacked_ < apci_.k && (!pendingControlAsdu_.empty() || !pendingAsdu_.empty())) {
+    auto &pendingQueue = pendingControlAsdu_.empty() ? pendingAsdu_ : pendingControlAsdu_;
+    auto asdu = std::move(pendingQueue.front());
+    pendingQueue.pop_front();
     sendIFrame(std::move(asdu));
   }
 }
@@ -1364,12 +1389,14 @@ void TcpSession::sendIFrame(PendingAsdu asdu) {
   }
   if (!dataTransferActive_) {
     LOG_WARNING("IEC104 非激活状态发送 I 帧: conn_name={}", config_.conn_name());
-    pendingAsdu_.emplace_front(std::move(asdu));
+    auto &pendingQueue = asdu.highPriority ? pendingControlAsdu_ : pendingAsdu_;
+    pendingQueue.emplace_front(std::move(asdu));
     return;
   }
   if (sendUnacked_ >= apci_.k) {
     LOG_DEBUG("IEC104 发送窗口已满，ASDU 入队: conn_name={}, k={}, 未确认={}", config_.conn_name(), apci_.k, sendUnacked_);
-    pendingAsdu_.emplace_front(std::move(asdu));
+    auto &pendingQueue = asdu.highPriority ? pendingControlAsdu_ : pendingAsdu_;
+    pendingQueue.emplace_front(std::move(asdu));
     return;
   }
 
@@ -1957,6 +1984,7 @@ void TcpSession::setDataTransferActive(bool active, const char *reason) {
   recvSinceLastAck_ = 0;
   sendUnacked_ = 0;
   sendAckedSeq_ = sendSeq_;
+  pendingControlAsdu_.clear();
   pendingAsdu_.clear();
   sentIFrameSoeSequences_.clear();
   soeReplayLoaded_ = false;
@@ -1982,7 +2010,7 @@ void TcpSession::sendAutoInterrogation(uint8_t qoi) {
   }
   autoInterrogationSent_ = true;
   LOG_INFO("IEC104 自动总召: conn_name={}, qoi={}", config_.conn_name(), qoi);
-  enqueueAsdu(buildInterrogationAsdu(kCotActivation, qoi));
+  enqueueAsdu(buildInterrogationAsdu(kCotActivation, qoi), std::nullopt, true);
 }
 
 void TcpSession::sendTimeSync(int64_t tsMs) {

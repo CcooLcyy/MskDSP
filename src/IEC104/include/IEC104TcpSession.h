@@ -135,8 +135,10 @@ private:
   struct PendingAsdu {
     std::vector<uint8_t> bytes;
     std::optional<uint64_t> soeEventSequence;
+    bool highPriority = false;
   };
 
+  std::deque<PendingAsdu> pendingControlAsdu_;
   std::deque<PendingAsdu> pendingAsdu_;
   std::deque<std::optional<uint64_t>> sentIFrameSoeSequences_;
   bool writing_ = false;
@@ -193,7 +195,9 @@ private:
   void handleTimeSyncCommand(const std::vector<uint8_t>& asdu);
   void handleInterrogation(const std::vector<uint8_t>& asdu);
 
-  void enqueueAsdu(std::vector<uint8_t> asdu, std::optional<uint64_t> soeEventSequence = std::nullopt);
+  void enqueueAsdu(std::vector<uint8_t> asdu,
+                   std::optional<uint64_t> soeEventSequence = std::nullopt,
+                   std::optional<bool> highPriority = std::nullopt);
   void enqueueSoe(const SoeEvent& event);
   void loadSoeReplay();
   void enqueuePointValue(const PointValue& value, uint8_t cause);
