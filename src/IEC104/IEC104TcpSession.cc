@@ -237,6 +237,10 @@ void TcpSession::SetInterrogationSnapshotProvider(SnapshotProvider provider) {
   interrogationSnapshotProvider_ = std::move(provider);
 }
 
+void TcpSession::SetActivationSnapshotProvider(SnapshotProvider provider) {
+  activationSnapshotProvider_ = std::move(provider);
+}
+
 void TcpSession::SetSoeReplayProvider(SoeReplayProvider provider) {
   soeReplayProvider_ = std::move(provider);
 }
@@ -1973,6 +1977,12 @@ void TcpSession::setDataTransferActive(bool active, const char *reason) {
       sendAutoInterrogation(kQoiStation);
     }
     loadSoeReplay();
+    if (!isMasterStation() && activationSnapshotProvider_) {
+      auto values = activationSnapshotProvider_();
+      LOG_INFO("IEC104 从站激活后主动发送固定配置及恢复点值: conn_name={}, 点数={}",
+               config_.conn_name(), values.size());
+      enqueuePointValuesBatch(std::move(values), kCotSpontaneous);
+    }
     trySendPending();
     return;
   }

@@ -24,6 +24,8 @@ public:
         mskdsp::numeric::Decimal20::FromInt64(1).value();
     mskdsp::numeric::Decimal20 offset;
     mskdsp::numeric::Decimal20 deadband;
+    bool fixedValueEnabled = false;
+    double fixedValue = 0;
     IEC104Proto::RemoteControlType remoteControlType =
         IEC104Proto::REMOTE_CONTROL_TYPE_SINGLE;
     IEC104Proto::CommandExecutionMode commandExecutionMode =

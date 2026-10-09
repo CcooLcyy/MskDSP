@@ -36,7 +36,8 @@ public:
                               DataCenterProto::Quality quality, int64_t tsMs);
   grpc::Status ExecuteCommand(const DataCenterProto::ExecuteCommandRequest& request, DataCenterProto::ExecuteCommandResponse* response);
 
-  grpc::Status GetLatest(uint32_t connId, const std::vector<std::string>& tags, DataCenterProto::GetLatestResponse* out);
+  grpc::Status GetLatest(uint32_t connId, const std::vector<std::string>& tags,
+                        DataCenterProto::GetLatestResponse* out, uint32_t timeoutMs = 0);
   std::unique_ptr<grpc::ClientReaderInterface<DataCenterProto::PointUpdate>> Subscribe(
       grpc::ClientContext* context, uint32_t connId, const std::vector<std::string>& tags, bool snapshot);
 

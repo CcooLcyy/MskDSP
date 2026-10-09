@@ -247,7 +247,8 @@ grpc::Status DataCenterClient::ExecuteCommand(
 }
 
 grpc::Status DataCenterClient::GetLatest(
-    uint32_t connId, const std::vector<std::string>& tags, DataCenterProto::GetLatestResponse* out) {
+    uint32_t connId, const std::vector<std::string>& tags, DataCenterProto::GetLatestResponse* out,
+    uint32_t timeoutMs) {
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
@@ -268,6 +269,10 @@ grpc::Status DataCenterClient::GetLatest(
   }
 
   grpc::ClientContext ctx;
+  if (timeoutMs != 0) {
+    // 发送线程中的恢复快照必须有界，避免 DataCenter 故障阻塞协议和停止链路功能。
+    ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(timeoutMs));
+  }
   out->Clear();
   return stub->GetLatest(&ctx, req, out);
 }

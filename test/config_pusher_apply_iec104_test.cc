@@ -82,6 +82,47 @@ TEST(ConfigPusherApplyIec104Test, ApplyLinkAndPointTableWithoutExplicitStart) {
   EXPECT_TRUE(ConfigPusher::applyIec104Config(config, stub.get()));
 }
 
+// 验证：固定上报值及原倍率/偏移通过现有配置下发接口完整保留，不在编排阶段换算。
+TEST(ConfigPusherApplyIec104Test, PreservesFixedWireValueAndEngineeringOptions) {
+  auto config = MakeIec104Config(false);
+  auto *point = config.mutable_links(0)->mutable_point_table()->mutable_points(0);
+  point->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_TELEMETRY);
+  point->set_scale(2.0);
+  point->set_offset(3.0);
+  point->set_fixed_value_enabled(true);
+  point->set_fixed_value(10.0);
+  auto stub = std::make_unique<IEC104Proto::MockIEC104ServiceStub>();
+
+  InSequence seq;
+  EXPECT_CALL(*stub, ListLinks(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext *, const IEC104Proto::Empty &,
+                          IEC104Proto::ListLinksResponse *resp) {
+        resp->Clear();
+        return grpc::Status::OK;
+      }));
+  EXPECT_CALL(*stub, UpsertLink(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext *, const IEC104Proto::UpsertLinkRequest &,
+                          IEC104Proto::LinkInfo *resp) {
+        resp->set_conn_id(301);
+        return grpc::Status::OK;
+      }));
+  EXPECT_CALL(*stub, UpsertPointTable(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext *, const IEC104Proto::UpsertPointTableRequest &req,
+                          IEC104Proto::Empty *) {
+        EXPECT_TRUE(req.replace());
+        EXPECT_EQ(req.points_size(), 1);
+        if (req.points_size() == 1) {
+          EXPECT_TRUE(req.points(0).fixed_value_enabled());
+          EXPECT_DOUBLE_EQ(req.points(0).fixed_value(), 10.0);
+          EXPECT_DOUBLE_EQ(req.points(0).scale(), 2.0);
+          EXPECT_DOUBLE_EQ(req.points(0).offset(), 3.0);
+        }
+        return grpc::Status::OK;
+      }));
+  EXPECT_CALL(*stub, StartLink(_, _, _)).Times(0);
+  EXPECT_TRUE(ConfigPusher::applyIec104Config(config, stub.get()));
+}
+
 // 验证：缺少 config.conn_name 时不会继续下发连接配置，并返回失败。
 TEST(ConfigPusherApplyIec104Test, MissingConnNameSkipsRpc) {
   auto config = MakeIec104Config(false);

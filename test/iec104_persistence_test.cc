@@ -119,6 +119,41 @@ void RunWithDeadlockWatchdog(const char* what, const std::function<void()>& task
 
 }  // 命名空间结束
 
+// 验证：逐点固定值随点表落盘，重建模块后仍绕过原工程量配置。
+TEST(IEC104PersistenceTest, FixedPointSettingsSurviveModuleRestart) {
+  ScopedTempDir dir;
+  const auto database = dir.path() / "fixed.db";
+  FakeDataCenterState state;
+  const auto stub = MakeStub(&state);
+  const auto port = AllocateFreeTcpPort();
+  {
+    LinkManager manager("IEC104", database);
+    manager.setDataCenterStub(stub);
+    IEC104Proto::LinkInfo info;
+    ASSERT_TRUE(manager.UpsertLink(MakeServerLinkReq("fixed-persist", port), &info).ok());
+    IEC104Proto::UpsertPointTableRequest request;
+    request.set_conn_name("fixed-persist");
+    request.set_replace(true);
+    auto* point = request.add_points();
+    *point = MakePoint("fixed", 0x4001);
+    point->set_scale(2);
+    point->set_offset(3);
+    point->set_fixed_value_enabled(true);
+    point->set_fixed_value(10);
+    ASSERT_TRUE(manager.UpsertPointTable(request).ok());
+  }
+  LinkManager manager("IEC104", database);
+  manager.setDataCenterStub(stub);
+  IEC104Proto::PointTable table;
+  ASSERT_TRUE(manager.GetPointTable("fixed-persist", &table).ok());
+  ASSERT_EQ(table.points_size(), 1);
+  EXPECT_TRUE(table.points(0).fixed_value_enabled());
+  EXPECT_EQ(table.points(0).fixed_value(), 10);
+  EXPECT_EQ(table.points(0).scale(), 2);
+  EXPECT_EQ(table.points(0).offset(), 3);
+  ASSERT_TRUE(manager.StopLink("fixed-persist").ok());
+}
+
 // 验证：链路配置与点表在落盘后可被新 LinkManager 实例恢复，且恢复后会自动启动链路功能。
 TEST(IEC104PersistenceTest, LoadsPersistedLinkAndPointTableAfterRestart) {
   ScopedTempDir dir;

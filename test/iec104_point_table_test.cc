@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <limits>
+
 #include "IEC104PointTable.h"
 
 namespace {
@@ -13,6 +15,61 @@ IEC104Proto::Point MakePoint(const char* tag, uint32_t ioa) {
   return p;
 }
 }  // 命名空间结束
+
+// 验证：逐点固定值往返保留原工程量配置，旧配置默认关闭。
+TEST(IEC104PointTableTest, FixedValueRoundTripKeepsEngineeringParameters) {
+  PointTable table;
+  IEC104Proto::UpsertPointTableRequest request;
+  auto* point = request.add_points();
+  *point = MakePoint("fixed", 0x4001);
+  point->set_scale(2);
+  point->set_offset(3);
+  point->set_fixed_value_enabled(true);
+  point->set_fixed_value(10);
+  *request.add_points() = MakePoint("normal", 0x4002);
+  ASSERT_TRUE(table.Upsert(request.points(), true).ok());
+  IEC104Proto::PointTable output;
+  table.ToProto("slave", &output);
+  ASSERT_EQ(output.points_size(), 2);
+  EXPECT_TRUE(output.points(0).fixed_value_enabled());
+  EXPECT_EQ(output.points(0).fixed_value(), 10);
+  EXPECT_EQ(output.points(0).scale(), 2);
+  EXPECT_EQ(output.points(0).offset(), 3);
+  EXPECT_FALSE(output.points(1).fixed_value_enabled());
+  point->set_fixed_value_enabled(false);
+  ASSERT_TRUE(table.Upsert(request.points(), true).ok());
+  table.ToProto("slave", &output);
+  EXPECT_EQ(output.points(0).fixed_value(), 10);
+}
+
+// 验证：启用固定值时拒绝非有限、FLOAT 溢出、非法遥信和非上报业务。
+TEST(IEC104PointTableTest, FixedValueRejectsInvalidTypeValueAndBusiness) {
+  for (const auto value : {std::numeric_limits<double>::quiet_NaN(),
+                           std::numeric_limits<double>::infinity(),
+                           std::numeric_limits<double>::max()}) {
+    PointTable table;
+    IEC104Proto::UpsertPointTableRequest request;
+    auto* point = request.add_points();
+    *point = MakePoint("fixed", 0x4001);
+    point->set_fixed_value_enabled(true);
+    point->set_fixed_value(value);
+    EXPECT_EQ(table.Upsert(request.points(), true).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  }
+  PointTable table;
+  IEC104Proto::UpsertPointTableRequest request;
+  auto* point = request.add_points();
+  *point = MakePoint("fixed", 1);
+  point->set_type(IEC104Proto::POINT_TYPE_SINGLE);
+  point->set_fixed_value_enabled(true);
+  point->set_fixed_value(2);
+  EXPECT_EQ(table.Upsert(request.points(), true).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  point->set_fixed_value(0);
+  EXPECT_TRUE(table.Upsert(request.points(), true).ok());
+  point->set_fixed_value(1);
+  EXPECT_TRUE(table.Upsert(request.points(), true).ok());
+  point->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_CONTROL);
+  EXPECT_EQ(table.Upsert(request.points(), true).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
 
 // 验证：点表 replace 更新与双向查询（tag->ioa、ioa->tag）以及稳定输出顺序。
 TEST(IEC104PointTableTest, ReplaceAndLookup) {

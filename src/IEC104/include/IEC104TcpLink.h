@@ -84,6 +84,7 @@ public:
   void SendSetpointCommand(uint32_t ioa, double value);
   void SetPointValueCallback(PointValueCallback cb);
   void SetInterrogationSnapshotProvider(SnapshotProvider provider);
+  void SetActivationSnapshotProvider(SnapshotProvider provider);
   void SetSoeReplayProvider(SoeReplayProvider provider);
   void SetSoeAcknowledgedCallback(SoeAcknowledgedCallback cb);
   void SetTimeSyncCallback(TimeSyncCallback cb);
@@ -119,6 +120,7 @@ private:
   IEC104Proto::ConnectionState connectionState_ = IEC104Proto::CONNECTION_STATE_DISCONNECTED;
   PointValueCallback onPointValue_;
   SnapshotProvider interrogationSnapshotProvider_;
+  SnapshotProvider activationSnapshotProvider_;
   SoeReplayProvider soeReplayProvider_;
   SoeAcknowledgedCallback onSoeAcknowledged_;
   TimeSyncCallback onTimeSync_;

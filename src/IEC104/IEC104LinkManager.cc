@@ -76,6 +76,7 @@ void detachTransportCallbacks(TcpLink *transport) {
   transport->SetPointValueCallback(nullptr);
   transport->SetInterrogationSnapshotProvider(nullptr);
   transport->SetSoeReplayProvider(nullptr);
+  transport->SetActivationSnapshotProvider(nullptr);
   transport->SetSoeAcknowledgedCallback(nullptr);
   transport->SetTimeSyncCallback(nullptr);
   transport->SetCommandCallback(nullptr);
@@ -1130,6 +1131,7 @@ void LinkManager::configureTransportCallbacksLocked(const std::string &connName,
   }
   if (isSlaveStation(link->config)) {
     link->transport->SetInterrogationSnapshotProvider([this, connName]() { return buildInterrogationSnapshot(connName); });
+    link->transport->SetActivationSnapshotProvider([this, connName]() { return buildActivationSnapshot(connName); });
     if (soeStore_) {
       link->transport->SetSoeReplayProvider([this, connName]() {
         std::vector<SoeRecord> records;
@@ -1142,6 +1144,19 @@ void LinkManager::configureTransportCallbacksLocked(const std::string &connName,
         std::vector<SoeEvent> events;
         events.reserve(records.size());
         for (const auto &record : records) {
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            const auto it = linksByName_.find(connName);
+            if (it == linksByName_.end()) {
+              return std::vector<SoeEvent>{};
+            }
+            const auto point = it->second.pointTable.FindByIoa(record.ioa);
+            if (point && point->fixedValueEnabled) {
+              LOG_DEBUG("IEC104 固定遥信暂停真实历史 SOE 回放，保留原未确认记录: conn_name={}, ioa={}, event_seq={}",
+                        connName, record.ioa, record.eventSequence);
+              continue;
+            }
+          }
           SoeEvent event;
           event.eventSequence = record.eventSequence;
           event.value.ioa = record.ioa;
@@ -1423,16 +1438,40 @@ grpc::Status LinkManager::UpsertPointTable(const IEC104Proto::UpsertPointTableRe
     if (it == linksByName_.end()) {
       return makeNotFound(request.conn_name());
     }
+    // DataCenter 调用在锁外执行，回到提交点必须再次确认尚未启动链路功能。
+    // 否则新点表可能与订阅线程捕获的旧配置同时生效，泄漏旧固定值或真实值。
+    if (it->second.state == IEC104Proto::LINK_STATE_RUNNING ||
+        it->second.state == IEC104Proto::LINK_STATE_PENDING_DELETE) {
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "点表更新期间链路状态发生变化，请停止链路后重试");
+    }
+    const auto previousRefreshTags = it->second.fixedRefreshTags;
+    it->second.fixedRefreshTags.clear();
+    for (const auto& tag : next.Tags()) {
+      const auto point = next.FindByTag(tag);
+      const auto oldByTag = current.FindByTag(tag);
+      const auto oldByIoa = point ? current.FindByIoa(point->ioa) : std::nullopt;
+      if (point && PointTable::IsSimulationBusinessType(point->businessType) &&
+          (point->fixedValueEnabled || (oldByTag && oldByTag->fixedValueEnabled) ||
+           (oldByIoa && oldByIoa->fixedValueEnabled) || previousRefreshTags.contains(tag))) {
+        it->second.fixedRefreshTags.insert(tag);
+      }
+    }
+    const auto previousTable = it->second.pointTable;
+    const auto previousConfigured = it->second.pointTableConfigured;
     it->second.pointTable = std::move(next);
     it->second.pointTableConfigured = true;
-    it->second.lastReportedByTag.clear();
-    it->second.lastReportedSingleByTag.clear();
-    it->second.simulationValues.clear();
     status = savePointTablesLocked();
     if (!status.ok()) {
+      // 落盘失败不能让新固定值只在内存中生效，避免上位机显示保存失败但重启前行为已改变。
+      it->second.pointTable = previousTable;
+      it->second.pointTableConfigured = previousConfigured;
+      it->second.fixedRefreshTags = previousRefreshTags;
       LOG_ERROR("IEC104 点表配置落盘失败: conn_name={}, 原因={}", request.conn_name(), status.error_message());
       return status;
     }
+    it->second.lastReportedByTag.clear();
+    it->second.lastReportedSingleByTag.clear();
+    it->second.simulationValues.clear();
   }
   LOG_INFO("IEC104 点表配置更新成功，当前不会自动启动链路连接功能，等待显式调用 StartLink: conn_name={}", request.conn_name());
   return grpc::Status::OK;

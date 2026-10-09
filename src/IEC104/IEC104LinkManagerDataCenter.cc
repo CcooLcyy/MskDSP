@@ -18,6 +18,7 @@
 #include "Logger.h"
 #include "IEC104LibInfo.h"
 #include "IEC104ReportPolicy.hpp"
+#include "IEC104FixedValue.hpp"
 #include "IEC104SoeStore.h"
 #include "ThreadUtil.hpp"
 #include "mskdsp/Decimal20.hpp"
@@ -29,6 +30,11 @@ constexpr uint8_t kIec104QualityInvalid = 0x80;
 constexpr uint32_t kSynchronousCommandTimeoutMs = 8000;
 
 constexpr uint8_t kCotSpontaneous = 3;
+
+int64_t currentTimestampMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::system_clock::now().time_since_epoch()).count();
+}
 
 DataCenterProto::Quality toDataCenterQuality(uint8_t qds) {
   if ((qds & kIec104QualityInvalid) != 0) {
@@ -308,20 +314,12 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, Li
   // 上一轮订阅线程已由 StartLink 在锁内摘出、锁外停止，这里直接启动新的订阅。
 
   auto tags = link->pointTable.Tags();
-  struct PointMeta {
-    uint32_t ioa = 0;
-    IEC104Proto::PointType type = IEC104Proto::POINT_TYPE_UNSPECIFIED;
-    mskdsp::numeric::Decimal20 scale =
-        mskdsp::numeric::Decimal20::FromInt64(1).value();
-    mskdsp::numeric::Decimal20 offset;
-    mskdsp::numeric::Decimal20 deadband;
-  };
-  std::unordered_map<std::string, PointMeta> metaByTag;
+  std::unordered_map<std::string, PointTable::Point> metaByTag;
   metaByTag.reserve(tags.size());
   for (const auto& tag : tags) {
     auto p = link->pointTable.FindByTag(tag);
     if (p) {
-      metaByTag.emplace(tag, PointMeta{p->ioa, p->type, p->scale, p->offset, p->deadband});
+      metaByTag.emplace(tag, *p);
     }
   }
 
@@ -348,12 +346,37 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, Li
     lastSentByTag.reserve(metaByTag.size());
     DataCenterProto::PointUpdate update;
     while (reader->Read(&update)) {
-      if (isSimulationValueActive(connName, update.dst_tag())) {
-        LOG_DEBUG("IEC104 当前 Tag 存在模拟值，忽略 DataCenter 实时值: conn_name={}, tag={}", connName, update.dst_tag());
-        continue;
-      }
       auto it = metaByTag.find(update.dst_tag());
       if (it == metaByTag.end()) {
+        continue;
+      }
+      if (const auto fixed = detail::MakeFixedPointValue(it->second, currentTimestampMs())) {
+        if (fixed->type == IEC104Proto::POINT_TYPE_SINGLE) {
+          // 固定遥信只比较有效的对外状态，真实源变位或品质变化不能形成虚假 SOE。
+          std::lock_guard<std::mutex> lock(mu_);
+          auto linkIt = linksByName_.find(connName);
+          if (linkIt == linksByName_.end() || linkIt->second.transport.get() != transport) {
+            continue;
+          }
+          auto baseline = linkIt->second.lastReportedSingleByTag.find(update.dst_tag());
+          std::optional<detail::LastReportedSinglePoint> last;
+          if (baseline != linkIt->second.lastReportedSingleByTag.end()) {
+            last = baseline->second;
+          }
+          if (detail::ShouldReportSoe(fixed->boolValue, DataCenterProto::QUALITY_GOOD, last) &&
+              storeAndSendSoe(connName, *fixed, transport)) {
+            linkIt->second.lastReportedSingleByTag[update.dst_tag()] =
+                detail::LastReportedSinglePoint{fixed->boolValue, DataCenterProto::QUALITY_GOOD};
+          }
+        } else {
+          transport->SendPointValue(*fixed, kCotSpontaneous);
+        }
+        LOG_DEBUG("IEC104 实时更新使用逐点固定报文值: conn_name={}, tag={}, ioa={}",
+                  connName, update.dst_tag(), fixed->ioa);
+        continue;
+      }
+      if (isSimulationValueActive(connName, update.dst_tag())) {
+        LOG_DEBUG("IEC104 当前 Tag 存在模拟值，忽略 DataCenter 实时值: conn_name={}, tag={}", connName, update.dst_tag());
         continue;
       }
       if (it->second.type == IEC104Proto::POINT_TYPE_FLOAT) {
@@ -1020,16 +1043,10 @@ grpc::Status LinkManager::handleTimeSyncCommand(const std::string& connName, int
   return grpc::Status::OK;
 }
 
-std::vector<PointValue> LinkManager::buildInterrogationSnapshot(const std::string& connName) {
+std::vector<PointValue> LinkManager::buildInterrogationSnapshot(
+    const std::string& connName, const std::vector<std::string>& requestedTags) {
   uint32_t connId = 0;
-  struct PointMeta {
-    uint32_t ioa = 0;
-    IEC104Proto::PointType type = IEC104Proto::POINT_TYPE_UNSPECIFIED;
-    mskdsp::numeric::Decimal20 scale =
-        mskdsp::numeric::Decimal20::FromInt64(1).value();
-    mskdsp::numeric::Decimal20 offset;
-  };
-  std::unordered_map<std::string, PointMeta> metaByTag;
+  std::unordered_map<std::string, PointTable::Point> metaByTag;
   std::unordered_map<std::string, IEC104Proto::SimulationPoint> simulationValues;
   std::vector<std::string> tags;
   {
@@ -1039,19 +1056,27 @@ std::vector<PointValue> LinkManager::buildInterrogationSnapshot(const std::strin
       return {};
     }
     connId = it->second.connId;
-    tags = it->second.pointTable.Tags();
+    tags = requestedTags.empty() ? it->second.pointTable.Tags() : requestedTags;
     metaByTag.reserve(tags.size());
     for (const auto& tag : tags) {
       auto p = it->second.pointTable.FindByTag(tag);
       if (p) {
-        metaByTag.emplace(tag, PointMeta{p->ioa, p->type, p->scale, p->offset});
+        metaByTag.emplace(tag, *p);
       }
     }
     simulationValues = it->second.simulationValues;
   }
 
   DataCenterProto::GetLatestResponse resp;
-  auto status = dataCenter_.GetLatest(connId, tags, &resp);
+  std::vector<std::string> realTags;
+  for (const auto& tag : tags) {
+    const auto it = metaByTag.find(tag);
+    if (it != metaByTag.end() && !it->second.fixedValueEnabled && !simulationValues.contains(tag)) {
+      realTags.push_back(tag);
+    }
+  }
+  // 全固定/模拟快照完全独立于 DataCenter；含真实点的总召与恢复查询最多等待一秒。
+  auto status = realTags.empty() ? grpc::Status::OK : dataCenter_.GetLatest(connId, realTags, &resp, 1000);
   if (!status.ok()) {
     LOG_WARNING("IEC104 查询快照失败: conn_name={}, 错误={}", connName, status.error_message());
     std::lock_guard<std::mutex> lock(mu_);
@@ -1105,6 +1130,12 @@ std::vector<PointValue> LinkManager::buildInterrogationSnapshot(const std::strin
   for (const auto& tag : tags) {
     auto simIt = simulationValues.find(tag);
     auto metaIt = metaByTag.find(tag);
+    if (metaIt != metaByTag.end()) {
+      if (auto fixed = detail::MakeFixedPointValue(metaIt->second, currentTimestampMs())) {
+        valuesByTag[tag] = *fixed;
+        continue;
+      }
+    }
     if (simIt == simulationValues.end() || metaIt == metaByTag.end()) {
       continue;
     }
@@ -1135,6 +1166,75 @@ std::vector<PointValue> LinkManager::buildInterrogationSnapshot(const std::strin
     }
   }
   return out;
+}
+
+std::vector<PointValue> LinkManager::buildActivationSnapshot(const std::string& connName) {
+  std::vector<PointValue> snapshot;
+  std::vector<std::string> restoreTags;
+  std::unordered_map<std::string, std::optional<detail::LastReportedSinglePoint>> initialSingleBaselines;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    const auto it = linksByName_.find(connName);
+    if (it == linksByName_.end() || !isSlaveStation(it->second.config)) {
+      return {};
+    }
+    for (const auto& tag : it->second.pointTable.Tags()) {
+      const auto point = it->second.pointTable.FindByTag(tag);
+      if (!point) {
+        continue;
+      }
+      if (auto fixed = detail::MakeFixedPointValue(*point, currentTimestampMs())) {
+        snapshot.push_back(*fixed);
+      } else if (it->second.fixedRefreshTags.contains(tag)) {
+        restoreTags.push_back(tag);
+        if (point->type == IEC104Proto::POINT_TYPE_SINGLE) {
+          const auto baseline = it->second.lastReportedSingleByTag.find(tag);
+          initialSingleBaselines[tag] = baseline == it->second.lastReportedSingleByTag.end()
+              ? std::nullopt : std::optional(baseline->second);
+        }
+      }
+    }
+  }
+  if (!restoreTags.empty()) {
+    auto restored = buildInterrogationSnapshot(connName, restoreTags);
+    snapshot.insert(snapshot.end(), restored.begin(), restored.end());
+  }
+  std::lock_guard<std::mutex> lock(mu_);
+  const auto it = linksByName_.find(connName);
+  if (it == linksByName_.end()) {
+    return {};
+  }
+  // 查询期间订阅可能已取得更新的真实遥信；保留该基线与已排队的新 SOE，不倒退到旧快照。
+  std::erase_if(snapshot, [&link = it->second, &initialSingleBaselines](const PointValue& value) {
+    const auto point = link.pointTable.FindByIoa(value.ioa);
+    if (!point || point->fixedValueEnabled || value.type != IEC104Proto::POINT_TYPE_SINGLE) {
+      return false;
+    }
+    const auto initial = initialSingleBaselines.find(point->tag);
+    const auto current = link.lastReportedSingleByTag.find(point->tag);
+    if (initial == initialSingleBaselines.end()) {
+      return true;
+    }
+    if (current == link.lastReportedSingleByTag.end()) {
+      return initial->second.has_value();
+    }
+    return !initial->second || current->second.value != initial->second->value ||
+        current->second.quality != initial->second->quality;
+  });
+  for (const auto& value : snapshot) {
+    const auto point = it->second.pointTable.FindByIoa(value.ioa);
+    if (!point) {
+      continue;
+    }
+    if (value.type == IEC104Proto::POINT_TYPE_SINGLE) {
+      it->second.lastReportedSingleByTag[point->tag] =
+          detail::LastReportedSinglePoint{value.boolValue, toDataCenterQuality(value.quality)};
+    }
+    // 解除固定的恢复点持续保留到下一次点表更新，重连时再次恢复最新真实值。
+    LOG_INFO("IEC104 从站激活快照已准备: conn_name={}, tag={}, ioa={}, 固定值模式={}",
+             connName, point->tag, value.ioa, point->fixedValueEnabled);
+  }
+  return snapshot;
 }
 
 grpc::Status LinkManager::fillSimulationSnapshotLocked(
@@ -1205,7 +1305,7 @@ grpc::Status LinkManager::GenerateSimulationValues(
     pointMetas.reserve(configuredPointCount);
     for (const auto& tag : pointTags) {
       auto point = it->second.pointTable.FindByTag(tag);
-      if (point && PointTable::IsSimulationBusinessType(point->businessType)) {
+      if (point && !point->fixedValueEnabled && PointTable::IsSimulationBusinessType(point->businessType)) {
         pointMetas.push_back(SimulationPointMeta{tag, std::move(*point)});
       }
     }
@@ -1320,7 +1420,7 @@ grpc::Status LinkManager::GenerateSimulationValues(
   size_t currentSimulationPointCount = 0;
   for (const auto& tag : it->second.pointTable.Tags()) {
     const auto currentPoint = it->second.pointTable.FindByTag(tag);
-    if (currentPoint && PointTable::IsSimulationBusinessType(currentPoint->businessType)) {
+    if (currentPoint && !currentPoint->fixedValueEnabled && PointTable::IsSimulationBusinessType(currentPoint->businessType)) {
       ++currentSimulationPointCount;
     }
   }
@@ -1330,7 +1430,7 @@ grpc::Status LinkManager::GenerateSimulationValues(
   for (const auto& meta : pointMetas) {
     const auto currentPoint = it->second.pointTable.FindByTag(meta.tag);
     if (!currentPoint || currentPoint->ioa != meta.point.ioa || currentPoint->type != meta.point.type
-        || currentPoint->businessType != meta.point.businessType) {
+        || currentPoint->businessType != meta.point.businessType || currentPoint->fixedValueEnabled) {
       return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "点表在生成期间发生变化，请重试");
     }
   }
@@ -1397,6 +1497,10 @@ grpc::Status LinkManager::ApplySimulationValues(const std::string& connName) {
   for (const auto& tag : link.pointTable.Tags()) {
     auto simIt = link.simulationValues.find(tag);
     auto point = link.pointTable.FindByTag(tag);
+    if (point && point->fixedValueEnabled) {
+      LOG_DEBUG("IEC104 应用模拟值跳过持久化固定点: conn_name={}, tag={}, ioa={}", connName, tag, point->ioa);
+      continue;
+    }
     if (simIt == link.simulationValues.end() || !point) {
       continue;
     }

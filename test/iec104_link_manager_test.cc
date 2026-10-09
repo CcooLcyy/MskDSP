@@ -1183,3 +1183,39 @@ TEST(IEC104LinkManagerTest, ChangedSinglePointFormsAdditionalSoe) {
 
   ASSERT_TRUE(mgr.StopLink("conn-soe-change").ok());
 }
+
+// 验证：固定遥信无论真实源状态和品质如何变化，均只形成有效固定状态的首次 SOE。
+TEST(IEC104LinkManagerTest, FixedSinglePointDoesNotCreateSoeForRealTransitions) {
+  ScopedTempDir dir;
+  FakeDataCenterState state;
+  LinkManager mgr("IEC104", dir.path() / "config.db");
+  mgr.setDataCenterStub(MakeStub(&state));
+  IEC104Proto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(MakeServerLinkReq("fixed-soe", "127.0.0.1", AllocateFreeTcpPort()), &info).ok());
+  IEC104Proto::UpsertPointTableRequest request;
+  request.set_conn_name("fixed-soe");
+  auto* point = request.add_points();
+  *point = MakeBoolPoint("DI", 1);
+  point->set_fixed_value_enabled(true);
+  point->set_fixed_value(0);
+  ASSERT_TRUE(mgr.UpsertPointTable(request).ok());
+  ASSERT_TRUE(mgr.StartLink("fixed-soe").ok());
+  ASSERT_TRUE(WaitForSubscriptionCreated(state, info.conn_id()));
+  for (int64_t index = 0; index < 5; ++index) {
+    auto update = MakeSinglePointUpdate(info.conn_id(), "DI", index % 2 != 0, 1000 + index);
+    update.set_quality(index % 2 != 0 ? DataCenterProto::QUALITY_GOOD : DataCenterProto::QUALITY_BAD);
+    state.DeliverUpdate(update);
+  }
+  ASSERT_TRUE(WaitForSubscriptionClosed(state, info.conn_id()));
+  ASSERT_TRUE(WaitForSoeCountAtLeast(mgr, "fixed-soe", 1));
+  IEC104Proto::QuerySoeRequest query;
+  query.set_conn_name("fixed-soe");
+  IEC104Proto::QuerySoeResponse response;
+  ASSERT_TRUE(mgr.QuerySoe(query, &response).ok());
+  EXPECT_EQ(response.total_count(), 1);
+  ASSERT_EQ(response.events_size(), 1);
+  EXPECT_FALSE(response.events(0).state());
+  EXPECT_EQ(response.events(0).quality(), 0);
+  EXPECT_GT(response.events(0).ts_ms(), 1004);
+  ASSERT_TRUE(mgr.StopLink("fixed-soe").ok());
+}

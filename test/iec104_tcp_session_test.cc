@@ -388,6 +388,39 @@ TEST(IEC104TcpSessionTest, T3TestFrameConfirmationTimeoutClosesSession) {
   io->stop();
 }
 
+// 验证：从站激活后无需总召或真实数据更新即可发送初始快照，重复 STARTDT 不重复发送。
+TEST(IEC104TcpSessionTest, SlaveSendsActivationSnapshotWithoutInterrogation) {
+  auto io = std::make_shared<boost::asio::io_context>();
+  auto sockets = MakeConnectedSockets(*io);
+  auto config = MakeConfig("fixed-activation", IEC104Proto::ROLE_SERVER, 5, 5, 1, 5, 8);
+  auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
+  session->SetActivationSnapshotProvider([] {
+    IEC104::PointValue value;
+    value.ioa = 0x4001;
+    value.type = IEC104Proto::POINT_TYPE_FLOAT;
+    value.doubleValue = 10;
+    value.tsMs = 1234;
+    return std::vector<IEC104::PointValue>{value};
+  });
+  session->Start(std::move(sockets.session_socket));
+  std::jthread sessionThread = ModuleManager::StartModuleThread(
+      IEC104LibInfo.LIB_NAME, [&]() { io->run(); });
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildUFrame(kUStartDtAct)));
+  ASSERT_FALSE(ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "激活确认").empty());
+  const auto frame = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "固定值自发报文");
+  ASSERT_GE(frame.size(), 20);
+  EXPECT_EQ(frame[6], kTypeIdMeasuredValueShort);
+  EXPECT_EQ(frame[8], kCotSpontaneous);
+  float received = 0;
+  std::memcpy(&received, frame.data() + 15, sizeof(received));
+  EXPECT_EQ(received, 10);
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildUFrame(kUStartDtAct)));
+  ASSERT_FALSE(ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "再次激活确认").empty());
+  EXPECT_FALSE(WaitReadable(sockets.peer_socket, std::chrono::milliseconds(100)));
+  session->Stop();
+  io->stop();
+}
+
 // 验证：客户端在收到 STARTDT 确认后会自动发送总召。
 TEST(IEC104TcpSessionTest, ClientAutoInterrogationAfterStartDt) {
   auto io = std::make_shared<boost::asio::io_context>();

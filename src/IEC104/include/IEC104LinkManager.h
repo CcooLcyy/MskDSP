@@ -91,6 +91,8 @@ private:
     // 链路启动、点表更新与配置重载时清空，清空后每个点会重新上送一次（首次规则）。
     std::unordered_map<std::string, detail::LastReportedSinglePoint> lastReportedSingleByTag;
     std::unordered_map<std::string, IEC104Proto::SimulationPoint> simulationValues;
+    // 配置切换后需主动恢复的点；每次激活取最新快照，后续点表更新过滤已删除或非上报点。
+    std::unordered_set<std::string> fixedRefreshTags;
 
     std::unique_ptr<TcpLink> transport;
 
@@ -162,7 +164,9 @@ private:
   CommandResult handleCommandValue(const std::string &connName, const CommandValue &cv);
   static grpc::Status setSystemClock(int64_t tsMs);
   grpc::Status handleTimeSyncCommand(const std::string &connName, int64_t tsMs);
-  std::vector<PointValue> buildInterrogationSnapshot(const std::string &connName);
+  std::vector<PointValue> buildInterrogationSnapshot(const std::string &connName,
+                                                   const std::vector<std::string>& requestedTags = {});
+  std::vector<PointValue> buildActivationSnapshot(const std::string &connName);
   bool isSimulationValueActive(const std::string &connName, const std::string &tag) const;
   // 读取某条链路某 tag 的遥信变位基线；未记录时返回空，表示该点尚无历史基线（首次上送）。
   std::optional<detail::LastReportedSinglePoint> lastReportedSinglePoint(const std::string &connName,

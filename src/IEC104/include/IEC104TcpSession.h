@@ -79,6 +79,7 @@ public:
 
   void SetPointValueCallback(PointValueCallback cb);
   void SetInterrogationSnapshotProvider(SnapshotProvider provider);
+  void SetActivationSnapshotProvider(SnapshotProvider provider);
   void SetSoeReplayProvider(SoeReplayProvider provider);
   void SetSoeAcknowledgedCallback(SoeAcknowledgedCallback cb);
   void SetTimeSyncCallback(TimeSyncCallback cb);
@@ -145,6 +146,7 @@ private:
 
   PointValueCallback onPointValue_;
   SnapshotProvider interrogationSnapshotProvider_;
+  SnapshotProvider activationSnapshotProvider_;
   SoeReplayProvider soeReplayProvider_;
   SoeAcknowledgedCallback onSoeAcknowledged_;
   TimeSyncCallback onTimeSync_;

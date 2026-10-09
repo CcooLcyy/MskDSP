@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <optional>
@@ -12,6 +13,7 @@
 #undef private
 
 #include "IEC104ReportPolicy.hpp"
+#include "IEC104FixedValue.hpp"
 #include "support/FakeDataCenter.hpp"
 
 namespace {
@@ -92,6 +94,278 @@ const IEC104Proto::SimulationPoint *FindSimulationPoint(
   return nullptr;
 }
 }  // 命名空间结束
+
+// 验证：固定值直接使用报文数值及有效品质、当前时标，不参与倍率或偏移换算。
+TEST(IEC104FixedValueTest, BuildsWireValueAndSingleSoeBaseline) {
+  auto table = MakePointTable();
+  auto point = table.FindByTag("float-tag").value();
+  point.fixedValueEnabled = true;
+  point.fixedValue = 10;
+  auto value = IEC104::detail::MakeFixedPointValue(point, 1234);
+  ASSERT_TRUE(value.has_value());
+  EXPECT_EQ(value->doubleValue, 10);
+  EXPECT_EQ(value->quality, 0);
+  EXPECT_EQ(value->tsMs, 1234);
+  point = table.FindByTag("single-tag").value();
+  point.fixedValueEnabled = true;
+  point.fixedValue = 0;
+  value = IEC104::detail::MakeFixedPointValue(point, 1234);
+  ASSERT_TRUE(value.has_value());
+  EXPECT_FALSE(value->boolValue);
+  EXPECT_FALSE(IEC104::detail::ShouldReportSoe(value->boolValue, DataCenterProto::QUALITY_GOOD,
+      IEC104::detail::LastReportedSinglePoint{false, DataCenterProto::QUALITY_GOOD}));
+  point.fixedValueEnabled = false;
+  EXPECT_FALSE(IEC104::detail::MakeFixedPointValue(point, 1234).has_value());
+}
+
+// 验证：总召在快照失败和模拟覆盖尝试下仍保留固定零值，清除模拟不清除设置。
+TEST(IEC104LinkManagerHelperTest, FixedZeroSurvivesMissingSnapshotAndSimulationClear) {
+  FakeDataCenterState state;
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(MakeStub(&state));
+  LinkManager::LinkRuntime runtime;
+  runtime.connId = 7;
+  runtime.config = MakeClientConfig("fixed", IEC104Proto::STATION_ROLE_SLAVE);
+  runtime.pointTable = MakePointTable();
+  IEC104Proto::PointTable configured;
+  runtime.pointTable.ToProto("fixed", &configured);
+  configured.mutable_points(1)->set_fixed_value_enabled(true);
+  configured.mutable_points(1)->set_fixed_value(0);
+  ASSERT_EQ(configured.points(1).tag(), "float-tag");
+  ASSERT_TRUE(runtime.pointTable.Upsert(configured.points(), true).ok());
+  IEC104Proto::SimulationPoint sim;
+  sim.set_double_value(99);
+  runtime.simulationValues["float-tag"] = sim;
+  mgr.linksByName_.emplace("fixed", std::move(runtime));
+  state.FailGetLatestForConn(7);
+  auto snapshot = mgr.buildInterrogationSnapshot("fixed");
+  ASSERT_EQ(snapshot.size(), 1);
+  EXPECT_EQ(snapshot.front().doubleValue, 0);
+  EXPECT_EQ(snapshot.front().quality, 0);
+  EXPECT_GT(snapshot.front().tsMs, 0);
+  ASSERT_TRUE(mgr.ClearSimulationValues("fixed").ok());
+  snapshot = mgr.buildInterrogationSnapshot("fixed");
+  ASSERT_EQ(snapshot.size(), 1);
+  EXPECT_EQ(snapshot.front().doubleValue, 0);
+}
+
+// 验证：激活快照仅发送固定点及解除固定的受影响点，恢复真实品质、时标和换算。
+TEST(IEC104LinkManagerHelperTest, ActivationSnapshotRestoresReleasedValue) {
+  FakeDataCenterState state;
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(MakeStub(&state));
+  LinkManager::LinkRuntime runtime;
+  runtime.connId = 7;
+  runtime.config = MakeClientConfig("fixed", IEC104Proto::STATION_ROLE_SLAVE);
+  runtime.pointTable = MakePointTable();
+  runtime.fixedRefreshTags.insert("float-tag");
+  mgr.linksByName_.emplace("fixed", std::move(runtime));
+  DataCenterProto::PublishRequest publish;
+  publish.set_conn_id(7);
+  publish.set_tag("float-tag");
+  publish.mutable_value()->set_double_value(21);
+  publish.set_quality(DataCenterProto::QUALITY_BAD);
+  publish.set_ts_ms(4321);
+  ASSERT_TRUE(state.Publish(publish).ok());
+  auto snapshot = mgr.buildActivationSnapshot("fixed");
+  ASSERT_EQ(snapshot.size(), 1);
+  EXPECT_EQ(snapshot.front().doubleValue, 10);
+  EXPECT_EQ(snapshot.front().quality, 0x80);
+  EXPECT_EQ(snapshot.front().tsMs, 4321);
+}
+
+// 验证：总召固定为十时忽略倍率偏移，非固定点仍按原工程量参数换算；模拟生成排除固定点。
+TEST(IEC104LinkManagerHelperTest, FixedTenKeepsUnrelatedConversionAndIsExcludedFromSimulation) {
+  FakeDataCenterState state;
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(MakeStub(&state));
+  LinkManager::LinkRuntime runtime;
+  runtime.connId = 7;
+  runtime.config = MakeClientConfig("fixed-ten", IEC104Proto::STATION_ROLE_SLAVE);
+  runtime.pointTable = MakePointTable();
+  IEC104Proto::PointTable configured;
+  runtime.pointTable.ToProto("fixed-ten", &configured);
+  for (auto& point : *configured.mutable_points()) {
+    if (point.tag() == "float-tag") {
+      point.set_fixed_value_enabled(true);
+      point.set_fixed_value(10);
+    } else if (point.tag() == "float-tag-2") {
+      point.set_scale_decimal("2");
+      point.set_offset_decimal("1");
+    }
+  }
+  ASSERT_TRUE(runtime.pointTable.Upsert(configured.points(), true).ok());
+  mgr.linksByName_.emplace("fixed-ten", std::move(runtime));
+  for (const auto& tag : {"float-tag", "float-tag-2"}) {
+    DataCenterProto::PublishRequest publish;
+    publish.set_conn_id(7);
+    publish.set_tag(tag);
+    publish.mutable_value()->set_double_value(std::string(tag) == "float-tag" ? 99 : 41);
+    publish.set_quality(DataCenterProto::QUALITY_BAD);
+    ASSERT_TRUE(state.Publish(publish).ok());
+  }
+  const auto snapshot = mgr.buildInterrogationSnapshot("fixed-ten");
+  ASSERT_EQ(snapshot.size(), 2);
+  EXPECT_EQ(snapshot[0].doubleValue, 10);
+  EXPECT_EQ(snapshot[0].quality, 0);
+  EXPECT_EQ(snapshot[1].doubleValue, 20);
+  EXPECT_EQ(snapshot[1].quality, 0x80);
+  IEC104Proto::SimulationRequest request;
+  request.set_conn_name("fixed-ten");
+  IEC104Proto::SimulationSnapshot generated;
+  ASSERT_TRUE(mgr.GenerateSimulationValues(request, &generated).ok());
+  EXPECT_EQ(FindSimulationPoint(generated, "float-tag"), nullptr);
+  EXPECT_NE(FindSimulationPoint(generated, "float-tag-2"), nullptr);
+}
+
+// 验证：全部固定的激活与总召无需调用 DataCenter，固定零值在数据服务不可用时直接发送。
+TEST(IEC104LinkManagerHelperTest, AllFixedSnapshotsNeverQueryDataCenter) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+  LinkManager::LinkRuntime runtime;
+  runtime.connId = 7;
+  runtime.config = MakeClientConfig("fixed-only", IEC104Proto::STATION_ROLE_SLAVE);
+  IEC104Proto::PointTable table;
+  auto* point = table.add_points();
+  point->set_tag("fixed");
+  point->set_ioa(1);
+  point->set_type(IEC104Proto::POINT_TYPE_SINGLE);
+  point->set_fixed_value_enabled(true);
+  ASSERT_TRUE(runtime.pointTable.Upsert(table.points(), true).ok());
+  mgr.linksByName_.emplace("fixed-only", std::move(runtime));
+  EXPECT_CALL(*stub, GetLatest(::testing::_, ::testing::_, ::testing::_)).Times(0);
+  const auto activation = mgr.buildActivationSnapshot("fixed-only");
+  const auto interrogation = mgr.buildInterrogationSnapshot("fixed-only");
+  ASSERT_EQ(activation.size(), 1);
+  ASSERT_EQ(interrogation.size(), 1);
+  EXPECT_FALSE(activation.front().boolValue);
+  EXPECT_FALSE(interrogation.front().boolValue);
+  EXPECT_EQ(mgr.lastReportedSinglePoint("fixed-only", "fixed")->quality, DataCenterProto::QUALITY_GOOD);
+}
+
+// 验证：解除固定的查询带有期限，查询期间更新的遥信基线不会被旧快照倒退。
+TEST(IEC104LinkManagerHelperTest, ActivationDoesNotRollbackLiveSingleBaseline) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+  LinkManager::LinkRuntime runtime;
+  runtime.connId = 7;
+  runtime.config = MakeClientConfig("released", IEC104Proto::STATION_ROLE_SLAVE);
+  runtime.pointTable = MakePointTable();
+  runtime.fixedRefreshTags.insert("single-tag");
+  mgr.linksByName_.emplace("released", std::move(runtime));
+  EXPECT_CALL(*stub, GetLatest(::testing::_, ::testing::_, ::testing::_))
+      .WillOnce(::testing::Invoke([&](grpc::ClientContext* context,
+                                     const DataCenterProto::GetLatestRequest& request,
+                                     DataCenterProto::GetLatestResponse* response) {
+        EXPECT_LT(context->deadline(), std::chrono::system_clock::now() + std::chrono::seconds(2));
+        EXPECT_EQ(request.tags_size(), 1);
+        EXPECT_EQ(request.tags(0), "single-tag");
+        mgr.rememberReportedSinglePoint("released", "single-tag", true, DataCenterProto::QUALITY_GOOD);
+        auto* update = response->add_updates();
+        update->set_dst_tag("single-tag");
+        update->mutable_value()->set_bool_value(false);
+        update->set_quality(DataCenterProto::QUALITY_GOOD);
+        return grpc::Status::OK;
+      }));
+  EXPECT_TRUE(mgr.buildActivationSnapshot("released").empty());
+  const auto baseline = mgr.lastReportedSinglePoint("released", "single-tag");
+  ASSERT_TRUE(baseline.has_value());
+  EXPECT_TRUE(baseline->value);
+}
+
+// 验证：重连时已有但未被实时订阅推进的遥信基线不阻止主动恢复最新真实快照。
+TEST(IEC104LinkManagerHelperTest, ActivationRestoresLatestSingleWithUnchangedExistingBaseline) {
+  FakeDataCenterState state;
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(MakeStub(&state));
+  LinkManager::LinkRuntime runtime;
+  runtime.connId = 7;
+  runtime.config = MakeClientConfig("released", IEC104Proto::STATION_ROLE_SLAVE);
+  runtime.pointTable = MakePointTable();
+  runtime.fixedRefreshTags.insert("single-tag");
+  runtime.lastReportedSingleByTag["single-tag"] = {true, DataCenterProto::QUALITY_GOOD};
+  mgr.linksByName_.emplace("released", std::move(runtime));
+  DataCenterProto::PublishRequest publish;
+  publish.set_conn_id(7);
+  publish.set_tag("single-tag");
+  publish.mutable_value()->set_bool_value(false);
+  publish.set_quality(DataCenterProto::QUALITY_BAD);
+  publish.set_ts_ms(4321);
+  ASSERT_TRUE(state.Publish(publish).ok());
+  const auto snapshot = mgr.buildActivationSnapshot("released");
+  ASSERT_EQ(snapshot.size(), 1);
+  EXPECT_FALSE(snapshot.front().boolValue);
+  EXPECT_EQ(snapshot.front().quality, 0x80);
+  EXPECT_EQ(snapshot.front().tsMs, 4321);
+  const auto baseline = mgr.lastReportedSinglePoint("released", "single-tag");
+  ASSERT_TRUE(baseline.has_value());
+  EXPECT_FALSE(baseline->value);
+  EXPECT_EQ(baseline->quality, DataCenterProto::QUALITY_BAD);
+}
+
+// 验证：解除固定并更换标签仍按同一 IOA 主动恢复，转为非上报业务后清除恢复标记。
+TEST(IEC104LinkManagerHelperTest, FixedReleaseRenameTracksIoaAndExcludesCommands) {
+  FakeDataCenterState state;
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(MakeStub(&state));
+  LinkManager::LinkRuntime runtime;
+  runtime.connId = 7;
+  runtime.config = MakeClientConfig("fixed", IEC104Proto::STATION_ROLE_SLAVE);
+  IEC104Proto::UpsertPointTableRequest request;
+  request.set_conn_name("fixed");
+  request.set_replace(true);
+  auto* point = request.add_points();
+  point->set_tag("old");
+  point->set_ioa(0x4001);
+  point->set_type(IEC104Proto::POINT_TYPE_FLOAT);
+  point->set_fixed_value_enabled(true);
+  point->set_fixed_value(10);
+  ASSERT_TRUE(runtime.pointTable.Upsert(request.points(), true).ok());
+  mgr.linksByName_.emplace("fixed", std::move(runtime));
+  point->set_tag("renamed");
+  point->set_fixed_value_enabled(false);
+  ASSERT_TRUE(mgr.UpsertPointTable(request).ok());
+  EXPECT_TRUE(mgr.linksByName_.at("fixed").fixedRefreshTags.contains("renamed"));
+  point->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_ADJUST);
+  ASSERT_TRUE(mgr.UpsertPointTable(request).ok());
+  EXPECT_TRUE(mgr.linksByName_.at("fixed").fixedRefreshTags.empty());
+}
+
+// 验证：固定配置落盘失败时恢复旧点表、恢复标记及模拟缓存，不留下仅内存生效的固定值。
+TEST(IEC104LinkManagerHelperTest, FailedPersistenceKeepsOldFixedConfiguration) {
+  FakeDataCenterState state;
+  // 已存在目录不是合法数据库文件，确定性触发 SQLite 打开失败，不依赖权限设置。
+  LinkManager mgr("IEC104", std::filesystem::temp_directory_path());
+  mgr.setDataCenterStub(MakeStub(&state));
+  LinkManager::LinkRuntime runtime;
+  runtime.connId = 7;
+  runtime.config = MakeClientConfig("fixed", IEC104Proto::STATION_ROLE_SLAVE);
+  runtime.pointTableConfigured = true;
+  runtime.fixedRefreshTags.insert("preserved");
+  runtime.simulationValues["preserved"].set_double_value(3);
+  IEC104Proto::UpsertPointTableRequest request;
+  request.set_conn_name("fixed");
+  request.set_replace(true);
+  auto* point = request.add_points();
+  point->set_tag("fixed");
+  point->set_ioa(0x4001);
+  point->set_type(IEC104Proto::POINT_TYPE_FLOAT);
+  point->set_fixed_value_enabled(true);
+  point->set_fixed_value(10);
+  ASSERT_TRUE(runtime.pointTable.Upsert(request.points(), true).ok());
+  mgr.linksByName_.emplace("fixed", std::move(runtime));
+  point->set_fixed_value(20);
+  EXPECT_FALSE(mgr.UpsertPointTable(request).ok());
+  const auto& unchanged = mgr.linksByName_.at("fixed");
+  EXPECT_EQ(unchanged.pointTable.FindByTag("fixed")->fixedValue, 10);
+  EXPECT_TRUE(unchanged.fixedRefreshTags.contains("preserved"));
+  EXPECT_FALSE(unchanged.fixedRefreshTags.contains("fixed"));
+  EXPECT_TRUE(unchanged.simulationValues.contains("preserved"));
+}
 
 // 验证：遥测数值未越过死区时，品质或时标变化仍会触发上报。
 TEST(IEC104ReportPolicyTest, QualityOrTimestampChangeBypassesDeadband) {

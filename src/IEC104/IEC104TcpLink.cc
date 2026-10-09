@@ -263,6 +263,14 @@ void TcpLink::SetSoeReplayProvider(SoeReplayProvider provider) {
   }
 }
 
+void TcpLink::SetActivationSnapshotProvider(SnapshotProvider provider) {
+  std::lock_guard<std::mutex> lock(mu_);
+  activationSnapshotProvider_ = std::move(provider);
+  if (session_) {
+    session_->SetActivationSnapshotProvider(activationSnapshotProvider_);
+  }
+}
+
 void TcpLink::SetSoeAcknowledgedCallback(SoeAcknowledgedCallback cb) {
   std::lock_guard<std::mutex> lock(mu_);
   onSoeAcknowledged_ = std::move(cb);
@@ -387,6 +395,7 @@ void TcpLink::startAccept() {
       session_ = newSession;
       session_->SetPointValueCallback(onPointValue_);
       session_->SetInterrogationSnapshotProvider(interrogationSnapshotProvider_);
+      session_->SetActivationSnapshotProvider(activationSnapshotProvider_);
       session_->SetSoeReplayProvider(soeReplayProvider_);
       session_->SetSoeAcknowledgedCallback(onSoeAcknowledged_);
       session_->SetTimeSyncCallback(onTimeSync_);
@@ -466,6 +475,7 @@ void TcpLink::startConnect() {
         session_ = newSession;
         session_->SetPointValueCallback(onPointValue_);
         session_->SetInterrogationSnapshotProvider(interrogationSnapshotProvider_);
+        session_->SetActivationSnapshotProvider(activationSnapshotProvider_);
         session_->SetSoeReplayProvider(soeReplayProvider_);
         session_->SetSoeAcknowledgedCallback(onSoeAcknowledged_);
         session_->SetTimeSyncCallback(onTimeSync_);

@@ -1,7 +1,9 @@
 #include "IEC104PointTable.h"
 
 #include <algorithm>
+#include <cmath>
 #include <format>
+#include <limits>
 
 #include "Logger.h"
 
@@ -30,6 +32,12 @@ void applyEngineeringConfig(const IEC104Proto::Point& source,
                             PointTable::Point* target) {
   if (target == nullptr) {
     return;
+  }
+  target->fixedValueEnabled = source.fixed_value_enabled();
+  target->fixedValue = source.fixed_value();
+  if (target->fixedValueEnabled) {
+    LOG_INFO("IEC104 点表启用逐点固定报文值: tag={}, ioa={}, 固定值={}，倍率偏移保留但不参与发送换算",
+             source.tag(), source.ioa(), target->fixedValue);
   }
   if (source.type() != IEC104Proto::POINT_TYPE_FLOAT) {
     target->scale = mskdsp::numeric::Decimal20::FromInt64(1).value();
@@ -149,6 +157,22 @@ grpc::Status PointTable::validatePoint(const IEC104Proto::Point& point) const {
   const auto effectiveBusinessType = point.business_type() == IEC104Proto::POINT_BUSINESS_TYPE_UNSPECIFIED
       ? InferBusinessType(point.ioa(), point.type())
       : point.business_type();
+  if (point.fixed_value_enabled()) {
+    if (!IsSimulationBusinessType(effectiveBusinessType)) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "仅遥测或遥信上报点允许启用固定值");
+    }
+    if (!std::isfinite(point.fixed_value())) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "固定值必须为有限数值");
+    }
+    if (point.type() == IEC104Proto::POINT_TYPE_FLOAT &&
+        std::abs(point.fixed_value()) > std::numeric_limits<float>::max()) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "固定值超出 IEC104 单精度浮点数范围");
+    }
+    if (point.type() == IEC104Proto::POINT_TYPE_SINGLE &&
+        point.fixed_value() != 0 && point.fixed_value() != 1) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "遥信固定值仅允许 0 或 1");
+    }
+  }
   if (effectiveBusinessType != IEC104Proto::POINT_BUSINESS_TYPE_REMOTE_CONTROL
       && point.remote_control_type() == IEC104Proto::REMOTE_CONTROL_TYPE_DOUBLE) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "非遥控点不能配置双点遥控");
@@ -270,6 +294,8 @@ void PointTable::ToProto(const std::string& connName, IEC104Proto::PointTable* o
     dst->set_scale_decimal(p.scale.ToFixedString());
     dst->set_offset_decimal(p.offset.ToFixedString());
     dst->set_deadband_decimal(p.deadband.ToFixedString());
+    dst->set_fixed_value_enabled(p.fixedValueEnabled);
+    dst->set_fixed_value(p.fixedValue);
     dst->set_remote_control_type(p.remoteControlType);
     dst->set_command_execution_mode(p.commandExecutionMode);
   }
