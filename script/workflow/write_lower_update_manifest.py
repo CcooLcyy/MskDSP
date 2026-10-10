@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
+import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -23,7 +25,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--platform", default="linux-arm64", help="目标平台，默认 linux-arm64")
     parser.add_argument("--version", required=True, help="完整包版本，通常与镜像 tag 一致")
     parser.add_argument("--display-version", default="", help="界面展示版本，默认从 --version 去掉平台后缀")
-    parser.add_argument("--image-id", required=True, help="Docker 镜像 config ID，例如 sha256:<64位十六进制>")
+    identity = parser.add_mutually_exclusive_group(required=True)
+    identity.add_argument("--image-id", help="显式 config 摘要，兼容既有调用，不接受 manifest/index 摘要")
+    identity.add_argument("--image-tar", help="从镜像归档验证并计算 config 摘要，发布流程优先使用")
     parser.add_argument("--artifact", required=True, help="自解压安装包路径")
     parser.add_argument("--checksums", default="SHA256SUMS", help="SHA256SUMS 文件路径")
     parser.add_argument("--output", default="latest.json", help="输出 latest.json 路径")
@@ -45,6 +49,61 @@ def normalize_image_id(value: str) -> str:
     if not IMAGE_ID_PATTERN.fullmatch(normalized):
         raise SystemExit(f"image_id 格式不合法，应为 sha256:<64位十六进制>: {value}")
     return normalized.lower()
+
+
+def read_image_config_id(image_tar: Path, platform: str) -> str:
+    """仅读取归档元数据，按原始配置内容计算平台一致的构建身份。"""
+    def read_metadata(archive: tarfile.TarFile, name: str) -> bytes:
+        members = [member for member in archive.getmembers() if member.name == name]
+        if len(members) != 1:
+            raise ValueError(f"镜像元数据缺失或路径重复: {name}")
+        member = members[0]
+        if not member.isfile() or member.size > 1024 * 1024:
+            raise ValueError(f"镜像元数据必须为不超过 1 MiB 的普通文件: {name}")
+        stream = archive.extractfile(member)
+        if stream is None:
+            raise ValueError(f"镜像元数据无法读取: {name}")
+        return stream.read()
+
+    try:
+        with tarfile.open(image_tar, "r:*") as archive:
+            manifest = json.loads(read_metadata(archive, "manifest.json"))
+            if not isinstance(manifest, list) or len(manifest) != 1:
+                raise ValueError("发布归档必须明确包含单个镜像")
+            name = manifest[0].get("Config", "")
+            if not isinstance(name, str) or not re.fullmatch(
+                r"(?:[0-9a-fA-F]{64}\.json|blobs/sha256/[0-9a-fA-F]{64})", name
+            ):
+                raise ValueError("镜像配置摘要路径不合法")
+            raw = read_metadata(archive, name)
+            digest = hashlib.sha256(raw).hexdigest()
+            path_digest = name.rsplit("/", 1)[-1].removesuffix(".json").lower()
+            if digest != path_digest:
+                raise ValueError("镜像配置内容与路径声明的摘要不一致")
+            config = json.loads(raw)
+            architecture = {"linux-arm64": "arm64", "linux-x64": "amd64"}.get(platform)
+            if architecture is None or config.get("os") != "linux" or config.get("architecture") != architecture:
+                raise ValueError(f"镜像配置平台与发布平台不一致: {platform}")
+            if any(member.name == "index.json" for member in archive.getmembers()):
+                index = json.loads(read_metadata(archive, "index.json"))
+                descriptors = index.get("manifests")
+                if index.get("schemaVersion") != 2 or not isinstance(descriptors, list) or len(descriptors) != 1:
+                    raise ValueError("OCI 发布归档必须明确关联单个镜像")
+                descriptor = descriptors[0]
+                manifest_id = normalize_image_id(descriptor.get("digest", ""))
+                manifest_raw = read_metadata(archive, "blobs/sha256/" + manifest_id[7:])
+                if "sha256:" + hashlib.sha256(manifest_raw).hexdigest() != manifest_id:
+                    raise ValueError("OCI manifest 内容摘要与索引关联不一致")
+                image_manifest = json.loads(manifest_raw)
+                if image_manifest.get("schemaVersion") != 2 or image_manifest.get("config", {}).get("digest") != "sha256:" + digest:
+                    raise ValueError("OCI manifest 与镜像配置关联不一致")
+                indexed_platform = descriptor.get("platform") or {}
+                for field in ("os", "architecture", "variant"):
+                    if field in indexed_platform and indexed_platform[field] != config.get(field):
+                        raise ValueError("OCI 索引平台与镜像配置不一致")
+            return "sha256:" + digest
+    except (OSError, tarfile.TarError, KeyError, ValueError, TypeError, AttributeError) as error:
+        raise SystemExit(f"读取镜像归档配置摘要失败: {error}") from error
 
 
 def read_sha256(checksums_path: Path, artifact_name: str) -> str:
@@ -98,7 +157,8 @@ def main() -> None:
     output_path = Path(args.output)
     artifact_name = artifact_path.name
     checksums_name = checksums_path.name
-    image_id = normalize_image_id(args.image_id)
+    image_id = (read_image_config_id(Path(args.image_tar), args.platform)
+                if args.image_tar else normalize_image_id(args.image_id))
     sha256 = read_sha256(checksums_path, artifact_name)
     published_at = args.published_at or rfc3339_now()
     display_version = args.display_version or display_version_from_package_version(args.version, args.platform)
@@ -132,6 +192,7 @@ def main() -> None:
 
     output_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"已生成下位机静态更新清单: {output_path}")
+    print(f"镜像配置摘要: {image_id}")
     print(f"安装包 URL: {manifest['asset']['url']}")
 
 

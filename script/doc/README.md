@@ -106,7 +106,9 @@ MSKDSP_VERSION=<version> bash script/make_image.sh
 - `asset`：安装包名称、下载地址、SHA256 与字节大小
 - `checksum`：`SHA256SUMS` 下载地址
 
-发布 workflow 在镜像构建完成后读取 Docker image ID，并将其写入 `latest.json`。上位机选择发布通道后，可通过 SSH 查询目标机 `mskdsp` 容器的运行状态与 image ID，将其与清单中的 `image_id` 比较。`asset.sha256` 只用于安装包传输完整性校验，不代表当前容器运行身份。
+发布 workflow 使用 `--image-tar` 从 `docker save` 归档读取镜像配置，验证经典 `<摘要>.json` 或 OCI `blobs/sha256/<摘要>` 路径与配置原始字节的 SHA256 一致，并核对镜像平台，再将该 config 摘要写入 `latest.json`。不依赖构建机器的 `docker image inspect .Id`，避免 Docker/containerd 返回 manifest 摘要时改变清单字段含义。`--image-id` 保留为显式提供 config 摘要的兼容入口。
+
+上位机通过 SSH 查询目标容器实际引用的不可变镜像，并在 containerd 场景验证 manifest/index 与 config 的关联后统一成 config 摘要，与清单中的 `image_id` 比较；不能直接混比不同类型的摘要。`asset.sha256` 只用于安装包传输完整性校验，不代表当前容器运行身份。缺失关联或多镜像歧义时拒绝校验通过。
 
 ### 静态目录约定
 默认 R2 公共开发 URL 结构：

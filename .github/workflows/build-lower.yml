@@ -306,15 +306,12 @@ jobs:
             -t "${IMAGE_REF}" \
             -f "${CI_DOCKERFILE}" \
             .
-          IMAGE_ID="$(docker image inspect --format '{{.Id}}' "${IMAGE_REF}")"
-          echo "image_id=${IMAGE_ID}" >> "${GITHUB_OUTPUT}"
           rm -f "${IMAGE_TAR}"
           docker save -o "${IMAGE_TAR}" "${IMAGE_REF}"
           (
             cd script
             bash ./make_exe.sh "../${IMAGE_TAR}"
           )
-          rm -f "${IMAGE_TAR}"
 
       - name: 生成校验文件
         if: ${{ github.event_name == 'push' && (github.ref_name == 'master' || github.ref_name == 'main') }}
@@ -337,7 +334,7 @@ jobs:
             --channel "${{ inputs.channel }}" \
             --platform ${{ inputs.platform }} \
             --version "${{ steps.meta.outputs.image_version }}" \
-            --image-id "${{ steps.lower_image.outputs.image_id }}" \
+            --image-tar "images/${{ steps.meta.outputs.archive_name }}.tar" \
             --artifact "images/${{ steps.meta.outputs.archive_name }}" \
             --checksums SHA256SUMS \
             --output latest.json \
@@ -345,6 +342,7 @@ jobs:
             --repository "${{ github.repository }}" \
             --source-ref "${{ github.ref_name }}" \
             --source-sha "${SOURCE_SHA}"
+          rm -f "images/${{ steps.meta.outputs.archive_name }}.tar"
 
       - name: 上传 ${{ inputs.arch_slug }} 测试安装包
         if: ${{ github.event_name == 'push' && (github.ref_name == 'master' || github.ref_name == 'main') }}

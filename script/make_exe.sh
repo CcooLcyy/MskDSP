@@ -126,6 +126,8 @@ HOST_DIR="/data/mskdsp"
 CONTAINER_DIR="/opt/mskdsp"
 IMAGE_TAG=""
 IMAGE_ID=""
+IMAGE_MANIFEST_ID=""
+LOCAL_IMAGE_ID=""
 PAYLOAD_TAR=""
 PAYLOAD_TMP_DIR=""
 NEED_UPDATE=0
@@ -178,47 +180,153 @@ parse_manifest() {
   local tar_path="$1"
   local parsed
   if ! parsed="$(python3 - "${tar_path}" <<'PY'
+import hashlib
 import json
+import re
 import sys
 import tarfile
 
+def read_file(tf, name):
+    members = [member for member in tf.getmembers() if member.name == name]
+    if len(members) != 1:
+        sys.exit(f"归档元数据缺失或包含重复路径: {name}")
+    member = members[0]
+    if not member.isfile():
+        sys.exit(f"归档内容不是普通文件: {name}")
+    if member.size > 1024 * 1024:
+        sys.exit(f"归档元数据超过 1 MiB 限制: {name}")
+    return tf.extractfile(member).read()
+
+
 tar_path = sys.argv[1]
-with tarfile.open(tar_path, "r:*") as tf:
-    try:
-        mf = tf.extractfile("manifest.json")
-    except KeyError:
-        mf = None
-    if mf is None:
-        sys.exit("manifest.json not found in tar")
-    manifest = json.load(mf)
+try:
+    with tarfile.open(tar_path, "r:*") as tf:
+        manifest = json.loads(read_file(tf, "manifest.json"))
+        if not isinstance(manifest, list) or len(manifest) != 1:
+            sys.exit("安装归档必须只包含一个镜像，不能自动选择多镜像或多平台")
+        entry = manifest[0]
+        config_path = entry.get("Config") or ""
+        match = re.fullmatch(r"(?:blobs/sha256/)?([0-9a-fA-F]{64})(?:\.json)?", config_path)
+        if not match:
+            sys.exit(f"镜像配置路径格式不合法: {config_path}")
+        config_data = read_file(tf, config_path)
+        config_hash = hashlib.sha256(config_data).hexdigest()
+        if config_hash != match.group(1).lower():
+            sys.exit(f"镜像配置内容摘要与归档路径不一致: {config_path}")
+        config = json.loads(config_data)
+        config_id = "sha256:" + config_hash
+        repo_tags = entry.get("RepoTags") or []
+        repo_tag = repo_tags[0] if repo_tags else ""
+        if not isinstance(repo_tag, str) or ":" not in repo_tag or re.search(r"\s", repo_tag):
+            sys.exit("归档缺少合法的镜像标签")
 
-if not isinstance(manifest, list) or not manifest:
-    sys.exit("invalid manifest")
-
-entry = manifest[0]
-config = entry.get("Config") or ""
-repo_tags = entry.get("RepoTags") or []
-repo_tag = repo_tags[0] if repo_tags else ""
-
-print(config)
-print(repo_tag)
+        manifest_id = ""
+        if "index.json" in tf.getnames():
+            index = json.loads(read_file(tf, "index.json"))
+            descriptors = index.get("manifests") or []
+            if len(descriptors) != 1:
+                sys.exit("OCI 索引必须只包含一个镜像，不能自动选择多镜像或多平台")
+            descriptor = descriptors[0]
+            manifest_id = descriptor.get("digest", "")
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", manifest_id):
+                sys.exit("OCI manifest 摘要格式不合法")
+            manifest_data = read_file(tf, "blobs/sha256/" + manifest_id[7:])
+            if "sha256:" + hashlib.sha256(manifest_data).hexdigest() != manifest_id:
+                sys.exit("OCI manifest 内容摘要与索引不一致")
+            image_manifest = json.loads(manifest_data)
+            if image_manifest.get("config", {}).get("digest") != config_id:
+                sys.exit("OCI manifest 未指向安装归档中的镜像配置")
+            platform = descriptor.get("platform") or {}
+            for field in ("os", "architecture"):
+                if field in platform and platform[field] != config.get(field):
+                    sys.exit(f"OCI 索引的平台信息与镜像配置不一致: {field}")
+            if "variant" in platform and "variant" in config and platform["variant"] != config["variant"]:
+                sys.exit("OCI 索引的平台变体与镜像配置不一致")
+        print(config_id)
+        print(repo_tag)
+        print(manifest_id)
+except (KeyError, ValueError, TypeError, AttributeError, tarfile.TarError, OSError) as error:
+    sys.exit(f"解析镜像归档失败: {error}")
 PY
 )"
   then
-    die "Failed to parse manifest.json"
+    die "安装包镜像身份校验失败"
   fi
 
-  local config
   local repo_tag
-  config="$(printf '%s\n' "${parsed}" | sed -n '1p')"
+  IMAGE_ID="$(printf '%s\n' "${parsed}" | sed -n '1p')"
   repo_tag="$(printf '%s\n' "${parsed}" | sed -n '2p')"
-  if [[ -z "${config}" || -z "${repo_tag}" ]]; then
-    die "manifest.json missing Config or RepoTags"
+  IMAGE_MANIFEST_ID="$(printf '%s\n' "${parsed}" | sed -n '3p')"
+  if [[ -z "${IMAGE_ID}" || -z "${repo_tag}" ]]; then
+    die "镜像归档缺少配置摘要或镜像标签"
   fi
 
   IMAGE_TAG="${repo_tag}"
-  IMAGE_ID="sha256:${config%.json}"
   IMAGE_REPO="${IMAGE_TAG%:*}"
+  echo "安装包镜像配置摘要: ${IMAGE_ID}，关联 manifest 摘要: ${IMAGE_MANIFEST_ID:-无}"
+}
+
+saved_image_config_id() {
+  local parser
+  parser="$(cat <<'PY'
+import hashlib
+import json
+import re
+import sys
+import tarfile
+
+try:
+    hashes = {}
+    manifest = None
+    with tarfile.open(fileobj=sys.stdin.buffer, mode="r|*") as tf:
+        for member in tf:
+            if not member.isfile():
+                continue
+            if member.name == "manifest.json":
+                if manifest is not None:
+                    sys.exit("本机镜像导出包含重复的镜像清单")
+                if member.size > 1024 * 1024:
+                    sys.exit("本机镜像清单超过 1 MiB 限制")
+                manifest = json.load(tf.extractfile(member))
+            elif re.fullmatch(r"(?:blobs/sha256/)?[0-9a-fA-F]{64}(?:\.json)?", member.name):
+                if member.name in hashes:
+                    sys.exit("本机镜像导出包含重复的镜像配置路径")
+                digest = hashlib.sha256()
+                source = tf.extractfile(member)
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                hashes[member.name] = digest.hexdigest()
+    for chunk in iter(lambda: sys.stdin.buffer.read(1024 * 1024), b""):
+        pass
+    if not isinstance(manifest, list) or len(manifest) != 1:
+        sys.exit("本机镜像导出必须只包含一个镜像")
+    config_path = manifest[0].get("Config", "")
+    match = re.fullmatch(r"(?:blobs/sha256/)?([0-9a-fA-F]{64})(?:\.json)?", config_path)
+    if not match or hashes.get(config_path) != match.group(1).lower():
+        sys.exit("本机镜像导出的配置摘要校验失败")
+    print("sha256:" + hashes[config_path])
+except (KeyError, ValueError, TypeError, AttributeError, tarfile.TarError, OSError) as error:
+    sys.exit(f"解析本机镜像导出失败: {error}")
+PY
+)"
+  docker image save "$1" | python3 -c "${parser}"
+}
+
+image_matches_payload() {
+  local local_id="$1"
+  local config_id
+  [[ -n "${local_id}" ]] || return 1
+  if [[ "${local_id}" == "${IMAGE_ID}" || ( -n "${IMAGE_MANIFEST_ID}" && "${local_id}" == "${IMAGE_MANIFEST_ID}" ) ]]; then
+    echo "本机镜像身份已与安装包关联: ${local_id}"
+    return 0
+  fi
+  echo "本机镜像身份 ${local_id} 无法直接关联，正在流式核对镜像配置摘要"
+  if ! config_id="$(saved_image_config_id "${local_id}")"; then
+    echo "警告: 无法验证本机镜像配置摘要" >&2
+    return 1
+  fi
+  echo "本机镜像配置摘要: ${config_id}，安装包配置摘要: ${IMAGE_ID}"
+  [[ "${config_id}" == "${IMAGE_ID}" ]]
 }
 
 load_image_if_needed() {
@@ -226,17 +334,26 @@ load_image_if_needed() {
   parse_manifest "${PAYLOAD_TAR}"
 
   local existing_id
-  existing_id="$(docker images -q --no-trunc "${IMAGE_TAG}" 2>/dev/null | head -n1 || true)"
-  if [[ -n "${existing_id}" && "${existing_id}" == "${IMAGE_ID}" ]]; then
+  existing_id="$(docker image inspect --format '{{.Id}}' "${IMAGE_TAG}" 2>/dev/null || true)"
+  if image_matches_payload "${existing_id}"; then
+    echo "镜像配置相同，跳过加载: ${IMAGE_TAG}"
+    LOCAL_IMAGE_ID="${existing_id}"
     cleanup_payload
     NEED_UPDATE=0
     return 0
   fi
 
-  docker load -i "${PAYLOAD_TAR}" >/dev/null
+  echo "镜像配置尚未匹配，正在加载安装包镜像: ${IMAGE_TAG}"
+  if ! docker load -i "${PAYLOAD_TAR}" >/dev/null; then
+    die "加载安装包镜像失败，未替换既有业务容器"
+  fi
   CLEANUP_REPO=1
   local new_id
-  new_id="$(docker images -q --no-trunc "${IMAGE_TAG}" 2>/dev/null | head -n1 || true)"
+  new_id="$(docker image inspect --format '{{.Id}}' "${IMAGE_TAG}" 2>/dev/null || true)"
+  if ! image_matches_payload "${new_id}"; then
+    die "加载后的镜像身份仍与安装包不一致，未替换既有业务容器"
+  fi
+  LOCAL_IMAGE_ID="${new_id}"
   if [[ -n "${existing_id}" && -n "${new_id}" && "${existing_id}" != "${new_id}" ]]; then
     docker rmi "${existing_id}" >/dev/null 2>&1 || true
   fi
@@ -283,7 +400,7 @@ ensure_module_dir() {
     echo "模块目录为空，初始化模块到宿主机: ${module_dir}"
   fi
   local init_name="mskdsp-init-$$"
-  docker create --name "${init_name}" "${IMAGE_TAG}" >/dev/null
+  docker create --name "${init_name}" "${LOCAL_IMAGE_ID}" >/dev/null
   if ! docker cp "${init_name}:${CONTAINER_DIR}/module/." "${module_dir}/"; then
     docker rm -f "${init_name}" >/dev/null 2>&1 || true
     die "模块目录初始化失败: ${module_dir}"
@@ -303,7 +420,7 @@ ensure_default_conf() {
   fi
   mkdir -p "${conf_dir}"
 
-  if ! docker create --name "${init_name}" "${IMAGE_TAG}" >/dev/null; then
+  if ! docker create --name "${init_name}" "${LOCAL_IMAGE_ID}" >/dev/null; then
     die "创建配置同步临时容器失败: ${init_name}"
   fi
 
@@ -373,7 +490,7 @@ start_container() {
     shift
   fi
   echo "运行容器固定使用 Asia/Shanghai（北京时间，UTC+8），并关闭 Docker 日志收集"
-  docker run -d \
+  if ! docker run -d \
     --name "${CONTAINER_NAME}" \
     --privileged \
     --restart unless-stopped \
@@ -383,7 +500,15 @@ start_container() {
     -v "${HOST_DIR}/module:${CONTAINER_DIR}/module" \
     -v "${HOST_DIR}/log:${CONTAINER_DIR}/log" \
     "$@" \
-    "${IMAGE_TAG}"
+    "${LOCAL_IMAGE_ID}"; then
+    die "运行 mskdsp 容器失败"
+  fi
+  local running
+  running="$(docker inspect --format '{{.State.Running}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
+  if [[ "${running}" != "true" ]]; then
+    die "mskdsp 容器未处于运行状态，请检查下位机服务日志"
+  fi
+  echo "mskdsp 容器已处于运行状态，镜像身份校验通过"
 }
 
 stop_container() {
