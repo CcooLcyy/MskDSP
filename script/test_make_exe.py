@@ -136,9 +136,10 @@ class InstallerIdentityTest(unittest.TestCase):
         self.bin.mkdir()
         mock = self.root / "mock_docker.py"
         mock.write_text(MOCK_DOCKER, encoding="utf-8")
+        # Git Bash 调用 Windows Python 时保留设备挂载参数，不转换为 Windows 路径。
         for name, command in {
             "python3": f"exec {shlex.quote(bash_path(Path(sys.executable)))} \"$@\"\n",
-            "docker": f"exec python3 {shlex.quote(bash_path(mock))} \"$@\"\n",
+            "docker": f"MSYS2_ARG_CONV_EXCL='/dev:/dev' exec python3 {shlex.quote(bash_path(mock))} \"$@\"\n",
         }.items():
             script = self.bin / name
             script.write_text("#!/usr/bin/env bash\n" + command, encoding="utf-8", newline="\n")
@@ -172,6 +173,24 @@ class InstallerIdentityTest(unittest.TestCase):
     def calls(self, command: str) -> list[list[str]]:
         state = json.loads(self.state_path.read_text(encoding="utf-8"))
         return [args for args in state["calls"] if args[0] == command]
+
+    # 首次安装和版本更新重建容器时，都应默认共享宿主机设备目录。
+    def test_install_and_update_share_host_devices(self) -> None:
+        for current_id in ("", "sha256:" + "b" * 64):
+            with self.subTest(current_id=current_id):
+                result = self.run_installer(
+                    current_id=current_id,
+                    existing_content=b'{"architecture":"amd64","os":"linux","old":true}')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                run = self.calls("run")[0]
+                volumes = [run[index + 1] for index, arg in enumerate(run[:-1]) if arg == "-v"]
+                self.assertEqual(volumes.count("/dev:/dev"), 1)
+                self.assertIn("--privileged", run)
+                self.assertEqual(len(self.calls("load")), 1)
+                state = json.loads(self.state_path.read_text(encoding="utf-8"))
+                self.assertIn(["rm", "-f", "mskdsp"], state["calls"])
+                self.assertLess(state["calls"].index(["rm", "-f", "mskdsp"]),
+                                state["calls"].index(run))
 
     # 经典归档的 config 身份相同，应安全跳过镜像加载。
     def test_classic_same_config_skips_load(self) -> None:

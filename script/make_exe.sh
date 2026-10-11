@@ -490,12 +490,14 @@ start_container() {
     shift
   fi
   echo "运行容器固定使用 Asia/Shanghai（北京时间，UTC+8），并关闭 Docker 日志收集"
+  echo "运行容器共享宿主机 /dev，支持访问真实串口与伪串口"
   if ! docker run -d \
     --name "${CONTAINER_NAME}" \
     --privileged \
     --restart unless-stopped \
     --log-driver none \
     --network host \
+    -v /dev:/dev \
     -v "${HOST_DIR}/conf:${CONTAINER_DIR}/conf" \
     -v "${HOST_DIR}/module:${CONTAINER_DIR}/module" \
     -v "${HOST_DIR}/log:${CONTAINER_DIR}/log" \
