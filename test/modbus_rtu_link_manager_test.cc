@@ -1264,6 +1264,72 @@ TEST(ModbusRtuLinkManagerTest, PollingReportsExactDecimalAtDeadbandBoundary) {
   responder.request_stop();
 }
 
+// 验证：RTU 单点/区间读取在字节和字序归一化后发布枚举 BOOL，兼容 0x03/0x04 与 16/32 位。
+TEST(ModbusRtuLinkManagerTest, PollsEnumBoolInPointAndExplicitModes) {
+  for (auto mode : {ModbusRTUProto::READ_PLAN_MODE_POINT, ModbusRTUProto::READ_PLAN_MODE_EXPLICIT}) {
+    for (uint32_t count : {1u, 2u}) {
+      ScopedPseudoTty pty;
+      ASSERT_TRUE(pty.ok()) << pty.error();
+      FakeDataCenterState state;
+      LinkManagerTestEnv env;
+      auto& mgr = env.mgr;
+      mgr.setDataCenterStub(MakeStub(&state));
+      const auto function = count == 1 ? ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS
+                                       : ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS;
+      auto link = MakeMinimalLinkReq("enum-poll", pty.slavePath().c_str(), 1);
+      link.mutable_config()->set_poll_interval_ms(5);
+      link.mutable_config()->mutable_serial()->set_read_timeout_ms(200);
+      auto* plan = link.mutable_config()->mutable_read_plan();
+      plan->set_mode(mode);
+      if (mode == ModbusRTUProto::READ_PLAN_MODE_EXPLICIT) {
+        auto* block = plan->add_blocks();
+        block->set_function(function);
+        block->set_start(10);
+        block->set_quantity(count);
+      }
+      ModbusRTUProto::LinkInfo info;
+      ASSERT_TRUE(mgr.UpsertLink(link, &info).ok());
+      const uint32_t expected = count == 1 ? 0x1234u : 0x12345678u;
+      ModbusRTUProto::UpsertPointTableRequest points;
+      points.set_conn_name("enum-poll");
+      points.set_replace(true);
+      for (bool matches : {true, false}) {
+        auto point = MakeHoldingRegisterPoint(matches ? "enum-match" : "enum-other", 10);
+        point.set_function(function);
+        point.set_type(ModbusRTUProto::DATA_TYPE_BOOL);
+        point.set_reg_count(count);
+        point.set_byte_order(ModbusRTUProto::BYTE_ORDER_BA);
+        point.set_word_order(ModbusRTUProto::WORD_ORDER_LH);
+        point.set_enum_value(matches ? expected : 7u);
+        *points.add_points() = point;
+      }
+      std::jthread responder([&](std::stop_token stop) {
+        while (!stop.stop_requested()) {
+          std::vector<uint8_t> request;
+          if (!pty.readExact(&request, 8, 500)) return;
+          std::vector<uint8_t> response{1, request[1], static_cast<uint8_t>(count * 2)};
+          if (count == 1) response.insert(response.end(), {0x34, 0x12});
+          else response.insert(response.end(), {0x78, 0x56, 0x34, 0x12});
+          ModbusRTU::SerialBus::appendCrc(&response);
+          if (!pty.writeAll(response)) return;
+        }
+      });
+      ASSERT_TRUE(mgr.UpsertPointTable(points).ok());
+      ASSERT_TRUE(mgr.StartLink("enum-poll").ok());
+      for (const char* tag : {"enum-match", "enum-other"}) {
+        ASSERT_TRUE(state.WaitForPublishCount(info.conn_id(), tag, 1, std::chrono::seconds(2)));
+        const auto updates = state.GetPublishedUpdates(info.conn_id(), tag);
+        ASSERT_FALSE(updates.empty());
+        ASSERT_TRUE(updates[0].value().has_bool_value());
+        EXPECT_EQ(updates[0].value().bool_value(), std::string(tag) == "enum-match");
+        EXPECT_EQ(updates[0].quality(), DataCenterProto::QUALITY_GOOD);
+      }
+      ASSERT_TRUE(mgr.StopLink("enum-poll").ok());
+      responder.request_stop();
+    }
+  }
+}
+
 // 验证：同步 BOOL 命令通过 0x05 写单线圈，并按标准发送 true=FF00、false=0000。
 TEST(ModbusRtuLinkManagerTest, ExecuteCommandWritesSingleCoilBoolOnAndOff) {
   ScopedPseudoTty pty;

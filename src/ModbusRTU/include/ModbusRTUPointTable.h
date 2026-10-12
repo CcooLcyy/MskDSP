@@ -28,6 +28,7 @@ public:
     mskdsp::numeric::Decimal20 offset;
     mskdsp::numeric::Decimal20 deadband;
     std::optional<uint32_t> bitIndex;
+    std::optional<uint32_t> enumValue;
   };
 
   struct RegisterLookup {

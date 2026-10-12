@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "ModbusRTUPointTable.h"
+#include "ModbusRegisterBool.hpp"
 
 namespace {
 using ModbusRTU::PointTable;
@@ -27,6 +28,110 @@ ModbusRTUProto::Point MakeInputRegisterPoint(const char* tag, uint32_t address, 
   return MakePoint(tag, ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS, address, type);
 }
 }  // 命名空间结束
+
+// 验证：同址不同枚举可共存，枚举 0 的存在性与查询往返保持不变。
+TEST(ModbusRtuPointTableTest, AcceptsEnumBoolPointsAndRoundTripsZero) {
+  PointTable table;
+  ModbusRTUProto::UpsertPointTableRequest req;
+  for (uint32_t code : {0u, 3u, 65535u}) {
+    auto point = MakePoint(("enum-" + std::to_string(code)).c_str(),
+                           ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS,
+                           5038, ModbusRTUProto::DATA_TYPE_BOOL);
+    point.set_enum_value(code);
+    *req.add_points() = point;
+  }
+  ASSERT_TRUE(table.Upsert(req.points(), true).ok());
+  ASSERT_TRUE(table.FindByTag("enum-0")->enumValue.has_value());
+  EXPECT_EQ(table.FindByTag("enum-0")->enumValue.value(), 0u);
+  ModbusRTUProto::PointTable out;
+  table.ToProto("enum", &out);
+  ASSERT_EQ(out.points_size(), 3);
+  EXPECT_TRUE(out.points(0).has_enum_value());
+  EXPECT_EQ(out.points(0).enum_value(), 0u);
+  EXPECT_FALSE(out.points(0).has_bit_index());
+  PointTable restored;
+  ASSERT_TRUE(restored.Upsert(out.points(), true).ok());
+  EXPECT_EQ(restored.FindByTag("enum-0")->enumValue.value(), 0u);
+}
+
+// 验证：枚举遥信拒绝互斥字段、错误类型/功能码和超出单寄存器的枚举码。
+TEST(ModbusRtuPointTableTest, RejectsInvalidEnumBoolPoints) {
+  auto point = MakePoint("enum", ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS,
+                         5140, ModbusRTUProto::DATA_TYPE_BOOL);
+  point.set_enum_value(0);
+  const auto rejects = [](const ModbusRTUProto::Point& candidate) {
+    PointTable table;
+    ModbusRTUProto::UpsertPointTableRequest req;
+    *req.add_points() = candidate;
+    EXPECT_EQ(table.Upsert(req.points(), true).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  };
+  auto invalid = point;
+  invalid.set_bit_index(0);
+  rejects(invalid);
+  invalid = point;
+  invalid.set_type(ModbusRTUProto::DATA_TYPE_UINT16);
+  rejects(invalid);
+  for (auto function : {ModbusRTUProto::FUNCTION_READ_COILS,
+                        ModbusRTUProto::FUNCTION_WRITE_SINGLE_REGISTER,
+                        ModbusRTUProto::FUNCTION_WRITE_SINGLE_COIL}) {
+    invalid = point;
+    invalid.set_function(function);
+    rejects(invalid);
+  }
+  invalid = point;
+  invalid.set_enum_value(65536);
+  rejects(invalid);
+  point.set_reg_count(2);
+  point.set_enum_value(UINT32_MAX);
+  PointTable table;
+  ModbusRTUProto::UpsertPointTableRequest req;
+  *req.add_points() = point;
+  EXPECT_TRUE(table.Upsert(req.points(), true).ok());
+}
+
+// 验证：重复枚举、与数值/位图重叠、长度和解码序不同的同址枚举均被拒绝。
+TEST(ModbusRtuPointTableTest, RejectsEnumAddressConflictsInBothOrders) {
+  auto point = MakePoint("enum", ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS,
+                         100, ModbusRTUProto::DATA_TYPE_BOOL);
+  point.set_enum_value(3);
+  std::vector<ModbusRTUProto::Point> conflicts;
+  auto other = point;
+  other.set_tag("other");
+  conflicts.push_back(other);
+  other.set_enum_value(4);
+  other.set_reg_count(2);
+  conflicts.push_back(other);
+  other.set_reg_count(1);
+  other.set_byte_order(ModbusRTUProto::BYTE_ORDER_BA);
+  conflicts.push_back(other);
+  other = MakePoint("other", point.function(), 100, ModbusRTUProto::DATA_TYPE_UINT16);
+  conflicts.push_back(other);
+  other = MakePoint("other", point.function(), 100, ModbusRTUProto::DATA_TYPE_BOOL);
+  other.set_bit_index(0);
+  conflicts.push_back(other);
+  other = MakeUint32RegisterPoint("other", 99);
+  conflicts.push_back(other);
+  for (const auto& conflict : conflicts) {
+    for (bool reverse : {false, true}) {
+      PointTable table;
+      ModbusRTUProto::UpsertPointTableRequest req;
+      *req.add_points() = reverse ? conflict : point;
+      *req.add_points() = reverse ? point : conflict;
+      EXPECT_EQ(table.Upsert(req.points(), true).error_code(), grpc::StatusCode::ALREADY_EXISTS);
+    }
+  }
+}
+
+// 验证：枚举解码按无符号原始值相等，0/32 位上限和未知码正确，原位图行为保持。
+TEST(ModbusRtuPointTableTest, DecodesEnumEqualityRatherThanBits) {
+  EXPECT_TRUE(ModbusRTU::DecodeRegisterBool(0, std::nullopt, 0));
+  EXPECT_TRUE(ModbusRTU::DecodeRegisterBool(3, std::nullopt, 3));
+  EXPECT_FALSE(ModbusRTU::DecodeRegisterBool(7, std::nullopt, 3));
+  EXPECT_TRUE(ModbusRTU::DecodeRegisterBool(UINT32_MAX, std::nullopt, UINT32_MAX));
+  EXPECT_FALSE(ModbusRTU::DecodeRegisterBool(42, std::nullopt, 0));
+  EXPECT_TRUE(ModbusRTU::DecodeRegisterBool(0x80000000u, 31, std::nullopt));
+  EXPECT_FALSE(ModbusRTU::DecodeRegisterBool(3, 2, std::nullopt));
+}
 
 // 验证：点表 replace 更新与 tag 查询、ToProto 输出排序。
 TEST(ModbusRtuPointTableTest, ReplaceAndLookup) {

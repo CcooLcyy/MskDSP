@@ -155,8 +155,19 @@ grpc::Status PointTable::validatePoint(const ModbusRTUProto::Point &point) const
   if (isWriteSingleCoilFunction(point.function()) && regCount != 1) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "写单线圈点位 reg_count 只能为 1");
   }
-  if (point.type() == ModbusRTUProto::DATA_TYPE_BOOL && isReadRegisterFunction(point.function()) && !point.has_bit_index()) {
-    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "寄存器 BOOL 点位必须配置 bit_index");
+  if (point.has_enum_value() &&
+      (point.type() != ModbusRTUProto::DATA_TYPE_BOOL || !isReadRegisterFunction(point.function()))) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "enum_value 仅支持 0x03/0x04 寄存器 BOOL 点位");
+  }
+  if (point.has_enum_value() && point.has_bit_index()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "enum_value 与 bit_index 不能同时配置");
+  }
+  if (point.has_enum_value() && regCount == 1 && point.enum_value() > 65535u) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "enum_value 超出单寄存器无符号值范围");
+  }
+  if (point.type() == ModbusRTUProto::DATA_TYPE_BOOL && isReadRegisterFunction(point.function()) &&
+      !point.has_bit_index() && !point.has_enum_value()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "寄存器 BOOL 点位必须配置 bit_index 或 enum_value");
   }
   if (point.type() == ModbusRTUProto::DATA_TYPE_BOOL && point.has_bit_index() && !isReadRegisterFunction(point.function())) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "bit_index 仅支持 0x03/0x04 寄存器 BOOL 点位");
@@ -221,6 +232,26 @@ grpc::Status PointTable::insertOrUpdatePoint(const ModbusRTUProto::Point &point)
   if (point.has_bit_index()) {
     p.bitIndex = point.bit_index();
   }
+  if (point.has_enum_value()) {
+    p.enumValue = point.enum_value();
+  }
+
+  // 枚举点可共用完整寄存器，必须显式检查范围与解码序，避免与数值/位图点混用。
+  for (const auto &[tag, existing] : byTag_) {
+    if (tag == p.tag || existing.function != p.function ||
+        (!p.enumValue.has_value() && !existing.enumValue.has_value()) ||
+        p.address > existing.address + existing.regCount - 1 ||
+        existing.address > p.address + p.regCount - 1) {
+      continue;
+    }
+    if (p.enumValue.has_value() && existing.enumValue.has_value() &&
+        p.address == existing.address && p.regCount == existing.regCount &&
+        p.wordOrder == existing.wordOrder && p.byteOrder == existing.byteOrder &&
+        p.enumValue != existing.enumValue) {
+      continue;
+    }
+    return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "枚举点地址重复或与其他点位解码范围冲突");
+  }
 
   std::vector<PointKey> keys;
   keys.reserve(p.regCount);
@@ -278,17 +309,18 @@ grpc::Status PointTable::insertOrUpdatePoint(const ModbusRTUProto::Point &point)
   byTag_[p.tag] = p;
   if (p.bitIndex.has_value()) {
     tagByBitKey_[BitPointKey{p.function, p.address, p.bitIndex.value()}] = p.tag;
-  } else {
+  } else if (!p.enumValue.has_value()) {
     for (uint32_t i = 0; i < p.regCount; ++i) {
       tagByKey_[keys[i]] = AddressEntry{p.tag, i};
     }
   }
-  LOG_DEBUG("ModbusRTU 点表写入点位: tag={}, function={}, address={}, reg_count={}, bit_index={}, 倍率={}, 偏移={}, 死区={}",
+  LOG_DEBUG("ModbusRTU 点表写入点位: tag={}, function={}, address={}, reg_count={}, bit_index={}, enum_value={}, 倍率={}, 偏移={}, 死区={}",
             p.tag,
             static_cast<int>(p.function),
             p.address,
             p.regCount,
             p.bitIndex.has_value() ? std::to_string(p.bitIndex.value()) : "-",
+            p.enumValue.has_value() ? std::to_string(p.enumValue.value()) : "-",
             p.scale.ToString(),
             p.offset.ToString(),
             p.deadband.ToString());
@@ -369,11 +401,17 @@ void PointTable::ToProto(const std::string &connName, ModbusRTUProto::PointTable
       dst->set_reg_count(point.regCount);
       dst->set_word_order(point.wordOrder);
       dst->set_byte_order(point.byteOrder);
-    } else if (point.type == ModbusRTUProto::DATA_TYPE_BOOL && point.bitIndex.has_value()) {
+    } else if (point.type == ModbusRTUProto::DATA_TYPE_BOOL &&
+               (point.bitIndex.has_value() || point.enumValue.has_value())) {
       dst->set_reg_count(point.regCount);
       dst->set_word_order(point.wordOrder);
       dst->set_byte_order(point.byteOrder);
-      dst->set_bit_index(point.bitIndex.value());
+      if (point.bitIndex.has_value()) {
+        dst->set_bit_index(point.bitIndex.value());
+      }
+      if (point.enumValue.has_value()) {
+        dst->set_enum_value(point.enumValue.value());
+      }
     }
     const auto legacyScale = point.scale.ToDouble();
     const auto legacyOffset = point.offset.ToDouble();

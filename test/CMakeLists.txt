@@ -1518,6 +1518,14 @@ target_link_libraries(modbusTcpBus_test PRIVATE
 
 mskdsp_add_isolated_test(modbusTcpBus_test)
 
+add_executable(modbusTcpEnum_test modbus_tcp_enum_test.cc)
+target_link_libraries(modbusTcpEnum_test PRIVATE
+  GTest::gtest_main
+  GTest::gmock
+  ModbusTCP
+)
+mskdsp_add_isolated_test(modbusTcpEnum_test)
+
 add_executable(configPusherApplyModbusRtu_test
   config_pusher_apply_modbus_rtu_test.cc
 )
@@ -1799,6 +1807,7 @@ set(MSKDSP_TEST_TARGETS
   moduleManager_test
   moduleInterface_test
   modbusTcpBus_test
+  modbusTcpEnum_test
   logger_test
   mqtt_manager_test
   configDatabase_test

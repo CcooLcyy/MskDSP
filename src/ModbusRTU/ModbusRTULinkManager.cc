@@ -15,6 +15,7 @@
 
 #include "Logger.h"
 #include "ModbusRTULibInfo.h"
+#include "ModbusRegisterBool.hpp"
 #include "ThreadUtil.hpp"
 #include "mskdsp/Decimal20.hpp"
 
@@ -72,8 +73,9 @@ bool isWriteFunction(ModbusRTUProto::FunctionCode function) {
   return isWriteRegisterFunction(function) || isWriteSingleCoilFunction(function);
 }
 
-bool isRegisterBitPoint(const PointTable::Point& point) {
-  return point.type == ModbusRTUProto::DATA_TYPE_BOOL && isReadRegisterFunction(point.function) && point.bitIndex.has_value();
+bool isRegisterBoolPoint(const PointTable::Point& point) {
+  return point.type == ModbusRTUProto::DATA_TYPE_BOOL && isReadRegisterFunction(point.function) &&
+      (point.bitIndex.has_value() || point.enumValue.has_value());
 }
 
 uint16_t swapWordBytes(uint16_t value) {
@@ -2376,7 +2378,7 @@ void LinkManager::pollLoop(std::string connName,
                    point.function == ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS) {
           const bool isInputRegisters = point.function == ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS;
           std::optional<Decimal20> engValue;
-          if (isRegisterBitPoint(point)) {
+          if (isRegisterBoolPoint(point)) {
             uint32_t raw = 0;
             if (point.regCount == 1) {
               uint16_t value = 0;
@@ -2416,12 +2418,13 @@ void LinkManager::pollLoop(std::string connName,
               status = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "寄存器 BOOL 点位 reg_count 不支持");
             }
             if (status.ok()) {
-              const bool bitValue = ((raw >> point.bitIndex.value()) & 0x01u) != 0;
-              LOG_DEBUG("ModbusRTU 读取寄存器bit遥信: conn_name={}, tag={}, raw={}, bit_index={}, value={}",
+              const bool bitValue = DecodeRegisterBool(raw, point.bitIndex, point.enumValue);
+              LOG_DEBUG("ModbusRTU 读取寄存器遥信: conn_name={}, tag={}, raw={}, bit_index={}, enum_value={}, value={}",
                         connName,
                         point.tag,
                         raw,
-                        point.bitIndex.value(),
+                        point.bitIndex.has_value() ? std::to_string(point.bitIndex.value()) : "-",
+                        point.enumValue.has_value() ? std::to_string(point.enumValue.value()) : "-",
                         bitValue);
               // 现场帧已成功接收并解析，通信健康不依赖 DataCenter 上报结果。
               roundSuccessCount += 1;
@@ -2599,6 +2602,7 @@ void LinkManager::pollLoop(std::string connName,
     Decimal20 offset;
     Decimal20 deadband;
     std::optional<uint32_t> bitIndex;
+    std::optional<uint32_t> enumValue;
   };
 
   std::vector<NormalizedPoint> registerPoints;
@@ -2629,6 +2633,7 @@ void LinkManager::pollLoop(std::string connName,
     normalized.offset = point.offset;
     normalized.deadband = point.deadband;
     normalized.bitIndex = point.bitIndex;
+    normalized.enumValue = point.enumValue;
 
     if (isReadRegisterFunction(point.function)) {
       registerPoints.push_back(std::move(normalized));
@@ -2780,7 +2785,8 @@ void LinkManager::pollLoop(std::string connName,
         }
         const size_t offset = static_cast<size_t>(point.address - start);
         Decimal20 engValue;
-        if (point.type == ModbusRTUProto::DATA_TYPE_BOOL && point.bitIndex.has_value()) {
+        if (point.type == ModbusRTUProto::DATA_TYPE_BOOL &&
+            (point.bitIndex.has_value() || point.enumValue.has_value())) {
           uint32_t raw = 0;
           if (point.regCount == 1) {
             if (offset >= values.size()) {
@@ -2811,12 +2817,13 @@ void LinkManager::pollLoop(std::string connName,
             LOG_WARNING("ModbusRTU 轮询区间寄存器BOOL点位 reg_count 不支持: conn_name={}, tag={}", connName, point.tag);
             continue;
           }
-          const bool bitValue = ((raw >> point.bitIndex.value()) & 0x01u) != 0;
-          LOG_DEBUG("ModbusRTU 读取寄存器bit遥信: conn_name={}, tag={}, raw={}, bit_index={}, value={}",
+          const bool bitValue = DecodeRegisterBool(raw, point.bitIndex, point.enumValue);
+          LOG_DEBUG("ModbusRTU 读取寄存器遥信: conn_name={}, tag={}, raw={}, bit_index={}, enum_value={}, value={}",
                     connName,
                     point.tag,
                     raw,
-                    point.bitIndex.value(),
+                    point.bitIndex.has_value() ? std::to_string(point.bitIndex.value()) : "-",
+                    point.enumValue.has_value() ? std::to_string(point.enumValue.value()) : "-",
                     bitValue);
           auto dc = dataCenter_.PublishBool(connId, point.tag, bitValue, DataCenterProto::QUALITY_GOOD, 0);
           if (!dc.ok()) {

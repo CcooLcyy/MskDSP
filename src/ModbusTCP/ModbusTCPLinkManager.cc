@@ -10,6 +10,7 @@
 
 #include "Logger.h"
 #include "ModbusTCPLibInfo.h"
+#include "ModbusRegisterBool.hpp"
 #include "mskdsp/Decimal20.hpp"
 
 namespace ModbusTCP {
@@ -516,8 +517,12 @@ void LinkManager::pollLoop(std::string name,
               point.regCount == 1) {
             raw = swapBytes(static_cast<uint16_t>(raw));
           }
-          const bool value =
-              ((raw >> point.bitIndex.value_or(0)) & 1u) != 0;
+          const bool value = ModbusRTU::DecodeRegisterBool(raw, point.bitIndex, point.enumValue);
+          LOG_DEBUG("ModbusTCP 读取寄存器遥信: conn_name={}, tag={}, raw={}, bit_index={}, enum_value={}, value={}",
+                    name, point.tag, raw,
+                    point.bitIndex.has_value() ? std::to_string(point.bitIndex.value()) : "-",
+                    point.enumValue.has_value() ? std::to_string(point.enumValue.value()) : "-",
+                    value);
           status = dataCenter_.PublishBool(
               connId, point.tag, value, DataCenterProto::QUALITY_GOOD, 0);
         } else if (status.ok()) {
