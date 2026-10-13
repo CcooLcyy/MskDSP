@@ -21,8 +21,8 @@ concurrency:
 env:
   R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
   R2_BUCKET: ${{ vars.R2_BUCKET || 'mskdsp-update' }}
-  R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL || 'https://pub-19f3d71852b04011b120b1b814141c12.r2.dev' }}
-  STATIC_UPDATE_BASE_URL: ${{ format('{0}/mskdsp-lower', vars.R2_PUBLIC_BASE_URL || 'https://pub-19f3d71852b04011b120b1b814141c12.r2.dev') }}
+  R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL || 'https://update.clsclear.top' }}
+  STATIC_UPDATE_BASE_URL: ${{ format('{0}/mskdsp-lower', vars.R2_PUBLIC_BASE_URL || 'https://update.clsclear.top') }}
 
 jobs:
   arm64-release:

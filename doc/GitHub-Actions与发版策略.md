@@ -286,13 +286,13 @@ mskdsp-lower-x64/<channel>/latest.json
 安装包、调试包和 `SHA256SUMS` 先上传，`latest.json` 最后上传。上传完成后仅清理同一渠道和平台下不再使用的旧对象，不影响其他渠道。客户端清单地址示例：
 
 ```text
-https://pub-19f3d71852b04011b120b1b814141c12.r2.dev/mskdsp-lower/stable/latest.json
-https://pub-19f3d71852b04011b120b1b814141c12.r2.dev/mskdsp-lower-x64/ci/latest.json
+https://update.clsclear.top/mskdsp-lower/stable/latest.json
+https://update.clsclear.top/mskdsp-lower-x64/ci/latest.json
 ```
 
 首次启用前，在仓库 `Settings → Secrets and variables → Actions` 配置：
 
 - Secrets：`R2_ACCOUNT_ID`、`R2_ACCESS_KEY_ID`、`R2_SECRET_ACCESS_KEY`
-- Variables：`R2_BUCKET`（默认 `mskdsp-update`）、`R2_PUBLIC_BASE_URL`（当前为上述 `r2.dev` 地址）
+- Variables：`R2_BUCKET`（默认 `mskdsp-update`）、`R2_PUBLIC_BASE_URL`（默认 `https://update.clsclear.top`，可覆盖更新公共域名）
 
-`r2.dev` 仅用于当前开发联调；绑定自定义域名后，可通过修改 `R2_PUBLIC_BASE_URL` 和对应的更新基地址切换正式地址，无需修改清单格式或下载逻辑。
+`https://update.clsclear.top` 是 Cloudflare R2 自定义域名，客户端通过该域名读取清单和下载安装包；发布仍使用 R2 S3 兼容接口。更新基地址由 `R2_PUBLIC_BASE_URL` 与产品前缀拼接，切换域名时无需修改清单格式或下载逻辑。

@@ -111,15 +111,15 @@ MSKDSP_VERSION=<version> bash script/make_image.sh
 上位机通过 SSH 查询目标容器实际引用的不可变镜像，并在 containerd 场景验证 manifest/index 与 config 的关联后统一成 config 摘要，与清单中的 `image_id` 比较；不能直接混比不同类型的摘要。`asset.sha256` 只用于安装包传输完整性校验，不代表当前容器运行身份。缺失关联或多镜像歧义时拒绝校验通过。
 
 ### 静态目录约定
-默认 R2 公共开发 URL 结构：
+默认更新域名 `https://update.clsclear.top` 为 Cloudflare R2 自定义域名，URL 结构：
 ```
-https://pub-19f3d71852b04011b120b1b814141c12.r2.dev/mskdsp-lower/<channel>/latest.json
-https://pub-19f3d71852b04011b120b1b814141c12.r2.dev/mskdsp-lower/<channel>/linux-arm64/<package>
-https://pub-19f3d71852b04011b120b1b814141c12.r2.dev/mskdsp-lower/<channel>/linux-arm64/SHA256SUMS
+https://update.clsclear.top/mskdsp-lower/<channel>/latest.json
+https://update.clsclear.top/mskdsp-lower/<channel>/linux-arm64/<package>
+https://update.clsclear.top/mskdsp-lower/<channel>/linux-arm64/SHA256SUMS
 
 # x64 验证包使用独立前缀（platform=linux-x64），与 arm64 分开存放，避免 latest.json 互相覆盖
-https://pub-19f3d71852b04011b120b1b814141c12.r2.dev/mskdsp-lower-x64/<channel>/latest.json
-https://pub-19f3d71852b04011b120b1b814141c12.r2.dev/mskdsp-lower-x64/<channel>/linux-x64/<package>
+https://update.clsclear.top/mskdsp-lower-x64/<channel>/latest.json
+https://update.clsclear.top/mskdsp-lower-x64/<channel>/linux-x64/<package>
 ```
 
 R2 上传脚本会先上传安装包和 `SHA256SUMS`，最后上传 `latest.json`，并仅清理同一渠道/平台下不再使用的旧对象，避免上位机读到已更新但资产尚未上传完成的清单。

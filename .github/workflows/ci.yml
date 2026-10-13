@@ -38,7 +38,7 @@ jobs:
       strip_debug: true
       channel: ci
       r2_prefix: mskdsp-lower/ci
-      static_update_base_url: ${{ format('{0}/mskdsp-lower', vars.R2_PUBLIC_BASE_URL || 'https://pub-19f3d71852b04011b120b1b814141c12.r2.dev') }}
+      static_update_base_url: ${{ format('{0}/mskdsp-lower', vars.R2_PUBLIC_BASE_URL || 'https://update.clsclear.top') }}
 
   # x64：无现场设备时的服务器验证链路（在 x86_64 服务器上跑起下位机模拟现场），
   # 发布到独立前缀 mskdsp-lower-x64/ci，避免与 arm64 的 latest.json 互相覆盖；
@@ -59,4 +59,4 @@ jobs:
       strip_debug: false
       channel: ci
       r2_prefix: mskdsp-lower-x64/ci
-      static_update_base_url: ${{ format('{0}/mskdsp-lower-x64', vars.R2_PUBLIC_BASE_URL || 'https://pub-19f3d71852b04011b120b1b814141c12.r2.dev') }}
+      static_update_base_url: ${{ format('{0}/mskdsp-lower-x64', vars.R2_PUBLIC_BASE_URL || 'https://update.clsclear.top') }}
