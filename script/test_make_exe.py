@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import gzip
+import bz2
 import io
 import json
+import lzma
 import os
 from pathlib import Path
 import shlex
@@ -68,6 +71,7 @@ def image_archive(path: Path, *, oci: bool = False, content: bytes | None = None
 
 
 MOCK_DOCKER = r'''
+import gzip
 import json
 import os
 from pathlib import Path
@@ -87,6 +91,14 @@ elif args[:2] == ["image", "save"] or args[:1] == ["save"]:
         sys.exit(17)
     sys.stdout.buffer.write(Path(state["installed_archive"]).read_bytes())
 elif args[:1] == ["load"]:
+    input_path = Path(args[args.index("-i") + 1])
+    assert sorted(path.name for path in input_path.parent.iterdir()) == ["image.tar.gz"], "安装器只能落盘压缩镜像临时文件"
+    compressed = input_path.read_bytes()
+    assert compressed[:2] == b"\x1f\x8b", "Docker 必须收到 gzip 压缩载荷"
+    assert gzip.decompress(compressed) == Path(state["payload_archive"]).read_bytes(), "Docker 输入必须完整还原原始镜像 tar"
+    state["loaded_gzip"] = True
+    state["load_input_name"] = Path(args[args.index("-i") + 1]).name
+    state_path.write_text(json.dumps(state), encoding="utf-8")
     if state.get("load_fail"):
         sys.exit(19)
     state["current_id"] = state["loaded_id"]
@@ -146,12 +158,21 @@ class InstallerIdentityTest(unittest.TestCase):
             script.chmod(0o755)
 
     def run_installer(self, *, oci: bool = False, current_id: str = "", loaded_id: str | None = None,
-                      existing_content: bytes | None = None, **options: bool) -> subprocess.CompletedProcess[str]:
+                      existing_content: bytes | None = None, payload_fault: str | None = None,
+                      archive_limit: int | None = None,
+                      compressed_input: str | None = None,
+                      build_archive_limit: int | None = None,
+                      **options: bool) -> subprocess.CompletedProcess[str]:
         archive_options = {key: options.pop(key) for key in list(options)
                            if key in {"corrupt_config", "corrupt_manifest", "wrong_link", "multiple",
                                       "multiple_platforms", "wrong_platform", "duplicate_config",
                                       "oversized_config"}}
         identity = image_archive(self.payload, oci=oci, **archive_options)
+        build_input = self.payload
+        if compressed_input:
+            build_input = self.payload.with_suffix(".tar." + compressed_input)
+            compressor = {"gz": gzip.compress, "bz2": bz2.compress, "xz": lzma.compress}[compressed_input]
+            build_input.write_bytes(compressor(self.payload.read_bytes()))
         image_archive(self.installed, content=existing_content)
         state = {"current_id": current_id, "loaded_id": loaded_id or identity["config_id"],
                  "installed_archive": str(self.installed), "payload_archive": str(self.payload),
@@ -159,20 +180,127 @@ class InstallerIdentityTest(unittest.TestCase):
         self.state_path.write_text(json.dumps(state), encoding="utf-8")
         env = {**os.environ, "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
                "MOCK_DOCKER_STATE": str(self.state_path), "PYTHONIOENCODING": "utf-8"}
+        self.payload_temp = self.root / "payload-temp"
+        self.payload_temp.mkdir(exist_ok=True)
+        env["TMPDIR"] = bash_path(self.payload_temp)
         env.pop("MSYS_NO_PATHCONV", None)
+        if build_archive_limit is not None:
+            build_script = self.root / "script" / "make_exe.sh"
+            build_script.write_bytes(Path(__file__).with_name("make_exe.sh").read_bytes().replace(
+                b"MAX_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024",
+                f"MAX_ARCHIVE_BYTES = {build_archive_limit}".encode()))
         built = subprocess.run([self.bash, bash_path(self.root / "script" / "make_exe.sh"),
-                                bash_path(self.payload)], env=env, capture_output=True, text=True,
+                                bash_path(build_input)], env=env, capture_output=True, text=True,
                                encoding="utf-8", errors="replace", timeout=30)
+        if compressed_input or build_archive_limit is not None:
+            return built
         self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
         package = self.root / "images" / "mskdsp-test"
         package.write_bytes(package.read_bytes().replace(b'HOST_DIR="/data/mskdsp"',
                             f"HOST_DIR={shlex.quote(bash_path(self.root / 'runtime'))}".encode()))
+        self.package = package
+        if archive_limit is not None:
+            package.write_bytes(package.read_bytes().replace(
+                b"MAX_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024",
+                f"MAX_ARCHIVE_BYTES = {archive_limit}".encode()))
+        if payload_fault:
+            header, payload = package.read_bytes().split(b"\n__ARCHIVE_BELOW__\n", 1)
+            if payload_fault == "raw":
+                payload = self.payload.read_bytes()
+            else:
+                payload = bytearray(gzip.compress(self.payload.read_bytes(), compresslevel=6, mtime=0))
+                if payload_fault == "crc":
+                    payload[-8] ^= 1
+                elif payload_fault == "truncated":
+                    del payload[-8:]
+                elif payload_fault == "multiple_members":
+                    payload.extend(gzip.compress(b"extra-member", mtime=0))
+                elif payload_fault == "trailing_data":
+                    payload.extend(b"trailing")
+                elif payload_fault == "trailing_zero":
+                    payload.extend(b"\0")
+                else:
+                    raise ValueError(payload_fault)
+            package.write_bytes(header + b"\n__ARCHIVE_BELOW__\n" + payload)
+            for directory in ("module", "conf"):
+                preserved = self.root / "runtime" / directory
+                preserved.mkdir(parents=True, exist_ok=True)
+                (preserved / "preserve.txt").write_text("现场内容", encoding="utf-8")
         return subprocess.run([self.bash, bash_path(package), "start"], env=env,
                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
 
     def calls(self, command: str) -> list[list[str]]:
         state = json.loads(self.state_path.read_text(encoding="utf-8"))
         return [args for args in state["calls"] if args[0] == command]
+
+    # 发布仅压缩归档载荷，关闭 gzip 文件名和时间戳，Docker 完整还原原始 tar。
+    def test_generated_payload_is_reproducible_gzip(self) -> None:
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        payload = self.package.read_bytes().split(b"\n__ARCHIVE_BELOW__\n", 1)[1]
+        self.assertEqual(payload[:3], b"\x1f\x8b\x08")
+        self.assertEqual(payload[3], 0, "gzip 不能记录原始文件名")
+        self.assertEqual(payload[4:8], b"\0" * 4, "gzip 不能记录时间戳")
+        self.assertEqual(gzip.decompress(payload), self.payload.read_bytes())
+        expected = io.BytesIO()
+        with gzip.GzipFile(filename="", fileobj=expected, mode="wb", compresslevel=6, mtime=0) as archive:
+            archive.write(self.payload.read_bytes())
+        self.assertEqual(payload, expected.getvalue())
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertTrue(state["loaded_gzip"])
+        self.assertEqual(state["load_input_name"], "image.tar.gz")
+        self.assertEqual(list(self.payload_temp.iterdir()), [])
+
+    # 裸 tar、尾部 CRC 错误和截断必须在 Docker 加载、模块替换前拒绝并清理压缩临时文件。
+    def test_invalid_compressed_payload_preserves_existing_installation(self) -> None:
+        for fault in ("raw", "crc", "truncated"):
+            with self.subTest(fault=fault):
+                result = self.run_installer(payload_fault=fault)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                state = json.loads(self.state_path.read_text(encoding="utf-8"))
+                self.assertEqual(state["calls"], [], "损坏载荷不能进入 Docker 操作")
+                for directory in ("module", "conf"):
+                    self.assertEqual((self.root / "runtime" / directory / "preserve.txt").read_text(encoding="utf-8"), "现场内容")
+                self.assertEqual(list(self.payload_temp.iterdir()), [])
+
+    # 与上位机保持单成员规则，额外 gzip 成员以及任何尾随字节都不能进入 Docker。
+    def test_multiple_members_and_trailing_bytes_are_rejected(self) -> None:
+        for fault in ("multiple_members", "trailing_data", "trailing_zero"):
+            with self.subTest(fault=fault):
+                result = self.run_installer(payload_fault=fault)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                state = json.loads(self.state_path.read_text(encoding="utf-8"))
+                self.assertEqual(state["calls"], [])
+                self.assertEqual(list(self.payload_temp.iterdir()), [])
+
+    # 发布输入只接受原始 tar，提前拒绝 gzip/bzip2/xz，避免二次压缩生成无法安装的产物。
+    def test_packager_rejects_already_compressed_input(self) -> None:
+        for compression in ("gz", "bz2", "xz"):
+            with self.subTest(compression=compression):
+                result = self.run_installer(compressed_input=compression)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertFalse((self.root / "images" / "mskdsp-test").exists())
+
+    # 缩小发布阈值验证超限原始 tar 被拒绝，并清理已写入的安装脚本头，避免发布无法安装的包。
+    def test_packager_rejects_oversized_source_tar(self) -> None:
+        result = self.run_installer(build_archive_limit=10240)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.root / "images" / "mskdsp-test").exists())
+        result = self.run_installer(build_archive_limit=4096)
+        self.assertEqual(self.payload.stat().st_size, 10240)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.root / "images" / "mskdsp-test").exists())
+
+    # 缩小实际生产上限来验证拒绝逻辑，避免测试生成 4 GiB 镜像；恰好达到上限仍允许安装。
+    def test_decompressed_archive_size_is_bounded(self) -> None:
+        result = self.run_installer(archive_limit=10240)
+        self.assertEqual(self.payload.stat().st_size, 10240)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = self.run_installer(archive_limit=4096)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(state["calls"], [])
+        self.assertEqual(list(self.payload_temp.iterdir()), [])
 
     # 首次安装和版本更新重建容器时，都应默认共享宿主机设备目录。
     def test_install_and_update_share_host_devices(self) -> None:
@@ -293,6 +421,7 @@ class InstallerIdentityTest(unittest.TestCase):
         result = self.run_installer(load_fail=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.calls("rm"), [])
+        self.assertEqual(list(self.payload_temp.iterdir()), [])
 
     # Docker run 命令失败，安装器不能返回执行成功。
     def test_run_failure_is_not_success(self) -> None:

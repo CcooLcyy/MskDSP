@@ -21,14 +21,18 @@ import sys
 import tarfile
 
 tar_path = sys.argv[1]
-with tarfile.open(tar_path, "r:*") as tf:
-    try:
-        mf = tf.extractfile("manifest.json")
-    except KeyError:
-        mf = None
-    if mf is None:
-        sys.exit(1)
-    manifest = json.load(mf)
+try:
+    # 输入必须为原始镜像 tar，避免对已压缩输入再次压缩生成错误载荷。
+    with tarfile.open(tar_path, "r:") as tf:
+        try:
+            mf = tf.extractfile("manifest.json")
+        except KeyError:
+            mf = None
+        if mf is None:
+            sys.exit("原始镜像 tar 缺少 manifest.json")
+        manifest = json.load(mf)
+except (tarfile.TarError, OSError) as error:
+    sys.exit(f"发布输入必须为未压缩原始镜像 tar，不支持 gzip/bzip2/xz 等压缩输入: {error}")
 
 if not isinstance(manifest, list) or not manifest:
     sys.exit(1)
@@ -169,11 +173,46 @@ extract_payload() {
   local start_line
   start_line="$(payload_start_line)"
   if [[ -z "${start_line}" ]]; then
-    die "Payload marker not found."
+    die "安装包缺少压缩载荷分界标记，请重新下载安装包"
   fi
   PAYLOAD_TMP_DIR="$(mktemp -d)"
-  PAYLOAD_TAR="${PAYLOAD_TMP_DIR}/image.tar"
+  PAYLOAD_TAR="${PAYLOAD_TMP_DIR}/image.tar.gz"
   tail -n +"${start_line}" "$0" > "${PAYLOAD_TAR}"
+  echo "开始检查 gzip 压缩载荷完整性，不生成未压缩镜像临时文件"
+  if ! python3 - "${PAYLOAD_TAR}" <<'PY'
+import sys
+import zlib
+
+MAX_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024
+
+try:
+    with open(sys.argv[1], "rb") as source:
+        if source.read(2) != b"\x1f\x8b":
+            sys.exit("安装包载荷必须为 gzip，旧裸 tar 安装包不再支持，请重新下载")
+        source.seek(0)
+        compressed = zlib.decompressobj(wbits=31)
+        total = 0
+        # 单成员解压必须读到流尾部校验 CRC，拒绝额外成员、尾随字节和超大镜像。
+        for chunk in iter(lambda: source.read(64 * 1024), b""):
+            if compressed.eof:
+                sys.exit("gzip 压缩载荷含多成员或尾随数据，请重新下载安装包")
+            while chunk:
+                output = compressed.decompress(chunk, max_length=1024 * 1024)
+                total += len(output)
+                if total > MAX_ARCHIVE_BYTES:
+                    sys.exit("gzip 镜像解压后大小超过 4 GiB 限制，请重新下载安装包")
+                chunk = compressed.unconsumed_tail
+                if compressed.unused_data:
+                    sys.exit("gzip 压缩载荷含多成员或尾随数据，请重新下载安装包")
+        if not compressed.eof or compressed.unused_data or compressed.unconsumed_tail:
+            sys.exit("gzip 压缩载荷被截断或含未消费数据，请重新下载安装包")
+except (OSError, EOFError, zlib.error) as error:
+    sys.exit(f"gzip 压缩载荷损坏或截断，请重新下载安装包: {error}")
+PY
+  then
+    die "安装包压缩载荷校验失败，未加载镜像或替换既有业务容器"
+  fi
+  echo "gzip 压缩载荷完整性校验通过"
 }
 
 parse_manifest() {
@@ -343,7 +382,7 @@ load_image_if_needed() {
     return 0
   fi
 
-  echo "镜像配置尚未匹配，正在加载安装包镜像: ${IMAGE_TAG}"
+  echo "镜像配置尚未匹配，Docker 正在直接加载 gzip 压缩镜像: ${IMAGE_TAG}"
   if ! docker load -i "${PAYLOAD_TAR}" >/dev/null; then
     die "加载安装包镜像失败，未替换既有业务容器"
   fi
@@ -544,7 +583,28 @@ exit 0
 __ARCHIVE_BELOW__
 EOF
 
-cat "${INPUT_TAR}" >> "${OUTPUT_PATH}"
+echo "以 gzip 级别 6 封装镜像载荷，不记录文件名和时间戳"
+if ! python3 - "${INPUT_TAR}" "${OUTPUT_PATH}" <<'PY'
+import gzip
+import os
+import shutil
+import sys
+
+source_path, output_path = sys.argv[1:]
+MAX_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024
+source_bytes = os.path.getsize(source_path)
+if source_bytes > MAX_ARCHIVE_BYTES:
+    sys.exit(f"原始镜像 tar 大小超过 4 GiB 限制，不能发布: {source_bytes} 字节")
+with open(source_path, "rb") as source, open(output_path, "ab") as output:
+    payload_start = output.tell()
+    with gzip.GzipFile(filename="", fileobj=output, mode="wb", compresslevel=6, mtime=0) as compressed:
+        shutil.copyfileobj(source, compressed, length=1024 * 1024)
+    print(f"镜像 tar 原始大小: {source_bytes} 字节，gzip 载荷大小: {output.tell() - payload_start} 字节")
+PY
+then
+  rm -f "${OUTPUT_PATH}"
+  die "压缩镜像载荷失败，已清理不完整安装包"
+fi
 chmod +x "${OUTPUT_PATH}"
 
-echo "Generated ${OUTPUT_PATH}"
+echo "已生成 gzip 自解压安装包: ${OUTPUT_PATH}"
