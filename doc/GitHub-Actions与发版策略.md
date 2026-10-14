@@ -4,6 +4,8 @@
 
 本文档记录当前仓库已经落地的 GitHub Actions workflow、分支/渠道约定、构建产物形态与发布流程，作为后续维护 workflow、排查构建问题与安排版本发布的依据。
 
+GitLab 对应流水线、服务器接入与验证边界见 [GitLab CI 迁移与验证方案](./GitLab-CI迁移与验证方案.md)。
+
 ## 2. 当前 workflow 概览
 
 当前仓库已落地 4 个 workflow 文件，其中 `build-lower.yml` 是可复用工作流（只能被调用，不会自行触发）：
@@ -51,7 +53,7 @@
   | `x64` | `ubuntu-24.04` | `x64-linux-dynamic` | `linux-x64` |
 
 - 两个架构的 triplet 都由仓库内 `cmake/vcpkg-triplets/` 的 overlay 覆盖并设置 `VCPKG_BUILD_TYPE=release`，因此 vcpkg 依赖只编译 Release；项目本体仍使用 `RelWithDebInfo`
-- 编译后在该 runner 上执行 `ctest --test-dir build-<架构> --output-on-failure --parallel "$(nproc)"`
+- 编译后在该 runner 上执行 `ctest --test-dir build-<架构> --output-on-failure --parallel 2`
 - 交付包生成流程对两个架构完全一致：
   1. 单元测试通过后，通过 `cmake --install build-<架构>` 将运行产物落到 `package/`
   2. 清理 `package/` 根目录下的 `*_test` 测试可执行文件
@@ -93,7 +95,7 @@
 补充说明：
 
 - `ci.yml` 为兼容历史仓库命名，同时监听 `master` 与 `main`
-- `release.yml` 要求正式 tag 对应的 commit 必须来自某条 `origin/beta/*` 版本线
+- 正式发布建议沿 Beta 版本线晋升；当前 `release.yml` 并未自动检查 tag 的 Beta 血缘或 tag 与 `VERSION` 的一致性，不应将建议当作已实现的门禁
 - `mskdsp-lower-x64` 是独立前缀，与 `mskdsp-lower/<channel>/latest.json` 分开存放，避免两个架构互相覆盖清单；上位机目前只读取 `mskdsp-lower`（`platform=linux-arm64`），不会消费 x64 前缀
 - 新增架构或渠道时，只需在 `ci.yml` 里按架构再增加一段 `uses:`，不需要复制构建逻辑
 
