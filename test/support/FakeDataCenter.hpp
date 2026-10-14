@@ -17,6 +17,9 @@
 #include <vector>
 
 #include <grpcpp/client_context.h>
+#include <grpcpp/completion_queue.h>
+#include <grpcpp/create_channel.h>
+#include <grpcpp/support/client_interceptor.h>
 #include <grpcpp/support/status.h>
 
 #include "DataCenter_mock.grpc.pb.h"
@@ -37,8 +40,6 @@ struct ConnKeyHash {
 
 class FakeDataCenterState {
 public:
-  static constexpr auto kSubscriptionIdleTimeout = std::chrono::milliseconds(200);
-
   struct SubscriptionState {
     explicit SubscriptionState(uint32_t connIdIn, std::vector<std::string> tagsIn) :
         connId(connIdIn),
@@ -48,31 +49,107 @@ public:
       return tags.empty() || std::find(tags.begin(), tags.end(), tag) != tags.end();
     }
 
+    void Close(grpc::Status status = grpc::Status::OK) {
+      {
+        std::lock_guard<std::mutex> lock(mu);
+        if (!closed) {
+          closed = true;
+          finishStatus = std::move(status);
+          queue.clear();
+        }
+      }
+      cv.notify_all();
+    }
+
     uint32_t connId{0};
     std::vector<std::string> tags;
     mutable std::mutex mu;
     std::condition_variable cv;
     std::deque<DataCenterProto::PointUpdate> queue;
     bool closed{false};
+    grpc::Status finishStatus;
+  };
+
+  // 只为测试建立未启动的 RPC 来观察公开取消钩子，不启动服务或发送网络请求。
+  class CancellationBridge {
+  public:
+    class Interceptor final : public grpc::experimental::Interceptor {
+    public:
+      explicit Interceptor(std::weak_ptr<SubscriptionState> subscription) : subscription_(std::move(subscription)) {}
+
+      void Intercept(grpc::experimental::InterceptorBatchMethods* methods) override {
+        if (methods->QueryInterceptionHookPoint(grpc::experimental::InterceptionHookPoints::PRE_SEND_CANCEL)) {
+          if (auto subscription = subscription_.lock()) {
+            subscription->Close(grpc::Status(grpc::StatusCode::CANCELLED, "Fake 订阅已取消"));
+          }
+        }
+        methods->Proceed();
+      }
+
+    private:
+      std::weak_ptr<SubscriptionState> subscription_;
+    };
+
+    class InterceptorFactory final : public grpc::experimental::ClientInterceptorFactoryInterface {
+    public:
+      explicit InterceptorFactory(std::weak_ptr<SubscriptionState> subscription) : subscription_(std::move(subscription)) {}
+
+      grpc::experimental::Interceptor* CreateClientInterceptor(grpc::experimental::ClientRpcInfo*) override {
+        return new Interceptor(subscription_);
+      }
+
+    private:
+      std::weak_ptr<SubscriptionState> subscription_;
+    };
+
+    CancellationBridge(grpc::ClientContext* context, const DataCenterProto::SubscribeRequest& request,
+                       const std::shared_ptr<SubscriptionState>& subscription) : context_(context) {
+      std::vector<std::unique_ptr<grpc::experimental::ClientInterceptorFactoryInterface>> factories;
+      factories.push_back(std::make_unique<InterceptorFactory>(subscription));
+      channel_ = grpc::experimental::CreateCustomChannelWithInterceptors(
+          "localhost:0", grpc::InsecureChannelCredentials(), grpc::ChannelArguments{}, std::move(factories));
+      auto stub = DataCenterProto::DataCenterService::NewStub(channel_);
+      // Prepare 仅绑定 ClientContext 和取消拦截器；禁止调用 StartCall、Read 或 Finish。
+      preparedReader_ = stub->PrepareAsyncSubscribe(context_, request, &queue_);
+    }
+
+    ~CancellationBridge() {
+      context_->TryCancel();
+      preparedReader_.reset();
+      queue_.Shutdown();
+      void* tag = nullptr;
+      bool ok = false;
+      while (queue_.Next(&tag, &ok)) {
+      }
+    }
+
+  private:
+    grpc::ClientContext* context_;
+    std::shared_ptr<grpc::Channel> channel_;
+    grpc::CompletionQueue queue_;
+    std::unique_ptr<grpc::ClientAsyncReaderInterface<DataCenterProto::PointUpdate>> preparedReader_;
   };
 
   class FakePointUpdateReader : public grpc::ClientReaderInterface<DataCenterProto::PointUpdate> {
   public:
-    explicit FakePointUpdateReader(std::shared_ptr<SubscriptionState> subscription)
-        : subscription_(std::move(subscription)) {}
+    explicit FakePointUpdateReader(std::shared_ptr<SubscriptionState> subscription,
+                                   grpc::ClientContext* context = nullptr,
+                                   const DataCenterProto::SubscribeRequest& request = {})
+        : subscription_(std::move(subscription)) {
+      if (context != nullptr) {
+        cancellation_ = std::make_unique<CancellationBridge>(context, request, subscription_);
+      }
+    }
+
+    ~FakePointUpdateReader() override { (void)Finish(); }
 
     bool Read(DataCenterProto::PointUpdate* msg) override {
       if (msg == nullptr) {
         return false;
       }
       std::unique_lock<std::mutex> lock(subscription_->mu);
-      while (subscription_->queue.empty() && !subscription_->closed) {
-        if (subscription_->cv.wait_for(lock, kSubscriptionIdleTimeout) == std::cv_status::timeout) {
-          subscription_->closed = true;
-          return false;
-        }
-      }
-      if (subscription_->queue.empty()) {
+      subscription_->cv.wait(lock, [&]() { return subscription_->closed || !subscription_->queue.empty(); });
+      if (subscription_->closed) {
         return false;
       }
       *msg = std::move(subscription_->queue.front());
@@ -96,15 +173,31 @@ public:
     void WaitForInitialMetadata() override {}
 
     grpc::Status Finish() override {
+      subscription_->Close();
+      cancellation_.reset();
       std::lock_guard<std::mutex> lock(subscription_->mu);
-      subscription_->closed = true;
-      subscription_->cv.notify_all();
-      return grpc::Status::OK;
+      return subscription_->finishStatus;
     }
 
   private:
     std::shared_ptr<SubscriptionState> subscription_;
+    std::unique_ptr<CancellationBridge> cancellation_;
   };
+
+  ~FakeDataCenterState() { Close(); }
+
+  void Close() {
+    std::lock_guard<std::mutex> lock(mu_);
+    closed_ = true;
+    for (const auto& [_, subscriptions] : subscriptionsByConnId_) {
+      for (const auto& weak : subscriptions) {
+        if (auto subscription = weak.lock()) {
+          subscription->Close();
+        }
+      }
+    }
+    subscriptionsByConnId_.clear();
+  }
 
   void AddConnection(uint32_t connId, std::string module, std::string conn) {
     std::lock_guard<std::mutex> lock(mu_);
@@ -118,7 +211,11 @@ public:
 
   void RemoveConnection(const std::string& module, const std::string& conn) {
     std::lock_guard<std::mutex> lock(mu_);
-    conns_.erase(ConnKey{module, conn});
+    auto it = conns_.find(ConnKey{module, conn});
+    if (it != conns_.end()) {
+      closeSubscriptionsLocked(it->second.conn_id());
+      conns_.erase(it);
+    }
   }
 
   void SetNextConnId(uint32_t nextConnId) {
@@ -344,6 +441,7 @@ public:
     if (it == conns_.end()) {
       return grpc::Status(grpc::StatusCode::NOT_FOUND, "connection not found");
     }
+    closeSubscriptionsLocked(it->second.conn_id());
     conns_.erase(it);
     return grpc::Status::OK;
   }
@@ -625,7 +723,7 @@ public:
   }
 
   std::unique_ptr<grpc::ClientReaderInterface<DataCenterProto::PointUpdate>> Subscribe(
-      const DataCenterProto::SubscribeRequest& request) const {
+      const DataCenterProto::SubscribeRequest& request, grpc::ClientContext* context = nullptr) const {
     if (request.conn_id() == 0) {
       return nullptr;
     }
@@ -634,6 +732,9 @@ public:
         std::vector<std::string>(request.tags().begin(), request.tags().end()));
     if (request.snapshot()) {
       std::lock_guard<std::mutex> lock(mu_);
+      if (closed_) {
+        return nullptr;
+      }
       auto it = latestByConnId_.find(request.conn_id());
       if (it != latestByConnId_.end()) {
         if (request.tags().empty()) {
@@ -649,21 +750,41 @@ public:
           }
         }
       }
+      // 对齐真实 DataCenter GetLatest 的目标标签词典序，快照顺序不依赖请求或哈希表顺序。
+      std::sort(subscription->queue.begin(), subscription->queue.end(),
+                [](const auto& lhs, const auto& rhs) { return lhs.dst_tag() < rhs.dst_tag(); });
       subscriptionsByConnId_[request.conn_id()].push_back(subscription);
       ++subscriptionCreateCountByConnId_[request.conn_id()];
     }
     if (!request.snapshot()) {
       std::lock_guard<std::mutex> lock(mu_);
+      if (closed_) {
+        return nullptr;
+      }
       subscriptionsByConnId_[request.conn_id()].push_back(subscription);
       ++subscriptionCreateCountByConnId_[request.conn_id()];
     }
-    return std::make_unique<FakePointUpdateReader>(std::move(subscription));
+    return std::make_unique<FakePointUpdateReader>(std::move(subscription), context, request);
   }
 
 private:
+  void closeSubscriptionsLocked(uint32_t connId) {
+    const auto it = subscriptionsByConnId_.find(connId);
+    if (it == subscriptionsByConnId_.end()) {
+      return;
+    }
+    for (const auto& weak : it->second) {
+      if (auto subscription = weak.lock()) {
+        subscription->Close();
+      }
+    }
+    subscriptionsByConnId_.erase(it);
+  }
+
   mutable std::mutex mu_;
   mutable std::condition_variable publishCv_;
   uint32_t nextConnId_ = 1;
+  bool closed_{false};
   std::unordered_map<ConnKey, DataCenterProto::ConnectionInfo, ConnKeyHash> conns_;
   std::unordered_set<std::string> failDeleteConnNames_;
   std::unordered_set<std::string> failPublishTags_;
@@ -753,8 +874,8 @@ inline std::shared_ptr<DataCenterProto::MockDataCenterServiceStub> MakeStub(Fake
       }));
 
   ON_CALL(*stub, SubscribeRaw(::testing::_, ::testing::_))
-      .WillByDefault(::testing::Invoke([state](grpc::ClientContext*, const DataCenterProto::SubscribeRequest& req) {
-        return state->Subscribe(req).release();
+      .WillByDefault(::testing::Invoke([state](grpc::ClientContext* context, const DataCenterProto::SubscribeRequest& req) {
+        return state->Subscribe(req, context).release();
       }));
 
   return stub;

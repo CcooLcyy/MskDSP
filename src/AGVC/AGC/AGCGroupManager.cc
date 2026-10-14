@@ -691,7 +691,10 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
       [this, groupName, ctx, connId, tags](std::stop_token st) {
         std::stop_callback cb(st, [&ctx]() { ctx->TryCancel(); });
 
-        auto reader = dataCenter_.Subscribe(ctx.get(), connId, tags, false);
+        // 快照与实时输入由同一订阅依次交付，避免独立 GetLatest 与注册订阅之间漏失或回写旧值。
+        LOG_INFO("AGC 开始建立带初始快照的 DataCenter 订阅: group_name={}, conn_id={}, 标签数={}",
+                 groupName, connId, tags.size());
+        auto reader = dataCenter_.Subscribe(ctx.get(), connId, tags, true);
         if (!reader) {
           LOG_ERROR("AGC 建立 DataCenter 订阅失败: group_name={}, conn_id={}, 标签数={}", groupName, connId, tags.size());
           return;
@@ -742,6 +745,8 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
         }
 
         auto finishStatus = reader->Finish();
+        LOG_INFO("AGC DataCenter 订阅已结束: group_name={}, conn_id={}, 已请求停止={}, 状态码={}",
+                 groupName, connId, st.stop_requested(), static_cast<int>(finishStatus.error_code()));
         if (!finishStatus.ok() && !st.stop_requested()) {
           std::lock_guard<std::mutex> lock(mu_);
           auto it = groupsByName_.find(groupName);
@@ -791,7 +796,6 @@ grpc::Status GroupManager::StartGroup(const std::string &groupName) {
     return grpc::Status::OK;
   }
   publishControlStatePoints(groupName, "控制组启动");
-  primeControlInputs(groupName);
   LOG_INFO("AGC 控制组已启动控制功能: group_name={}, 控制方式={}",
            groupName,
            controlMode == AGCProto::CONTROL_MODE_DIRECT_CYCLIC ? "周期直分配" : "PI 事件触发");
@@ -1349,6 +1353,11 @@ void GroupManager::rebuildTagCache(GroupRuntime *g) {
   g->baseTags.clear();
   g->subscribeTags.clear();
 
+  // 重新订阅必须从新快照建立输入，不能因沿用上次运行同值命令而漏掉首轮控制。
+  g->hasCmdRaw = false;
+  g->cmdRaw = Decimal{};
+  g->baseRawByTag.clear();
+
   const auto memberCount = static_cast<size_t>(g->config.members_size());
   g->hasMemberMeasRaw.assign(memberCount, false);
   g->memberMeasRaw.assign(memberCount, Decimal{});
@@ -1394,64 +1403,6 @@ void GroupManager::rebuildTagCache(GroupRuntime *g) {
   for (const auto &t : g->baseTags) {
     g->subscribeTags.emplace_back(t);
   }
-}
-
-void GroupManager::primeControlInputs(const std::string &groupName) {
-  uint32_t connId = 0;
-  std::vector<std::string> tags;
-  std::shared_ptr<std::mutex> outputMutex;
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    auto it = groupsByName_.find(groupName);
-    if (it == groupsByName_.end() || it->second.state != AGCProto::GROUP_STATE_RUNNING) {
-      return;
-    }
-    connId = it->second.connId;
-    tags = it->second.subscribeTags;
-    outputMutex = it->second.outputMutex;
-  }
-
-  if (connId == 0 || tags.empty()) {
-    LOG_DEBUG("AGC 启动控制组时跳过初始输入快照加载: group_name={}, conn_id={}, 标签数={}", groupName, connId, tags.size());
-    return;
-  }
-
-  DataCenterProto::GetLatestResponse resp;
-  auto status = dataCenter_.GetLatest(connId, tags, &resp);
-  if (!status.ok()) {
-    {
-      std::lock_guard<std::mutex> lock(mu_);
-      auto it = groupsByName_.find(groupName);
-      if (it != groupsByName_.end()) {
-        it->second.lastError = status.error_message();
-      }
-    }
-    LOG_WARNING("AGC 启动控制组时读取初始输入快照失败: group_name={}, conn_id={}, 标签数={}, 原因={}", groupName, connId, tags.size(), status.error_message());
-    return;
-  }
-
-  size_t changed = 0;
-  std::unique_lock<std::mutex> outputLock;
-  if (outputMutex) {
-    outputLock = std::unique_lock<std::mutex>(*outputMutex);
-  }
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    auto it = groupsByName_.find(groupName);
-    if (it == groupsByName_.end() || it->second.state != AGCProto::GROUP_STATE_RUNNING) {
-      return;
-    }
-    for (const auto &update : resp.updates()) {
-      if (handleUpdateLocked(&it->second, update)) {
-        ++changed;
-      }
-    }
-    if (resp.updates_size() > 0) {
-      requestControlLocked(groupName, &it->second, "启动时加载初始输入快照", "");
-    }
-  }
-
-  LOG_INFO("AGC 启动控制组时已加载初始输入快照: group_name={}, conn_id={}, updates={}, changed={}", groupName, connId, resp.updates_size(), changed);
 }
 
 void GroupManager::requestControlLocked(
@@ -2613,7 +2564,6 @@ grpc::Status GroupManager::StartTuning(
       });
   *out = it->second.tuningStatus;
   lock.unlock();
-  primeControlInputs(groupName);
   LOG_INFO("AGC 已创建自动调试任务: group_name={}, 目标范围=[{}, {}]kW, 总时间={}min, 最低上调/下调={}/{}",
            request.group_name(), targetLower->ToFixedString(), targetUpper->ToFixedString(),
            request.config().total_time_minutes(), request.config().min_up_tests(), request.config().min_down_tests());

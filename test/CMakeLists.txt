@@ -1620,6 +1620,18 @@ target_link_libraries(agcGroupManager_test PRIVATE
 
 mskdsp_add_isolated_test(agcGroupManager_test)
 
+# 验证 Fake 长连接空闲、取消、显式关闭和连接删除的生命周期语义。
+add_executable(fakeDataCenterSubscription_test fake_datacenter_subscription_test.cc)
+target_link_libraries(fakeDataCenterSubscription_test PRIVATE
+  GTest::gtest_main
+  GTest::gmock
+  dspProto
+)
+mskdsp_add_isolated_test(fakeDataCenterSubscription_test)
+# 取消失效时让 CI 明确失败，避免永久等待订阅读取或取消清理。
+set_tests_properties(agcGroupManager_test PROPERTIES TIMEOUT 120)
+set_tests_properties(fakeDataCenterSubscription_test PROPERTIES TIMEOUT 30)
+
 add_executable(agcGroupStore_test
   agc_group_store_test.cc
   ${CMAKE_SOURCE_DIR}/src/AGVC/AGC/AGCGroupStore.cc
@@ -1860,6 +1872,7 @@ set(MSKDSP_TEST_TARGETS
   iec104TcpLink_test
   agvcStrategy_test
   agcGroupManager_test
+  fakeDataCenterSubscription_test
   agcGroupStore_test
   agcControlProfileStore_test
   agcControl_test

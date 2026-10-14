@@ -1,11 +1,15 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -28,6 +32,39 @@ using ::testing::Invoke;
 // 因此给出较宽的轮询预算（500 次 × 10ms = 5s）来容忍调度延迟；它只影响"等多久"，
 // 条件始终不满足时仍然判定失败，不改变任何断言语义。
 constexpr int kAsyncWaitIterations = 500;
+
+// 用显式屏障控制订阅注册时序；超时只防止测试挂起，不靠延迟制造竞态。
+class InputSubscriptionBarrier {
+public:
+  void ArriveAndWait() {
+    std::unique_lock<std::mutex> lock(mu_);
+    arrived_ = true;
+    cv_.notify_all();
+    cv_.wait(lock, [this] { return released_; });
+  }
+
+  bool WaitForArrival() {
+    std::unique_lock<std::mutex> lock(mu_);
+    return cv_.wait_for(lock, std::chrono::seconds(5), [this] { return arrived_; });
+  }
+
+  void Release() {
+    std::lock_guard<std::mutex> lock(mu_);
+    released_ = true;
+    cv_.notify_all();
+  }
+
+  void WaitForRelease() {
+    std::unique_lock<std::mutex> lock(mu_);
+    cv_.wait_for(lock, std::chrono::seconds(5), [this] { return released_; });
+  }
+
+private:
+  std::mutex mu_;
+  std::condition_variable cv_;
+  bool arrived_{false};
+  bool released_{false};
+};
 
 class ScopedTempDir {
 public:
@@ -192,6 +229,33 @@ bool WaitForLatestDouble(const FakeDataCenterState &state, uint32_t connId, cons
       }
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return false;
+}
+
+using ControlPublishCounts = std::array<size_t, 3>;
+
+ControlPublishCounts CaptureControlPublishCounts(const FakeDataCenterState &state, uint32_t connId) {
+  return {state.GetPublishCount(connId, "P_TOTAL"),
+          state.GetPublishCount(connId, "INV1_P_SET"),
+          state.GetPublishCount(connId, "INV2_P_SET")};
+}
+
+// 最终值断言完成后，等待启动产生的事件发布收敛再记录基线，避免将快照中间发布误算成周期重发。
+bool WaitForInitialPublishCountsToSettle(
+    const FakeDataCenterState &state, uint32_t connId, ControlPublishCounts *counts) {
+  auto latest = CaptureControlPublishCounts(state, connId);
+  auto stableSince = std::chrono::steady_clock::now();
+  for (int i = 0; i < kAsyncWaitIterations; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    const auto current = CaptureControlPublishCounts(state, connId);
+    if (current != latest) {
+      latest = current;
+      stableSince = std::chrono::steady_clock::now();
+    } else if (std::chrono::steady_clock::now() - stableSince >= std::chrono::milliseconds(100)) {
+      *counts = current;
+      return true;
+    }
   }
   return false;
 }
@@ -722,6 +786,85 @@ TEST(AgcGroupManagerTest, DeleteGroupCallsDataCenterDeleteAndRemovesLocal) {
   EXPECT_EQ(st.error_code(), grpc::StatusCode::NOT_FOUND);
 }
 
+// 验证：控制组自动启动已返回但订阅尚未注册时到达的量测，必须由同一订阅的快照补齐。
+TEST(AgcGroupManagerTest, StartupSubscriptionSnapshotRecoversMeasurementBeforeRegistration) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  auto barrier = std::make_shared<InputSubscriptionBarrier>();
+  ON_CALL(*stub, SubscribeRaw(_, _))
+      .WillByDefault(Invoke([&state, barrier](grpc::ClientContext *context, const DataCenterProto::SubscribeRequest &request) {
+        barrier->ArriveAndWait();
+        return state.Subscribe(request, context).release();
+      }));
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  auto request = MakeGroupReq("g-registration-gap");
+  request.mutable_config()->mutable_members(0)->set_controllable(false);
+  request.mutable_config()->mutable_members(1)->set_min_kw(10.0);
+  request.mutable_config()->mutable_members(1)->set_max_kw(80.0);
+  AGCProto::GroupInfo info;
+  const auto status = mgr.UpsertGroup(request, &info);
+  const bool subscriptionReachedBarrier = barrier->WaitForArrival();
+  if (status.ok() && subscriptionReachedBarrier) {
+    PublishDoublePoint(&state, info.conn_id(), "INV1_P_MEAS", 20.0);
+  }
+  // 在任何断言退出前释放线程，避免析构停止控制组时等待仍被测试屏障阻塞的订阅。
+  barrier->Release();
+  ASSERT_TRUE(status.ok()) << status.error_message();
+  ASSERT_TRUE(subscriptionReachedBarrier);
+  EXPECT_TRUE(WaitForLatestDoubleWithQuality(
+      state, info.conn_id(), "当前可调有功下限", 30.0, DataCenterProto::QUALITY_GOOD));
+  EXPECT_TRUE(WaitForLatestDoubleWithQuality(
+      state, info.conn_id(), "当前可调有功上限", 100.0, DataCenterProto::QUALITY_GOOD));
+  ASSERT_TRUE(mgr.StopGroup("g-registration-gap").ok());
+}
+
+// 验证：初始化旧快照读取后实时量测已更新时，独立 GetLatest 不能再写回旧值覆盖订阅输入。
+TEST(AgcGroupManagerTest, StartupSnapshotCannotOverwriteNewerSubscriptionMeasurement) {
+  FakeDataCenterState state;
+  constexpr uint32_t connId = 41;
+  state.AddConnection(connId, "AGC", "g-snapshot-overwrite");
+  PublishDoublePoint(&state, connId, "INV1_P_MEAS", 10.0);
+  PublishDoublePoint(&state, connId, "INV2_P_MEAS", 20.0);
+  auto stub = MakeStub(&state);
+  auto snapshotCaptured = std::make_shared<InputSubscriptionBarrier>();
+  std::atomic<unsigned> separateSnapshotReads{0};
+  ON_CALL(*stub, GetLatest(_, _, _))
+      .WillByDefault(Invoke([&](grpc::ClientContext*, const DataCenterProto::GetLatestRequest &request,
+                               DataCenterProto::GetLatestResponse *response) {
+        ++separateSnapshotReads;
+        const auto status = state.GetLatest(request, response);
+        snapshotCaptured->Release();
+        // 只有旧业务才会调用此独立快照：先确认订阅新值已计算，再让旧快照返回。
+        EXPECT_TRUE(WaitForLatestDouble(state, connId, "P_TOTAL", 60.0));
+        return status;
+      }));
+  ON_CALL(*stub, SubscribeRaw(_, _))
+      .WillByDefault(Invoke([&state, snapshotCaptured](grpc::ClientContext *context, const DataCenterProto::SubscribeRequest &request) {
+        if (!request.snapshot()) {
+          snapshotCaptured->WaitForRelease();
+        }
+        auto reader = state.Subscribe(request, context);
+        PublishDoublePoint(&state, request.conn_id(), "INV1_P_MEAS", 20.0);
+        PublishDoublePoint(&state, request.conn_id(), "INV2_P_MEAS", 40.0);
+        return reader.release();
+      }));
+
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  auto request = MakeGroupReq("g-snapshot-overwrite");
+  request.set_create_only(false);
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(request, &info).ok());
+  ASSERT_TRUE(WaitForSubscriptionCount(state, connId, 1u));
+  PublishDoublePoint(&state, connId, "P_CMD", 90.0);
+  ASSERT_TRUE(WaitForLatestDouble(state, connId, "INV2_P_SET", 60.0));
+  EXPECT_TRUE(WaitForLatestDouble(state, connId, "P_TOTAL", 60.0));
+  EXPECT_EQ(separateSnapshotReads.load(), 0u);
+  ASSERT_TRUE(mgr.StopGroup("g-snapshot-overwrite").ok());
+}
+
 // 验证：默认限值点会注册到 DataCenter 标签注册表并在不可控缺测时先发布 BAD 质量，量测到来后转为 GOOD。
 TEST(AgcGroupManagerTest, UpsertGroupRegistersAndPublishesDefaultLimitPoints) {
   FakeDataCenterState state;
@@ -1043,7 +1186,7 @@ TEST(AgcGroupManagerTest, StartGroupRejectsWhenPendingDelete) {
   EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
 }
 
-// 验证：显式 StartGroup 在预置初始输入快照后会触发一次控制，并且不会按固定周期重复下发。
+// 验证：显式 StartGroup 完成初始输入快照后，无输入时不会按固定周期重复发布测量或成员设定。
 TEST(AgcGroupManagerTest, ExplicitStartUsesInitialSnapshotWithoutPeriodicRepublish) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
@@ -1060,14 +1203,16 @@ TEST(AgcGroupManagerTest, ExplicitStartUsesInitialSnapshotWithoutPeriodicRepubli
   PublishDoublePoint(&state, info.conn_id(), "INV2_P_MEAS", 20.0);
 
   ASSERT_TRUE(mgr.StartGroup("g-initial-snapshot").ok());
-  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "P_TOTAL", 30.0));
-  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV1_P_SET", 20.0));
-  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV2_P_SET", 40.0));
-
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "P_TOTAL", 30.0));
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV1_P_SET", 20.0));
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV2_P_SET", 40.0));
+  ControlPublishCounts initialCounts;
+  ASSERT_TRUE(WaitForInitialPublishCountsToSettle(state, info.conn_id(), &initialCounts));
+  // 成员相同设定仍然只下发一次，测量发布次数取完成初始化后的精确基线。
+  EXPECT_EQ(initialCounts[1], 1u);
+  EXPECT_EQ(initialCounts[2], 1u);
   std::this_thread::sleep_for(std::chrono::milliseconds(350));
-  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "P_TOTAL"), 1u);
-  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV1_P_SET"), 1u);
-  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV2_P_SET"), 1u);
+  EXPECT_EQ(CaptureControlPublishCounts(state, info.conn_id()), initialCounts);
 
   ASSERT_TRUE(mgr.StopGroup("g-initial-snapshot").ok());
 }
@@ -1097,6 +1242,30 @@ TEST(AgcGroupManagerTest, RestartGroupReusesInitialSnapshotWithoutWaitingForNewI
   EXPECT_TRUE(WaitForPublishCount(state, info.conn_id(), "INV2_P_SET", 2u));
 
   ASSERT_TRUE(mgr.StopGroup("g-restart-snapshot").ok());
+}
+
+// 验证：重新启动时即使只有同值总设定快照、没有成员量测，也必须重新下发成员设定。
+TEST(AgcGroupManagerTest, RestartGroupUsesCommandOnlySnapshotWithoutWaitingForMeasurement) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  GroupManager mgr("AGC");
+  mgr.setDataCenterStub(stub);
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(MakeGroupReq("g-command-only-restart"), &info).ok());
+  ASSERT_TRUE(mgr.StopGroup("g-command-only-restart").ok());
+  PublishDoublePoint(&state, info.conn_id(), "P_CMD", 60.0);
+
+  ASSERT_TRUE(mgr.StartGroup("g-command-only-restart").ok());
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV1_P_SET", 20.0));
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV2_P_SET", 40.0));
+  ASSERT_TRUE(mgr.StopGroup("g-command-only-restart").ok());
+  const auto firstMemberPublishes = state.GetPublishCount(info.conn_id(), "INV1_P_SET");
+  const auto secondMemberPublishes = state.GetPublishCount(info.conn_id(), "INV2_P_SET");
+
+  ASSERT_TRUE(mgr.StartGroup("g-command-only-restart").ok());
+  EXPECT_TRUE(WaitForPublishCount(state, info.conn_id(), "INV1_P_SET", firstMemberPublishes + 1));
+  EXPECT_TRUE(WaitForPublishCount(state, info.conn_id(), "INV2_P_SET", secondMemberPublishes + 1));
+  ASSERT_TRUE(mgr.StopGroup("g-command-only-restart").ok());
 }
 
 // 验证：控制组启动后，运行中收到新的总设定输入会触发一次控制发布，输出点按工程量写入 DataCenter。
@@ -1251,12 +1420,19 @@ TEST(AgcGroupManagerTest, DuplicateRuntimeCommandDoesNotRepublish) {
   ASSERT_TRUE(WaitForPublishCount(state, info.conn_id(), "INV1_P_SET", 1u));
   ASSERT_TRUE(WaitForPublishCount(state, info.conn_id(), "INV2_P_SET", 1u));
   ASSERT_TRUE(WaitForSubscriptionCount(state, info.conn_id(), 1u));
-
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "P_TOTAL", 30.0));
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV1_P_SET", 20.0));
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV2_P_SET", 40.0));
+  ControlPublishCounts initialCounts;
+  ASSERT_TRUE(WaitForInitialPublishCountsToSettle(state, info.conn_id(), &initialCounts));
+  EXPECT_EQ(initialCounts[1], 1u);
+  EXPECT_EQ(initialCounts[2], 1u);
+  const auto echoCount = state.GetPublishCount(info.conn_id(), "调节返回值");
   PublishDoublePoint(&state, info.conn_id(), "P_CMD", 60.0);
+  // 回显次数确认重复命令已被订阅处理，随后严格核对控制发布计数没有增加。
+  ASSERT_TRUE(WaitForPublishCount(state, info.conn_id(), "调节返回值", echoCount + 1));
   std::this_thread::sleep_for(std::chrono::milliseconds(120));
-  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV1_P_SET"), 1u);
-  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV2_P_SET"), 1u);
-  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "P_TOTAL"), 1u);
+  EXPECT_EQ(CaptureControlPublishCounts(state, info.conn_id()), initialCounts);
 
   ASSERT_TRUE(mgr.StopGroup("g-duplicate-cmd").ok());
 }
