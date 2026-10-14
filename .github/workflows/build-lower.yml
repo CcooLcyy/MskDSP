@@ -62,11 +62,6 @@ on:
         required: false
         default: ci
         type: string
-      verify_legacy_startup:
-        description: 是否在完整构建前执行 AGC 与 Fake 旧实现失败、新实现通过的对照
-        required: false
-        default: false
-        type: boolean
     secrets:
       R2_ACCOUNT_ID:
         required: false
@@ -231,19 +226,6 @@ jobs:
             -DVCPKG_TARGET_TRIPLET="${TRIPLET}" \
             -DProtobuf_PROTOC_EXECUTABLE="${GITHUB_WORKSPACE}/${BUILD_DIR}/vcpkg_installed/${TRIPLET}/tools/protobuf/protoc" \
             -DgRPC_CPP_PLUGIN_EXECUTABLE="${GITHUB_WORKSPACE}/${BUILD_DIR}/vcpkg_installed/${TRIPLET}/tools/grpc/grpc_cpp_plugin"
-
-      - name: 验证 AGC 与 Fake 启动问题的红绿对照
-        if: ${{ inputs.verify_legacy_startup }}
-        shell: bash
-        run: bash script/test_agc_startup_legacy.sh "${BUILD_DIR}"
-
-      - name: 保存 AGC 启动竞态对照日志
-        if: ${{ always() && inputs.verify_legacy_startup }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: agc-startup-red-green-${{ inputs.arch_slug }}
-          path: ${{ runner.temp }}/agc-startup-regression/*.log
-          if-no-files-found: warn
 
       - name: 清零 ccache 统计
         shell: bash

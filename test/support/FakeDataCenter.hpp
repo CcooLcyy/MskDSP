@@ -186,6 +186,12 @@ public:
 
   ~FakeDataCenterState() { Close(); }
 
+  // 显式模拟该连接当前订阅断流，保留连接与最新值以验证客户端重连。
+  void CloseSubscriptions(uint32_t connId) {
+    std::lock_guard<std::mutex> lock(mu_);
+    closeSubscriptionsLocked(connId);
+  }
+
   void Close() {
     std::lock_guard<std::mutex> lock(mu_);
     closed_ = true;

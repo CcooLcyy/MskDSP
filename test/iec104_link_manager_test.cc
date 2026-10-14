@@ -3,9 +3,11 @@
 
 #include <cstdint>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <functional>
 #include <mutex>
+#include <memory>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -1062,16 +1064,65 @@ bool WaitForSubscriptionCreated(const FakeDataCenterState& state, uint32_t connI
   return false;
 }
 
-// 等待订阅读取器因空闲超时关闭：表示已投递的更新都已被订阅线程取走。
-bool WaitForSubscriptionClosed(const FakeDataCenterState& state, uint32_t connId) {
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-  while (std::chrono::steady_clock::now() < deadline) {
-    if (state.GetSubscriptionCount(connId) == 0) {
-      return true;
+// 下一轮 Read 入口才确认上一条业务处理结束，避免把出队、首次 SOE 或空闲 EOF 当成处理完成。
+class SubscriptionProgress {
+public:
+  void Acknowledge() {
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      ++processed_;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    cv_.notify_all();
   }
-  return false;
+
+  bool WaitForProcessed(size_t expected) {
+    std::unique_lock<std::mutex> lock(mu_);
+    return cv_.wait_for(lock, std::chrono::seconds(2), [&]() { return processed_ >= expected; });
+  }
+
+private:
+  std::mutex mu_;
+  std::condition_variable cv_;
+  size_t processed_{0};
+};
+
+class ProcessingAwareReader final : public grpc::ClientReaderInterface<DataCenterProto::PointUpdate> {
+public:
+  ProcessingAwareReader(std::unique_ptr<grpc::ClientReaderInterface<DataCenterProto::PointUpdate>> reader,
+                        std::shared_ptr<SubscriptionProgress> progress)
+      : reader_(std::move(reader)), progress_(std::move(progress)) {}
+
+  bool Read(DataCenterProto::PointUpdate* update) override {
+    if (previousReadSucceeded_) {
+      progress_->Acknowledge();
+    }
+    previousReadSucceeded_ = reader_->Read(update);
+    return previousReadSucceeded_;
+  }
+
+  bool NextMessageSize(uint32_t* size) override { return reader_->NextMessageSize(size); }
+  void WaitForInitialMetadata() override { reader_->WaitForInitialMetadata(); }
+  grpc::Status Finish() override { return reader_->Finish(); }
+
+private:
+  std::unique_ptr<grpc::ClientReaderInterface<DataCenterProto::PointUpdate>> reader_;
+  std::shared_ptr<SubscriptionProgress> progress_;
+  bool previousReadSucceeded_{false};
+};
+
+std::shared_ptr<DataCenterProto::MockDataCenterServiceStub> MakeProcessingAwareStub(
+    FakeDataCenterState* state, const std::shared_ptr<SubscriptionProgress>& progress) {
+  auto stub = MakeStub(state);
+  ON_CALL(*stub, SubscribeRaw(_, _))
+      .WillByDefault(Invoke([state, progress](grpc::ClientContext* context, const DataCenterProto::SubscribeRequest& request)
+                               -> grpc::ClientReaderInterface<DataCenterProto::PointUpdate>* {
+        auto reader = state->Subscribe(request, context);
+        if (!reader) {
+          return nullptr;
+        }
+        return new ProcessingAwareReader(std::move(reader), progress);
+      }));
+  return stub;
 }
 
 // 等待指定连接的 SOE 落盘条数达到期望值。
@@ -1121,7 +1172,8 @@ DataCenterProto::PointUpdate MakeSinglePointUpdate(uint32_t connId, const std::s
 TEST(IEC104LinkManagerTest, RepeatedUnchangedSinglePointFormsSingleSoe) {
   ScopedTempDir dir;
   FakeDataCenterState state;
-  auto stub = MakeStub(&state);
+  auto progress = std::make_shared<SubscriptionProgress>();
+  auto stub = MakeProcessingAwareStub(&state, progress);
 
   LinkManager mgr("IEC104", dir.path() / "config.db");
   mgr.setDataCenterStub(stub);
@@ -1143,18 +1195,21 @@ TEST(IEC104LinkManagerTest, RepeatedUnchangedSinglePointFormsSingleSoe) {
     state.DeliverUpdate(MakeSinglePointUpdate(info.conn_id(), "DI-1", true, 1000 + i));
   }
 
-  ASSERT_TRUE(WaitForSubscriptionClosed(state, info.conn_id()));
+  ASSERT_TRUE(progress->WaitForProcessed(5));
+  EXPECT_EQ(state.GetSubscriptionCount(info.conn_id()), 1u);
   ASSERT_TRUE(WaitForSoeCountAtLeast(mgr, "conn-soe-stable", 1));
   EXPECT_EQ(QuerySoeTotal(mgr, "conn-soe-stable"), 1);
 
   ASSERT_TRUE(mgr.StopLink("conn-soe-stable").ok());
+  EXPECT_EQ(state.GetSubscriptionCount(info.conn_id()), 0u);
 }
 
 // 验证：遥信真实变位仍形成新的 SOE，变位判定不会吞掉真实事件。
 TEST(IEC104LinkManagerTest, ChangedSinglePointFormsAdditionalSoe) {
   ScopedTempDir dir;
   FakeDataCenterState state;
-  auto stub = MakeStub(&state);
+  auto progress = std::make_shared<SubscriptionProgress>();
+  auto stub = MakeProcessingAwareStub(&state, progress);
 
   LinkManager mgr("IEC104", dir.path() / "config.db");
   mgr.setDataCenterStub(stub);
@@ -1177,19 +1232,22 @@ TEST(IEC104LinkManagerTest, ChangedSinglePointFormsAdditionalSoe) {
   state.DeliverUpdate(MakeSinglePointUpdate(info.conn_id(), "DI-1", false, 1002));
   state.DeliverUpdate(MakeSinglePointUpdate(info.conn_id(), "DI-1", false, 1003));
 
-  ASSERT_TRUE(WaitForSubscriptionClosed(state, info.conn_id()));
+  ASSERT_TRUE(progress->WaitForProcessed(4));
+  EXPECT_EQ(state.GetSubscriptionCount(info.conn_id()), 1u);
   ASSERT_TRUE(WaitForSoeCountAtLeast(mgr, "conn-soe-change", 2));
   EXPECT_EQ(QuerySoeTotal(mgr, "conn-soe-change"), 2);
 
   ASSERT_TRUE(mgr.StopLink("conn-soe-change").ok());
+  EXPECT_EQ(state.GetSubscriptionCount(info.conn_id()), 0u);
 }
 
 // 验证：固定遥信无论真实源状态和品质如何变化，均只形成有效固定状态的首次 SOE。
 TEST(IEC104LinkManagerTest, FixedSinglePointDoesNotCreateSoeForRealTransitions) {
   ScopedTempDir dir;
   FakeDataCenterState state;
+  auto progress = std::make_shared<SubscriptionProgress>();
   LinkManager mgr("IEC104", dir.path() / "config.db");
-  mgr.setDataCenterStub(MakeStub(&state));
+  mgr.setDataCenterStub(MakeProcessingAwareStub(&state, progress));
   IEC104Proto::LinkInfo info;
   ASSERT_TRUE(mgr.UpsertLink(MakeServerLinkReq("fixed-soe", "127.0.0.1", AllocateFreeTcpPort()), &info).ok());
   IEC104Proto::UpsertPointTableRequest request;
@@ -1206,7 +1264,8 @@ TEST(IEC104LinkManagerTest, FixedSinglePointDoesNotCreateSoeForRealTransitions) 
     update.set_quality(index % 2 != 0 ? DataCenterProto::QUALITY_GOOD : DataCenterProto::QUALITY_BAD);
     state.DeliverUpdate(update);
   }
-  ASSERT_TRUE(WaitForSubscriptionClosed(state, info.conn_id()));
+  ASSERT_TRUE(progress->WaitForProcessed(5));
+  EXPECT_EQ(state.GetSubscriptionCount(info.conn_id()), 1u);
   ASSERT_TRUE(WaitForSoeCountAtLeast(mgr, "fixed-soe", 1));
   IEC104Proto::QuerySoeRequest query;
   query.set_conn_name("fixed-soe");
@@ -1218,4 +1277,5 @@ TEST(IEC104LinkManagerTest, FixedSinglePointDoesNotCreateSoeForRealTransitions) 
   EXPECT_EQ(response.events(0).quality(), 0);
   EXPECT_GT(response.events(0).ts_ms(), 1004);
   ASSERT_TRUE(mgr.StopLink("fixed-soe").ok());
+  EXPECT_EQ(state.GetSubscriptionCount(info.conn_id()), 0u);
 }

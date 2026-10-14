@@ -368,15 +368,6 @@ bool WaitForSubscriptionCreateCount(const FakeDataCenterState& state,
   return false;
 }
 
-bool WaitForNoSubscriptions(const FakeDataCenterState& state, uint32_t connId) {
-  for (int i = 0; i < 100; ++i) {
-    if (state.GetSubscriptionCount(connId) == 0) {
-      return true;
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-  }
-  return false;
-}
 }  // 命名空间结束
 
 // 验证：create_only UpsertLink 会向 DataCenter 取/建 conn_id，并回填到 LinkInfo。
@@ -1024,7 +1015,7 @@ TEST(ModbusRtuLinkManagerTest, DataCenterCommandSubscriptionKeepsLatestValuePerT
   ASSERT_TRUE(mgr.StopLink("conn-latest-per-tag").ok());
 }
 
-// 验证：DataCenter 命令订阅流结束后会自动重连，新设点仍可写入串口。
+// 验证：显式关闭当前 DataCenter 命令订阅后会自动重连，断流期间的新设点仍可写入串口。
 TEST(ModbusRtuLinkManagerTest, DataCenterCommandSubscriptionReconnectsAfterStreamEnds) {
   ScopedPseudoTty pty;
   ASSERT_TRUE(pty.ok()) << pty.error();
@@ -1046,9 +1037,11 @@ TEST(ModbusRtuLinkManagerTest, DataCenterCommandSubscriptionReconnectsAfterStrea
   ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
   ASSERT_TRUE(mgr.StartLink("conn-command-reconnect").ok());
   ASSERT_TRUE(WaitForSubscriptionCount(state, info.conn_id(), 1));
-  ASSERT_TRUE(WaitForNoSubscriptions(state, info.conn_id()));
+  // 仅关闭现有订阅队列，保持连接和最新值缓存可用于重连，不依赖空闲超时制造断流。
+  state.CloseSubscriptions(info.conn_id());
   state.DeliverUpdate(MakeDeliveredUpdate(99, info.conn_id(), "active-power-setpoint", 1124.0));
   ASSERT_TRUE(WaitForSubscriptionCreateCount(state, info.conn_id(), 2));
+  ASSERT_TRUE(WaitForSubscriptionCount(state, info.conn_id(), 1));
 
   std::vector<uint8_t> frame;
   ASSERT_TRUE(pty.readExact(&frame, 8, 3000));
