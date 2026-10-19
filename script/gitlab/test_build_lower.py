@@ -312,5 +312,66 @@ fi
                 self.assertIn("树对象", result.stdout + result.stderr)
 
 
+@unittest.skipUnless(os.name == "posix", "tmpfs 工作区与真实 ELF 验证在 Linux/WSL 执行")
+class TmpfsWorkspaceTest(unittest.TestCase):
+    def exercise(self, failure):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            work = root / "build-x64/test_env"
+            seed = work / "demo/module/seed"
+            seed.parent.mkdir(parents=True)
+            shutil.copyfile("/bin/pwd", seed)
+            seed.chmod(0o755)
+            (root / "logs/x64").mkdir(parents=True)
+            tools = root / "bin"
+            tools.mkdir()
+            executable = tools / "ctest"
+            executable.write_text('''#!/usr/bin/env python3
+import json, os, subprocess, sys
+from pathlib import Path
+work = Path(os.environ["ROOT"]) / "build-x64/test_env/demo"
+seed = work / "module/seed"
+real_work = work.resolve()
+run = subprocess.run([str(seed)], cwd=work, capture_output=True, text=True)
+data = dict(arguments=sys.argv[1:], cwd=str(real_work), tmpfs=os.stat(real_work).st_dev == os.stat("/dev/shm").st_dev,
+            seed_link=seed.is_symlink(), seed_target=os.readlink(seed) if seed.is_symlink() else "",
+            executable_status=run.returncode, executable_cwd=run.stdout.strip())
+(work / "conf").mkdir()
+(work / "conf/soe.sqlite").write_text("临时数据库")
+Path(os.environ["PROBE"]).write_text(json.dumps(data))
+sys.exit(int(os.environ["TEST_FAILURE"]))
+''', encoding="utf-8")
+            executable.chmod(0o755)
+            script = (ROOT / "script/gitlab/build_lower.sh").read_text()
+            function = "run_complete_ctest() {" + script.split("run_complete_ctest() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
+            command = "set -euo pipefail\nlog() { printf '%s\\n' \"$*\"; }\n" + function + "\nrun_complete_ctest\n"
+            result = subprocess.run(["bash", "-c", command], cwd=root, capture_output=True, text=True, timeout=30,
+                                    env=dict(os.environ, ROOT=str(root), BUILD_DIR="build-x64", LOG_DIR="logs/x64", ARCH="x64",
+                                             PATH=str(tools) + os.pathsep + os.environ["PATH"],
+                                             PROBE=str(root / "probe.json"), TEST_FAILURE=str(failure)))
+            self.assertEqual(result.returncode, failure, result.stdout + result.stderr)
+            data = json.loads((root / "probe.json").read_text())
+            self.assertTrue(data["tmpfs"], data)
+            self.assertTrue(data["seed_link"], data)
+            self.assertIn("test_env.disk", data["seed_target"])
+            self.assertEqual(data["executable_status"], 0)
+            self.assertEqual(data["executable_cwd"], data["cwd"])
+            self.assertTrue(work.is_dir())
+            self.assertFalse(work.is_symlink())
+            self.assertTrue(seed.is_file())
+            self.assertFalse(seed.is_symlink())
+            self.assertFalse(work.with_name("test_env.disk").exists())
+            self.assertFalse((work / "demo/conf/soe.sqlite").exists())
+            self.assertFalse(Path(data["cwd"]).exists())
+            self.assertIn("--no-tests=error", data["arguments"])
+            self.assertEqual(data["arguments"][data["arguments"].index("--parallel") + 1], "2")
+
+    def test_tmpfs_workspace_preserves_disk_elf_seed_and_restores_after_success(self):
+        self.exercise(0)
+
+    def test_tmpfs_workspace_restores_after_failure_and_preserves_exit_code(self):
+        self.exercise(27)
+
+
 if __name__ == "__main__":
     unittest.main()

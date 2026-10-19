@@ -67,9 +67,53 @@ finish_tested_package() {
 }
 
 run_complete_ctest() {
-  log "执行 ${ARCH} 完整 CTest，并行度 2"
-  ctest --test-dir "${BUILD_DIR}" --output-on-failure --parallel 2 --no-tests=error \
-    --output-junit "${ROOT}/${LOG_DIR}/ctest.xml"
+  (
+    local test_env="${ROOT}/${BUILD_DIR}/test_env"
+    local disk_env="${test_env}.disk"
+    local ram_env="" result=0
+    [[ ! -e "${disk_env}" && ! -L "${disk_env}" ]] || { log '错误：测试磁盘备份已存在，拒绝覆盖'; exit 1; }
+    [[ ! -L "${test_env}" ]] || { log '错误：原测试工作区不是独立目录'; exit 1; }
+    restore_ctest_workspace() {
+      local original_status="$1" cleanup_status=0
+      trap - EXIT
+      if [[ -L "${test_env}" && "$(readlink -- "${test_env}")" == "${ram_env}" ]]; then
+        rm -- "${test_env}" || cleanup_status=1
+      fi
+      if [[ -d "${disk_env}" ]]; then
+        if [[ ! -e "${test_env}" && ! -L "${test_env}" ]]; then
+          mv -- "${disk_env}" "${test_env}" || cleanup_status=1
+        else
+          log '错误：无法安全恢复测试磁盘工作区'
+          cleanup_status=1
+        fi
+      fi
+      # 仅删除本次 mktemp 创建的 RAM 目录；不跟随符号链接或处理其他路径。
+      if [[ -n "${ram_env}" ]]; then
+        if [[ "${ram_env}" == /dev/shm/mskdsp-ctest-"${ARCH}".* \
+              && "$(dirname -- "${ram_env}")" == /dev/shm && ! -L "${ram_env}" ]]; then
+          rm -rf -- "${ram_env}" || cleanup_status=1
+        else
+          log '错误：测试 RAM 目录不在本次允许的清理范围'
+          cleanup_status=1
+        fi
+      fi
+      if [[ "${original_status}" == 0 && "${cleanup_status}" != 0 ]]; then
+        original_status="${cleanup_status}"
+      fi
+      exit "${original_status}"
+    }
+    trap 'restore_ctest_workspace "$?"' EXIT
+    ram_env="$(mktemp -d "/dev/shm/mskdsp-ctest-${ARCH}.XXXXXX")"
+    mkdir -p "${test_env}"
+    mv -- "${test_env}" "${disk_env}"
+    # 目录位于 tmpfs；ELF 种子通过绝对链接保留在磁盘，兼容 /dev/shm 的 noexec 挂载。
+    cp -as "${disk_env}/." "${ram_env}/"
+    ln -s "${ram_env}" "${test_env}"
+    log "执行 ${ARCH} 完整 CTest，并行度 2，运行工作区位于 RAM"
+    ctest --test-dir "${BUILD_DIR}" --output-on-failure --parallel 2 --no-tests=error \
+      --output-junit "${ROOT}/${LOG_DIR}/ctest.xml" || result="$?"
+    exit "${result}"
+  )
 }
 
 configure_local_registry() {
