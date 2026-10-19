@@ -27,7 +27,7 @@
 - 独立安装脚本初始化 CMake 策略，提前查询并收集目标 GCC 运行库；ARM64 glibc 及加载器由 Ubuntu 基础镜像提供，其他缺失依赖仍拒绝交付。
 - 验收必须包含实际交叉编译器版本及目标架构、真实 ARM64 完整 CTest、双架构打包发布、平台清单与实际下载 SHA256 核对；不以编译通过代替 ARM64 执行验证。
 
-CI 完整测试的临时工作目录使用作业独立的内存文件系统，避免缓存和大产物归档的共享磁盘争用触发 SQLite/SOE 处理等待超时。CTest 仍执行全部用例，保留原有断言、超时、并行度与失败门禁；测试种子文件读取磁盘原件，模块种子目录整体链接到磁盘以保留共享库的普通文件属性，避免内存挂载的 noexec 影响模块加载。成功及失败后均恢复原工作目录。下位机 Runner 的共享内存上限为每作业 1 GiB，计入原有 16 GiB 内存限制。
+CI 完整测试的临时工作目录、系统临时目录和 CTest 过程日志使用作业独立的内存文件系统，避免缓存和大产物归档的共享磁盘争用触发 SQLite/SOE 处理等待超时或日志管道反压。内存目录使用短路径，保留 Unix socket 的路径长度余量。CTest 仍执行全部用例，保留原有断言、超时、并行度与失败门禁；测试种子文件读取磁盘原件，模块种子目录整体链接到磁盘以保留共享库的普通文件属性，避免内存挂载的 noexec 影响模块加载。成功及失败后均恢复原工作目录，并将 CTest 日志归档回磁盘。下位机 Runner 的共享内存上限为每作业 1 GiB，计入原有 16 GiB 内存限制。
 
 metadata.json 冻结 product、version、package_version、platform、file_name、size、sha256、image_id、source_repository、source_ref、source_sha、build_time、channel 及 pipeline_id。product 固定 mskdsp-lower；platform 为 linux-arm64/linux-x64；channel 固定 ci。版本包含 GitLab 流水线及作业身份，防止重试产生不同字节却复用同一版本。
 

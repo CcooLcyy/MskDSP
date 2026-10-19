@@ -70,12 +70,29 @@ run_complete_ctest() {
   (
     local test_env="${ROOT}/${BUILD_DIR}/test_env"
     local disk_env="${test_env}.disk"
+    local testing_env="${ROOT}/${BUILD_DIR}/Testing"
+    local disk_testing="${testing_env}.disk"
     local ram_env="" result=0
     [[ ! -e "${disk_env}" && ! -L "${disk_env}" ]] || { log '错误：测试磁盘备份已存在，拒绝覆盖'; exit 1; }
+    [[ ! -e "${disk_testing}" && ! -L "${disk_testing}" ]] || { log '错误：CTest 日志备份已存在，拒绝覆盖'; exit 1; }
     [[ ! -L "${test_env}" ]] || { log '错误：原测试工作区不是独立目录'; exit 1; }
+    [[ ! -L "${testing_env}" ]] || { log '错误：原 CTest 日志目录不是独立目录'; exit 1; }
     restore_ctest_workspace() {
       local original_status="$1" cleanup_status=0
       trap - EXIT
+      # 先保存成功及失败的 CTest 日志，再恢复磁盘目录；不丢弃本次诊断。
+      if [[ -L "${testing_env}" && "$(readlink -- "${testing_env}")" == "${ram_env}/.Testing" ]]; then
+        cp -a "${ram_env}/.Testing/." "${disk_testing}/" || cleanup_status=1
+        rm -- "${testing_env}" || cleanup_status=1
+      fi
+      if [[ -d "${disk_testing}" ]]; then
+        if [[ ! -e "${testing_env}" && ! -L "${testing_env}" ]]; then
+          mv -- "${disk_testing}" "${testing_env}" || cleanup_status=1
+        else
+          log '错误：无法安全恢复 CTest 日志目录'
+          cleanup_status=1
+        fi
+      fi
       if [[ -L "${test_env}" && "$(readlink -- "${test_env}")" == "${ram_env}" ]]; then
         rm -- "${test_env}" || cleanup_status=1
       fi
@@ -89,7 +106,7 @@ run_complete_ctest() {
       fi
       # 仅删除本次 mktemp 创建的 RAM 目录；不跟随符号链接或处理其他路径。
       if [[ -n "${ram_env}" ]]; then
-        if [[ "${ram_env}" == /dev/shm/mskdsp-ctest-"${ARCH}".* \
+        if [[ "${ram_env}" == /dev/shm/msk.?????? \
               && "$(dirname -- "${ram_env}")" == /dev/shm && ! -L "${ram_env}" ]]; then
           rm -rf -- "${ram_env}" || cleanup_status=1
         else
@@ -103,7 +120,7 @@ run_complete_ctest() {
       exit "${original_status}"
     }
     trap 'restore_ctest_workspace "$?"' EXIT
-    ram_env="$(mktemp -d "/dev/shm/mskdsp-ctest-${ARCH}.XXXXXX")"
+    ram_env="$(mktemp -d /dev/shm/msk.XXXXXX)"
     mkdir -p "${test_env}"
     mv -- "${test_env}" "${disk_env}"
     # 目录位于 tmpfs；ELF 种子通过绝对链接保留在磁盘，兼容 /dev/shm 的 noexec 挂载。
@@ -120,6 +137,11 @@ run_complete_ctest() {
     ln -s "${ram_env}" "${test_env}"
     mkdir "${ram_env}/.tmp"
     export TMPDIR="${ram_env}/.tmp"
+    mkdir -p "${testing_env}"
+    mv -- "${testing_env}" "${disk_testing}"
+    mkdir "${ram_env}/.Testing"
+    cp -a "${disk_testing}/." "${ram_env}/.Testing/"
+    ln -s "${ram_env}/.Testing" "${testing_env}"
     log "执行 ${ARCH} 完整 CTest，并行度 2，运行工作区位于 RAM"
     ctest --test-dir "${BUILD_DIR}" --output-on-failure --parallel 2 --no-tests=error \
       --output-junit "${ROOT}/${LOG_DIR}/ctest.xml" || result="$?"

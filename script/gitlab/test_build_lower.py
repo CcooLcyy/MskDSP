@@ -323,22 +323,34 @@ class TmpfsWorkspaceTest(unittest.TestCase):
             shutil.copyfile("/bin/pwd", seed)
             seed.chmod(0o755)
             (root / "logs/x64").mkdir(parents=True)
+            testing = root / "build-x64/Testing/Temporary"
+            testing.mkdir(parents=True)
+            (testing / "previous.log").write_text("已有测试日志")
             tools = root / "bin"
             tools.mkdir()
             executable = tools / "ctest"
             executable.write_text('''#!/usr/bin/env python3
-import json, os, subprocess, sys, tempfile
+import json, os, socket, subprocess, sys, tempfile
 from pathlib import Path
 work = Path(os.environ["ROOT"]) / "build-x64/test_env/demo"
 seed = work / "module/libDummy.so"
 real_work = work.resolve()
 run = subprocess.run([str(seed)], cwd=work, capture_output=True, text=True)
+testing = Path(os.environ["ROOT"]) / "build-x64/Testing/Temporary"
+testing.mkdir(parents=True, exist_ok=True)
+(testing / "LastTest.log").write_text("本次真实日志")
+socket_path = tempfile.gettempdir() + "/data_center_grpc_service_test_tmp_1234567890123/./socket/IEC61850.sock"
+os.makedirs(os.path.dirname(socket_path))
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as endpoint:
+    endpoint.bind(socket_path)
 data = dict(arguments=sys.argv[1:], cwd=str(real_work), tmpfs=os.stat(real_work).st_dev == os.stat("/dev/shm").st_dev,
             seed_link=seed.is_symlink(), seed_target=os.readlink(seed) if seed.is_symlink() else "",
             module_directory_link=seed.parent.is_symlink(),
             module_directory_target=os.readlink(seed.parent) if seed.parent.is_symlink() else "",
             directory_entries=[dict(name=entry.name, symlink=entry.is_symlink()) for entry in os.scandir(seed.parent)],
             temporary_dir=tempfile.gettempdir(), temporary_tmpfs=os.stat(tempfile.gettempdir()).st_dev == os.stat("/dev/shm").st_dev,
+            testing_tmpfs=os.stat(testing).st_dev == os.stat("/dev/shm").st_dev,
+            socket_path=socket_path, socket_length=len(socket_path.encode()),
             executable_status=run.returncode, executable_cwd=run.stdout.strip())
 (work / "conf").mkdir()
 (work / "conf/soe.sqlite").write_text("临时数据库")
@@ -361,8 +373,15 @@ sys.exit(int(os.environ["TEST_FAILURE"]))
             self.assertIn("test_env.disk", data["module_directory_target"])
             self.assertEqual(data["directory_entries"], [dict(name="libDummy.so", symlink=False)])
             self.assertTrue(data["temporary_tmpfs"], data)
-            self.assertTrue(data["temporary_dir"].startswith("/dev/shm/mskdsp-ctest-x64."), data)
+            self.assertTrue(data["temporary_dir"].startswith("/dev/shm/msk."), data)
             self.assertFalse(Path(data["temporary_dir"]).exists())
+            self.assertTrue(data["testing_tmpfs"], data)
+            self.assertLess(data["socket_length"], 108, data)
+            self.assertTrue(data["socket_path"].endswith("data_center_grpc_service_test_tmp_1234567890123/./socket/IEC61850.sock"))
+            self.assertEqual((testing / "LastTest.log").read_text(), "本次真实日志")
+            self.assertEqual((testing / "previous.log").read_text(), "已有测试日志")
+            self.assertFalse((root / "build-x64/Testing").is_symlink())
+            self.assertFalse((root / "build-x64/Testing.disk").exists())
             self.assertEqual(data["executable_status"], 0)
             self.assertEqual(data["executable_cwd"], data["cwd"])
             self.assertTrue(work.is_dir())
