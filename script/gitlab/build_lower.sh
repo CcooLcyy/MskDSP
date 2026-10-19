@@ -78,6 +78,11 @@ build_and_test() {
     [[ "$("${TARGET_CC}" -dumpmachine)" == aarch64-linux-gnu ]] || fail '交叉编译器目标架构不一致'
     [[ "$("${TARGET_CXX}" -dumpfullversion)" == 14.* ]] || fail '交叉编译器必须为 GCC14'
     [[ "$(gcc-14 -dumpfullversion)" == 14.* ]] || fail '主机协议工具编译器必须为 GCC14'
+    [[ "$(cc -dumpmachine)" == x86_64-linux-gnu && "$(c++ -dumpmachine)" == x86_64-linux-gnu \
+       && "$(cc -dumpfullversion)" == 14.* && "$(c++ -dumpfullversion)" == 14.* ]] \
+      || fail '交叉镜像默认主机 cc/c++ 必须为原生 x64 GCC14'
+    # make 端口仅在 CC/CXX 未定义时使用检测到的目标工具链，不能全局导出主机编译器。
+    unset CC CXX
     log "主机 GCC $(gcc-14 -dumpfullversion)，ARM64 交叉 GCC $("${TARGET_CXX}" -dumpfullversion)"
   else
     case "$(uname -m):${ARCH}" in
@@ -94,8 +99,6 @@ build_and_test() {
   export VCPKG_BINARY_SOURCES="clear;files,${VCPKG_DEFAULT_BINARY_CACHE},readwrite"
   export VCPKG_OVERLAY_TRIPLETS="${ROOT}/cmake/vcpkg-triplets"
   export VCPKG_DISABLE_METRICS=1 VCPKG_MAX_CONCURRENCY=8
-  # host 工具固定使用原生 GCC14；目标端由专用 triplet 的 toolchain 指定交叉编译器。
-  export CC=gcc-14 CXX=g++-14
   # 仅重定向官方 GitHub archive，保留 REF 和 SHA512；失败不退回已知不通的首跳。
   # 占位参数由 vcpkg 自行做 shell 转义，外层再次加引号会破坏含空格的目标路径。
   export X_VCPKG_ASSET_SOURCES="clear;x-script,python3 \"${ROOT}/script/gitlab/download_asset.py\" {url} {sha512} {dst};x-block-origin"

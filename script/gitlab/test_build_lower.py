@@ -19,7 +19,7 @@ with open(os.environ["COMMAND_LOG"], "a") as log:
     log.write(json.dumps([name] + args) + "\n")
 if name == "uname":
     print(os.environ.get("TOOL_ARCH", "aarch64" if os.environ["ARCH"] == "arm64" else "x86_64"))
-elif name in ("gcc-14", "g++-14", "aarch64-linux-gnu-gcc-14", "aarch64-linux-gnu-g++-14"):
+elif name in ("cc", "c++", "gcc-14", "g++-14", "aarch64-linux-gnu-gcc-14", "aarch64-linux-gnu-g++-14"):
     print("aarch64-linux-gnu" if name.startswith("aarch64") and "-dumpmachine" in args else
           "x86_64-linux-gnu" if "-dumpmachine" in args else "14.2.0")
 elif name == "git" and "rev-parse" in args:
@@ -33,6 +33,13 @@ elif name == "cmake" and "--install" in args:
         Path("package/debug").mkdir()
         Path("package/debug/MskDSP.debug").write_bytes(b"symbols")
 elif name == "cmake" and "-B" in args:
+    if os.environ.get("CHECK_MAKE_ENV") == "1":
+        # 对应 baseline vcpkg_configure_make 的规则：已有 CC 环境变量优先于目标工具链。
+        compiler = os.environ.get("CC", "aarch64-linux-gnu-gcc-14")
+        with open(os.environ["COMMAND_LOG"], "a") as log:
+            log.write(json.dumps(["make-target-compiler", compiler]) + "\n")
+        if compiler != "aarch64-linux-gnu-gcc-14" or "CXX" in os.environ:
+            sys.exit("非 CMake 目标端继承了主机编译器环境")
     directory = Path(args[args.index("-B") + 1])
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "CTestTestfile.cmake").write_text("# 完整测试目录")
@@ -68,7 +75,7 @@ class BuildLowerTest(unittest.TestCase):
             shutil.copyfile(ROOT / filename, destination)
         tools = root / "bin"
         tools.mkdir()
-        for name in ("uname", "git", "cmake", "ctest", "ccache", "buildctl", "gcc-14", "g++-14",
+        for name in ("uname", "git", "cmake", "ctest", "ccache", "buildctl", "cc", "c++", "gcc-14", "g++-14",
                      "aarch64-linux-gnu-gcc-14", "aarch64-linux-gnu-g++-14"):
             executable = tools / name
             executable.write_text(MOCK, encoding="utf-8")
@@ -166,6 +173,14 @@ class BuildLowerTest(unittest.TestCase):
         self.assertTrue((root / "package/temporary_test").is_file())
         self.assertTrue((root / "logs/arm64/ctest.xml").is_file())
         self.assertEqual(list((root / "release/arm64").glob("*debugsymbols*")), [])
+
+    def test_cross_make_ports_do_not_inherit_native_compiler_environment(self):
+        root, environment = self.prepare("arm64")
+        environment.update(TOOL_ARCH="x86_64", CHECK_MAKE_ENV="1", CC="gcc-14", CXX="g++-14")
+        result = self.run_phase(root, environment, "cross-build")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        commands = [json.loads(line) for line in (root / "commands.jsonl").read_text().splitlines()]
+        self.assertIn(["make-target-compiler", "aarch64-linux-gnu-gcc-14"], commands)
 
 
 if __name__ == "__main__":
