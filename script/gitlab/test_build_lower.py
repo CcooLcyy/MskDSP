@@ -25,6 +25,10 @@ elif name in ("cc", "c++", "gcc-14", "g++-14", "aarch64-linux-gnu-gcc-14", "aarc
 elif name == "git" and any(argument.startswith("--batch-check") for argument in args):
     for expression in sys.stdin.read().splitlines():
         print("a" * 40 + " tree")
+elif name == "git" and "--is-shallow-repository" in args:
+    print(os.environ.get("SHALLOW_SOURCE", "false"))
+elif name == "git" and "cat-file" in args and "-e" in args:
+    sys.exit(1 if os.environ.get("MISSING_BASELINE") == "1" else 0)
 elif name == "git" and "rev-parse" in args:
     print(json.load(open("vcpkg-configuration.json"))["default-registry"]["baseline"])
 elif name == "cmake" and "--install" in args:
@@ -191,6 +195,26 @@ class BuildLowerTest(unittest.TestCase):
         commands = [json.loads(line) for line in (root / "commands.jsonl").read_text().splitlines()]
         self.assertIn(["make-target-compiler", "aarch64-linux-gnu-gcc-14"], commands)
 
+    def test_missing_source_baseline_fetches_complete_history(self):
+        root, environment = self.prepare("x64")
+        result = self.run_phase(root, environment | {"MISSING_BASELINE": "1"}, "build")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        commands = [json.loads(line) for line in (root / "commands.jsonl").read_text().splitlines()]
+        fetches = [command for command in commands if command[0] == "git" and "fetch" in command]
+        self.assertEqual(len(fetches), 1)
+        self.assertIn("origin", fetches[0])
+        self.assertFalse(any(part.startswith("--depth") for part in fetches[0]))
+
+    def test_existing_shallow_source_restores_complete_history(self):
+        root, environment = self.prepare("x64")
+        result = self.run_phase(root, environment | {"SHALLOW_SOURCE": "true"}, "build")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        commands = [json.loads(line) for line in (root / "commands.jsonl").read_text().splitlines()]
+        fetches = [command for command in commands if command[0] == "git" and "fetch" in command]
+        self.assertEqual(len(fetches), 1)
+        self.assertIn("--unshallow", fetches[0])
+        self.assertIn("origin", fetches[0])
+
 
 @unittest.skipUnless(os.name == "posix", "真实浅仓库验证在 Linux/WSL 执行")
 class LocalRegistryTest(unittest.TestCase):
@@ -198,7 +222,7 @@ class LocalRegistryTest(unittest.TestCase):
         return subprocess.run(["git", "-C", str(directory), *arguments], check=True,
                               capture_output=True, text=True).stdout.strip()
 
-    def prepare(self, missing_tree=False):
+    def prepare(self, missing_tree=False, shallow=True):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -214,19 +238,24 @@ class LocalRegistryTest(unittest.TestCase):
         tree = self.git(origin, "rev-parse", "HEAD:ports/demo")
         if missing_tree:
             (port / "portfile.cmake").write_text("当前树")
+        self.git(origin, "add", "ports")
+        index_tree = self.git(origin, "write-tree")
+        current_tree = self.git(origin, "rev-parse", index_tree + ":ports/demo")
         versions = origin / "versions"
         (versions / "d-").mkdir(parents=True)
-        (versions / "baseline.json").write_text(json.dumps({"default": {"demo": {"baseline": "1.0", "port-version": 0}}}))
-        (versions / "d-/demo.json").write_text(json.dumps({"versions": [{"version": "1.0", "port-version": 0, "git-tree": tree}]}))
+        (versions / "baseline.json").write_text(json.dumps({"default": {"demo": {"baseline": "1.0", "port-version": 1}}}))
+        (versions / "d-/demo.json").write_text(json.dumps({"versions": [
+            {"version": "1.0", "port-version": 1, "git-tree": current_tree},
+            {"version": "1.0", "port-version": 0, "git-tree": tree}]}))
         self.git(origin, "add", ".")
         self.git(origin, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
                  "-c", "commit.gpgsign=false", "commit", "-m", "versions")
         source = root / "source"
-        subprocess.run(["git", "clone", "--depth=1", origin.as_uri(), str(source)],
+        subprocess.run(["git", "clone", *(["--depth=1"] if shallow else []), origin.as_uri(), str(source)],
                        check=True, capture_output=True, text=True)
         baseline = self.git(source, "rev-parse", "HEAD")
         self.git(source, "checkout", "--detach", baseline)
-        self.assertEqual(self.git(source, "rev-parse", "--is-shallow-repository"), "true")
+        self.assertEqual(self.git(source, "rev-parse", "--is-shallow-repository"), "true" if shallow else "false")
         return root, source, baseline
 
     def function(self):
@@ -234,8 +263,8 @@ class LocalRegistryTest(unittest.TestCase):
         self.assertIn("configure_local_registry() {", text)
         return "configure_local_registry() {" + text.split("configure_local_registry() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
 
-    def verify_local_fetch(self, missing_unrelated_tree=False):
-        root, source, baseline = self.prepare(missing_tree=missing_unrelated_tree)
+    def verify_local_fetch(self, missing_unrelated_tree=False, full_history=False):
+        root, source, baseline = self.prepare(missing_tree=missing_unrelated_tree, shallow=not full_history)
         registry = root / "registry"
         registry.mkdir()
         command = self.function() + r'''
@@ -247,9 +276,14 @@ GIT_ALLOW_PROTOCOL=file git -C "$REGISTRY" fetch --update-shallow -- https://git
 test "$(git -C "$REGISTRY" rev-parse FETCH_HEAD)" = "$PINNED_BASELINE"
 git -C "$REGISTRY" cat-file -e "FETCH_HEAD:versions/baseline.json"
 git -C "$REGISTRY" cat-file -e "FETCH_HEAD:ports/demo"
+if test -n "${HISTORICAL_TREE:-}"; then
+  git -C "$REGISTRY" read-tree "$HISTORICAL_TREE"
+fi
 '''
+        record = json.loads((source / "versions/d-/demo.json").read_text())["versions"][-1]
         result = subprocess.run(["bash", "-c", command], env=dict(os.environ, VCPKG_ROOT=str(source),
-                                PINNED_BASELINE=baseline, REGISTRY=str(registry)), cwd=root,
+                                PINNED_BASELINE=baseline, REGISTRY=str(registry),
+                                HISTORICAL_TREE=record["git-tree"] if full_history else ""), cwd=root,
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("insteadOf", self.git(source, "config", "--local", "--list"))
@@ -259,6 +293,9 @@ git -C "$REGISTRY" cat-file -e "FETCH_HEAD:ports/demo"
 
     def test_unrelated_old_port_tree_does_not_reject_valid_baseline(self):
         self.verify_local_fetch(missing_unrelated_tree=True)
+
+    def test_complete_history_registry_supports_prior_port_revision(self):
+        self.verify_local_fetch(missing_unrelated_tree=True, full_history=True)
 
     def test_missing_required_baseline_directory_is_rejected(self):
         for directory in ("ports", "versions"):

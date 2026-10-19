@@ -138,8 +138,12 @@ build_and_test() {
     git -C "${VCPKG_ROOT}" init -q
     git -C "${VCPKG_ROOT}" remote add origin https://github.com/microsoft/vcpkg.git
   fi
-  if ! git -C "${VCPKG_ROOT}" cat-file -e "${baseline}^{commit}" 2>/dev/null; then
-    git -C "${VCPKG_ROOT}" fetch --depth 1 origin "${baseline}"
+  # 版本求解会读取同版本的旧 port revision，必须保留固定基线的完整可达历史。
+  if [[ "$(git -C "${VCPKG_ROOT}" rev-parse --is-shallow-repository)" == true ]]; then
+    log '补全 vcpkg 固定基线历史，供本地 registry 解析历史端口树'
+    git -C "${VCPKG_ROOT}" fetch --unshallow origin "${baseline}"
+  elif ! git -C "${VCPKG_ROOT}" cat-file -e "${baseline}^{commit}" 2>/dev/null; then
+    git -C "${VCPKG_ROOT}" fetch origin "${baseline}"
   fi
   git -C "${VCPKG_ROOT}" checkout --detach "${baseline}"
   [[ "$(git -C "${VCPKG_ROOT}" rev-parse HEAD)" == "${baseline}" ]] || fail 'vcpkg baseline 不一致'
