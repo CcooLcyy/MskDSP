@@ -145,7 +145,7 @@ python script/dev/lower_device_ssh.py sudo "docker ps --filter name=mskdsp --for
 如需要查看运行日志（日志文件对普通用户可读，无需提权）：
 
 ```bash
-python script/dev/lower_device_ssh.py run "ls -lah /data/mskdsp/log; tail -n 200 /data/mskdsp/log/RTU.log"
+python script/dev/lower_device_ssh.py run "ls -lah /data/mskdsp/log; tail -n 200 /data/mskdsp/log/moduleManager/moduleManager.log"
 ```
 
 如果容器未运行或日志显示异常，应保留当前安装包文件、`/data/mskdsp/conf/`、`/data/mskdsp/log/`，再继续定位。

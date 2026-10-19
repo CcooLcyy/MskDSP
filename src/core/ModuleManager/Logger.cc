@@ -37,7 +37,6 @@ constexpr std::uintmax_t kRotationSizeBytes = 10 * 1024 * 1024;
 constexpr std::uintmax_t kArchiveLimitBytes = 500ull * 1024ull * 1024ull;
 constexpr int kRetentionDays = 60;
 constexpr const char *kDefaultModuleName = "moduleManager";
-constexpr const char *kAggregateLogFileName = "RTU.log";
 
 namespace sink_file = boost::log::sinks::file;
 namespace log_fs = boost::filesystem;
@@ -441,30 +440,6 @@ void CreateModuleSinkLocked(const std::string &module_name) {
   logging::core::get()->add_sink(sink);
 }
 
-void CreateAggregateSinkLocked() {
-  namespace logging = boost::log;
-  namespace keywords = boost::log::keywords;
-
-  if (!std::filesystem::exists(logBaseDir)) {
-    std::filesystem::create_directories(logBaseDir);
-  }
-  auto log_info = BuildLogFileInfo(logBaseDir, kAggregateLogFileName);
-  MaintainLogDirectory(logBaseDir, log_info.prefix, log_info.active_file);
-
-  using backend_t = logging::sinks::text_file_backend;
-  using sink_t = logging::sinks::synchronous_sink<backend_t>;
-  auto backend = boost::make_shared<backend_t>(
-      keywords::file_name = log_info.active_pattern.string(),
-      keywords::target_file_name = log_info.rotated_pattern.string(),
-      keywords::open_mode = std::ios_base::app,
-      keywords::rotation_size = kRotationSizeBytes,
-      keywords::time_based_rotation = sink_file::rotation_at_time_point(0, 0, 0),
-      keywords::auto_flush = true);
-  backend->set_file_collector(boost::make_shared<CompressedFileCollector>(logBaseDir, log_info.prefix));
-  auto sink = boost::make_shared<sink_t>(backend);
-  sink->set_formatter(BuildLogFormatter());
-  logging::core::get()->add_sink(sink);
-}
 }  // namespace
 
 std::once_flag Logger::initFlag_;
@@ -513,7 +488,6 @@ void Logger::init(const std::string &logDir, const std::string &fileName) {
 
     {
       std::scoped_lock lock(sinkMutex);
-      CreateAggregateSinkLocked();
       if (!moduleSinks.contains(kDefaultModuleName)) {
         CreateModuleSinkLocked(kDefaultModuleName);
         moduleSinks.insert(std::string(kDefaultModuleName));
@@ -521,8 +495,8 @@ void Logger::init(const std::string &logDir, const std::string &fileName) {
       MaintainExistingModuleLogsLocked();
     }
     BOOST_LOG_STREAM_SEV(loggerInstance(), boost::log::trivial::info)
-        << "统一日志输出已启用"
-        << ", file=" << (logBaseDir / kAggregateLogFileName).string();
+        << "日志输出已按模块保存"
+        << ", 目录=" << logBaseDir.string();
     std::filesystem::path module_dir = logBaseDir / kDefaultModuleName;
     BOOST_LOG_STREAM_SEV(loggerInstance(), boost::log::trivial::info)
         << "模块日志输出已启用: module=" << kDefaultModuleName

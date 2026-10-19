@@ -32,7 +32,7 @@ MQTTManager 提供通用 MQTT 连接与请求-响应能力，业务模块通过 
 ## 重连后订阅恢复说明
 ### 问题现象
 - 业务侧已成功订阅响应主题后，若 MQTT 连接中途断开，再由后续 `publish` 路径触发重连，现场可能出现“请求仍能继续发送，但响应主题再也收不到消息”的现象。
-- 在 DLT645 LoRa 超时排查中，可观察到 `RequestAndWait` 持续发起请求，但 `RTU.log` 中不再出现 `MQTTManager 收到消息: 主题=loraManager/AGVC/JSON/action/response/monitorNode`。
+- 在 DLT645 LoRa 超时排查中，可观察到 `RequestAndWait` 持续发起请求，但 `MQTTManager/MQTTManager.log` 中不再出现 `MQTTManager 收到消息: 主题=loraManager/AGVC/JSON/action/response/monitorNode`。
 - 该现象同样会影响 ModbusRTU 等依赖 `RequestAndWait` 或预先订阅响应主题的业务模块，表现通常为请求超时、重试增多或链路看似在线但响应长期缺失。
 
 ### 根因分析

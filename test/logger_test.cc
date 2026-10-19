@@ -6,6 +6,7 @@
 #include <chrono>
 #include <ctime>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -138,6 +139,84 @@ protected:
   }
 };
 }  // 命名空间结束
+
+// 验证：在独立进程中完成首次初始化，避免 once_flag 使重复初始化的断言失效。
+// DeathTest 套件由 GTest 优先运行，threadsafe 模式重新执行子进程，也不继承父进程的日志状态。
+TEST(LoggerInitializationDeathTest, FreshInitializationWritesOnlyModuleLogs) {
+  ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+  const fs::path log_dir("fresh_logger_initialization");
+  ASSERT_EXIT(
+      {
+        fs::remove_all(log_dir);
+        ModuleManager::Logger::init(log_dir.string(), kLogFileName);
+        LOG_INFO("fresh_default_message");
+        {
+          ModuleManager::LogModuleScope scope(kOtherModuleName);
+          LOG_INFO("fresh_other_message");
+          LOG_ERROR("fresh_other_error");
+        }
+        boost::log::core::get()->flush();
+
+        // 首次启动不生成汇总文件，默认日志和模块日志仍完整分流。
+        EXPECT_FALSE(fs::exists(log_dir / "RTU.log"));
+        for (const auto &entry : fs::directory_iterator(log_dir)) {
+          EXPECT_TRUE(entry.is_directory()) << entry.path();
+        }
+        const auto default_content = ReadTextFile(log_dir / kDefaultModuleName / kLogFileName);
+        EXPECT_NE(default_content.find("fresh_default_message"), std::string::npos);
+        EXPECT_EQ(default_content.find("fresh_other_message"), std::string::npos);
+        EXPECT_EQ(default_content.find("fresh_other_error"), std::string::npos);
+        const auto other_content = ReadTextFile(log_dir / kOtherModuleName / (std::string(kOtherModuleName) + ".log"));
+        EXPECT_NE(other_content.find("fresh_other_message"), std::string::npos);
+        EXPECT_NE(other_content.find("fresh_other_error"), std::string::npos);
+        EXPECT_EQ(other_content.find("fresh_default_message"), std::string::npos);
+        std::_Exit(::testing::Test::HasFailure() ? 1 : 0);
+      },
+      ::testing::ExitedWithCode(0), "");
+  fs::remove_all(log_dir);
+}
+
+// 验证：升级后的首次初始化和后续写入不再追加、压缩或清理根目录的旧汇总日志。
+TEST(LoggerInitializationDeathTest, KeepsLegacyAggregateFilesUnchanged) {
+  ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+  const fs::path log_dir("legacy_logger_initialization");
+  ASSERT_EXIT(
+      {
+        fs::remove_all(log_dir);
+        const auto active_log = log_dir / "RTU.log";
+        const auto old_date = DateString(LocalToday() - std::chrono::days(61));
+        const auto archive_log = log_dir / ("RTU_" + old_date + "_12-00-00_1.log");
+        auto compressed_archive = archive_log;
+        compressed_archive += ".gz";
+        // 使用超过保留天数的归档，同时检查原始文件和已有压缩文件的字节内容。
+        const std::string active_content = "previous-aggregate-log\n";
+        const std::string archive_content = "previous-aggregate-archive\n";
+        const std::string compressed_content("\x1f\x8b\0legacy-gzip-bytes", 20);
+        WriteTextFile(active_log, active_content);
+        WriteTextFile(archive_log, archive_content);
+        WriteTextFile(compressed_archive, compressed_content);
+
+        ModuleManager::Logger::init(log_dir.string(), kLogFileName);
+        LOG_INFO("legacy_default_message");
+        {
+          ModuleManager::LogModuleScope scope(kOtherModuleName);
+          LOG_INFO("legacy_other_message");
+        }
+        boost::log::core::get()->flush();
+
+        EXPECT_TRUE(fs::exists(active_log));
+        EXPECT_EQ(ReadTextFile(active_log), active_content);
+        EXPECT_TRUE(fs::exists(archive_log));
+        EXPECT_EQ(ReadTextFile(archive_log), archive_content);
+        EXPECT_TRUE(fs::exists(compressed_archive));
+        EXPECT_EQ(ReadTextFile(compressed_archive), compressed_content);
+        EXPECT_NE(ReadTextFile(log_dir / kDefaultModuleName / kLogFileName).find("legacy_default_message"), std::string::npos);
+        EXPECT_NE(ReadTextFile(log_dir / kOtherModuleName / (std::string(kOtherModuleName) + ".log")).find("legacy_other_message"), std::string::npos);
+        std::_Exit(::testing::Test::HasFailure() ? 1 : 0);
+      },
+      ::testing::ExitedWithCode(0), "");
+  fs::remove_all(log_dir);
+}
 
 // 验证：初始化后日志仍保留已有内容，并继续追加写入新日志。
 TEST_F(LoggerTest, KeepsExistingLogContentOnInit) {
