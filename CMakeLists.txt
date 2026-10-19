@@ -256,6 +256,7 @@ endforeach()
 set(MSKDSP_INSTALL_SCRIPT
     "${CMAKE_CURRENT_BINARY_DIR}/mskdsp_install_runtime_deps.cmake")
 set(MSKDSP_INSTALL_SCRIPT_CONTENT [=[
+cmake_minimum_required(VERSION 3.28)
 message(STATUS "开始收集 vcpkg 运行时依赖到: ${CMAKE_INSTALL_PREFIX}/lib")
 set(_mskdsp_execs "@MSKDSP_INSTALL_EXEC_PATHS@")
 set(_mskdsp_libs "@MSKDSP_INSTALL_LIB_PATHS@")
@@ -298,9 +299,38 @@ foreach(_mskdsp_required_dep IN LISTS _mskdsp_required_vcpkg_dependencies)
   endif()
 endforeach()
 
+message(STATUS "开始查询目标编译器的 C++ 运行时库")
+set(_mskdsp_runtime_libs "libstdc++.so.6" "libgcc_s.so.1" "libatomic.so.1")
+set(_mskdsp_runtime_paths "")
+set(_mskdsp_runtime_resolved "")
+foreach(_lib IN LISTS _mskdsp_runtime_libs)
+  execute_process(
+    COMMAND "@CMAKE_CXX_COMPILER@" "-print-file-name=${_lib}"
+    OUTPUT_VARIABLE _mskdsp_runtime_path
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+  )
+  if(_mskdsp_runtime_path STREQUAL "" OR _mskdsp_runtime_path STREQUAL "${_lib}")
+    message(STATUS "未找到目标编译器运行时库: ${_lib}")
+  elseif(EXISTS "${_mskdsp_runtime_path}")
+    list(APPEND _mskdsp_runtime_paths "${_mskdsp_runtime_path}")
+    list(APPEND _mskdsp_runtime_resolved "${_lib}")
+  else()
+    message(STATUS "目标编译器运行时库路径不存在: ${_mskdsp_runtime_path}")
+  endif()
+endforeach()
+
+# 这些 glibc 库由 Ubuntu 基础镜像提供，不随应用捆绑；其余未解析库仍须拒绝交付。
+set(_mskdsp_base_runtime_libraries "libanl.so.1" "libc.so.6" "libm.so.6")
+if("@CMAKE_SYSTEM_PROCESSOR@" MATCHES "^(aarch64|arm64)$")
+  list(APPEND _mskdsp_base_runtime_libraries "ld-linux-aarch64.so.1")
+endif()
 set(_mskdsp_unresolved_remaining ${_mskdsp_required_vcpkg_missing})
 foreach(_mskdsp_unresolved_dep IN LISTS _mskdsp_unresolved)
-  if(NOT _mskdsp_unresolved_dep IN_LIST _mskdsp_required_vcpkg_resolved)
+  if(_mskdsp_unresolved_dep IN_LIST _mskdsp_base_runtime_libraries)
+    message(STATUS "运行时依赖由 Ubuntu 基础镜像提供: ${_mskdsp_unresolved_dep}")
+  elseif(NOT _mskdsp_unresolved_dep IN_LIST _mskdsp_required_vcpkg_resolved
+         AND NOT _mskdsp_unresolved_dep IN_LIST _mskdsp_runtime_resolved)
     list(APPEND _mskdsp_unresolved_remaining "${_mskdsp_unresolved_dep}")
   endif()
 endforeach()
@@ -318,28 +348,15 @@ foreach(_dep IN LISTS _mskdsp_deps)
        FOLLOW_SYMLINK_CHAIN)
 endforeach()
 message(STATUS "开始收集 C++ 运行时库到: ${CMAKE_INSTALL_PREFIX}/lib")
-set(_mskdsp_runtime_libs "libstdc++.so.6" "libgcc_s.so.1" "libatomic.so.1")
-set(_mskdsp_runtime_paths "")
-foreach(_lib IN LISTS _mskdsp_runtime_libs)
-  execute_process(
-    COMMAND "@CMAKE_CXX_COMPILER@" "-print-file-name=${_lib}"
-    OUTPUT_VARIABLE _mskdsp_runtime_path
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-  )
-  if(_mskdsp_runtime_path STREQUAL "" OR _mskdsp_runtime_path STREQUAL "${_lib}")
-    message(STATUS "未找到运行时库: ${_lib}")
-  elseif(EXISTS "${_mskdsp_runtime_path}")
-    list(APPEND _mskdsp_runtime_paths "${_mskdsp_runtime_path}")
-  else()
-    message(STATUS "运行时库路径不存在: ${_mskdsp_runtime_path}")
-  endif()
-endforeach()
 list(REMOVE_DUPLICATES _mskdsp_runtime_paths)
 foreach(_dep IN LISTS _mskdsp_runtime_paths)
   message(STATUS "复制运行时库: ${_dep}")
   execute_process(COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                  "${_dep}" "${CMAKE_INSTALL_PREFIX}/lib")
+                  "${_dep}" "${CMAKE_INSTALL_PREFIX}/lib"
+                  RESULT_VARIABLE _mskdsp_runtime_copy_result)
+  if(NOT _mskdsp_runtime_copy_result EQUAL 0)
+    message(FATAL_ERROR "复制目标编译器运行时库失败: ${_dep}")
+  endif()
 endforeach()
 ]=])
 string(CONFIGURE "${MSKDSP_INSTALL_SCRIPT_CONTENT}"

@@ -24,6 +24,7 @@
 - 使用独立交叉 triplet、chainload toolchain 与缓存版本，避免复用旧 QEMU 编译器生成的 ARM64 二进制缓存。
 - ARM64 编译作业传递完整 CTest 运行所需的构建目录、目标库和测试程序；测试作业保持相同仓库绝对路径，在 ARM64 镜像中执行全部测试，拒绝零测试。测试失败不能进入打包或发布。
 - 安装及符号归档在可用的工具环境中完成；测试通过后才清理测试程序并归档交付包。发布作业继续只消费已测试的冻结产物。
+- 独立安装脚本初始化 CMake 策略，提前查询并收集目标 GCC 运行库；ARM64 glibc 及加载器由 Ubuntu 基础镜像提供，其他缺失依赖仍拒绝交付。
 - 验收必须包含实际交叉编译器版本及目标架构、真实 ARM64 完整 CTest、双架构打包发布、平台清单与实际下载 SHA256 核对；不以编译通过代替 ARM64 执行验证。
 
 metadata.json 冻结 product、version、package_version、platform、file_name、size、sha256、image_id、source_repository、source_ref、source_sha、build_time、channel 及 pipeline_id。product 固定 mskdsp-lower；platform 为 linux-arm64/linux-x64；channel 固定 ci。版本包含 GitLab 流水线及作业身份，防止重试产生不同字节却复用同一版本。
