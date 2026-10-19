@@ -1,0 +1,11 @@
+services:
+  lower-runner:
+    image: docker.m.daocloud.io/gitlab/gitlab-runner@sha256:a4838319e55b510c05b36d701d06362b9197458558c7b0d3d63f2c7588c7cd2f
+    container_name: gitlab-runner-lower
+    restart: unless-stopped
+    volumes:
+      - ./config:/etc/gitlab-runner
+      - lower-runner-state:/home/gitlab-runner
+      - /var/run/docker.sock:/var/run/docker.sock
+volumes:
+  lower-runner-state:

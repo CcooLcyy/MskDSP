@@ -1,0 +1,141 @@
+workflow:
+  auto_cancel:
+    on_new_commit: interruptible
+  rules:
+    - if: '$CI_COMMIT_TAG == null && ($CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "main") && ($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web")'
+    - when: never
+
+stages: [build-test, package, publish]
+
+default:
+  tags: [lower-ci]
+  interruptible: true
+
+variables:
+  GIT_DEPTH: "0"
+  GIT_SUBMODULE_STRATEGY: none
+  CMAKE_BUILD_PARALLEL_LEVEL: "8"
+  VCPKG_MAX_CONCURRENCY: "8"
+
+.build-test:
+  stage: build-test
+  tags: [lower-ci]
+  environment:
+    name: ci-build
+    action: prepare
+  timeout: 8h
+  cache:
+    key:
+      prefix: lower-gcc14-$ARCH-v1
+      files: [vcpkg.json, vcpkg-configuration.json]
+    paths:
+      - .cache/vcpkg/$ARCH/
+      - .cache/ccache/$ARCH/
+    policy: pull-push
+  script:
+    - bash script/gitlab/build_lower.sh build "$ARCH"
+  after_script:
+    - CCACHE_DIR="$CI_PROJECT_DIR/.cache/ccache/$ARCH" ccache --show-stats || true
+  artifacts:
+    name: lower-build-$ARCH-$CI_JOB_ID
+    when: always
+    expire_in: 7 days
+    paths:
+      - package/
+      - release/$ARCH/
+      - logs/$ARCH/
+      - build-$ARCH/Testing/
+    reports:
+      junit: logs/$ARCH/ctest.xml
+
+build-test-arm64:
+  extends: .build-test
+  image:
+    name: mskdsp-ci-tools:ubuntu24.04-arm64
+    docker:
+      platform: linux/arm64
+    pull_policy: if-not-present
+  variables:
+    ARCH: arm64
+
+build-test-x64:
+  extends: .build-test
+  image:
+    name: mskdsp-ci-tools:ubuntu24.04-x64
+    docker:
+      platform: linux/amd64
+    pull_policy: if-not-present
+  variables:
+    ARCH: x64
+
+.package:
+  stage: package
+  image:
+    name: mskdsp-lower-package-tools:bookworm-v1
+    pull_policy: if-not-present
+  environment:
+    name: ci-build
+    action: prepare
+  timeout: 2h
+  script:
+    - bash script/gitlab/build_lower.sh package "$ARCH"
+  artifacts:
+    name: lower-release-$ARCH-$CI_JOB_ID
+    when: always
+    expire_in: 30 days
+    paths:
+      - release/$ARCH/
+      - logs/$ARCH/
+
+package-arm64:
+  extends: .package
+  variables:
+    ARCH: arm64
+  needs:
+    - job: build-test-arm64
+      artifacts: true
+
+package-x64:
+  extends: .package
+  variables:
+    ARCH: x64
+  needs:
+    - job: build-test-x64
+      artifacts: true
+
+.publish:
+  stage: publish
+  interruptible: false
+  image:
+    name: mskdsp-platform-ci-tools:bookworm-v2
+    pull_policy: if-not-present
+  timeout: 2h
+  script:
+    - python3 script/gitlab/init_platform_proto.py
+    - python3 script/gitlab/platform_client.py --metadata "release/$ARCH/metadata.json" --proto-root .ci/platform-proto
+
+publish-arm64:
+  extends: .publish
+  variables:
+    ARCH: arm64
+  environment:
+    name: ci
+  resource_group: mskdsp-lower-ci-arm64
+  needs:
+    - job: package-arm64
+      artifacts: true
+    - job: package-x64
+      artifacts: false
+
+publish-x64:
+  extends: .publish
+  variables:
+    ARCH: x64
+  environment:
+    name: ci
+  resource_group: mskdsp-lower-ci-x64
+  needs:
+    - job: package-arm64
+      artifacts: false
+    - job: package-x64
+      artifacts: true

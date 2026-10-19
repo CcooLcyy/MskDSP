@@ -55,3 +55,9 @@ testConfig
 
 # 日志数据
 checklog
+
+# GitLab CI 临时协议、交付产物和 Python 测试缓存
+.ci/
+release/
+__pycache__/
+*.pyc
