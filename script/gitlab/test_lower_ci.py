@@ -36,6 +36,7 @@ class LowerCiTest(unittest.TestCase):
         self.assertEqual(job["tags"], ["lower-ci"])
         self.assertEqual(job["environment"]["name"], "ci-build")
         self.assertEqual(job["artifacts"]["when"], "always")
+        self.assertEqual(job["cache"]["when"], "always")
         self.assertIn("$ARCH", job["cache"]["key"]["prefix"])
         self.assertIn("junit", job["artifacts"]["reports"])
         self.assertNotEqual(self.config["build-test-arm64"]["image"], self.config["build-test-x64"]["image"])
@@ -44,6 +45,9 @@ class LowerCiTest(unittest.TestCase):
         self.assertIn("--parallel 2", script)
         self.assertIn("--no-tests=error", script)
         self.assertIn("type=docker", script)
+        self.assertIn("X_VCPKG_ASSET_SOURCES=", script)
+        self.assertIn("x-block-origin", script)
+        self.assertIn("{url} {sha512} {dst};x-block-origin", script)
         self.assertNotIn("docker.sock", script)
         self.assertNotIn("check_iec61850_package", script)
 

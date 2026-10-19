@@ -52,7 +52,8 @@ class BuildLowerTest(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
-        for filename in ("script/gitlab/build_lower.sh", "script/gitlab/lower_metadata.py", "script/make_exe.sh",
+        for filename in ("script/gitlab/build_lower.sh", "script/gitlab/lower_metadata.py",
+                         "script/gitlab/download_asset.py", "script/make_exe.sh",
                          "script/workflow/write_lower_update_manifest.py", "Dockerfile", "VERSION", "vcpkg-configuration.json"):
             destination = root / filename
             destination.parent.mkdir(parents=True, exist_ok=True)

@@ -32,6 +32,7 @@ variables:
       - .cache/vcpkg/$ARCH/
       - .cache/ccache/$ARCH/
     policy: pull-push
+    when: always
   script:
     - bash script/gitlab/build_lower.sh build "$ARCH"
   after_script:

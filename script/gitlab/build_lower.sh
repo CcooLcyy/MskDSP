@@ -54,6 +54,9 @@ PY
   export VCPKG_BINARY_SOURCES="clear;files,${VCPKG_DEFAULT_BINARY_CACHE},readwrite"
   export VCPKG_OVERLAY_TRIPLETS="${ROOT}/cmake/vcpkg-triplets"
   export VCPKG_DISABLE_METRICS=1 VCPKG_MAX_CONCURRENCY=8
+  # 仅重定向官方 GitHub archive，保留 REF 和 SHA512；失败不退回已知不通的首跳。
+  # 占位参数由 vcpkg 自行做 shell 转义，外层再次加引号会破坏含空格的目标路径。
+  export X_VCPKG_ASSET_SOURCES="clear;x-script,python3 \"${ROOT}/script/gitlab/download_asset.py\" {url} {sha512} {dst};x-block-origin"
   export CCACHE_DIR="${ROOT}/.cache/ccache/${ARCH}" CCACHE_BASEDIR="${ROOT}"
   export CCACHE_COMPILERCHECK=content CCACHE_MAXSIZE=1G
   mkdir -p "${VCPKG_DOWNLOADS}" "${VCPKG_DEFAULT_BINARY_CACHE}" "${CCACHE_DIR}"
@@ -73,6 +76,7 @@ PY
     "${VCPKG_ROOT}/bootstrap-vcpkg.sh" -disableMetrics
   fi
   log "配置 ${ARCH} RelWithDebInfo，完整测试开启，strip=${STRIP_DEBUG}"
+  log '启用官方 codeload 归档下载与严格 SHA512 校验'
   cmake -S . -B "${BUILD_DIR}" -G Ninja \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 \
     -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \

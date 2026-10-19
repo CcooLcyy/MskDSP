@@ -26,6 +26,8 @@ metadata.json 冻结 product、version、package_version、platform、file_name�
 
 编译镜像复用已准备的 Ubuntu 24.04 x64/ARM64 工具链，按仓库 baseline 初始化 vcpkg，并按架构隔离 vcpkg 和 ccache。镜像打包通过独立 BuildKit 服务导出普通 Docker 归档，不将宿主机 Docker socket 挂载到作业容器。
 
+服务器直连 GitHub 源码归档入口可能超时；通过 vcpkg 自定义资源下载源将 GitHub tar.gz 归档映射到同一仓库、同一 ref 的官方 codeload 地址。下载器与 vcpkg 均保留 SHA512 校验，不改变依赖版本或校验值。依赖缓存失败时也保存，降低网络重试和首次构建成本。
+
 ## 验收标准
 
 1. 先补元数据、上传续传、发布及流水线规则测试，再实现对应代码。
