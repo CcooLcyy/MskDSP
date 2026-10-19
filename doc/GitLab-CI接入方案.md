@@ -2,6 +2,8 @@
 
 ## 已确认的目标与边界
 
+- GitLab 为下位机代码与 CI 的唯一维护入口，移除旧 GitHub Actions、专用 Runner 部署模板和 R2/静态发布脚本；GitHub 仓库停用 Actions，历史提交仍可追溯。
+- 本地仅保留 `gitlab` 远端，`master` 跟踪 `gitlab/master`，普通 `git push` 仅推送 GitLab。协议子模块固定提交保持不变，源地址改为 GitLab。
 - 仅主分支 master/main 的 push 或手动流水线执行；MR、beta 分支和版本标签不重复构建。
 - ARM64、x64 均完成 GCC14 RelWithDebInfo 编译及现有完整 CTest 测试；ARM64 由 x64 交叉编译，在现有 x64 主机通过 QEMU 执行完整单测。
 - 使用独立下位机 Runner、标签、配置和缓存；并发 6，单作业 8 CPU、16 GiB。保留现有平台 Runner 配置。
@@ -18,7 +20,7 @@
 
 首次实测发现，将 GCC14 编译器本身放在 QEMU 中运行开销很大：Abseil 单项约为 x64 的 20 倍，Protobuf 也持续表现出较高开销，8 小时作业上限存在风险。因此 ARM64 改为在独立 x64 工具镜像中使用 GCC14 的 aarch64 交叉工具链编译，随后在既有 ARM64 工具镜像中通过 QEMU 执行完整 CTest。x64 仍在原工具镜像中完成编译和测试。
 
-- 交叉镜像基于既有 x64 工具镜像，额外安装 GCC14 aarch64 交叉编译器；不覆盖现有平台或 GitHub 工具镜像。
+- 交叉镜像基于既有 x64 工具镜像，额外安装 GCC14 aarch64 交叉编译器；不覆盖现有平台工具镜像。
 - vcpkg 明确区分 host=x64 与 target=ARM64，protoc 与 grpc_cpp_plugin 由 host triplet 提供；目标库及主程序使用同一交叉工具链。
 - 交叉镜像默认主机 `cc/c++` 必须为 x64 GCC14；交叉编译入口清除继承的 `CC/CXX`，避免 OpenSSL 等 make 端口沿用主机编译器而忽略目标工具链。
 - 使用独立交叉 triplet、chainload toolchain 与缓存版本，避免复用旧 QEMU 编译器生成的 ARM64 二进制缓存。
@@ -37,7 +39,7 @@ metadata.json 冻结 product、version、package_version、platform、file_name�
 
 ## 协议、授权和镜像
 
-软件仓库协议由单独的 MskDSPPlatformProto GitLab 仓库按固定提交获取到临时目录，不改变现有 protobuf 子模块及 GitHub 流程。CI_JOB_TOKEN 只读获取两个协议项目，并配置对应 allowlist。
+软件仓库协议由单独的 MskDSPPlatformProto GitLab 仓库按固定提交获取到临时目录；下位机 protobuf 子模块也直接指向 GitLab。CI_JOB_TOKEN 通过仅存于子进程环境的认证头只读获取两个协议项目，并配置对应 allowlist，不再使用自有 GitHub 仓库的地址重写。
 
 平台上传使用已有通用 publisher 令牌，保存在下位机项目受保护、掩码的 CI 变量中；不复用仅允许平台自身包的 CI 上传令牌。客户端不输出令牌、认证头或底层 RPC 详情。现有平台业务代码不需要修改。
 

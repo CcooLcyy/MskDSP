@@ -69,6 +69,22 @@ ModuleManager 使用模块 manifest 构建依赖图，并自动处理依赖启�
 ## 构建与测试
 依赖通过 CMake + vcpkg manifest 管理（见 `vcpkg.json` / `vcpkg-configuration.json`）。
 
+### 默认 CI 与软件发布
+
+本仓库默认使用 GitLab CI，入口为 `.gitlab-ci.yml`，作业定义见
+`.gitlab/ci/ci.yml`。仅 `master/main` 的 push 或手动流水线运行：两个架构完成编译与
+完整 CTest 后生成 Docker gzip 自解压安装包，双架构打包成功后上传平台软件库并发布各自 CI 通道。
+ARM64 使用 x64 GCC14 交叉编译，在 ARM64 工具镜像中通过 QEMU 执行完整测试。
+
+安装包、SHA256SUMS、冻结元数据、测试日志和 ARM64 独立调试符号保存在 GitLab artifacts。
+现场安装包可从平台软件库获取；软件入库、通道发布与设备安装分别执行。
+Beta/Stable 使用同一已通过 CI 的安装包晋升，保持文件及 SHA256 不变；x64 仅用于 CI。
+维护步骤见 [GitLab CI 接入方案](./doc/GitLab-CI接入方案.md) 和
+[脚本说明](./script/doc/README.md)。
+
+旧 GitHub Actions、GitHub Runner 配置及 R2/SSH 静态发布脚本已移除。
+共享的镜像归档身份校验与 gzip 安装器继续用于 GitLab，不改变第三方源码依赖及已有历史验证记录。
+
 ### 开发容器（推荐）
 推荐使用长期驻留的开发容器 `mskdsp-dev` 承担依赖安装与配置动作，Codex 仍直接在 WSL 仓库路径中读写代码。
 

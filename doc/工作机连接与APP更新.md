@@ -45,48 +45,34 @@ python script/dev/lower_device_ssh.py sudo "docker ps"             # 需要 root
 
 > 上传较大安装包时不走本脚本（它只覆盖上面的三类操作）；用 `$ssh-device-debug` 的 `deploy` 或 `scp -P 10022` 上传，注意目标是 `megsky` 的家目录 `/home/megsky`。
 
-## 4. 获取最新 CI 安装包
+## 4. 从平台软件库获取安装包
 
-默认从 GitHub Actions `ci.yml` 最新成功的 `master/main` push 构建中获取 arm64 测试安装包。
+GitLab CI 完成双架构编译、完整测试及打包后，自动上传平台软件库并发布到 CI 通道。登录平台的[软件版本页面](http://192.168.10.198:8082/software)，选择「下位机 / CI」及 `linux-arm64` 即可下载安装包和 `SHA256SUMS`。
 
-CI 安装包命名格式为：
-
-```text
-mskdsp-<VERSION>-<branch>-ci-<YYYYMMDD>-<sha>-linux-arm64
-```
-
-在已安装并登录 `gh` 的环境中，可按以下方式下载最新成功包：
+命令行也可通过平台公开清单下载，并校验实际文件：
 
 ```bash
-CI_BRANCH=master
-DOWNLOAD_DIR=/tmp/mskdsp-ci-latest
+PLATFORM_BASE_URL=http://192.168.10.198:8082
+CHANNEL=ci
+DOWNLOAD_DIR="$(mktemp -d /tmp/mskdsp-ci.XXXXXX)"
 
-rm -rf "${DOWNLOAD_DIR}"
-mkdir -p "${DOWNLOAD_DIR}"
+curl --fail --location "${PLATFORM_BASE_URL}/mskdsp-lower/${CHANNEL}/latest.json" \
+  --output "${DOWNLOAD_DIR}/latest.json"
 
-RUN_ID="$(gh run list \
-  --workflow ci.yml \
-  --branch "${CI_BRANCH}" \
-  --event push \
-  --status success \
-  --limit 1 \
-  --json databaseId \
-  --jq '.[0].databaseId')"
+APP_NAME="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["asset"]["name"])' "${DOWNLOAD_DIR}/latest.json")"
+APP_URL="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["asset"]["url"])' "${DOWNLOAD_DIR}/latest.json")"
+SHA_URL="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["checksum"]["url"])' "${DOWNLOAD_DIR}/latest.json")"
+APP_PACKAGE="${DOWNLOAD_DIR}/${APP_NAME}"
+SHA_FILE="${DOWNLOAD_DIR}/SHA256SUMS"
 
-gh run download "${RUN_ID}" \
-  --pattern 'mskdsp-*-linux-arm64' \
-  --dir "${DOWNLOAD_DIR}"
-
-APP_PACKAGE="$(find "${DOWNLOAD_DIR}" -type f -path '*/images/mskdsp-*-linux-arm64' | sort | tail -n 1)"
-SHA_FILE="$(find "${DOWNLOAD_DIR}" -type f -name SHA256SUMS | sort | tail -n 1)"
-
-test -n "${APP_PACKAGE}"
-test -n "${SHA_FILE}"
+curl --fail --location "${APP_URL}" --output "${APP_PACKAGE}"
+curl --fail --location "${SHA_URL}" --output "${SHA_FILE}"
+(cd "${DOWNLOAD_DIR}" && sha256sum --check SHA256SUMS)
 ```
 
-如主线分支为 `main`，将 `CI_BRANCH=master` 改为 `CI_BRANCH=main`。
+文件名由平台清单提供，包含版本、GitLab 流水线及作业身份、提交短哈希和目标架构。
 
-如果要更新 Beta 或 Stable 包，应改用对应 workflow 或 GitHub Release 资产；各渠道产物规则见 [GitHub Actions 与发版策略](./GitHub-Actions与发版策略.md)。
+Beta/Stable 由平台将已经通过 CI 的 ARM64 安装包晋升产生，不重复构建。需要这些通道时将 `CHANNEL` 改为 `beta` 或 `stable`；具体构建发布规则见 [GitLab CI 接入方案](./GitLab-CI接入方案.md)。设备安装仍需按后文单独执行，下载不会自动升级设备。
 
 ## 5. 上传安装包到工作机
 

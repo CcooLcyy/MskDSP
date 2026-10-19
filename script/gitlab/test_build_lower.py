@@ -22,6 +22,12 @@ if name == "uname":
 elif name in ("cc", "c++", "gcc-14", "g++-14", "aarch64-linux-gnu-gcc-14", "aarch64-linux-gnu-g++-14"):
     print("aarch64-linux-gnu" if name.startswith("aarch64") and "-dumpmachine" in args else
           "x86_64-linux-gnu" if "-dumpmachine" in args else "14.2.0")
+elif name == "git" and "submodule" in args:
+    expected_key = "http." + os.environ["CI_SERVER_URL"].rstrip("/") + "/.extraHeader"
+    if (os.environ.get("GIT_CONFIG_COUNT") != "1"
+            or os.environ.get("GIT_CONFIG_KEY_0") != expected_key
+            or not os.environ.get("GIT_CONFIG_VALUE_0", "").startswith("Authorization: Basic ")):
+        sys.exit("协议子模块必须直接使用 GitLab 临时认证头，禁止旧地址重写")
 elif name == "git" and any(argument.startswith("--batch-check") for argument in args):
     for expression in sys.stdin.read().splitlines():
         print("a" * 40 + " tree")
@@ -78,7 +84,7 @@ class BuildLowerTest(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
         for filename in ("script/gitlab/build_lower.sh", "script/gitlab/lower_metadata.py",
-                         "script/gitlab/download_asset.py", "script/make_exe.sh",
+                         "script/gitlab/download_asset.py", "script/gitlab/init_platform_proto.py", "script/make_exe.sh",
                          "script/workflow/write_lower_update_manifest.py", "Dockerfile", "VERSION", "vcpkg-configuration.json",
                          "cmake/toolchains/aarch64-linux-gcc14.cmake", "cmake/vcpkg-triplets/arm64-linux-dynamic-cross.cmake"):
             destination = root / filename
@@ -111,6 +117,14 @@ class BuildLowerTest(unittest.TestCase):
     def run_phase(self, root, environment, phase):
         return subprocess.run(["bash", "script/gitlab/build_lower.sh", phase, environment["ARCH"]],
                               cwd=root, env=environment, capture_output=True, text=True, timeout=30)
+
+    def test_protobuf_auth_uses_gitlab_header_and_hides_job_token(self):
+        root, environment = self.prepare("x64")
+        result = self.run_phase(root, environment, "build")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn(environment["CI_JOB_TOKEN"], result.stdout + result.stderr)
+        commands = (root / "commands.jsonl").read_text()
+        self.assertIn('"submodule", "update", "--init", "--recursive"', commands)
 
     def test_both_architectures_freeze_packages_and_symbols(self):
         for arch in ("arm64", "x64"):

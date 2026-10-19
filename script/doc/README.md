@@ -88,10 +88,18 @@ MSKDSP_VERSION=<version> bash script/make_image.sh
 - 依赖容器 `x64` 与 `VCPKG_ROOT` 等环境（脚本内默认 `/data/3rdlibs/vcpkg`）。
 - 输出 tar 可用于 `make_exe.sh` 生成自解压脚本。
 
-## workflow 静态更新发布脚本
+## GitLab CI 与共享镜像身份校验
 
 ### 用途
-`script/workflow/write_lower_update_manifest.py` 用于生成下位机更新清单 `latest.json`；`script/workflow/upload_r2.sh` 使用 AWS CLI 的 S3 兼容接口把自解压安装包、`SHA256SUMS` 和 `latest.json` 发布到 Cloudflare R2。
+当前发布入口为 `.gitlab-ci.yml` 和 `script/gitlab/`：两种架构完成编译、完整 CTest 与
+独立 BuildKit 打包后，生成 `release/<arch>/` 安装包、`metadata.json` 和 `SHA256SUMS`。
+发布作业消费冻结文件，通过 `platform_client.py` 续传入库，再发布对应 CI 通道，
+不执行设备安装。完整流程见 [GitLab CI 接入方案](../../doc/GitLab-CI接入方案.md)。
+
+共享文件 `script/workflow/write_lower_update_manifest.py` 保留：GitLab 的
+`lower_metadata.py` 导入其 `read_image_config_id`，校验 Docker/OCI 归档平台与镜像 config 摘要。
+兼容清单生成 CLI 及功能测试继续保留；当前 CI 的公开 `latest.json` 和下载校验文件由平台生成。
+旧 GitHub Actions、R2 上传与 SSH 静态目录同步入口已移除。
 
 静态发布链路面向上位机使用：下位机不直接访问静态文件服务器，上位机读取 `latest.json` 后下载安装包，再下发到下位机执行安装。
 
@@ -106,23 +114,24 @@ MSKDSP_VERSION=<version> bash script/make_image.sh
 - `asset`：安装包名称、下载地址、SHA256 与字节大小
 - `checksum`：`SHA256SUMS` 下载地址
 
-发布 workflow 使用 `--image-tar` 从 `docker save` 归档读取镜像配置，验证经典 `<摘要>.json` 或 OCI `blobs/sha256/<摘要>` 路径与配置原始字节的 SHA256 一致，并核对镜像平台，再将该 config 摘要写入 `latest.json`。不依赖构建机器的 `docker image inspect .Id`，避免 Docker/containerd 返回 manifest 摘要时改变清单字段含义。`--image-id` 保留为显式提供 config 摘要的兼容入口。
+GitLab 打包阶段从 BuildKit 导出的普通 Docker 归档读取镜像配置，验证经典 `<摘要>.json`
+或 OCI `blobs/sha256/<摘要>` 路径与配置原始字节的 SHA256 一致，并核对镜像平台，
+再将该 config 摘要写入冻结元数据。归档在安装包封装、元数据计算完成后才删除。
+不依赖构建机器的 `docker image inspect .Id`，避免混用 config 和 manifest 摘要。
+兼容清单生成 CLI 的 `--image-tar` / `--image-id` 参数继续保留。
 
 上位机通过 SSH 查询目标容器实际引用的不可变镜像，并在 containerd 场景验证 manifest/index 与 config 的关联后统一成 config 摘要，与清单中的 `image_id` 比较；不能直接混比不同类型的摘要。`asset.sha256` 只用于安装包传输完整性校验，不代表当前容器运行身份。缺失关联或多镜像歧义时拒绝校验通过。
 
-### 静态目录约定
-默认更新域名 `https://update.clsclear.top` 为 Cloudflare R2 自定义域名，URL 结构：
-```
-https://update.clsclear.top/mskdsp-lower/<channel>/latest.json
-https://update.clsclear.top/mskdsp-lower/<channel>/linux-arm64/<package>
-https://update.clsclear.top/mskdsp-lower/<channel>/linux-arm64/SHA256SUMS
+### 平台清单与下载
 
-# x64 验证包使用独立前缀（platform=linux-x64），与 arm64 分开存放，避免 latest.json 互相覆盖
-https://update.clsclear.top/mskdsp-lower-x64/<channel>/latest.json
-https://update.clsclear.top/mskdsp-lower-x64/<channel>/linux-x64/<package>
+公开地址由平台配置的基地址决定，架构分别使用以下清单入口：
+```
+<平台基地址>/mskdsp-lower/<channel>/latest.json
+<平台基地址>/mskdsp-lower-x64/ci/latest.json
 ```
 
-R2 上传脚本会先上传安装包和 `SHA256SUMS`，最后上传 `latest.json`，并仅清理同一渠道/平台下不再使用的旧对象，避免上位机读到已更新但资产尚未上传完成的清单。
+实际安装包及 `SHA256SUMS` URL 取自清单，不能再拼接旧 R2 静态目录。
+Beta/Stable 从已通过 CI 的 ARM64 安装包晋升，不重新构建；x64 仅支持 CI 通道。
 
 ## new_module.sh（模块脚手架）
 

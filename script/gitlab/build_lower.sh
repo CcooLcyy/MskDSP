@@ -33,20 +33,17 @@ mkdir -p "${RELEASE_DIR}" "${LOG_DIR}"
 exec > >(tee -a "${LOG_DIR}/${MODE}.log") 2>&1
 
 fetch_protobuf() {
-  # Git 配置仅存在于子进程环境；不修改 .gitmodules，不将凭据写入磁盘。
+  # 子模块直接指向 GitLab，认证头仅存在于子进程环境，不将凭据写入磁盘。
   python3 - <<'PY'
 import os
+from pathlib import Path
 import subprocess
-from urllib.parse import urlsplit, urlunsplit
+import sys
 
-server = urlsplit(os.environ["CI_SERVER_URL"])
-server_auth = urlunsplit((server.scheme, "gitlab-ci-token:" + os.environ["CI_JOB_TOKEN"] + "@" + server.netloc,
-                         server.path.rstrip("/") + "/mskdsp/mskdspproto.git", "", ""))
-environment = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_CONFIG_COUNT="2",
-                   GIT_CONFIG_KEY_0="url." + server_auth + ".insteadOf",
-                   GIT_CONFIG_VALUE_0="git@github.com:CcooLcyy/MskDSPProto.git",
-                   GIT_CONFIG_KEY_1="url." + server_auth + ".insteadOf",
-                   GIT_CONFIG_VALUE_1="https://github.com/CcooLcyy/MskDSPProto.git")
+sys.path.insert(0, str(Path("script/gitlab").resolve()))
+from init_platform_proto import auth_environment
+
+_, environment = auth_environment(os.environ)
 for command in (["git", "submodule", "sync", "--recursive"],
                 ["git", "submodule", "update", "--init", "--recursive"]):
     result = subprocess.run(command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

@@ -141,17 +141,31 @@ class WriteLowerUpdateManifestTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("平台", result.stderr)
 
-    # 验证三条发布链保留镜像归档到清单生成完成，避免清单读取已删除的 tar。
-    def test_workflows_keep_image_tar_until_manifest_generation(self) -> None:
-        workflow_dir = SCRIPT.parents[2] / ".github/workflows"
-        for name in ("build-lower.yml", "beta.yml", "release.yml"):
-            with self.subTest(workflow=name):
-                source = (workflow_dir / name).read_text(encoding="utf-8")
-                packaged = source.index('bash ./make_exe.sh "../${IMAGE_TAR}"')
-                generated = source.index("python3 script/workflow/write_lower_update_manifest.py", packaged)
-                self.assertNotIn('rm -f "${IMAGE_TAR}"', source[packaged:generated])
-                self.assertIn('--image-tar "images/${{ steps.meta.outputs.archive_name }}.tar"', source[generated:])
-                self.assertNotIn("lower_image.outputs.image_id", source)
+    # 验证 GitLab 保留原始镜像归档到安装包及冻结元数据完成，共享归档校验仍被使用。
+    def test_gitlab_keeps_image_tar_until_identity_freeze(self) -> None:
+        root = SCRIPT.parents[2]
+        source = (root / "script/gitlab/build_lower.sh").read_text(encoding="utf-8")
+        packaged = source.index('bash script/make_exe.sh "${image_tar}"')
+        frozen = source.index("python3 script/gitlab/lower_metadata.py freeze", packaged)
+        removed = source.index('rm -f "${image_tar}"', packaged)
+        self.assertLess(frozen, removed)
+        self.assertIn('--image-tar "${image_tar}"', source[frozen:removed])
+        metadata = (root / "script/gitlab/lower_metadata.py").read_text(encoding="utf-8")
+        self.assertIn("from write_lower_update_manifest import read_image_config_id", metadata)
+        self.assertIn('read_image_config_id(image_tar, identity["platform"])', metadata)
+
+    # 验证当前 CI 仅通过 GitLab 与平台软件库发布，不残留旧 Actions 或静态上传入口。
+    def test_gitlab_replaces_old_actions_and_static_publishers(self) -> None:
+        root = SCRIPT.parents[2]
+        self.assertTrue((root / ".gitlab-ci.yml").is_file())
+        workflow_dir = root / ".github/workflows"
+        self.assertEqual(list(workflow_dir.glob("*.yml")) + list(workflow_dir.glob("*.yaml")), [])
+        for name in ("upload_r2.sh", "sync_static_lower_update.sh", "sync_static_lower_update_if_configured.sh"):
+            with self.subTest(script=name):
+                self.assertFalse(SCRIPT.with_name(name).exists())
+        client = (root / "script/gitlab/platform_client.py").read_text(encoding="utf-8")
+        self.assertIn("publisher.CompleteUpload", client)
+        self.assertIn("publisher.PublishRelease", client)
 
     # 验证 OCI manifest 不得指向 Docker 清单之外的另一份配置。
     def test_tar_generator_rejects_unrelated_oci_manifest(self) -> None:
