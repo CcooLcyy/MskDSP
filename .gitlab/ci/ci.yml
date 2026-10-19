@@ -5,7 +5,7 @@ workflow:
     - if: '$CI_COMMIT_TAG == null && ($CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "main") && ($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web")'
     - when: never
 
-stages: [build-test, package, publish]
+stages: [build-test, arm64-test, package, publish]
 
 default:
   tags: [lower-ci]
@@ -17,7 +17,7 @@ variables:
   CMAKE_BUILD_PARALLEL_LEVEL: "8"
   VCPKG_MAX_CONCURRENCY: "8"
 
-.build-test:
+.build:
   stage: build-test
   tags: [lower-ci]
   environment:
@@ -26,17 +26,15 @@ variables:
   timeout: 8h
   cache:
     key:
-      prefix: lower-gcc14-$ARCH-v1
+      prefix: lower-gcc14-$CACHE_ARCH-v1
       files: [vcpkg.json, vcpkg-configuration.json]
     paths:
-      - .cache/vcpkg/$ARCH/
-      - .cache/ccache/$ARCH/
+      - .cache/vcpkg/$CACHE_ARCH/
+      - .cache/ccache/$CACHE_ARCH/
     policy: pull-push
     when: always
-  script:
-    - bash script/gitlab/build_lower.sh build "$ARCH"
   after_script:
-    - CCACHE_DIR="$CI_PROJECT_DIR/.cache/ccache/$ARCH" ccache --show-stats || true
+    - CCACHE_DIR="$CI_PROJECT_DIR/.cache/ccache/$CACHE_ARCH" ccache --show-stats || true
   artifacts:
     name: lower-build-$ARCH-$CI_JOB_ID
     when: always
@@ -46,18 +44,35 @@ variables:
       - release/$ARCH/
       - logs/$ARCH/
       - build-$ARCH/Testing/
+.build-test:
+  extends: .build
+  script:
+    - bash script/gitlab/build_lower.sh build "$ARCH"
+  artifacts:
     reports:
       junit: logs/$ARCH/ctest.xml
 
-build-test-arm64:
-  extends: .build-test
+build-arm64:
+  extends: .build
   image:
-    name: mskdsp-ci-tools:ubuntu24.04-arm64
+    name: mskdsp-lower-cross-tools:ubuntu24.04-gcc14-v1
     docker:
-      platform: linux/arm64
+      platform: linux/amd64
     pull_policy: if-not-present
   variables:
     ARCH: arm64
+    CACHE_ARCH: arm64-cross
+  cache:
+    key:
+      prefix: lower-gcc14-$CACHE_ARCH-v2
+  script:
+    - bash script/gitlab/build_lower.sh cross-build "${ARCH}"
+  artifacts:
+    paths:
+      - package/
+      - release/arm64/
+      - logs/arm64/
+      - build-arm64/
 
 build-test-x64:
   extends: .build-test
@@ -68,6 +83,34 @@ build-test-x64:
     pull_policy: if-not-present
   variables:
     ARCH: x64
+    CACHE_ARCH: x64
+
+test-arm64:
+  stage: arm64-test
+  image:
+    name: mskdsp-ci-tools:ubuntu24.04-arm64
+    docker:
+      platform: linux/arm64
+    pull_policy: if-not-present
+  variables:
+    ARCH: arm64
+  timeout: 2h
+  needs:
+    - job: build-arm64
+      artifacts: true
+  script:
+    - bash script/gitlab/build_lower.sh test "${ARCH}"
+  artifacts:
+    name: lower-tested-arm64-$CI_JOB_ID
+    when: always
+    expire_in: 7 days
+    paths:
+      - package/
+      - release/arm64/
+      - logs/arm64/
+      - build-arm64/Testing/
+    reports:
+      junit: logs/arm64/ctest.xml
 
 .package:
   stage: package
@@ -93,7 +136,7 @@ package-arm64:
   variables:
     ARCH: arm64
   needs:
-    - job: build-test-arm64
+    - job: test-arm64
       artifacts: true
 
 package-x64:

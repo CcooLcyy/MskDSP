@@ -13,6 +13,18 @@ case "${ARCH}" in
   x64) TRIPLET=x64-linux-dynamic; PLATFORM=linux/amd64; BASE_IMAGE=amd64/ubuntu:noble; STRIP_DEBUG=OFF ;;
   *) fail '用法：build_lower.sh build|package arm64|x64' ;;
 esac
+HOST_TRIPLET="${TRIPLET}"
+CACHE_ARCH="${ARCH}"
+TARGET_CC=gcc-14
+TARGET_CXX=g++-14
+if [[ "${MODE}" == cross-build ]]; then
+  [[ "${ARCH}" == arm64 ]] || fail '交叉编译模式仅支持 ARM64'
+  TRIPLET=arm64-linux-dynamic-cross
+  HOST_TRIPLET=x64-linux-dynamic
+  CACHE_ARCH=arm64-cross
+  TARGET_CC=aarch64-linux-gnu-gcc-14
+  TARGET_CXX=aarch64-linux-gnu-g++-14
+fi
 BUILD_DIR="build-${ARCH}"
 RELEASE_DIR="release/${ARCH}"
 LOG_DIR="logs/${ARCH}"
@@ -20,13 +32,7 @@ mkdir -p "${RELEASE_DIR}" "${LOG_DIR}"
 # 保留失败阶段输出；GitLab artifacts.when=always 收集日志和 CTest 报告。
 exec > >(tee -a "${LOG_DIR}/${MODE}.log") 2>&1
 
-build_and_test() {
-  case "$(uname -m):${ARCH}" in
-    aarch64:arm64|arm64:arm64|x86_64:x64) ;;
-    *) fail '工具镜像架构与构建目标不一致' ;;
-  esac
-  log "准备 ${ARCH} 主分支构建与 protobuf 子模块"
-  python3 script/gitlab/lower_metadata.py build --arch "${ARCH}" --output "${RELEASE_DIR}/build_identity.json"
+fetch_protobuf() {
   # Git 配置仅存在于子进程环境；不修改 .gitmodules，不将凭据写入磁盘。
   python3 - <<'PY'
 import os
@@ -48,16 +54,52 @@ for command in (["git", "submodule", "sync", "--recursive"],
         raise SystemExit("protobuf 子模块获取失败，请检查提交同步与 CI_JOB_TOKEN allowlist；底层输出已隐藏")
 print("已通过临时 CI_JOB_TOKEN 配置获取 protobuf 子模块")
 PY
-  export VCPKG_ROOT="${ROOT}/.cache/vcpkg/${ARCH}/source"
-  export VCPKG_DOWNLOADS="${ROOT}/.cache/vcpkg/${ARCH}/downloads"
-  export VCPKG_DEFAULT_BINARY_CACHE="${ROOT}/.cache/vcpkg/${ARCH}/archives"
+}
+
+finish_tested_package() {
+  find package -maxdepth 1 -type f -name '*_test' -delete
+  if [[ "${ARCH}" == arm64 ]]; then
+    [[ -d package/debug ]] || fail 'ARM64 安装结果缺少独立调试符号目录'
+    local symbol_name
+    symbol_name="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "${RELEASE_DIR}/build_identity.json")"
+    tar -C package -czf "${RELEASE_DIR}/mskdsp-${symbol_name}-debugsymbols-linux-${ARCH}.tar.gz" debug
+  fi
+}
+
+run_complete_ctest() {
+  log "执行 ${ARCH} 完整 CTest，并行度 2"
+  ctest --test-dir "${BUILD_DIR}" --output-on-failure --parallel 2 --no-tests=error \
+    --output-junit "${ROOT}/${LOG_DIR}/ctest.xml"
+}
+
+build_and_test() {
+  if [[ "${MODE}" == cross-build ]]; then
+    [[ "$(uname -m)" == x86_64 ]] || fail 'ARM64 交叉编译必须在 x64 工具镜像执行'
+    [[ "$("${TARGET_CC}" -dumpmachine)" == aarch64-linux-gnu ]] || fail '交叉编译器目标架构不一致'
+    [[ "$("${TARGET_CXX}" -dumpfullversion)" == 14.* ]] || fail '交叉编译器必须为 GCC14'
+    [[ "$(gcc-14 -dumpfullversion)" == 14.* ]] || fail '主机协议工具编译器必须为 GCC14'
+    log "主机 GCC $(gcc-14 -dumpfullversion)，ARM64 交叉 GCC $("${TARGET_CXX}" -dumpfullversion)"
+  else
+    case "$(uname -m):${ARCH}" in
+      aarch64:arm64|arm64:arm64|x86_64:x64) ;;
+      *) fail '工具镜像架构与构建目标不一致' ;;
+    esac
+  fi
+  log "准备 ${ARCH} 主分支构建与 protobuf 子模块"
+  python3 script/gitlab/lower_metadata.py build --arch "${ARCH}" --output "${RELEASE_DIR}/build_identity.json"
+  fetch_protobuf
+  export VCPKG_ROOT="${ROOT}/.cache/vcpkg/${CACHE_ARCH}/source"
+  export VCPKG_DOWNLOADS="${ROOT}/.cache/vcpkg/${CACHE_ARCH}/downloads"
+  export VCPKG_DEFAULT_BINARY_CACHE="${ROOT}/.cache/vcpkg/${CACHE_ARCH}/archives"
   export VCPKG_BINARY_SOURCES="clear;files,${VCPKG_DEFAULT_BINARY_CACHE},readwrite"
   export VCPKG_OVERLAY_TRIPLETS="${ROOT}/cmake/vcpkg-triplets"
   export VCPKG_DISABLE_METRICS=1 VCPKG_MAX_CONCURRENCY=8
+  # host 工具固定使用原生 GCC14；目标端由专用 triplet 的 toolchain 指定交叉编译器。
+  export CC=gcc-14 CXX=g++-14
   # 仅重定向官方 GitHub archive，保留 REF 和 SHA512；失败不退回已知不通的首跳。
   # 占位参数由 vcpkg 自行做 shell 转义，外层再次加引号会破坏含空格的目标路径。
   export X_VCPKG_ASSET_SOURCES="clear;x-script,python3 \"${ROOT}/script/gitlab/download_asset.py\" {url} {sha512} {dst};x-block-origin"
-  export CCACHE_DIR="${ROOT}/.cache/ccache/${ARCH}" CCACHE_BASEDIR="${ROOT}"
+  export CCACHE_DIR="${ROOT}/.cache/ccache/${CACHE_ARCH}" CCACHE_BASEDIR="${ROOT}"
   export CCACHE_COMPILERCHECK=content CCACHE_MAXSIZE=1G
   mkdir -p "${VCPKG_DOWNLOADS}" "${VCPKG_DEFAULT_BINARY_CACHE}" "${CCACHE_DIR}"
   local baseline
@@ -77,31 +119,69 @@ PY
   fi
   log "配置 ${ARCH} RelWithDebInfo，完整测试开启，strip=${STRIP_DEBUG}"
   log '启用官方 codeload 归档下载与严格 SHA512 校验'
+  local extra_arguments=()
+  if [[ "${MODE}" == cross-build ]]; then
+    extra_arguments+=("-DVCPKG_CHAINLOAD_TOOLCHAIN_FILE=${ROOT}/cmake/toolchains/aarch64-linux-gcc14.cmake")
+  fi
   cmake -S . -B "${BUILD_DIR}" -G Ninja \
-    -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 \
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_COMPILER="${TARGET_CC}" -DCMAKE_CXX_COMPILER="${TARGET_CXX}" \
     -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
     -DCMAKE_CXX_SCAN_FOR_MODULES=OFF \
     -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
     -DMSKDSP_BUILD_TESTS=ON -DMSKDSP_STRIP_DEBUG="${STRIP_DEBUG}" \
-    -DVCPKG_HOST_TRIPLET="${TRIPLET}" -DVCPKG_TARGET_TRIPLET="${TRIPLET}" \
-    -DProtobuf_PROTOC_EXECUTABLE="${ROOT}/${BUILD_DIR}/vcpkg_installed/${TRIPLET}/tools/protobuf/protoc" \
-    -DgRPC_CPP_PLUGIN_EXECUTABLE="${ROOT}/${BUILD_DIR}/vcpkg_installed/${TRIPLET}/tools/grpc/grpc_cpp_plugin"
+    -DVCPKG_HOST_TRIPLET="${HOST_TRIPLET}" -DVCPKG_TARGET_TRIPLET="${TRIPLET}" \
+    -DProtobuf_PROTOC_EXECUTABLE="${ROOT}/${BUILD_DIR}/vcpkg_installed/${HOST_TRIPLET}/tools/protobuf/protoc" \
+    -DgRPC_CPP_PLUGIN_EXECUTABLE="${ROOT}/${BUILD_DIR}/vcpkg_installed/${HOST_TRIPLET}/tools/grpc/grpc_cpp_plugin" \
+    "${extra_arguments[@]}"
   ccache --zero-stats
   log "编译 ${ARCH}，并行度 8"
   cmake --build "${BUILD_DIR}" --parallel 8
-  log "执行 ${ARCH} 完整 CTest，并行度 2"
-  ctest --test-dir "${BUILD_DIR}" --output-on-failure --parallel 2 --no-tests=error \
-    --output-junit "${ROOT}/${LOG_DIR}/ctest.xml"
-  log '测试成功，安装运行文件并归档独立调试符号'
-  cmake --install "${BUILD_DIR}"
-  find package -maxdepth 1 -type f -name '*_test' -delete
-  if [[ "${ARCH}" == arm64 ]]; then
-    [[ -d package/debug ]] || fail 'ARM64 安装结果缺少独立调试符号目录'
-    local symbol_name
-    symbol_name="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "${RELEASE_DIR}/build_identity.json")"
-    tar -C package -czf "${RELEASE_DIR}/mskdsp-${symbol_name}-debugsymbols-linux-${ARCH}.tar.gz" debug
+  if [[ "${MODE}" != cross-build ]]; then
+    run_complete_ctest
+    log '测试成功，安装运行文件并归档独立调试符号'
+  else
+    log '交叉编译完成，安装运行依赖并保留全部测试程序供 ARM64 作业执行'
   fi
-  log "${ARCH} 编译、完整测试与安装完成"
+  cmake --install "${BUILD_DIR}"
+  if [[ "${MODE}" == cross-build ]]; then
+    python3 - "${ROOT}" "${RELEASE_DIR}/build_context.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+Path(sys.argv[2]).write_text(json.dumps({"project_dir": sys.argv[1], "target_triplet": "arm64-linux-dynamic-cross",
+                                      "host_triplet": "x64-linux-dynamic"}) + "\n", encoding="utf-8")
+PY
+    log 'ARM64 交叉编译与安装完成，等待独立 ARM64 完整 CTest'
+  else
+    finish_tested_package
+    log "${ARCH} 编译、完整测试与安装完成"
+  fi
+}
+
+test_arm64() {
+  [[ "${ARCH}" == arm64 ]] || fail '独立测试模式仅支持 ARM64'
+  case "$(uname -m)" in aarch64|arm64) ;; *) fail 'ARM64 测试必须在 ARM64 工具镜像执行' ;; esac
+  [[ -f "${BUILD_DIR}/CTestTestfile.cmake" && -f package/MskDSP ]] || fail '缺少完整交叉编译构建目录或测试产物'
+  python3 - "${ROOT}" "${RELEASE_DIR}" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path("script/gitlab").resolve()))
+from lower_metadata import package_identity
+release = Path(sys.argv[2])
+identity = json.loads((release / "build_identity.json").read_text(encoding="utf-8"))
+# 复用来源验证，但不生成测试作业身份，继续保留原编译作业的 build_job_id。
+package_identity(identity, os.environ)
+context = json.loads((release / "build_context.json").read_text(encoding="utf-8"))
+if context != {"project_dir": sys.argv[1], "target_triplet": "arm64-linux-dynamic-cross", "host_triplet": "x64-linux-dynamic"}:
+    raise SystemExit("ARM64 测试路径或交叉编译来源不一致，拒绝执行其他构建的测试")
+print("已核对 ARM64 原构建身份与跨镜像绝对路径")
+PY
+  fetch_protobuf
+  run_complete_ctest
+  finish_tested_package
+  log 'ARM64 完整 CTest 成功，保留原构建身份并完成独立调试符号归档'
 }
 
 package_release() {
@@ -154,6 +234,8 @@ package_release() {
 
 case "${MODE}" in
   build) build_and_test ;;
+  cross-build) build_and_test ;;
+  test) test_arm64 ;;
   package) package_release ;;
   *) fail '用法：build_lower.sh build|package arm64|x64' ;;
 esac

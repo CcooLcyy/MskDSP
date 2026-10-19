@@ -18,7 +18,10 @@ args = sys.argv[1:]
 with open(os.environ["COMMAND_LOG"], "a") as log:
     log.write(json.dumps([name] + args) + "\n")
 if name == "uname":
-    print("aarch64" if os.environ["ARCH"] == "arm64" else "x86_64")
+    print(os.environ.get("TOOL_ARCH", "aarch64" if os.environ["ARCH"] == "arm64" else "x86_64"))
+elif name in ("gcc-14", "g++-14", "aarch64-linux-gnu-gcc-14", "aarch64-linux-gnu-g++-14"):
+    print("aarch64-linux-gnu" if name.startswith("aarch64") and "-dumpmachine" in args else
+          "x86_64-linux-gnu" if "-dumpmachine" in args else "14.2.0")
 elif name == "git" and "rev-parse" in args:
     print(json.load(open("vcpkg-configuration.json"))["default-registry"]["baseline"])
 elif name == "cmake" and "--install" in args:
@@ -29,6 +32,10 @@ elif name == "cmake" and "--install" in args:
     if os.environ["ARCH"] == "arm64":
         Path("package/debug").mkdir()
         Path("package/debug/MskDSP.debug").write_bytes(b"symbols")
+elif name == "cmake" and "-B" in args:
+    directory = Path(args[args.index("-B") + 1])
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "CTestTestfile.cmake").write_text("# 完整测试目录")
 elif name == "ctest":
     Path(args[args.index("--output-junit") + 1]).write_text('<testsuites tests="2"/>')
     sys.exit(int(os.environ.get("TEST_FAILURE", "0")))
@@ -54,20 +61,23 @@ class BuildLowerTest(unittest.TestCase):
         root = Path(temporary.name)
         for filename in ("script/gitlab/build_lower.sh", "script/gitlab/lower_metadata.py",
                          "script/gitlab/download_asset.py", "script/make_exe.sh",
-                         "script/workflow/write_lower_update_manifest.py", "Dockerfile", "VERSION", "vcpkg-configuration.json"):
+                         "script/workflow/write_lower_update_manifest.py", "Dockerfile", "VERSION", "vcpkg-configuration.json",
+                         "cmake/toolchains/aarch64-linux-gcc14.cmake", "cmake/vcpkg-triplets/arm64-linux-dynamic-cross.cmake"):
             destination = root / filename
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / filename, destination)
         tools = root / "bin"
         tools.mkdir()
-        for name in ("uname", "git", "cmake", "ctest", "ccache", "buildctl"):
+        for name in ("uname", "git", "cmake", "ctest", "ccache", "buildctl", "gcc-14", "g++-14",
+                     "aarch64-linux-gnu-gcc-14", "aarch64-linux-gnu-g++-14"):
             executable = tools / name
             executable.write_text(MOCK, encoding="utf-8")
             executable.chmod(0o755)
-        vcpkg = root / ".cache/vcpkg" / arch / "source"
-        (vcpkg / ".git").mkdir(parents=True)
-        (vcpkg / "vcpkg").write_text("#!/bin/sh\nexit 0\n")
-        (vcpkg / "vcpkg").chmod(0o755)
+        for profile in (arch, "arm64-cross"):
+            vcpkg = root / ".cache/vcpkg" / profile / "source"
+            (vcpkg / ".git").mkdir(parents=True, exist_ok=True)
+            (vcpkg / "vcpkg").write_text("#!/bin/sh\nexit 0\n")
+            (vcpkg / "vcpkg").chmod(0o755)
         environment = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ["PATH"], ARCH=arch,
                            CI_PIPELINE_SOURCE="push", CI_COMMIT_BRANCH="master", CI_COMMIT_SHA="a" * 40,
                            CI_PIPELINE_ID="100", CI_PIPELINE_IID="7", CI_JOB_ID="42",
@@ -121,6 +131,41 @@ class BuildLowerTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((root / "release/x64/metadata.json").exists())
         self.assertNotIn('"buildctl"', (root / "commands.jsonl").read_text())
+
+    def test_cross_build_uses_host_tools_and_leaves_tests_for_arm_job(self):
+        root, environment = self.prepare("arm64")
+        built = self.run_phase(root, environment | {"TOOL_ARCH": "x86_64"}, "cross-build")
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        commands = [json.loads(line) for line in (root / "commands.jsonl").read_text().splitlines()]
+        self.assertFalse(any(command[0] == "ctest" for command in commands))
+        configure = next(command for command in commands if command[0] == "cmake" and "-B" in command)
+        self.assertIn("-DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++-14", configure)
+        self.assertIn("-DVCPKG_HOST_TRIPLET=x64-linux-dynamic", configure)
+        self.assertIn("-DVCPKG_TARGET_TRIPLET=arm64-linux-dynamic-cross", configure)
+        self.assertIn("-DProtobuf_PROTOC_EXECUTABLE=" + str(root / "build-arm64/vcpkg_installed/x64-linux-dynamic/tools/protobuf/protoc"), configure)
+        self.assertTrue((root / "package/temporary_test").is_file())
+        self.assertEqual(list((root / "release/arm64").glob("*debugsymbols*")), [])
+        identity = (root / "release/arm64/build_identity.json").read_bytes()
+        tested = self.run_phase(root, environment | {"CI_JOB_ID": "49"}, "test")
+        self.assertEqual(tested.returncode, 0, tested.stdout + tested.stderr)
+        self.assertFalse((root / "package/temporary_test").exists())
+        self.assertEqual((root / "release/arm64/build_identity.json").read_bytes(), identity)
+        self.assertEqual(len(list((root / "release/arm64").glob("*debugsymbols*"))), 1)
+        all_commands = [json.loads(line) for line in (root / "commands.jsonl").read_text().splitlines()]
+        self.assertEqual(sum(command[0] == "cmake" and "--install" in command for command in all_commands), 1)
+        self.assertEqual(sum(command[0] == "git" and "submodule" in command and "update" in command for command in all_commands), 2)
+
+    def test_arm_test_rejects_wrong_pipeline_and_preserves_tests_on_failure(self):
+        root, environment = self.prepare("arm64")
+        built = self.run_phase(root, environment | {"TOOL_ARCH": "x86_64"}, "cross-build")
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        wrong = self.run_phase(root, environment | {"CI_PIPELINE_ID": "101"}, "test")
+        self.assertNotEqual(wrong.returncode, 0)
+        failed = self.run_phase(root, environment | {"TEST_FAILURE": "1"}, "test")
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertTrue((root / "package/temporary_test").is_file())
+        self.assertTrue((root / "logs/arm64/ctest.xml").is_file())
+        self.assertEqual(list((root / "release/arm64").glob("*debugsymbols*")), [])
 
 
 if __name__ == "__main__":

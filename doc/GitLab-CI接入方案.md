@@ -3,7 +3,7 @@
 ## 已确认的目标与边界
 
 - 仅主分支 master/main 的 push 或手动流水线执行；MR、beta 分支和版本标签不重复构建。
-- ARM64、x64 均完成 RelWithDebInfo 编译及现有完整 CTest 测试；ARM64 在现有 x64 主机通过 QEMU 执行。
+- ARM64、x64 均完成 GCC14 RelWithDebInfo 编译及现有完整 CTest 测试；ARM64 由 x64 交叉编译，在现有 x64 主机通过 QEMU 执行完整单测。
 - 使用独立下位机 Runner、标签、配置和缓存；并发 6，单作业 8 CPU、16 GiB。保留现有平台 Runner 配置。
 - 保留 Docker 镜像、自解压 gzip 安装包、SHA256SUMS；ARM64 独立调试符号包归档到 GitLab。
 - 不执行独立的 check_iec61850_package.sh；不减少已有协议单测。
@@ -13,6 +13,17 @@
 ## 作业与身份
 
 两个架构使用同一套构建脚本和不同工具镜像，各自产出 release/<arch>/ 下的安装包、metadata.json、SHA256SUMS、测试日志及可选符号包。先完成两个架构的编译测试与打包，再执行发布作业，避免失败流水线发布另一个架构。发布作业不重新编译。
+
+### ARM64 编译与测试分离
+
+首次实测发现，将 GCC14 编译器本身放在 QEMU 中运行开销很大：Abseil 单项约为 x64 的 20 倍，Protobuf 也持续表现出较高开销，8 小时作业上限存在风险。因此 ARM64 改为在独立 x64 工具镜像中使用 GCC14 的 aarch64 交叉工具链编译，随后在既有 ARM64 工具镜像中通过 QEMU 执行完整 CTest。x64 仍在原工具镜像中完成编译和测试。
+
+- 交叉镜像基于既有 x64 工具镜像，额外安装 GCC14 aarch64 交叉编译器；不覆盖现有平台或 GitHub 工具镜像。
+- vcpkg 明确区分 host=x64 与 target=ARM64，protoc 与 grpc_cpp_plugin 由 host triplet 提供；目标库及主程序使用同一交叉工具链。
+- 使用独立交叉 triplet、chainload toolchain 与缓存版本，避免复用旧 QEMU 编译器生成的 ARM64 二进制缓存。
+- ARM64 编译作业传递完整 CTest 运行所需的构建目录、目标库和测试程序；测试作业保持相同仓库绝对路径，在 ARM64 镜像中执行全部测试，拒绝零测试。测试失败不能进入打包或发布。
+- 安装及符号归档在可用的工具环境中完成；测试通过后才清理测试程序并归档交付包。发布作业继续只消费已测试的冻结产物。
+- 验收必须包含实际交叉编译器版本及目标架构、真实 ARM64 完整 CTest、双架构打包发布、平台清单与实际下载 SHA256 核对；不以编译通过代替 ARM64 执行验证。
 
 metadata.json 冻结 product、version、package_version、platform、file_name、size、sha256、image_id、source_repository、source_ref、source_sha、build_time、channel 及 pipeline_id。product 固定 mskdsp-lower；platform 为 linux-arm64/linux-x64；channel 固定 ci。版本包含 GitLab 流水线及作业身份，防止重试产生不同字节却复用同一版本。
 
@@ -25,6 +36,8 @@ metadata.json 冻结 product、version、package_version、platform、file_name�
 平台上传使用已有通用 publisher 令牌，保存在下位机项目受保护、掩码的 CI 变量中；不复用仅允许平台自身包的 CI 上传令牌。客户端不输出令牌、认证头或底层 RPC 详情。现有平台业务代码不需要修改。
 
 编译镜像复用已准备的 Ubuntu 24.04 x64/ARM64 工具链，按仓库 baseline 初始化 vcpkg，并按架构隔离 vcpkg 和 ccache。镜像打包通过独立 BuildKit 服务导出普通 Docker 归档，不将宿主机 Docker socket 挂载到作业容器。
+
+下位机 Runner 为 `gitlab-runner-lower`，独立 BuildKit 为 `mskdsp-lower-ci-buildkit`，配置保存在服务器 `/home/daniel/mskdsp-lower-ci/`。BuildKit 使用独立状态卷，通过内网 `tcp://192.168.10.198:1235` 提供 mTLS 服务，并配置 Docker Hub 镜像加速；其网络使用宿主机网络，以避开既有容器网络中的外网访问超时。平台原 Runner、原 BuildKit 的配置和状态卷保持不变。项目 `ci-build` 环境的 `BUILDKIT_HOST` 指向下位机独立实例，证书变量受保护且掩码保存。
 
 服务器直连 GitHub 源码归档入口可能超时；通过 vcpkg 自定义资源下载源将 GitHub tar.gz 归档映射到同一仓库、同一 ref 的官方 codeload 地址。下载器与 vcpkg 均保留 SHA512 校验，不改变依赖版本或校验值。依赖缓存失败时也保存，降低网络重试和首次构建成本。
 
