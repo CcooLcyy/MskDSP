@@ -72,6 +72,32 @@ run_complete_ctest() {
     --output-junit "${ROOT}/${LOG_DIR}/ctest.xml"
 }
 
+configure_local_registry() {
+  local baseline="$1"
+  # 核对浅克隆中的基线目录；实际所选版本的树仍由 vcpkg 严格解析，不能因无关旧端口缺树拒绝。
+  python3 - "${VCPKG_ROOT}" "${baseline}" <<'PY'
+from pathlib import Path
+import subprocess
+import sys
+
+root, baseline = Path(sys.argv[1]), sys.argv[2]
+required = [baseline + ":ports", baseline + ":versions"]
+result = subprocess.run(["git", "-C", str(root), "cat-file", "--batch-check=%(objectname) %(objecttype)"],
+                        input="\n".join(sorted(required)) + "\n", text=True, capture_output=True)
+rows = result.stdout.splitlines()
+if result.returncode or len(rows) != len(required) or any(row.split()[-1:] != ["tree"] for row in rows):
+    raise SystemExit("本地 registry 缺少基线引用的树对象，请准备完整基线缓存后重试")
+print("已核对本地 registry 固定基线的 ports 与 versions 树对象")
+PY
+  # 仅当前 CI 进程继承；不修改全局或仓库配置，protobuf 的临时认证仍独立配置。
+  unset GIT_CONFIG_PARAMETERS
+  export GIT_CONFIG_COUNT=1
+  export GIT_CONFIG_KEY_0="url.file://${VCPKG_ROOT}/.insteadOf"
+  export GIT_CONFIG_VALUE_0=https://github.com/microsoft/vcpkg
+  export GIT_TERMINAL_PROMPT=0
+  log 'vcpkg registry 使用已验证的本地固定基线，避免联网读取 GitHub HEAD'
+}
+
 build_and_test() {
   if [[ "${MODE}" == cross-build ]]; then
     [[ "$(uname -m)" == x86_64 ]] || fail 'ARM64 交叉编译必须在 x64 工具镜像执行'
@@ -120,6 +146,7 @@ build_and_test() {
   if [[ ! -x "${VCPKG_ROOT}/vcpkg" ]]; then
     "${VCPKG_ROOT}/bootstrap-vcpkg.sh" -disableMetrics
   fi
+  configure_local_registry "${baseline}"
   log "配置 ${ARCH} RelWithDebInfo，完整测试开启，strip=${STRIP_DEBUG}"
   log '启用官方 codeload 归档下载与严格 SHA512 校验'
   local extra_arguments=()

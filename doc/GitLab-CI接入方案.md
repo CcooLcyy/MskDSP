@@ -43,6 +43,8 @@ metadata.json 冻结 product、version、package_version、platform、file_name�
 
 服务器直连 GitHub 源码归档入口可能超时；通过 vcpkg 自定义资源下载源将 GitHub tar.gz 归档映射到同一仓库、同一 ref 的官方 codeload 地址。下载器与 vcpkg 均保留 SHA512 校验，不改变依赖版本或校验值。依赖缓存失败时也保存，降低网络重试和首次构建成本。
 
+CI 已按配置 baseline 获取并校验 vcpkg 本地仓库后，依赖索引的同一 GitHub 仓库地址仅在当前构建子进程中映射到该本地仓库，避免索引重复联网拉取 HEAD。依赖 baseline、版本和内容校验保持不变；不写全局 Git 配置，不影响项目及协议仓库认证。
+
 ## 验收标准
 
 1. 先补元数据、上传续传、发布及流水线规则测试，再实现对应代码。

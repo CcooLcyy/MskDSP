@@ -22,6 +22,9 @@ if name == "uname":
 elif name in ("cc", "c++", "gcc-14", "g++-14", "aarch64-linux-gnu-gcc-14", "aarch64-linux-gnu-g++-14"):
     print("aarch64-linux-gnu" if name.startswith("aarch64") and "-dumpmachine" in args else
           "x86_64-linux-gnu" if "-dumpmachine" in args else "14.2.0")
+elif name == "git" and any(argument.startswith("--batch-check") for argument in args):
+    for expression in sys.stdin.read().splitlines():
+        print("a" * 40 + " tree")
 elif name == "git" and "rev-parse" in args:
     print(json.load(open("vcpkg-configuration.json"))["default-registry"]["baseline"])
 elif name == "cmake" and "--install" in args:
@@ -33,6 +36,10 @@ elif name == "cmake" and "--install" in args:
         Path("package/debug").mkdir()
         Path("package/debug/MskDSP.debug").write_bytes(b"symbols")
 elif name == "cmake" and "-B" in args:
+    if os.environ.get("GIT_CONFIG_COUNT") != "1" or os.environ.get("GIT_CONFIG_VALUE_0") != "https://github.com/microsoft/vcpkg":
+        sys.exit("vcpkg registry 未使用进程级本地重定向")
+    if os.environ.get("GIT_CONFIG_KEY_0") != "url.file://" + os.environ["VCPKG_ROOT"] + "/.insteadOf":
+        sys.exit("本地 registry 重定向地址不一致")
     if os.environ.get("CHECK_MAKE_ENV") == "1":
         # 对应 baseline vcpkg_configure_make 的规则：已有 CC 环境变量优先于目标工具链。
         compiler = os.environ.get("CC", "aarch64-linux-gnu-gcc-14")
@@ -85,6 +92,8 @@ class BuildLowerTest(unittest.TestCase):
             (vcpkg / ".git").mkdir(parents=True, exist_ok=True)
             (vcpkg / "vcpkg").write_text("#!/bin/sh\nexit 0\n")
             (vcpkg / "vcpkg").chmod(0o755)
+            (vcpkg / "versions").mkdir()
+            (vcpkg / "versions/baseline.json").write_text('{"default": {}}')
         environment = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ["PATH"], ARCH=arch,
                            CI_PIPELINE_SOURCE="push", CI_COMMIT_BRANCH="master", CI_COMMIT_SHA="a" * 40,
                            CI_PIPELINE_ID="100", CI_PIPELINE_IID="7", CI_JOB_ID="42",
@@ -181,6 +190,89 @@ class BuildLowerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         commands = [json.loads(line) for line in (root / "commands.jsonl").read_text().splitlines()]
         self.assertIn(["make-target-compiler", "aarch64-linux-gnu-gcc-14"], commands)
+
+
+@unittest.skipUnless(os.name == "posix", "真实浅仓库验证在 Linux/WSL 执行")
+class LocalRegistryTest(unittest.TestCase):
+    def git(self, directory, *arguments):
+        return subprocess.run(["git", "-C", str(directory), *arguments], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def prepare(self, missing_tree=False):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        origin = root / "origin"
+        origin.mkdir()
+        self.git(origin, "init")
+        port = origin / "ports/demo"
+        port.mkdir(parents=True)
+        (port / "portfile.cmake").write_text("旧树" if missing_tree else "当前树")
+        self.git(origin, "add", ".")
+        self.git(origin, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                 "-c", "commit.gpgsign=false", "commit", "-m", "fixture")
+        tree = self.git(origin, "rev-parse", "HEAD:ports/demo")
+        if missing_tree:
+            (port / "portfile.cmake").write_text("当前树")
+        versions = origin / "versions"
+        (versions / "d-").mkdir(parents=True)
+        (versions / "baseline.json").write_text(json.dumps({"default": {"demo": {"baseline": "1.0", "port-version": 0}}}))
+        (versions / "d-/demo.json").write_text(json.dumps({"versions": [{"version": "1.0", "port-version": 0, "git-tree": tree}]}))
+        self.git(origin, "add", ".")
+        self.git(origin, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                 "-c", "commit.gpgsign=false", "commit", "-m", "versions")
+        source = root / "source"
+        subprocess.run(["git", "clone", "--depth=1", origin.as_uri(), str(source)],
+                       check=True, capture_output=True, text=True)
+        baseline = self.git(source, "rev-parse", "HEAD")
+        self.git(source, "checkout", "--detach", baseline)
+        self.assertEqual(self.git(source, "rev-parse", "--is-shallow-repository"), "true")
+        return root, source, baseline
+
+    def function(self):
+        text = (ROOT / "script/gitlab/build_lower.sh").read_text()
+        self.assertIn("configure_local_registry() {", text)
+        return "configure_local_registry() {" + text.split("configure_local_registry() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
+
+    def verify_local_fetch(self, missing_unrelated_tree=False):
+        root, source, baseline = self.prepare(missing_tree=missing_unrelated_tree)
+        registry = root / "registry"
+        registry.mkdir()
+        command = self.function() + r'''
+set -euo pipefail
+log() { printf '%s\n' "$*"; }
+configure_local_registry "$PINNED_BASELINE"
+git -C "$REGISTRY" init -q
+GIT_ALLOW_PROTOCOL=file git -C "$REGISTRY" fetch --update-shallow -- https://github.com/microsoft/vcpkg HEAD
+test "$(git -C "$REGISTRY" rev-parse FETCH_HEAD)" = "$PINNED_BASELINE"
+git -C "$REGISTRY" cat-file -e "FETCH_HEAD:versions/baseline.json"
+git -C "$REGISTRY" cat-file -e "FETCH_HEAD:ports/demo"
+'''
+        result = subprocess.run(["bash", "-c", command], env=dict(os.environ, VCPKG_ROOT=str(source),
+                                PINNED_BASELINE=baseline, REGISTRY=str(registry)), cwd=root,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("insteadOf", self.git(source, "config", "--local", "--list"))
+
+    def test_registry_head_fetch_is_local_with_all_network_protocols_disabled(self):
+        self.verify_local_fetch()
+
+    def test_unrelated_old_port_tree_does_not_reject_valid_baseline(self):
+        self.verify_local_fetch(missing_unrelated_tree=True)
+
+    def test_missing_required_baseline_directory_is_rejected(self):
+        for directory in ("ports", "versions"):
+            with self.subTest(directory=directory):
+                root, source, _ = self.prepare()
+                self.git(source, "rm", "-r", directory)
+                self.git(source, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                         "-c", "commit.gpgsign=false", "commit", "-m", "missing required directory")
+                baseline = self.git(source, "rev-parse", "HEAD")
+                command = self.function() + '\nset -euo pipefail\nlog() { :; }\nconfigure_local_registry "$PINNED_BASELINE"\n'
+                result = subprocess.run(["bash", "-c", command], env=dict(os.environ, VCPKG_ROOT=str(source),
+                                        PINNED_BASELINE=baseline), cwd=root, capture_output=True, text=True, timeout=30)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("树对象", result.stdout + result.stderr)
 
 
 if __name__ == "__main__":
