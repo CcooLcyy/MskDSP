@@ -318,7 +318,7 @@ class TmpfsWorkspaceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             work = root / "build-x64/test_env"
-            seed = work / "demo/module/seed"
+            seed = work / "demo/module/libDummy.so"
             seed.parent.mkdir(parents=True)
             shutil.copyfile("/bin/pwd", seed)
             seed.chmod(0o755)
@@ -327,14 +327,18 @@ class TmpfsWorkspaceTest(unittest.TestCase):
             tools.mkdir()
             executable = tools / "ctest"
             executable.write_text('''#!/usr/bin/env python3
-import json, os, subprocess, sys
+import json, os, subprocess, sys, tempfile
 from pathlib import Path
 work = Path(os.environ["ROOT"]) / "build-x64/test_env/demo"
-seed = work / "module/seed"
+seed = work / "module/libDummy.so"
 real_work = work.resolve()
 run = subprocess.run([str(seed)], cwd=work, capture_output=True, text=True)
 data = dict(arguments=sys.argv[1:], cwd=str(real_work), tmpfs=os.stat(real_work).st_dev == os.stat("/dev/shm").st_dev,
             seed_link=seed.is_symlink(), seed_target=os.readlink(seed) if seed.is_symlink() else "",
+            module_directory_link=seed.parent.is_symlink(),
+            module_directory_target=os.readlink(seed.parent) if seed.parent.is_symlink() else "",
+            directory_entries=[dict(name=entry.name, symlink=entry.is_symlink()) for entry in os.scandir(seed.parent)],
+            temporary_dir=tempfile.gettempdir(), temporary_tmpfs=os.stat(tempfile.gettempdir()).st_dev == os.stat("/dev/shm").st_dev,
             executable_status=run.returncode, executable_cwd=run.stdout.strip())
 (work / "conf").mkdir()
 (work / "conf/soe.sqlite").write_text("临时数据库")
@@ -352,8 +356,13 @@ sys.exit(int(os.environ["TEST_FAILURE"]))
             self.assertEqual(result.returncode, failure, result.stdout + result.stderr)
             data = json.loads((root / "probe.json").read_text())
             self.assertTrue(data["tmpfs"], data)
-            self.assertTrue(data["seed_link"], data)
-            self.assertIn("test_env.disk", data["seed_target"])
+            self.assertFalse(data["seed_link"], data)
+            self.assertTrue(data["module_directory_link"], data)
+            self.assertIn("test_env.disk", data["module_directory_target"])
+            self.assertEqual(data["directory_entries"], [dict(name="libDummy.so", symlink=False)])
+            self.assertTrue(data["temporary_tmpfs"], data)
+            self.assertTrue(data["temporary_dir"].startswith("/dev/shm/mskdsp-ctest-x64."), data)
+            self.assertFalse(Path(data["temporary_dir"]).exists())
             self.assertEqual(data["executable_status"], 0)
             self.assertEqual(data["executable_cwd"], data["cwd"])
             self.assertTrue(work.is_dir())

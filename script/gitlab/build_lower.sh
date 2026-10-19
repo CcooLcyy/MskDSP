@@ -108,7 +108,18 @@ run_complete_ctest() {
     mv -- "${test_env}" "${disk_env}"
     # 目录位于 tmpfs；ELF 种子通过绝对链接保留在磁盘，兼容 /dev/shm 的 noexec 挂载。
     cp -as "${disk_env}/." "${ram_env}/"
+    # 模块扫描会跳过文件符号链接，因此整目录映射磁盘种子，保留 Dummy .so 的普通文件身份。
+    local seed_module ram_module
+    while IFS= read -r -d '' seed_module; do
+      ram_module="${ram_env}/${seed_module#"${disk_env}/"}"
+      [[ "${ram_module}" == "${ram_env}/"* && "$(realpath -- "${ram_module}")" == "${ram_module}" ]] \
+        || { log '错误：模块种子目录不在本次 RAM 工作区'; exit 1; }
+      rm -rf -- "${ram_module}"
+      ln -s -- "${seed_module}" "${ram_module}"
+    done < <(find "${disk_env}" -type d -name module -prune -print0)
     ln -s "${ram_env}" "${test_env}"
+    mkdir "${ram_env}/.tmp"
+    export TMPDIR="${ram_env}/.tmp"
     log "执行 ${ARCH} 完整 CTest，并行度 2，运行工作区位于 RAM"
     ctest --test-dir "${BUILD_DIR}" --output-on-failure --parallel 2 --no-tests=error \
       --output-junit "${ROOT}/${LOG_DIR}/ctest.xml" || result="$?"
