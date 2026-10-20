@@ -115,7 +115,11 @@ void RunTunnel(const Config &config, remote::DeviceAccessService::Stub *stub, re
       state->CloseSocket();
     }
   } cleanup{state};
-  const auto port = ResolveTarget(config, request.service(), DiscoverModules(config));
+  // 固定本机服务不依赖管理器查询；普通模块才需要动态发现运行端口。
+  const auto running = request.service() == "ModuleManager" || request.service() == "ssh"
+      ? std::vector<RunningModule>{}
+      : DiscoverModules(config);
+  const auto port = ResolveTarget(config, request.service(), running);
   if (!port) {
     ReportFailure(control, request, "服务未开放或模块当前未运行");
     return;

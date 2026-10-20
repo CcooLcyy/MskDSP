@@ -60,12 +60,11 @@ void PlatformAgent::Run(std::stop_token stop) {
     LOG_INFO("平台连接功能未启用");
     return;
   }
-  grpc::SslCredentialsOptions tls;
-  tls.pem_root_certs = config_.rootCertificates;
-  auto credentials = config_.insecure ? grpc::InsecureChannelCredentials() : grpc::SslCredentials(tls);
+  // 冷启动日志准备必须在控制流首帧期限之外完成。
+  ModuleManager::Logger::ensureModuleSink("PlatformAgent");
   grpc::ChannelArguments arguments;
   arguments.SetMaxReceiveMessageSize(128 * 1024);
-  auto channel = grpc::CreateCustomChannel(config_.target, credentials, arguments);
+  auto channel = grpc::CreateCustomChannel(config_.target, grpc::InsecureChannelCredentials(), arguments);
   auto stub = remote::DeviceAccessService::NewStub(channel);
   unsigned int failures = 0;
   while (!stop.stop_requested()) {
@@ -91,7 +90,8 @@ void PlatformAgent::Run(std::stop_token stop) {
     remote::DeviceMessage hello;
     hello.mutable_hello()->set_device_id(config_.deviceId);
     hello.mutable_hello()->set_agent_version("platform-agent.v1");
-    for (const auto &service : AvailableServices(config_, DiscoverModules(config_)))
+    // 首帧不依赖本机 RPC；运行模块由欢迎后的立即心跳完整刷新。
+    for (const auto &service : AvailableServices(config_, {}))
       hello.mutable_hello()->add_services(service);
     LOG_INFO("平台接入发送设备握手，设备={}，服务数={}", config_.deviceId, hello.hello().services_size());
     control->Send(hello);

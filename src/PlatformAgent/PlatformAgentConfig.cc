@@ -1,8 +1,6 @@
 #include <algorithm>
 #include <charconv>
 #include <cstdlib>
-#include <fstream>
-#include <iterator>
 #include <stdexcept>
 
 #include "PlatformAgent.h"
@@ -32,13 +30,6 @@ bool Flag(const std::string &value) {
   throw std::invalid_argument("平台连接功能开关必须是 0 或 1");
 }
 
-bool IsLoopbackTarget(std::string_view target) {
-  const auto colon = target.rfind(':');
-  if (colon == std::string_view::npos)
-    return false;
-  const auto host = target.substr(0, colon);
-  return host == "127.0.0.1" || host == "localhost" || host == "[::1]";
-}
 }  // namespace
 
 Config LoadConfig(const std::function<std::string(std::string_view)> &env) {
@@ -58,9 +49,6 @@ Config LoadConfig(const std::function<std::string(std::string_view)> &env) {
   if (colon == std::string::npos || colon == 0 || config.target.find_first_of("/\\\r\n\t ") != std::string::npos)
     throw std::invalid_argument("平台目标必须为主机名和端口");
   ParsePort(std::string_view(config.target).substr(colon + 1));
-  config.insecure = Flag(env("MSKDSP_PLATFORM_INSECURE"));
-  if (config.insecure && !IsLoopbackTarget(config.target))
-    throw std::invalid_argument("明文平台连接仅允许本机环回开发目标");
   config.sshEnabled = Flag(env("MSKDSP_PLATFORM_SSH_ENABLED"));
   if (const auto value = env("MSKDSP_PLATFORM_MANAGER_PORT"); !value.empty())
     config.managerPort = ParsePort(value);
@@ -81,14 +69,6 @@ Config LoadConfig(const std::function<std::string(std::string_view)> &env) {
       if (begin == value.size())
         throw std::invalid_argument("平台模块白名单包含空名称");
     }
-  }
-  if (const auto path = env("MSKDSP_PLATFORM_CA_FILE"); !path.empty()) {
-    std::ifstream stream(path, std::ios::binary);
-    if (!stream)
-      throw std::invalid_argument("无法读取平台 TLS 根证书文件");
-    config.rootCertificates.assign(std::istreambuf_iterator<char>(stream), {});
-    if (config.rootCertificates.empty())
-      throw std::invalid_argument("平台 TLS 根证书文件为空");
   }
   return config;
 }

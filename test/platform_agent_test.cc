@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <thread>
 
+#include "Logger.h"
 #include "ModuleManager.grpc.pb.h"
 #include "PlatformAgent.h"
 #include "platform/v1/remote.grpc.pb.h"
@@ -21,11 +22,10 @@ namespace agent = mskdsp::platformagent;
 namespace remote = mskdsp::platform::remote::v1;
 using namespace std::chrono_literals;
 
-// 验证默认禁用且 TLS 默认为证书验证模式，不要求未启用功能的设备凭据。
+// 验证默认禁用，不要求未启用连接功能的设备凭据。
 TEST(PlatformAgentConfig, DisabledByDefault) {
   const auto config = agent::LoadConfig([](std::string_view) { return std::string(); });
   EXPECT_FALSE(config.enabled);
-  EXPECT_FALSE(config.insecure);
   EXPECT_FALSE(config.sshEnabled);
 }
 
@@ -37,10 +37,21 @@ TEST(PlatformAgentConfig, EnabledRequiresIdentity) {
                std::invalid_argument);
 }
 
-// 验证明文开发连接不能用于公网目标。
-TEST(PlatformAgentConfig, InsecureRequiresLoopback) {
+// 验证明文平台目标可以使用远端主机，不需要额外协议开关。
+TEST(PlatformAgentConfig, PlaintextAllowsRemoteTarget) {
   std::map<std::string, std::string> env{
-      {"MSKDSP_PLATFORM_ENABLED", "1"}, {"MSKDSP_PLATFORM_TARGET", "example.org:50051"}, {"MSKDSP_PLATFORM_DEVICE_ID", "device-a"}, {"MSKDSP_PLATFORM_DEVICE_TOKEN", "token"}, {"MSKDSP_PLATFORM_INSECURE", "1"}};
+      {"MSKDSP_PLATFORM_ENABLED", "1"}, {"MSKDSP_PLATFORM_TARGET", "example.org:50051"}, {"MSKDSP_PLATFORM_DEVICE_ID", "device-a"}, {"MSKDSP_PLATFORM_DEVICE_TOKEN", "token"}};
+  const auto config = agent::LoadConfig([&](std::string_view name) { return env[std::string(name)]; });
+  EXPECT_EQ(config.target, "example.org:50051");
+}
+
+// 验证明文选择不会绕过平台地址格式或设备身份校验。
+TEST(PlatformAgentConfig, PlaintextStillRequiresValidTargetAndIdentity) {
+  std::map<std::string, std::string> env{
+      {"MSKDSP_PLATFORM_ENABLED", "1"}, {"MSKDSP_PLATFORM_TARGET", "example.org:0"}, {"MSKDSP_PLATFORM_DEVICE_ID", "device-a"}, {"MSKDSP_PLATFORM_DEVICE_TOKEN", "token"}};
+  EXPECT_THROW(agent::LoadConfig([&](std::string_view name) { return env[std::string(name)]; }), std::invalid_argument);
+  env["MSKDSP_PLATFORM_TARGET"] = "example.org:50051";
+  env["MSKDSP_PLATFORM_DEVICE_TOKEN"] = "";
   EXPECT_THROW(agent::LoadConfig([&](std::string_view name) { return env[std::string(name)]; }), std::invalid_argument);
 }
 
@@ -71,7 +82,11 @@ TEST(PlatformAgentTargets, AnnouncesOnlyCurrentAllowedServices) {
 namespace {
 class EmptyModuleManager final : public ModuleManagerProto::ModuleManage::Service {
 public:
+  std::atomic<bool> *helloReceived{nullptr};
+  std::atomic<bool> queriedBeforeHello{false};
   grpc::Status GetRunningModuleInfo(grpc::ServerContext *, const ModuleManagerProto::Empty *, ModuleManagerProto::ModuleRunningInfos *) override {
+    if (helloReceived != nullptr && !helloReceived->load())
+      queriedBeforeHello = true;
     return grpc::Status::OK;
   }
 };
@@ -129,10 +144,12 @@ class FakePlatform final : public remote::DeviceAccessService::Service {
 public:
   std::promise<std::string> result;
   std::atomic<bool> completed{false};
+  std::atomic<bool> helloReceived{false};
   grpc::Status ConnectDevice(grpc::ServerContext *context, grpc::ServerReaderWriter<remote::PlatformMessage, remote::DeviceMessage> *stream) override {
     remote::DeviceMessage input;
     if (!stream->Read(&input) || !input.has_hello())
       return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "缺少设备握手");
+    helloReceived = true;
     remote::PlatformMessage welcome;
     welcome.mutable_welcome()->set_connection_id("test-connection");
     welcome.mutable_welcome()->set_heartbeat_interval_seconds(1);
@@ -184,11 +201,20 @@ public:
 };
 }  // namespace
 
+class PlatformAgentIntegration : public ::testing::Test {
+public:
+  static void SetUpTestSuite() {
+    // 日志的文件扫描和首次动态库初始化不属于远程操作的等待期限。
+    ModuleManager::Logger::ensureModuleSink("PlatformAgent");
+  }
+};
+
 // 验证真实 gRPC 双向流承载二进制数据，发送方向半关闭后仍完整保留本机响应尾部。
-TEST(PlatformAgentIntegration, PreservesHalfCloseTailAndStops) {
+TEST_F(PlatformAgentIntegration, PreservesHalfCloseTailAndStops) {
   HalfCloseBackend backend;
   FakePlatform service;
   EmptyModuleManager manager;
+  manager.helloReceived = &service.helloReceived;
   grpc::ServerBuilder builder;
   int port = 0;
   builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
@@ -196,9 +222,10 @@ TEST(PlatformAgentIntegration, PreservesHalfCloseTailAndStops) {
   builder.RegisterService(&manager);
   auto server = builder.BuildAndStart();
   ASSERT_NE(server, nullptr);
+  auto ready = grpc::CreateChannel("127.0.0.1:" + std::to_string(port), grpc::InsecureChannelCredentials());
+  ASSERT_TRUE(ready->WaitForConnected(std::chrono::system_clock::now() + 10s));
   agent::Config config;
   config.enabled = true;
-  config.insecure = true;
   config.target = "127.0.0.1:" + std::to_string(port);
   config.deviceId = "device-a";
   config.token = "test-token";
@@ -211,13 +238,14 @@ TEST(PlatformAgentIntegration, PreservesHalfCloseTailAndStops) {
   EXPECT_EQ(result.wait_for(10s), std::future_status::ready);
   if (result.wait_for(0s) == std::future_status::ready)
     EXPECT_EQ(result.get(), std::string("\0\1\2", 3) + "尾部");
+  EXPECT_FALSE(manager.queriedBeforeHello.load()) << "设备首帧不得依赖本机模块查询";
   worker.request_stop();
   worker.join();
   server->Shutdown(std::chrono::system_clock::now() + 2s);
 }
 
 // 验证本机目标连接失败经控制流明确通知，停止连接功能不会阻塞控制流读取。
-TEST(PlatformAgentIntegration, ReportsBackendFailureAndCancelsControlRead) {
+TEST_F(PlatformAgentIntegration, ReportsBackendFailureAndCancelsControlRead) {
   FakePlatform service;
   EmptyModuleManager manager;
   grpc::ServerBuilder builder;
@@ -227,9 +255,10 @@ TEST(PlatformAgentIntegration, ReportsBackendFailureAndCancelsControlRead) {
   builder.RegisterService(&manager);
   auto server = builder.BuildAndStart();
   ASSERT_NE(server, nullptr);
+  auto ready = grpc::CreateChannel("127.0.0.1:" + std::to_string(port), grpc::InsecureChannelCredentials());
+  ASSERT_TRUE(ready->WaitForConnected(std::chrono::system_clock::now() + 10s));
   agent::Config config;
   config.enabled = true;
-  config.insecure = true;
   config.target = "127.0.0.1:" + std::to_string(port);
   config.deviceId = "device-a";
   config.token = "test-token";

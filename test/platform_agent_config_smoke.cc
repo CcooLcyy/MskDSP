@@ -16,11 +16,11 @@ int main() {
     std::map<std::string, std::string> values;
     const auto environment = [&](std::string_view name) { return values[std::string(name)]; };
     auto config = agent::LoadConfig(environment);
-    require(!config.enabled && !config.insecure && !config.sshEnabled);
+    require(!config.enabled && !config.sshEnabled);
     values = {{"MSKDSP_PLATFORM_ENABLED", "1"}, {"MSKDSP_PLATFORM_TARGET", "platform.example.org:50051"}, {"MSKDSP_PLATFORM_DEVICE_ID", "device-a"}, {"MSKDSP_PLATFORM_DEVICE_TOKEN", "device-token"}};
     config = agent::LoadConfig(environment);
-    require(config.enabled && !config.insecure);
-    values["MSKDSP_PLATFORM_INSECURE"] = "1";
+    require(config.enabled && config.target == "platform.example.org:50051");
+    values["MSKDSP_PLATFORM_TARGET"] = "platform.example.org:0";
     bool rejected = false;
     try {
       agent::LoadConfig(environment);
@@ -31,7 +31,7 @@ int main() {
     values["MSKDSP_PLATFORM_TARGET"] = "127.0.0.1:50051";
     values["MSKDSP_PLATFORM_MODULES"] = "DataCenter,IEC104";
     config = agent::LoadConfig(environment);
-    require(config.insecure && config.allowedModules.size() == 2);
+    require(config.allowedModules.size() == 2);
     require(agent::ResolveTarget(config, "ModuleManager", {}) == 17000);
     require(agent::ResolveTarget(config, "DataCenter", {{"DataCenter", "0.0.0.0:17123"}}) == 17123);
     require(!agent::ResolveTarget(config, "DataCenter", {{"DataCenter", "192.168.1.2:17123"}}));
