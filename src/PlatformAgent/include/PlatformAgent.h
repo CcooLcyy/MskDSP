@@ -32,14 +32,17 @@ Config LoadEnvironmentConfig();
 std::optional<uint16_t> ResolveTarget(const Config &config, std::string_view service, const std::vector<RunningModule> &running);
 std::vector<std::string> AvailableServices(const Config &config, const std::vector<RunningModule> &running);
 
-// 连接功能由主进程管理；不持久化令牌，也不重放断线前的任何业务字节。
+using PlatformStatusObserver = std::function<void(bool, std::string)>;
+
+// 连接任务由持久配置控制器管理，不重放断线前的任何业务字节。
 class PlatformAgent {
 public:
-  explicit PlatformAgent(Config config);
+  explicit PlatformAgent(Config config, PlatformStatusObserver observer = {});
   void Run(std::stop_token stop);
 
 private:
   Config config_;
+  PlatformStatusObserver observer_;
 };
 
 }  // namespace mskdsp::platformagent

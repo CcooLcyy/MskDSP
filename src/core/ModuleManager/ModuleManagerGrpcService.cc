@@ -65,3 +65,24 @@ grpc::Status ModuleManagerServiceImpl::SaveModuleStartConfig(grpc::ServerContext
   return grpc::Status::OK;
 }
 }  // namespace ModuleManager
+
+namespace ModuleManager {
+void ModuleManagerServiceImpl::SetPlatformAccessControl(std::shared_ptr<PlatformAccessControl> control) {
+  std::lock_guard lock(platformAccessMutex_);
+  platformAccess_ = std::move(control);
+}
+
+grpc::Status ModuleManagerServiceImpl::GetPlatformAccessConfig(grpc::ServerContext *, const ModuleManagerProto::Empty *, ModuleManagerProto::PlatformAccessStatus *status) {
+  std::shared_ptr<PlatformAccessControl> control;
+  { std::lock_guard lock(platformAccessMutex_); control = platformAccess_; }
+  if (!control) return {grpc::StatusCode::UNAVAILABLE, "平台接入控制器未安装"};
+  return control->Get(status);
+}
+
+grpc::Status ModuleManagerServiceImpl::SetPlatformAccessConfig(grpc::ServerContext *, const ModuleManagerProto::SetPlatformAccessConfigRequest *request, ModuleManagerProto::PlatformAccessStatus *status) {
+  std::shared_ptr<PlatformAccessControl> control;
+  { std::lock_guard lock(platformAccessMutex_); control = platformAccess_; }
+  if (!control) return {grpc::StatusCode::UNAVAILABLE, "平台接入控制器未安装"};
+  return control->Set(*request, status);
+}
+}  // namespace ModuleManager

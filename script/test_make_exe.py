@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -319,6 +320,50 @@ class InstallerIdentityTest(unittest.TestCase):
                 self.assertIn(["rm", "-f", "mskdsp"], state["calls"])
                 self.assertLess(state["calls"].index(["rm", "-f", "mskdsp"]),
                                 state["calls"].index(run))
+
+    def assert_platform_access_preserved(self, *, update: bool) -> None:
+        token = "factory-installer-regression-device-token"
+        conf = self.root / "runtime" / "conf"
+        conf.mkdir(parents=True)
+        path = conf / "platform_access.json"
+        original = (json.dumps({"revision": 3, "enabled": True, "device_id": "factory-device-01",
+                                "device_token": token, "ssh_enabled": True, "ssh_port": 10022},
+                               separators=(",", ":")) + "\n").encode("utf-8")
+        path.write_bytes(original)
+        path.chmod(0o600)
+        before_mode = stat.S_IMODE(path.stat().st_mode)
+        # NTFS 不提供完整 POSIX 模式；Linux 回归必须实际具有并保留 0600。
+        if os.name != "nt":
+            self.assertEqual(before_mode, 0o600)
+        identity = image_archive(self.payload)
+        result = self.run_installer(
+            current_id="sha256:" + "b" * 64 if update else identity["config_id"],
+            existing_content=b'{"architecture":"amd64","os":"linux","old":true}' if update else None)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), before_mode)
+        self.assertNotIn(token, result.stdout)
+        self.assertNotIn(token, result.stderr)
+        self.assertEqual(len(self.calls("load")), 1 if update else 0)
+        run = self.calls("run")[0]
+        volumes = [run[index + 1] for index, arg in enumerate(run[:-1]) if arg == "-v"]
+        # Git Bash 向 Windows Python 转换挂载路径；Linux 直接核对实际 Docker 参数。
+        if os.name == "nt":
+            bindings = [value.rsplit(";", 1) for value in volumes if ";" in value]
+            matches = [target for host, target in bindings if Path(host) == conf]
+            self.assertEqual(len(matches), 1)
+            self.assertEqual(Path(matches[0]).parts[-3:], ("opt", "mskdsp", "conf"))
+        else:
+            self.assertEqual(volumes.count(f"{conf}:/opt/mskdsp/conf"), 1)
+        self.assertNotIn(token, json.dumps(run))
+
+    # 同版本重新创建容器仍绑定既有 conf，完整保留平台接入文件、权限及凭据保密。
+    def test_same_version_rebuild_preserves_platform_access(self) -> None:
+        self.assert_platform_access_preserved(update=False)
+
+    # 镜像升级只更新模块启动策略，平台接入文件字节和 0600 权限不被重置。
+    def test_image_update_preserves_platform_access(self) -> None:
+        self.assert_platform_access_preserved(update=True)
 
     # 经典归档的 config 身份相同，应安全跳过镜像加载。
     def test_classic_same_config_skips_load(self) -> None:

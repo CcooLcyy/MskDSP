@@ -43,6 +43,11 @@ if(EXISTS "${MSKDSP_VCPKG_LIB_DIR}/manual-link")
   string(APPEND MSKDSP_TEST_LIBRARY_PATH ":${MSKDSP_VCPKG_LIB_DIR}/manual-link")
 endif()
 
+add_executable(platformAccess_test platform_access_test.cc)
+target_link_libraries(platformAccess_test PRIVATE platformAgent GTest::gtest_main)
+mskdsp_add_isolated_test(platformAccess_test)
+set_tests_properties(platformAccess_test PROPERTIES TIMEOUT 45)
+
 # 平台连接集成测试复用隔离运行器，提供 vcpkg 动态库路径并隔离日志目录。
 add_executable(platformAgent_test platform_agent_test.cc)
 target_link_libraries(platformAgent_test PRIVATE platformAgent GTest::gtest_main)

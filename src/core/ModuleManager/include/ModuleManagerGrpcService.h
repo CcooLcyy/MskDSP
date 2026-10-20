@@ -4,9 +4,12 @@
 #include <grpcpp/support/status.h>
 #include <grpcpp/support/sync_stream.h>
 
+#include <mutex>
+
 #include "ModuleManager.grpc.pb.h"
 #include "ModuleManager.h"
 #include "ModuleManager.pb.h"
+#include "PlatformAccessControl.h"
 
 namespace ModuleManager {
 class ModuleManagerServiceImpl : public ModuleManagerProto::ModuleManage::Service {
@@ -27,7 +30,15 @@ public:
   // 保存启动模块信息
   grpc::Status SaveModuleStartConfig(grpc::ServerContext *context, const ModuleManagerProto::ModuleInfos *moduleInfos, ModuleManagerProto::Empty *) override;
 
+  void SetPlatformAccessControl(std::shared_ptr<PlatformAccessControl> control);
+  // 读取脱敏平台配置与连接状态，不产生连接或保存副作用。
+  grpc::Status GetPlatformAccessConfig(grpc::ServerContext *, const ModuleManagerProto::Empty *, ModuleManagerProto::PlatformAccessStatus *) override;
+  // 校验修订、持久保存并切换连接功能，不记录请求中的令牌。
+  grpc::Status SetPlatformAccessConfig(grpc::ServerContext *, const ModuleManagerProto::SetPlatformAccessConfigRequest *, ModuleManagerProto::PlatformAccessStatus *) override;
+
 private:
-  ModuleManager *moduleManager_;
+  ModuleManager *moduleManager_{nullptr};
+  std::mutex platformAccessMutex_;
+  std::shared_ptr<PlatformAccessControl> platformAccess_;
 };
 }  // namespace ModuleManager

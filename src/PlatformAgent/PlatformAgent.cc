@@ -53,7 +53,7 @@ void ControlConnection::Cancel() {
   context.TryCancel();
 }
 
-PlatformAgent::PlatformAgent(Config config) : config_(std::move(config)) {}
+PlatformAgent::PlatformAgent(Config config, PlatformStatusObserver observer) : config_(std::move(config)), observer_(std::move(observer)) {}
 
 void PlatformAgent::Run(std::stop_token stop) {
   if (!config_.enabled) {
@@ -146,6 +146,8 @@ void PlatformAgent::Run(std::stop_token stop) {
         control->heartbeatSeconds = std::clamp(message.welcome().heartbeat_interval_seconds(), 1u, 30u);
         control->welcomed = true;
         failures = 0;
+        if (observer_)
+          observer_(true, "");
         LOG_INFO("平台设备连接功能已上线，设备={}", config_.deviceId);
       } else if (message.has_open_tunnel()) {
         std::erase_if(tasks, [](Task &task) { return task.connection->completed.load(); });
@@ -186,6 +188,8 @@ void PlatformAgent::Run(std::stop_token stop) {
     watchdog.join();
     const auto status = control->stream->Finish();
     LOG_INFO("平台设备连接已关闭，设备={}，状态码={}", config_.deviceId, static_cast<int>(status.error_code()));
+    if (observer_)
+      observer_(false, stop.stop_requested() ? "" : "平台连接中断，正在自动重试，状态码=" + std::to_string(static_cast<int>(status.error_code())));
     const auto delay = std::min(30u, 1u << std::min(failures++, 5u));
     for (unsigned int count = 0; count < delay * 10 && !stop.stop_requested(); ++count)
       std::this_thread::sleep_for(100ms);

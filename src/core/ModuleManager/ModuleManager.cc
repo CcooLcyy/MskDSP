@@ -1517,3 +1517,7 @@ ModuleManagerProto::ModuleVersion ModuleManager::parseVersion(std::string libNam
   return version;
 }
 }  // namespace ModuleManager
+
+void ModuleManager::ModuleManager::SetPlatformAccessControl(std::shared_ptr<PlatformAccessControl> control) {
+  moduleManagerService_->SetPlatformAccessControl(std::move(control));
+}

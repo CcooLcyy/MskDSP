@@ -17,6 +17,7 @@
 
 namespace ModuleManager {
 class ModuleManagerServiceImpl;
+class PlatformAccessControl;
 
 enum class ModuleOpError {
   kOk,
@@ -95,6 +96,7 @@ public:
   ModuleOpResult unloadModule(ModuleManagerProto::ModuleInfo moduleInfo);
   ModuleManagerProto::ModuleInfos &getModuleInfos();
   ModuleManagerProto::ModuleRunningInfos getModuleRunningInfos();
+  void SetPlatformAccessControl(std::shared_ptr<PlatformAccessControl> control);
   void saveModuleStartConfig(ModuleManagerProto::ModuleInfos moduleInfos);
 
 private:
