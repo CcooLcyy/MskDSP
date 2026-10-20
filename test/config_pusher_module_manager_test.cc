@@ -77,6 +77,17 @@ public:
     return grpc::Status::OK;
   }
 
+  // 出厂接入配置不属于ConfigPusher业务；测试替身明确拒绝未模拟的管理操作。
+  grpc::Status GetPlatformAccessConfig(grpc::ClientContext*, const ModuleManagerProto::Empty&,
+                                      ModuleManagerProto::PlatformAccessStatus*) override {
+    return {grpc::StatusCode::UNIMPLEMENTED, "测试替身未模拟平台接入配置"};
+  }
+
+  grpc::Status SetPlatformAccessConfig(grpc::ClientContext*, const ModuleManagerProto::SetPlatformAccessConfigRequest&,
+                                      ModuleManagerProto::PlatformAccessStatus*) override {
+    return {grpc::StatusCode::UNIMPLEMENTED, "测试替身未模拟平台接入配置"};
+  }
+
   void SetModuleInfos(ModuleManagerProto::ModuleInfos infos) { moduleInfos_ = std::move(infos); }
 
   void SetRunningInfosSequence(std::vector<ModuleManagerProto::ModuleRunningInfos> seq) {
@@ -186,6 +197,27 @@ private:
       ::grpc::ClientContext* /*context*/,
       const ::ModuleManagerProto::ModuleInfos& /*request*/,
       ::grpc::CompletionQueue* /*cq*/) override {
+    return nullptr;
+  }
+
+  // 与已有异步占位保持一致，ConfigPusher本组测试只使用同步调用。
+  ::grpc::ClientAsyncResponseReaderInterface<::ModuleManagerProto::PlatformAccessStatus>* AsyncGetPlatformAccessConfigRaw(
+      ::grpc::ClientContext*, const ::ModuleManagerProto::Empty&, ::grpc::CompletionQueue*) override {
+    return nullptr;
+  }
+
+  ::grpc::ClientAsyncResponseReaderInterface<::ModuleManagerProto::PlatformAccessStatus>* PrepareAsyncGetPlatformAccessConfigRaw(
+      ::grpc::ClientContext*, const ::ModuleManagerProto::Empty&, ::grpc::CompletionQueue*) override {
+    return nullptr;
+  }
+
+  ::grpc::ClientAsyncResponseReaderInterface<::ModuleManagerProto::PlatformAccessStatus>* AsyncSetPlatformAccessConfigRaw(
+      ::grpc::ClientContext*, const ::ModuleManagerProto::SetPlatformAccessConfigRequest&, ::grpc::CompletionQueue*) override {
+    return nullptr;
+  }
+
+  ::grpc::ClientAsyncResponseReaderInterface<::ModuleManagerProto::PlatformAccessStatus>* PrepareAsyncSetPlatformAccessConfigRaw(
+      ::grpc::ClientContext*, const ::ModuleManagerProto::SetPlatformAccessConfigRequest&, ::grpc::CompletionQueue*) override {
     return nullptr;
   }
 
