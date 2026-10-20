@@ -28,6 +28,9 @@ elif name == "git" and "submodule" in args:
             or os.environ.get("GIT_CONFIG_KEY_0") != expected_key
             or not os.environ.get("GIT_CONFIG_VALUE_0", "").startswith("Authorization: Basic ")):
         sys.exit("协议子模块必须直接使用 GitLab 临时认证头，禁止旧地址重写")
+    if os.environ.get("FAIL_SUBMODULE_STAGE") in args:
+        print(os.environ["CI_JOB_TOKEN"])
+        sys.exit(27)
 elif name == "git" and any(argument.startswith("--batch-check") for argument in args):
     for expression in sys.stdin.read().splitlines():
         print("a" * 40 + " tree")
@@ -77,6 +80,57 @@ elif name == "buildctl":
 '''
 
 
+@unittest.skipUnless(os.name == "posix", "真实Git子模块回归在Linux/WSL执行")
+class ProtobufSubmoduleTest(unittest.TestCase):
+    def test_unregistered_existing_submodule_refreshes_old_origin_before_fetch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            origin, parent = base / "protocol-origin", base / "parent"
+            environment = dict(os.environ, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null",
+                               GIT_ALLOW_PROTOCOL="file", GIT_TERMINAL_PROMPT="0")
+
+            def git(directory, *arguments, check=True):
+                result = subprocess.run(["git", "-C", str(directory), *arguments], env=environment,
+                                        capture_output=True, text=True, timeout=20)
+                if check:
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                return result
+
+            for directory in (origin, parent):
+                directory.mkdir()
+                git(directory, "init", "-q")
+                git(directory, "config", "user.name", "Submodule fixture")
+                git(directory, "config", "user.email", "submodule-test@example.invalid")
+            (origin / "schema.proto").write_text("旧协议", encoding="utf-8")
+            git(origin, "add", "schema.proto")
+            git(origin, "commit", "-qm", "fixture-old")
+            git(parent, "submodule", "add", str(origin), "protobuf")
+            (origin / "schema.proto").write_text("新增协议", encoding="utf-8")
+            git(origin, "commit", "-qam", "fixture-new")
+            expected = git(origin, "rev-parse", "HEAD").stdout.strip()
+            git(parent, "update-index", "--cacheinfo", "160000," + expected + ",protobuf")
+            git(parent, "commit", "-qm", "fixture-pin")
+            stale_origin = str(base / "nonexistent-old-origin")
+            git(parent / "protobuf", "remote", "set-url", "origin", stale_origin)
+            git(parent, "config", "--remove-section", "submodule.protobuf")
+            self.assertNotEqual(git(parent / "protobuf", "cat-file", "-e", expected, check=False).returncode, 0)
+            self.assertNotEqual(git(parent, "config", "--get", "submodule.protobuf.url", check=False).returncode, 0)
+            self.assertEqual(git(parent / "protobuf", "remote", "get-url", "origin").stdout.strip(), stale_origin)
+            helper = parent / "script/gitlab/init_platform_proto.py"
+            helper.parent.mkdir(parents=True)
+            shutil.copyfile(ROOT / "script/gitlab/init_platform_proto.py", helper)
+            script = (ROOT / "script/gitlab/build_lower.sh").read_text()
+            function = "fetch_protobuf() {" + script.split("fetch_protobuf() {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
+            result = subprocess.run(["bash", "-c", "set -euo pipefail\n" + function + "\nfetch_protobuf\n"],
+                                    cwd=parent, env=dict(environment, CI_SERVER_URL="https://gitlab.example",
+                                                         CI_JOB_TOKEN="local-test-token"),
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn("local-test-token", result.stdout + result.stderr)
+            self.assertEqual(git(parent / "protobuf", "remote", "get-url", "origin").stdout.strip(), str(origin))
+            self.assertEqual(git(parent / "protobuf", "rev-parse", "HEAD").stdout.strip(), expected)
+
+
 @unittest.skipUnless(os.name == "posix", "Bash 编排契约测试在 Linux/WSL 执行")
 class BuildLowerTest(unittest.TestCase):
     def prepare(self, arch):
@@ -124,7 +178,25 @@ class BuildLowerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn(environment["CI_JOB_TOKEN"], result.stdout + result.stderr)
         commands = (root / "commands.jsonl").read_text()
-        self.assertIn('"submodule", "update", "--init", "--recursive"', commands)
+        submodules = [command for command in map(json.loads, commands.splitlines())
+                      if command[0] == "git" and "submodule" in command]
+        self.assertEqual(submodules, [
+            ["git", "submodule", "init", "--", "protobuf"],
+            ["git", "submodule", "sync", "--recursive", "--", "protobuf"],
+            ["git", "submodule", "update", "--init", "--recursive", "--", "protobuf"],
+        ])
+
+    def test_submodule_failure_identifies_safe_stage_and_blocks_compilation(self):
+        for stage, label in (("init", "初始化"), ("sync", "同步地址"), ("update", "更新提交")):
+            with self.subTest(stage=stage):
+                root, environment = self.prepare("x64")
+                environment["FAIL_SUBMODULE_STAGE"] = stage
+                result = self.run_phase(root, environment, "build")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("protobuf 子模块" + label + "失败", result.stdout + result.stderr)
+                self.assertNotIn(environment["CI_JOB_TOKEN"], result.stdout + result.stderr)
+                commands = [json.loads(line) for line in (root / "commands.jsonl").read_text().splitlines()]
+                self.assertFalse(any(command[0] == "cmake" for command in commands))
 
     def test_both_architectures_freeze_packages_and_symbols(self):
         for arch in ("arm64", "x64"):

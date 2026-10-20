@@ -44,11 +44,13 @@ sys.path.insert(0, str(Path("script/gitlab").resolve()))
 from init_platform_proto import auth_environment
 
 _, environment = auth_environment(os.environ)
-for command in (["git", "submodule", "sync", "--recursive"],
-                ["git", "submodule", "update", "--init", "--recursive"]):
+# Runner可能清除父仓库注册信息但保留子仓库；先注册才能同步已有origin。
+for stage, command in (("初始化", ["git", "submodule", "init", "--", "protobuf"]),
+                       ("同步地址", ["git", "submodule", "sync", "--recursive", "--", "protobuf"]),
+                       ("更新提交", ["git", "submodule", "update", "--init", "--recursive", "--", "protobuf"])):
     result = subprocess.run(command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if result.returncode:
-        raise SystemExit("protobuf 子模块获取失败，请检查提交同步与 CI_JOB_TOKEN allowlist；底层输出已隐藏")
+        raise SystemExit(f"protobuf 子模块{stage}失败，请检查提交同步与 CI_JOB_TOKEN allowlist；底层输出已隐藏")
 print("已通过临时 CI_JOB_TOKEN 配置获取 protobuf 子模块")
 PY
 }
