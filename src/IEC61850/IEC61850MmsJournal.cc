@@ -28,12 +28,13 @@ grpc::Status Deadline(std::chrono::milliseconds timeout,
 
 grpc::Status CheckDeadlineAt(
     std::chrono::steady_clock::time_point deadline,
+    std::chrono::steady_clock::time_point now,
     const MmsCancellationPredicate& cancelled) {
   if (cancelled && cancelled()) {
     return grpc::Status(grpc::StatusCode::CANCELLED,
                         "IEC61850 MMS Journal操作已取消");
   }
-  if (std::chrono::steady_clock::now() >= deadline) {
+  if (now >= deadline) {
     return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED,
                         "IEC61850 MMS Journal操作超时");
   }
@@ -41,10 +42,11 @@ grpc::Status CheckDeadlineAt(
 }
 
 std::chrono::milliseconds Remaining(
-    std::chrono::steady_clock::time_point deadline) {
+    std::chrono::steady_clock::time_point deadline,
+    std::chrono::steady_clock::time_point now) {
   return std::max(std::chrono::milliseconds(1),
                   std::chrono::duration_cast<std::chrono::milliseconds>(
-                      deadline - std::chrono::steady_clock::now()));
+                      deadline - now));
 }
 
 }  // namespace
@@ -93,7 +95,7 @@ grpc::Status MmsJournalClient::JournalStatus(
   if (!status.ok() || response == nullptr) {
     return response == nullptr ? Invalid("JournalStatus响应输出为空") : status;
   }
-  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  const auto deadline = Now() + timeout;
   std::array<std::uint8_t, 65536> encoded{};
   std::size_t size = 0;
   status = EncodeMmsJournalStatusRequest(*nextInvokeId_, request, encoded,
@@ -101,9 +103,9 @@ grpc::Status MmsJournalClient::JournalStatus(
   if (!status.ok()) return status;
   std::vector<std::uint8_t> received;
   status = Exchange(std::span<const std::uint8_t>(encoded.data(), size),
-                    &received, Remaining(deadline), isCancelled);
+                    &received, Remaining(deadline, Now()), isCancelled);
   if (!status.ok()) return status;
-  status = CheckDeadlineAt(deadline, isCancelled);
+  status = CheckDeadlineAt(deadline, Now(), isCancelled);
   if (!status.ok()) return status;
   status = DecodeMmsJournalStatusResponse(received, *nextInvokeId_, response);
   if (!status.ok()) return status;
@@ -119,7 +121,7 @@ grpc::Status MmsJournalClient::InitializeJournal(
     return response == nullptr ? Invalid("InitializeJournal响应输出为空")
                                : status;
   }
-  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  const auto deadline = Now() + timeout;
   std::array<std::uint8_t, 65536> encoded{};
   std::size_t size = 0;
   status = EncodeMmsInitializeJournalRequest(*nextInvokeId_, request, encoded,
@@ -127,9 +129,9 @@ grpc::Status MmsJournalClient::InitializeJournal(
   if (!status.ok()) return status;
   std::vector<std::uint8_t> received;
   status = Exchange(std::span<const std::uint8_t>(encoded.data(), size),
-                    &received, Remaining(deadline), isCancelled);
+                    &received, Remaining(deadline, Now()), isCancelled);
   if (!status.ok()) return status;
-  status = CheckDeadlineAt(deadline, isCancelled);
+  status = CheckDeadlineAt(deadline, Now(), isCancelled);
   if (!status.ok()) return status;
   status = DecodeMmsInitializeJournalResponse(received, *nextInvokeId_,
                                               response);
@@ -150,9 +152,9 @@ grpc::Status MmsJournalClient::ReadJournal(
   }
   *response = {};
   MmsJournalReadRequest page = request;
-  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  const auto deadline = Now() + timeout;
   for (;;) {
-    const auto remaining = Remaining(deadline);
+    const auto remaining = Remaining(deadline, Now());
     status = Deadline(remaining, isCancelled);
     if (!status.ok()) return status;
     if (response->entries.size() >= maxEntries) {
@@ -167,7 +169,7 @@ grpc::Status MmsJournalClient::ReadJournal(
     status = Exchange(std::span<const std::uint8_t>(encoded.data(), size),
                       &received, remaining, isCancelled);
     if (!status.ok()) return status;
-    status = CheckDeadlineAt(deadline, isCancelled);
+    status = CheckDeadlineAt(deadline, Now(), isCancelled);
     if (!status.ok()) return status;
     MmsJournalReadResponse decoded;
     status = DecodeMmsJournalReadResponse(received, *nextInvokeId_, &decoded);

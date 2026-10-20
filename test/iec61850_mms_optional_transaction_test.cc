@@ -153,7 +153,9 @@ struct ExchangeScript {
 TEST(IEC61850MmsOptionalTransactionTest, ReadsJournalPages) {
   ExchangeScript script;
   std::uint32_t invokeId = 1;
-  IEC61850::MmsJournalClient client(script.Callback(), &invokeId);
+  const auto now = std::chrono::steady_clock::time_point{};
+  IEC61850::MmsJournalClient client(script.Callback(), &invokeId,
+                                   [now] { return now; });
   IEC61850::MmsJournalReadRequest request;
   request.journal = Object("EventLog");
   IEC61850::MmsJournalReadResponse response;
@@ -165,6 +167,29 @@ TEST(IEC61850MmsOptionalTransactionTest, ReadsJournalPages) {
   EXPECT_EQ(response.entries[1].entryId, (std::vector<std::uint8_t>{2}));
   EXPECT_EQ(script.services, (std::vector<std::uint8_t>{65, 65}));
   EXPECT_EQ(invokeId, 3U);
+}
+
+// 验证分页交换耗尽总期限后明确超时，使用可控时钟避免依赖机器调度速度。
+TEST(IEC61850MmsOptionalTransactionTest, JournalDeadlineStillAppliesWithInjectedClock) {
+  ExchangeScript script;
+  std::uint32_t invokeId = 1;
+  auto now = std::chrono::steady_clock::time_point{};
+  const auto exchange = script.Callback();
+  IEC61850::MmsJournalClient client(
+      [&](auto request, auto *response, auto timeout, const auto &cancelled, const auto &sent) {
+        auto status = exchange(request, response, timeout, cancelled, sent);
+        now += std::chrono::seconds(2);
+        return status;
+      },
+      &invokeId,
+      [&] { return now; });
+  IEC61850::MmsJournalReadRequest request;
+  request.journal = Object("EventLog");
+  IEC61850::MmsJournalReadResponse response;
+  const auto status = client.ReadJournal(request, &response, 2, std::chrono::seconds(1));
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
+  EXPECT_EQ(script.services, (std::vector<std::uint8_t>{65}));
+  EXPECT_TRUE(response.entries.empty());
 }
 
 // 验证Journal在调用方取消前不进入交换队列。

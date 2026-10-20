@@ -15,9 +15,13 @@ namespace IEC61850 {
 // Session代际和串行队列，Journal客户端只维护服务分页和有界输出。
 class MmsJournalClient {
 public:
+  using Clock = std::function<std::chrono::steady_clock::time_point()>;
   MmsJournalClient() = default;
-  MmsJournalClient(MmsFileExchange exchange, std::uint32_t* nextInvokeId)
-      : exchange_(std::move(exchange)), nextInvokeId_(nextInvokeId) {}
+  // 默认使用生产单调时钟；测试可注入时钟，分页断言不依赖机器调度速度。
+  MmsJournalClient(MmsFileExchange exchange, std::uint32_t* nextInvokeId,
+                   Clock clock = {})
+      : exchange_(std::move(exchange)), nextInvokeId_(nextInvokeId),
+        clock_(std::move(clock)) {}
 
   grpc::Status JournalStatus(
       const MmsJournalStatusRequest& request,
@@ -36,6 +40,9 @@ public:
       const MmsCancellationPredicate& isCancelled = {}) const;
 
 private:
+  std::chrono::steady_clock::time_point Now() const {
+    return clock_ ? clock_() : std::chrono::steady_clock::now();
+  }
   grpc::Status Exchange(std::span<const std::uint8_t> request,
                         std::vector<std::uint8_t>* response,
                         std::chrono::milliseconds timeout,
@@ -47,6 +54,7 @@ private:
 
   MmsFileExchange exchange_;
   std::uint32_t* nextInvokeId_ = nullptr;
+  Clock clock_;
 };
 
 }  // namespace IEC61850
