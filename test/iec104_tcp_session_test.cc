@@ -1395,6 +1395,161 @@ TEST(IEC104TcpSessionTest, PointWithTimeUsesTimestampTypes) {
   io->stop();
 }
 
+// 验证显式无时标混合快照不受连接时标开关影响，重复提交不丢点，普通上送和真实 SOE 的时标语义保持不变。
+TEST(IEC104TcpSessionTest, ExplicitSnapshotWithoutTimePreservesConfiguredPointAndSoeTypes) {
+  for (const bool withTime : {false, true}) {
+    SCOPED_TRACE(withTime ? "连接启用时标" : "连接关闭时标");
+    auto io = std::make_shared<boost::asio::io_context>();
+    auto sockets = MakeConnectedSockets(*io);
+    auto config = MakeConfig("explicit-snapshot-no-time", IEC104Proto::ROLE_SERVER, 5, 5, 1, 5, 8);
+    config.set_point_with_time(withTime);
+    config.set_point_dedupe(true);
+    config.set_point_batch_window_ms(1);
+    auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
+    session->Start(std::move(sockets.session_socket));
+    std::jthread sessionThread = ModuleManager::StartModuleThread(
+        IEC104LibInfo.LIB_NAME, [&]() { io->run(); });
+    struct SessionCleanup {
+      std::shared_ptr<IEC104::TcpSession> session;
+      std::shared_ptr<boost::asio::io_context> io;
+      ~SessionCleanup() {
+        session->Stop();
+        io->stop();
+      }
+    } cleanup{session, io};
+
+    boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildUFrame(kUStartDtAct)));
+    const auto startCon = ReadApduWithTimeout(
+        sockets.peer_socket, std::chrono::milliseconds(2000), "无时标快照启动确认");
+    ASSERT_EQ(startCon.size(), 6u);
+    ASSERT_EQ(startCon[2], kUStartDtCon);
+
+    std::vector<IEC104::PointValue> snapshot;
+    auto addSingle = [&](uint32_t ioa, bool value, uint8_t quality) {
+      IEC104::PointValue point;
+      point.ioa = ioa;
+      point.type = IEC104Proto::POINT_TYPE_SINGLE;
+      point.boolValue = value;
+      point.quality = quality;
+      point.tsMs = 1710000000000;
+      snapshot.push_back(point);
+    };
+    auto addFloat = [&](uint32_t ioa, double value, uint8_t quality) {
+      IEC104::PointValue point;
+      point.ioa = ioa;
+      point.type = IEC104Proto::POINT_TYPE_FLOAT;
+      point.doubleValue = value;
+      point.quality = quality;
+      point.tsMs = 1710000000000;
+      snapshot.push_back(point);
+    };
+    // 混排连续地址与离散地址，分别验证 SQ=1 和 SQ=0 的实际线格式。
+    addSingle(8, false, 0x20);
+    addFloat(16386, -2.5, 0x10);
+    addSingle(2, false, 0x80);
+    addSingle(5, true, 0x40);
+    addFloat(16385, 1.25, 0x80);
+    addSingle(1, true, 0x00);
+
+    uint16_t nextSendSeq = 0;
+    auto expectSnapshot = [&]() {
+      std::vector<uint32_t> receivedIoas;
+      bool sawSq0 = false;
+      bool sawSq1 = false;
+      for (int frameIndex = 0; frameIndex < 3; ++frameIndex) {
+        const auto apdu = ReadApduWithTimeout(
+            sockets.peer_socket, std::chrono::milliseconds(2000), "无时标混合快照报文");
+        ASSERT_GE(apdu.size(), 16u);
+        ASSERT_EQ(FrameTypeOf(apdu), FrameType::I);
+        EXPECT_EQ(ParseSeq(apdu, 2), nextSendSeq++);
+        const bool isFloat = apdu[6] == kTypeIdMeasuredValueShort;
+        ASSERT_TRUE(isFloat || apdu[6] == kTypeIdSinglePoint) << "快照只能使用类型 1 或类型 13";
+        EXPECT_EQ(apdu[8] & 0x3F, kCotSpontaneous);
+        EXPECT_EQ(apdu[10], 1u);
+        EXPECT_EQ(apdu[11], 0u);
+        const bool sequential = (apdu[7] & 0x80) != 0;
+        sawSq0 |= !sequential;
+        sawSq1 |= sequential;
+        const size_t count = apdu[7] & 0x7F;
+        ASSERT_GT(count, 0u);
+        const size_t valueSize = isFloat ? 5u : 1u;
+        ASSERT_EQ(apdu.size(), 12u + (sequential ? 3u : 0u) + count * (valueSize + (sequential ? 0u : 3u)))
+            << "快照报文长度必须不包含 CP56Time2a 时标";
+        auto readIoa = [&](size_t offset) {
+          return static_cast<uint32_t>(apdu[offset]) |
+              (static_cast<uint32_t>(apdu[offset + 1]) << 8) |
+              (static_cast<uint32_t>(apdu[offset + 2]) << 16);
+        };
+        size_t offset = 12;
+        const uint32_t firstIoa = sequential ? readIoa(offset) : 0;
+        if (sequential) {
+          offset += 3;
+        }
+        for (size_t i = 0; i < count; ++i) {
+          const uint32_t ioa = sequential ? firstIoa + static_cast<uint32_t>(i) : readIoa(offset);
+          if (!sequential) {
+            offset += 3;
+          }
+          const auto expected = std::find_if(snapshot.begin(), snapshot.end(), [ioa](const auto &point) {
+            return point.ioa == ioa;
+          });
+          ASSERT_NE(expected, snapshot.end()) << "收到快照之外的 IOA：" << ioa;
+          EXPECT_EQ(std::count(receivedIoas.begin(), receivedIoas.end(), ioa), 0) << "快照点被重复发送";
+          receivedIoas.push_back(ioa);
+          EXPECT_EQ(isFloat, expected->type == IEC104Proto::POINT_TYPE_FLOAT);
+          if (isFloat) {
+            const uint32_t bits = static_cast<uint32_t>(apdu[offset]) |
+                (static_cast<uint32_t>(apdu[offset + 1]) << 8) |
+                (static_cast<uint32_t>(apdu[offset + 2]) << 16) |
+                (static_cast<uint32_t>(apdu[offset + 3]) << 24);
+            float value = 0;
+            std::memcpy(&value, &bits, sizeof(value));
+            EXPECT_FLOAT_EQ(value, static_cast<float>(expected->doubleValue));
+            EXPECT_EQ(apdu[offset + 4], expected->quality);
+          } else {
+            EXPECT_EQ(apdu[offset] & 0x01, expected->boolValue ? 1 : 0);
+            EXPECT_EQ(apdu[offset] & 0xFE, expected->quality);
+          }
+          offset += valueSize;
+        }
+      }
+      EXPECT_EQ(receivedIoas.size(), snapshot.size());
+      EXPECT_TRUE(sawSq0) << "离散点应使用 SQ=0";
+      EXPECT_TRUE(sawSq1) << "连续点应使用 SQ=1";
+      boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildSFrame(nextSendSeq)));
+    };
+
+    session->SendPointValuesWithoutTime(snapshot, kCotSpontaneous);
+    ASSERT_NO_FATAL_FAILURE(expectSnapshot());
+    session->SendPointValuesWithoutTime(snapshot, kCotSpontaneous);
+    ASSERT_NO_FATAL_FAILURE(expectSnapshot());
+
+    // 显式无时标入口不得改写会话配置，后续普通点值仍遵从原来的时标开关。
+    for (const auto &point : {snapshot[1], snapshot[5]}) {
+      session->SendPointValue(point, kCotSpontaneous);
+      const auto apdu = ReadApduWithTimeout(
+          sockets.peer_socket, std::chrono::milliseconds(2000), "快照后的普通点值报文");
+      ASSERT_GE(apdu.size(), 16u);
+      EXPECT_EQ(ParseSeq(apdu, 2), nextSendSeq++);
+      const bool isFloat = point.type == IEC104Proto::POINT_TYPE_FLOAT;
+      EXPECT_EQ(apdu[6], isFloat ? (withTime ? kTypeIdMeasuredValueShortWithTime : kTypeIdMeasuredValueShort) : (withTime ? kTypeIdSinglePointWithTime : kTypeIdSinglePoint));
+      EXPECT_EQ(apdu.size(), (isFloat ? 20u : 16u) + (withTime ? 7u : 0u));
+    }
+    IEC104::SoeEvent event;
+    event.eventSequence = 1001;
+    event.value = snapshot[5];
+    session->SendSoe(event);
+    const auto soe = ReadApduWithTimeout(
+        sockets.peer_socket, std::chrono::milliseconds(2000), "快照后的真实 SOE 报文");
+    ASSERT_EQ(soe.size(), 23u);
+    EXPECT_EQ(ParseSeq(soe, 2), nextSendSeq++);
+    EXPECT_EQ(soe[6], kTypeIdSinglePointWithTime);
+    EXPECT_EQ(soe[8] & 0x3F, kCotSpontaneous);
+    boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildSFrame(nextSendSeq)));
+    EXPECT_FALSE(WaitReadable(sockets.peer_socket, std::chrono::milliseconds(100))) << "完整快照之后不应有额外点值";
+  }
+}
+
 // 验证：SOE 恢复不按 IOA 去重、始终使用带时标单点报文，并由 I/S 帧中的 N(R) 累计确认。
 TEST(IEC104TcpSessionTest, ReplaysSoeInOrderAndAcknowledgesByReceiveSequence) {
   auto io = std::make_shared<boost::asio::io_context>();

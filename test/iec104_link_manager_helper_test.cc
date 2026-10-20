@@ -1,8 +1,9 @@
 #include <gtest/gtest.h>
 
-#include <cstdint>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <optional>
 #include <string>
@@ -12,8 +13,9 @@
 #include "IEC104LinkManager.h"
 #undef private
 
-#include "IEC104ReportPolicy.hpp"
 #include "IEC104FixedValue.hpp"
+#include "IEC104ReportPolicy.hpp"
+#include "IEC104SoeStore.h"
 #include "support/FakeDataCenter.hpp"
 
 namespace {
@@ -21,6 +23,27 @@ using IEC104::LinkManager;
 using IEC104::PointTable;
 using IEC104::PointValue;
 using IEC104::CommandValue;
+
+class ScopedSimulationTempDir {
+public:
+  ScopedSimulationTempDir() {
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    path_ = std::filesystem::temp_directory_path() / ("iec104_apply_simulation_test_" + std::to_string(now));
+    std::filesystem::create_directories(path_);
+  }
+
+  ~ScopedSimulationTempDir() {
+    std::error_code error;
+    std::filesystem::remove_all(path_, error);
+  }
+
+  const std::filesystem::path &path() const {
+    return path_;
+  }
+
+private:
+  std::filesystem::path path_;
+};
 
 IEC104Proto::LinkConfig MakeClientConfig(const std::string& name, IEC104Proto::StationRole role) {
   IEC104Proto::LinkConfig config;
@@ -1052,6 +1075,109 @@ TEST(IEC104LinkManagerHelperTest, GeneratesAndKeepsSimulationValuesWithoutRoute)
   IEC104Proto::SimulationSnapshot loaded;
   ASSERT_TRUE(mgr.GetSimulationSnapshot("sim", &loaded).ok());
   EXPECT_EQ(loaded.SerializeAsString(), generated.SerializeAsString());
+}
+
+// 验证：应用及重复应用模拟快照均不新增 SOE，仍更新遥信基线，并让清除后的真实变位恢复上报。
+TEST(IEC104LinkManagerHelperTest, ApplySimulationKeepsSoeHistoryAndUpdatesSingleBaseline) {
+  ScopedSimulationTempDir dir;
+  for (const bool pointWithTime : {false, true}) {
+    SCOPED_TRACE(pointWithTime);
+    FakeDataCenterState state;
+    auto stub = MakeStub(&state);
+    LinkManager mgr("IEC104");
+    mgr.setDataCenterStub(stub);
+    mgr.soeStore_ = std::make_unique<IEC104::IEC104SoeStore>(
+        dir.path() / (pointWithTime ? "with_time.db" : "without_time.db"));
+    IEC104::SoeAppendResult realEvent;
+    ASSERT_TRUE(mgr.soeStore_->Append("sim-apply", 200, false, 1234, 0, &realEvent).ok());
+
+    LinkManager::LinkRuntime runtime;
+    runtime.config = MakeClientConfig("sim-apply", IEC104Proto::STATION_ROLE_SLAVE);
+    runtime.config.set_point_with_time(pointWithTime);
+    runtime.state = IEC104Proto::LINK_STATE_RUNNING;
+    runtime.pointTable = MakePointTable();
+    runtime.transport = std::make_unique<IEC104::TcpLink>(runtime.config);
+    runtime.lastReportedSingleByTag["single-tag"] = {false, DataCenterProto::QUALITY_GOOD};
+    mgr.linksByName_.emplace("sim-apply", std::move(runtime));
+    EXPECT_CALL(*stub, GetLatest(::testing::_, ::testing::_, ::testing::_)).Times(0);
+
+    IEC104Proto::SimulationRequest request;
+    request.set_conn_name("sim-apply");
+    request.set_mode(IEC104Proto::SIMULATION_MODE_INCREMENT);
+    request.set_bool_mode(IEC104Proto::SIMULATION_BOOL_MODE_ALL_TRUE);
+    IEC104Proto::SimulationSnapshot generated;
+    ASSERT_TRUE(mgr.GenerateSimulationValues(request, &generated).ok());
+    ASSERT_EQ(generated.points_size(), 3);
+    mgr.linksByName_.at("sim-apply").simulationValues.at("single-tag").set_quality(0x80);
+
+    // 这里只验证应用接口的持久化与基线副作用；实际报文类型由回环连接测试覆盖。
+    for (int click = 0; click < 2; ++click) {
+      SCOPED_TRACE(click);
+      ASSERT_TRUE(mgr.ApplySimulationValues("sim-apply").ok());
+      std::vector<IEC104::SoeRecord> history;
+      ASSERT_TRUE(mgr.soeStore_->LoadRecent("sim-apply", &history).ok());
+      ASSERT_EQ(history.size(), 1);
+      EXPECT_EQ(history.front().eventSequence, realEvent.record.eventSequence);
+      EXPECT_FALSE(history.front().state);
+      EXPECT_EQ(history.front().tsMs, 1234);
+      EXPECT_FALSE(history.front().acknowledged);
+      const auto baseline = mgr.lastReportedSinglePoint("sim-apply", "single-tag");
+      ASSERT_TRUE(baseline.has_value());
+      EXPECT_TRUE(baseline->value);
+      EXPECT_EQ(baseline->quality, DataCenterProto::QUALITY_BAD);
+    }
+
+    ASSERT_TRUE(mgr.ClearSimulationValues("sim-apply").ok());
+    const auto baseline = mgr.lastReportedSinglePoint("sim-apply", "single-tag");
+    ASSERT_TRUE(baseline.has_value());
+    EXPECT_TRUE(IEC104::detail::ShouldReportSoe(false, DataCenterProto::QUALITY_GOOD, baseline));
+  }
+}
+
+// 验证：后续遥测无法反向缩放时，整批应用失败且不落盘、不推进已有遥信基线或创建新基线。
+TEST(IEC104LinkManagerHelperTest, ApplySimulationRejectsInvalidFloatBeforeChangingSingleBaselines) {
+  ScopedSimulationTempDir dir;
+  LinkManager mgr("IEC104");
+  mgr.soeStore_ = std::make_unique<IEC104::IEC104SoeStore>(dir.path() / "config.db");
+  LinkManager::LinkRuntime runtime;
+  runtime.config = MakeClientConfig("sim-invalid", IEC104Proto::STATION_ROLE_SLAVE);
+  runtime.state = IEC104Proto::LINK_STATE_RUNNING;
+  runtime.transport = std::make_unique<IEC104::TcpLink>(runtime.config);
+
+  IEC104Proto::UpsertPointTableRequest table;
+  for (const auto &tag : {"a-single-existing", "b-single-new"}) {
+    auto *point = table.add_points();
+    point->set_tag(tag);
+    point->set_ioa(static_cast<uint32_t>(table.points_size()));
+    point->set_type(IEC104Proto::POINT_TYPE_SINGLE);
+    point->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_TELEINDICATION);
+    auto &simulation = runtime.simulationValues[tag];
+    simulation.set_bool_value(true);
+    simulation.set_quality(0x80);
+    simulation.set_ts_ms(1234);
+  }
+  auto *badFloat = table.add_points();
+  badFloat->set_tag("z-invalid-float");
+  badFloat->set_ioa(100);
+  badFloat->set_type(IEC104Proto::POINT_TYPE_FLOAT);
+  badFloat->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_TELEMETRY);
+  badFloat->set_scale_decimal("0.00000000000000000001");
+  ASSERT_TRUE(runtime.pointTable.Upsert(table.points(), true).ok());
+  // 工程量有效，但除以该倍率后的原始值为 1e40，超出 IEC104 短浮点范围。
+  runtime.simulationValues["z-invalid-float"].set_double_value(1e20);
+  runtime.lastReportedSingleByTag["a-single-existing"] = {false, DataCenterProto::QUALITY_GOOD};
+  mgr.linksByName_.emplace("sim-invalid", std::move(runtime));
+
+  const auto status = mgr.ApplySimulationValues("sim-invalid");
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  std::vector<IEC104::SoeRecord> history;
+  ASSERT_TRUE(mgr.soeStore_->LoadRecent("sim-invalid", &history).ok());
+  EXPECT_TRUE(history.empty());
+  const auto baseline = mgr.lastReportedSinglePoint("sim-invalid", "a-single-existing");
+  ASSERT_TRUE(baseline.has_value());
+  EXPECT_FALSE(baseline->value);
+  EXPECT_EQ(baseline->quality, DataCenterProto::QUALITY_GOOD);
+  EXPECT_FALSE(mgr.lastReportedSinglePoint("sim-invalid", "b-single-new").has_value());
 }
 
 // 验证：模拟快照只包含遥测和遥信，遥调、遥控点不会生成或发送模拟点值。

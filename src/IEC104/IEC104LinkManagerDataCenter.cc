@@ -1494,6 +1494,8 @@ grpc::Status LinkManager::ApplySimulationValues(const std::string& connName) {
   if (link.state != IEC104Proto::LINK_STATE_RUNNING || !link.transport) {
     return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路未运行");
   }
+  std::vector<PointValue> values;
+  values.reserve(link.simulationValues.size());
   for (const auto& tag : link.pointTable.Tags()) {
     auto simIt = link.simulationValues.find(tag);
     auto point = link.pointTable.FindByTag(tag);
@@ -1518,26 +1520,29 @@ grpc::Status LinkManager::ApplySimulationValues(const std::string& connName) {
     } else {
       continue;
     }
-    if (pv.type == IEC104Proto::POINT_TYPE_SINGLE) {
-      if (!storeAndSendSoe(connName, pv, link.transport.get())) {
-        return grpc::Status(grpc::StatusCode::INTERNAL, "模拟遥信 SOE 落盘失败");
-      }
-      // 人工注入的模拟遥信属显式事件，不受变位判定过滤；但必须同步更新变位基线，
-      // 否则清除模拟值后若真实值等于模拟前的基线，会被判为未变位而漏报，主站停在模拟值上。
-      link.lastReportedSingleByTag[tag] = detail::LastReportedSinglePoint{
-          .value = pv.boolValue,
-          .quality = toDataCenterQuality(pv.quality),
-      };
-      LOG_INFO("IEC104 模拟遥信已上送并更新变位基线: conn_name={}, tag={}, ioa={}, 状态={}",
-               connName,
-               tag,
-               pv.ioa,
-               pv.boolValue ? "合" : "分");
-    } else {
-      link.transport->SendPointValue(pv, kCotSpontaneous);
-    }
+    values.push_back(pv);
   }
-  LOG_INFO("IEC104 已发送固定模拟值: conn_name={}, 点数={}", connName, link.simulationValues.size());
+  // 全部点值校验完成后再提交；模拟遥信作为普通快照发送，不写入 SOE 历史。
+  const size_t sentCount = values.size();
+  link.transport->SendPointValuesWithoutTime(values, kCotSpontaneous);
+  size_t singleCount = 0;
+  for (const auto &pv : values) {
+    if (pv.type != IEC104Proto::POINT_TYPE_SINGLE) {
+      continue;
+    }
+    const auto point = link.pointTable.FindByIoa(pv.ioa);
+    if (!point) {
+      continue;
+    }
+    // 同步模拟遥信基线，清除模拟值后仍能识别真实值的恢复变位。
+    link.lastReportedSingleByTag[point->tag] = detail::LastReportedSinglePoint{
+        .value = pv.boolValue,
+        .quality = toDataCenterQuality(pv.quality),
+    };
+    ++singleCount;
+    LOG_INFO("IEC104 模拟遥信已提交不带时标发送并更新变位基线: conn_name={}, tag={}, ioa={}, 状态={}", connName, point->tag, pv.ioa, pv.boolValue ? "合" : "分");
+  }
+  LOG_INFO("IEC104 已提交不带时标模拟点值: conn_name={}, 点数={}, 遥信点数={}, 遥测点数={}", connName, sentCount, singleCount, sentCount - singleCount);
   return grpc::Status::OK;
 }
 

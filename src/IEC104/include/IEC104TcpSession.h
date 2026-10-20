@@ -68,6 +68,8 @@ public:
   void Stop();
 
   void SendPointValue(const PointValue& value, uint8_t cause);
+  // 显式快照独立选择不带时标编码，普通点值和 SOE 仍沿用各自规则。
+  void SendPointValuesWithoutTime(std::vector<PointValue> values, uint8_t cause);
   void SendSoe(const SoeEvent& event);
   void SendTimeSync(int64_t tsMs);
   void SendSingleCommand(uint32_t ioa, bool value, bool useSelect);
@@ -207,7 +209,7 @@ private:
   void flushPoint(const boost::system::error_code& ec);
   void drainPointQueue();
   void clearPointQueue();
-  void enqueuePointValuesBatch(std::vector<PointValue> values, uint8_t cause);
+  void enqueuePointValuesBatch(std::vector<PointValue> values, uint8_t cause, std::optional<bool> withTimeOverride = std::nullopt);
   void trySendPending();
   void sendIFrame(PendingAsdu asdu);
   void sendSFrame();

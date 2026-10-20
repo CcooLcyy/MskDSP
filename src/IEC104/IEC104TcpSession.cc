@@ -278,6 +278,16 @@ void TcpSession::SendPointValue(const PointValue &value, uint8_t cause) {
   });
 }
 
+void TcpSession::SendPointValuesWithoutTime(std::vector<PointValue> values, uint8_t cause) {
+  boost::asio::post(io_, [self = shared_from_this(), values = std::move(values), cause]() mutable {
+    if (self->closing_) {
+      return;
+    }
+    LOG_INFO("IEC104 提交不带时标点值快照: conn_name={}, 点数={}, cause={}", self->config_.conn_name(), values.size(), cause);
+    self->enqueuePointValuesBatch(std::move(values), cause, false);
+  });
+}
+
 void TcpSession::SendSoe(const SoeEvent &event) {
   boost::asio::post(io_, [self = shared_from_this(), event]() {
     if (self->closing_) {
@@ -470,7 +480,7 @@ void TcpSession::clearPointQueue() {
   pointFlushTimer_.cancel();
 }
 
-void TcpSession::enqueuePointValuesBatch(std::vector<PointValue> values, uint8_t cause) {
+void TcpSession::enqueuePointValuesBatch(std::vector<PointValue> values, uint8_t cause, std::optional<bool> withTimeOverride) {
   if (values.empty()) {
     return;
   }
@@ -493,8 +503,8 @@ void TcpSession::enqueuePointValuesBatch(std::vector<PointValue> values, uint8_t
   if (!floatValues.empty() && !singleValues.empty()) {
     LOG_DEBUG("IEC104 混合点类型拆分组包: conn_name={}, 浮点点数={}, 单点点数={}, cause={}",
               config_.conn_name(), floatValues.size(), singleValues.size(), cause);
-    enqueuePointValuesBatch(std::move(floatValues), cause);
-    enqueuePointValuesBatch(std::move(singleValues), cause);
+    enqueuePointValuesBatch(std::move(floatValues), cause, withTimeOverride);
+    enqueuePointValuesBatch(std::move(singleValues), cause, withTimeOverride);
     return;
   }
   if (!floatValues.empty()) {
@@ -511,7 +521,7 @@ void TcpSession::enqueuePointValuesBatch(std::vector<PointValue> values, uint8_t
     return a.ioa < b.ioa;
   });
 
-  const bool withTime = pointWithTime_;
+  const bool withTime = withTimeOverride.value_or(pointWithTime_);
   uint32_t sq0ObjectSize = 0;
   uint32_t sq1ObjectSize = 0;
   if (type == IEC104Proto::POINT_TYPE_FLOAT) {
