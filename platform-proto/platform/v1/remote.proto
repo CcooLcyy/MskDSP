@@ -1,0 +1,103 @@
+syntax = "proto3";
+
+package mskdsp.platform.remote.v1;
+
+// 下位机主动连接平台。设备凭据与用户账号分离，所有 RPC 要求唯一的
+// authorization: Bearer <设备令牌>；不允许在消息、日志中回显凭据。
+service DeviceAccessService {
+  // 设备双向控制流，首帧必须是 Hello；30 秒心跳、90 秒无心跳断开。
+  // 首帧 10 秒超时；认证失败 UNAUTHENTICATED、重复设备在线 ALREADY_EXISTS。
+  // 连接结束关闭所属全部隧道，不排队、不补执行离线请求。
+  rpc ConnectDevice(stream DeviceMessage) returns (stream PlatformMessage);
+  // 应平台通知建立独立数据流。首帧必须是 attach，携带一次性票据和隧道 ID。
+  // 票据绑定设备及当前控制连接，15 秒过期；复用/错设备 PERMISSION_DENIED。
+  // 本机服务连接成功后才调用本接口；消息及半关闭语义与 OpenTunnel 相同。
+  rpc AttachTunnel(stream TunnelFrame) returns (stream TunnelFrame);
+}
+
+// 上位机远程访问接口，使用既有 Login 返回的用户会话 Bearer 令牌。
+// 授权按设备及服务类别检查，不因设备 ID 可猜测而泄露未授权设备信息。
+service RemoteAccessService {
+  // 只读返回当前账号获授权的设备，包括离线设备，不暴露设备凭据或内网地址。
+  // 失效会话 UNAUTHENTICATED，存储故障 UNAVAILABLE。
+  rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse);
+  // 上位机创建双向字节隧道，首帧必须是 open，10 秒内发送。
+  // 服务名称为 ModuleManager、已公布的模块名或 ssh；禁止任意地址/端口。
+  // 未授权 PERMISSION_DENIED，离线 UNAVAILABLE，不支持服务 NOT_FOUND；
+  // 等待设备 attach 最多 15 秒，超时 DEADLINE_EXCEEDED。
+  // 建立后首个响应为 ready；仅允许 data(1..65536 字节)、half_close、close。
+  // half_close 仅结束发送方向，仍可接收另一方向；每方向最多一次，之后禁止 data。
+  // 任一异常或取消关闭整个隧道；close 为正常终止通知，不执行重连/字节重放。
+  // 流有界背压，单次阻塞发送最多 30 秒；每设备最多 16 条隧道。
+  // 授权失效或控制流断开时终止隧道；业务字节及 SSH 内容不落日志。
+  rpc OpenTunnel(stream TunnelFrame) returns (stream TunnelFrame);
+}
+
+message ListDevicesRequest {}
+message ListDevicesResponse { repeated Device devices = 1; }
+message Device {
+  string device_id = 1;
+  string display_name = 2;
+  bool online = 3;
+  bool allow_grpc = 4;
+  bool allow_ssh = 5;
+  repeated string services = 6;
+  string agent_version = 7;
+}
+
+message DeviceMessage {
+  oneof payload {
+    DeviceHello hello = 1;
+    DeviceHeartbeat heartbeat = 2;
+    DeviceGoodbye goodbye = 3;
+    TunnelFailure tunnel_failure = 4;
+  }
+}
+message DeviceHello {
+  string device_id = 1;
+  string agent_version = 2;
+  repeated string services = 3;
+}
+message DeviceHeartbeat {
+  // 当前本机可访问的服务完整集合；用于模块加载/卸载后的目标更新。
+  repeated string services = 1;
+}
+message DeviceGoodbye { string reason = 1; }
+message TunnelFailure {
+  string tunnel_id = 1;
+  // 仅中文可公开原因，不包含地址、令牌或 SSH 载荷。
+  string message = 2;
+}
+message PlatformMessage {
+  oneof payload {
+    DeviceWelcome welcome = 1;
+    DeviceHeartbeatAck heartbeat_ack = 2;
+    TunnelRequest open_tunnel = 3;
+  }
+}
+message DeviceWelcome {
+  string connection_id = 1;
+  uint32 heartbeat_interval_seconds = 2;
+}
+message DeviceHeartbeatAck {}
+message TunnelRequest {
+  string tunnel_id = 1;
+  string service = 2;
+  string attach_token = 3;
+}
+
+message TunnelFrame {
+  oneof payload {
+    TunnelOpen open = 1;
+    TunnelAttach attach = 2;
+    TunnelReady ready = 3;
+    bytes data = 4;
+    TunnelHalfClose half_close = 5;
+    TunnelClose close = 6;
+  }
+}
+message TunnelOpen { string device_id = 1; string service = 2; }
+message TunnelAttach { string tunnel_id = 1; string attach_token = 2; }
+message TunnelReady {}
+message TunnelHalfClose {}
+message TunnelClose { string message = 1; }

@@ -43,6 +43,16 @@ if(EXISTS "${MSKDSP_VCPKG_LIB_DIR}/manual-link")
   string(APPEND MSKDSP_TEST_LIBRARY_PATH ":${MSKDSP_VCPKG_LIB_DIR}/manual-link")
 endif()
 
+# 平台连接集成测试复用隔离运行器，提供 vcpkg 动态库路径并隔离日志目录。
+add_executable(platformAgent_test platform_agent_test.cc)
+target_link_libraries(platformAgent_test PRIVATE platformAgent GTest::gtest_main)
+mskdsp_add_isolated_test(platformAgent_test)
+set_tests_properties(platformAgent_test PROPERTIES TIMEOUT 45)
+add_executable(platformAgentConfig_smoke_test platform_agent_config_smoke.cc
+  ../src/PlatformAgent/PlatformAgentConfig.cc)
+target_include_directories(platformAgentConfig_smoke_test PRIVATE ../src/PlatformAgent/include)
+mskdsp_add_isolated_test(platformAgentConfig_smoke_test)
+
 set(MSKDSP_MODULE_MANAGER_TEST_ENV_DIR "${CMAKE_BINARY_DIR}/test_env/moduleManager")
 set(MSKDSP_MODULE_MANAGER_TEST_LIB_DIR "${MSKDSP_MODULE_MANAGER_TEST_ENV_DIR}/module")
 file(MAKE_DIRECTORY "${MSKDSP_MODULE_MANAGER_TEST_LIB_DIR}")

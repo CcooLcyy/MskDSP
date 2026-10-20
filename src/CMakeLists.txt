@@ -13,7 +13,9 @@ add_subdirectory(MQTTManager)
 add_subdirectory(IEC61850)
 add_subdirectory(BoardIO)
 add_subdirectory(DeviceInfo)
+add_subdirectory(PlatformAgent)
 add_executable(${PROJECT_NAME} main.cc)
 target_link_libraries(${PROJECT_NAME} PUBLIC 
     moduleManager
+    platformAgent
 )

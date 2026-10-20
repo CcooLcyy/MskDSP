@@ -1,0 +1,254 @@
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <array>
+#include <cerrno>
+#include <chrono>
+#include <thread>
+
+#include "Logger.h"
+#include "PlatformAgentInternal.h"
+#include "ThreadUtil.hpp"
+
+namespace mskdsp::platformagent {
+using namespace std::chrono_literals;
+
+void TunnelConnection::Cancel() {
+  cancelled = true;
+  context.TryCancel();
+  Shutdown(SHUT_RDWR);
+  event.notify_all();
+}
+
+void TunnelConnection::Shutdown(int direction) {
+  std::lock_guard lock(socketMutex);
+  if (descriptor >= 0)
+    shutdown(descriptor, direction);
+}
+
+void TunnelConnection::CloseSocket() {
+  std::lock_guard lock(socketMutex);
+  if (descriptor >= 0)
+    close(descriptor);
+  descriptor = -1;
+}
+
+namespace {
+bool WaitSocket(int descriptor, short events, const std::shared_ptr<TunnelConnection> &state, int64_t deadline) {
+  while (!state->cancelled.load()) {
+    if (deadline != 0 && SteadyMilliseconds() >= deadline)
+      return false;
+    pollfd item{descriptor, events, 0};
+    const int result = poll(&item, 1, 100);
+    if (result < 0 && errno == EINTR)
+      continue;
+    if (result < 0)
+      return false;
+    if (result == 0)
+      continue;
+    if (item.revents & POLLNVAL)
+      return false;
+    // 读方向同时可能收到 POLLHUP，先 recv 取完内核中已到达的尾部。
+    if ((item.revents & events) || (events == POLLIN && (item.revents & POLLHUP)))
+      return true;
+    if (item.revents & (POLLERR | POLLHUP))
+      return false;
+  }
+  return false;
+}
+
+bool ConnectLoopback(uint16_t port, const std::shared_ptr<TunnelConnection> &state) {
+  const int descriptor = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  if (descriptor < 0)
+    return false;
+  {
+    std::lock_guard lock(state->socketMutex);
+    state->descriptor = descriptor;
+  }
+  if (state->cancelled.load())
+    return false;
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = htons(port);
+  if (connect(descriptor, reinterpret_cast<sockaddr *>(&address), sizeof(address)) == 0)
+    return true;
+  if (errno != EINPROGRESS || !WaitSocket(descriptor, POLLOUT, state, SteadyMilliseconds() + 5000))
+    return false;
+  int error = 0;
+  socklen_t length = sizeof(error);
+  return getsockopt(descriptor, SOL_SOCKET, SO_ERROR, &error, &length) == 0 && error == 0;
+}
+
+bool WriteSocket(const std::string &data, const std::shared_ptr<TunnelConnection> &state) {
+  const auto deadline = SteadyMilliseconds() + 30000;
+  size_t offset = 0;
+  while (offset < data.size() && !state->cancelled.load()) {
+    if (!WaitSocket(state->descriptor, POLLOUT, state, deadline))
+      return false;
+    const auto count = send(state->descriptor, data.data() + offset, data.size() - offset, MSG_NOSIGNAL);
+    if (count < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK))
+      continue;
+    if (count <= 0)
+      return false;
+    offset += static_cast<size_t>(count);
+  }
+  return offset == data.size();
+}
+
+void ReportFailure(const std::shared_ptr<ControlConnection> &control, const remote::TunnelRequest &request, const char *reason) {
+  remote::DeviceMessage message;
+  message.mutable_tunnel_failure()->set_tunnel_id(request.tunnel_id());
+  message.mutable_tunnel_failure()->set_message(reason);
+  LOG_WARNING("平台接入发送隧道失败通知，隧道={}，原因={}", request.tunnel_id(), reason);
+  control->Send(message);
+}
+}  // namespace
+
+void RunTunnel(const Config &config, remote::DeviceAccessService::Stub *stub, remote::TunnelRequest request, const std::shared_ptr<ControlConnection> &control, const std::shared_ptr<TunnelConnection> &state) {
+  struct SocketCleanup {
+    std::shared_ptr<TunnelConnection> state;
+    ~SocketCleanup() {
+      state->CloseSocket();
+    }
+  } cleanup{state};
+  const auto port = ResolveTarget(config, request.service(), DiscoverModules(config));
+  if (!port) {
+    ReportFailure(control, request, "服务未开放或模块当前未运行");
+    return;
+  }
+  if (!ConnectLoopback(*port, state)) {
+    ReportFailure(control, request, "连接本机服务失败或超时");
+    return;
+  }
+  if (!control->active.load() || state->cancelled.load())
+    return;
+  state->context.AddMetadata("authorization", "Bearer " + config.token);
+  state->rpcDeadline = SteadyMilliseconds() + 10000;
+  auto watchdog = ModuleManager::StartModuleThread("PlatformAgent", [&](std::stop_token stop) {
+    while (!stop.stop_requested()) {
+      const auto deadline = state->rpcDeadline.load();
+      if (!control->active.load() || (deadline != 0 && SteadyMilliseconds() >= deadline))
+        state->Cancel();
+      std::this_thread::sleep_for(100ms);
+    }
+  });
+  auto stream = stub->AttachTunnel(&state->context);
+  auto send = [&](const remote::TunnelFrame &frame) {
+    if (state->cancelled.load())
+      return false;
+    state->rpcDeadline = SteadyMilliseconds() + 30000;
+    const bool success = stream->Write(frame);
+    state->rpcDeadline = 0;
+    if (!success)
+      state->Cancel();
+    return success;
+  };
+  remote::TunnelFrame frame;
+  frame.mutable_attach()->set_tunnel_id(request.tunnel_id());
+  frame.mutable_attach()->set_attach_token(request.attach_token());
+  if (!send(frame))
+    return;
+  state->rpcDeadline = SteadyMilliseconds() + 10000;
+  const bool ready = stream->Read(&frame) && frame.has_ready();
+  state->rpcDeadline = 0;
+  if (!ready) {
+    state->Cancel();
+    ReportFailure(control, request, "平台隧道配对失败或超时");
+    return;
+  }
+  LOG_INFO("平台隧道已建立，隧道={}，服务={}", request.tunnel_id(), request.service());
+  auto receiver = ModuleManager::StartModuleThread("PlatformAgent", [&] {
+    remote::TunnelFrame incoming;
+    while (!state->cancelled.load() && stream->Read(&incoming)) {
+      if (incoming.has_data()) {
+        if (state->remoteHalfClosed.load() || incoming.data().empty() || incoming.data().size() > 65536 ||
+            !WriteSocket(incoming.data(), state)) {
+          LOG_WARNING("平台隧道接收数据无效或本机写入失败，隧道={}", request.tunnel_id());
+          state->Cancel();
+          break;
+        }
+        LOG_DEBUG("平台隧道接收数据，隧道={}，字节数={}", request.tunnel_id(), incoming.data().size());
+      } else if (incoming.has_half_close()) {
+        if (state->remoteHalfClosed.exchange(true)) {
+          state->Cancel();
+          break;
+        }
+        state->Shutdown(SHUT_WR);
+        state->event.notify_all();
+        LOG_DEBUG("平台隧道收到发送方向半关闭，隧道={}", request.tunnel_id());
+      } else if (incoming.has_close()) {
+        state->remoteEnded = true;
+        state->Shutdown(SHUT_RDWR);
+        state->event.notify_all();
+        return;
+      } else {
+        state->Cancel();
+        break;
+      }
+    }
+    // 未收到正常关闭即结束 RPC，属于异常断线，不等待或重放另一方向。
+    state->remoteEnded = true;
+    state->Cancel();
+  });
+  struct ReceiverCleanup {
+    std::shared_ptr<TunnelConnection> state;
+    std::jthread &receiver;
+    ~ReceiverCleanup() {
+      if (receiver.joinable()) {
+        state->Cancel();
+        receiver.join();
+      }
+    }
+  } receiverCleanup{state, receiver};
+  std::array<char, 65536> buffer{};
+  bool localHalfClosed = false;
+  while (!state->cancelled.load() && !state->remoteEnded.load()) {
+    if (!WaitSocket(state->descriptor, POLLIN, state, 0)) {
+      state->Cancel();
+      break;
+    }
+    const auto count = recv(state->descriptor, buffer.data(), buffer.size(), 0);
+    if (count < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK))
+      continue;
+    if (count < 0) {
+      state->Cancel();
+      break;
+    }
+    if (state->remoteEnded.load() || state->cancelled.load())
+      break;
+    frame.Clear();
+    if (count == 0) {
+      frame.mutable_half_close();
+      localHalfClosed = send(frame);
+      LOG_DEBUG("平台隧道发送方向已半关闭，隧道={}", request.tunnel_id());
+      break;
+    }
+    frame.set_data(buffer.data(), static_cast<size_t>(count));
+    if (!send(frame))
+      break;
+    LOG_DEBUG("平台隧道发送数据，隧道={}，字节数={}", request.tunnel_id(), count);
+  }
+  if (localHalfClosed && !state->cancelled.load()) {
+    std::unique_lock lock(state->eventMutex);
+    while (!state->remoteHalfClosed.load() && !state->remoteEnded.load() && !state->cancelled.load())
+      state->event.wait_for(lock, 100ms);
+  }
+  if (localHalfClosed && state->remoteHalfClosed.load() && !state->remoteEnded.load() && !state->cancelled.load()) {
+    frame.Clear();
+    frame.mutable_close();
+    send(frame);
+  }
+  state->rpcDeadline = SteadyMilliseconds() + 30000;
+  stream->WritesDone();
+  receiver.join();
+  const auto status = stream->Finish();
+  state->rpcDeadline = 0;
+  watchdog.request_stop();
+  watchdog.join();
+  LOG_INFO("平台隧道已关闭，隧道={}，状态码={}", request.tunnel_id(), static_cast<int>(status.error_code()));
+}
+}  // namespace mskdsp::platformagent
