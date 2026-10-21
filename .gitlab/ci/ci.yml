@@ -60,12 +60,15 @@ build-arm64:
     CACHE_ARCH: arm64-cross
   script:
     - bash script/gitlab/build_lower.sh cross-build "${ARCH}"
+    - echo 'ARM64 编译和安装完成，上传时仅排除中间对象文件，保留完整测试依赖及原始调试符号'
   artifacts:
     paths:
       - package/
       - release/arm64/
       - logs/arm64/
       - build-arm64/
+    exclude:
+      - build-arm64/**/*.o
 
 build-test-x64:
   extends: .build-test
@@ -93,6 +96,7 @@ test-arm64:
       artifacts: true
   script:
     - bash script/gitlab/build_lower.sh test "${ARCH}"
+    - echo 'ARM64 完整测试及独立符号包归档完成，上传时排除重复的原始调试符号目录'
   artifacts:
     name: lower-tested-arm64-$CI_JOB_ID
     when: always
@@ -102,6 +106,8 @@ test-arm64:
       - release/arm64/
       - logs/arm64/
       - build-arm64/Testing/
+    exclude:
+      - package/debug/**
     reports:
       junit: logs/arm64/ctest.xml
 

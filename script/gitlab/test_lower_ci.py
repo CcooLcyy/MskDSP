@@ -112,6 +112,29 @@ class LowerCiTest(unittest.TestCase):
         self.assertEqual(job["artifacts"]["reports"]["junit"], "logs/arm64/ctest.xml")
         self.assertEqual(self.job("package-arm64")["needs"], [{"job": "test-arm64", "artifacts": True}])
 
+    def test_arm_build_artifacts_only_exclude_linked_object_files(self):
+        # 编译结束后只省略对象文件，保留测试程序、运行依赖、符号和 CTest 目录。
+        artifacts = self.job("build-arm64")["artifacts"]
+        self.assertEqual(artifacts.get("exclude", []), ["build-arm64/**/*.o"])
+        self.assertEqual(artifacts["paths"],
+                         ["package/", "release/arm64/", "logs/arm64/", "build-arm64/"])
+        self.assertEqual(artifacts["when"], "always")
+
+    def test_arm_test_artifacts_preserve_symbols_archive_and_diagnostics(self):
+        # 原始符号只在测试完成并生成符号归档后省略；符号归档、失败日志和报告仍传递。
+        artifacts = self.job("test-arm64")["artifacts"]
+        self.assertEqual(artifacts.get("exclude", []), ["package/debug/**"])
+        self.assertEqual(artifacts["paths"],
+                         ["package/", "release/arm64/", "logs/arm64/", "build-arm64/Testing/"])
+        self.assertEqual(artifacts["when"], "always")
+        self.assertEqual(artifacts["reports"]["junit"], "logs/arm64/ctest.xml")
+
+    def test_artifact_exclusions_do_not_spread_to_other_jobs(self):
+        # 精简规则必须局限于两个 ARM64 作业，避免继承影响其他架构或发布包。
+        for name in (".build", ".build-test", "build-test-x64", ".package", "package-arm64", "package-x64"):
+            with self.subTest(job=name):
+                self.assertNotIn("exclude", self.job(name)["artifacts"])
+
 
 if __name__ == "__main__":
     unittest.main()
