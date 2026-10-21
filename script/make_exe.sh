@@ -137,6 +137,8 @@ PAYLOAD_TMP_DIR=""
 NEED_UPDATE=0
 CLEANUP_REPO=0
 IMAGE_REPO=""
+# 宿主机独立更新器识别此标记；仅受管理模式保留回退镜像。
+MSKDSP_MANAGED_UPDATE_V1=1
 
 usage() {
   cat <<USAGE
@@ -393,7 +395,7 @@ load_image_if_needed() {
     die "加载后的镜像身份仍与安装包不一致，未替换既有业务容器"
   fi
   LOCAL_IMAGE_ID="${new_id}"
-  if [[ -n "${existing_id}" && -n "${new_id}" && "${existing_id}" != "${new_id}" ]]; then
+  if [[ "${MSKDSP_MANAGED_UPDATE:-0}" != "1" && -n "${existing_id}" && -n "${new_id}" && "${existing_id}" != "${new_id}" ]]; then
     docker rmi "${existing_id}" >/dev/null 2>&1 || true
   fi
 
@@ -402,6 +404,10 @@ load_image_if_needed() {
 }
 
 cleanup_repo_tags() {
+  if [[ "${MSKDSP_MANAGED_UPDATE:-0}" == "1" ]]; then
+    echo "受管理更新保留既有镜像，由宿主机任务在验证成功后轮换恢复材料"
+    return 0
+  fi
   if [[ "${CLEANUP_REPO}" -ne 1 || -z "${IMAGE_REPO}" ]]; then
     return 0
   fi

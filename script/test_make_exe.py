@@ -163,6 +163,7 @@ class InstallerIdentityTest(unittest.TestCase):
                       archive_limit: int | None = None,
                       compressed_input: str | None = None,
                       build_archive_limit: int | None = None,
+                      managed_update: bool = False,
                       **options: bool) -> subprocess.CompletedProcess[str]:
         archive_options = {key: options.pop(key) for key in list(options)
                            if key in {"corrupt_config", "corrupt_manifest", "wrong_link", "multiple",
@@ -185,6 +186,8 @@ class InstallerIdentityTest(unittest.TestCase):
         self.payload_temp.mkdir(exist_ok=True)
         env["TMPDIR"] = bash_path(self.payload_temp)
         env.pop("MSYS_NO_PATHCONV", None)
+        if managed_update:
+            env["MSKDSP_MANAGED_UPDATE"] = "1"
         if build_archive_limit is not None:
             build_script = self.root / "script" / "make_exe.sh"
             build_script.write_bytes(Path(__file__).with_name("make_exe.sh").read_bytes().replace(
@@ -477,6 +480,14 @@ class InstallerIdentityTest(unittest.TestCase):
     def test_stopped_container_is_not_success(self) -> None:
         result = self.run_installer(run_stopped=True)
         self.assertNotEqual(result.returncode, 0)
+
+    # 宿主机受管理更新必须保留旧镜像，直到独立任务验证后再轮换。
+    def test_managed_update_preserves_old_images(self) -> None:
+        result = self.run_installer(current_id="sha256:" + "a" * 64, managed_update=True,
+                                    existing_content=b'{"architecture":"amd64","os":"linux","old":true}')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.calls("rmi"), [])
+        self.assertIn(b"MSKDSP_MANAGED_UPDATE_V1=1", self.package.read_bytes())
 
 
 if __name__ == "__main__":
