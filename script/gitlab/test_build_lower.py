@@ -49,6 +49,14 @@ elif name == "cmake" and "--install" in args:
         Path("package/debug").mkdir()
         Path("package/debug/MskDSP.debug").write_bytes(b"symbols")
 elif name == "cmake" and "-B" in args:
+    cache_keys = ("VCPKG_ROOT", "VCPKG_DOWNLOADS", "VCPKG_DEFAULT_BINARY_CACHE", "VCPKG_BINARY_SOURCES", "CCACHE_DIR")
+    with open(os.environ["COMMAND_LOG"], "a") as log:
+        log.write(json.dumps(["cache-environment", {key: os.environ.get(key) for key in cache_keys}]) + "\n")
+    if os.environ.get("EXPECT_CACHE_SENTINEL"):
+        if Path(os.environ["VCPKG_ROOT"], "source-sentinel").read_text() != os.environ["EXPECT_CACHE_SENTINEL"]:
+            sys.exit("未复用持久 vcpkg 源码")
+        if Path(os.environ["CCACHE_DIR"], "ccache-sentinel").read_text() != os.environ["EXPECT_CACHE_SENTINEL"]:
+            sys.exit("未复用持久 ccache")
     if os.environ.get("GIT_CONFIG_COUNT") != "1" or os.environ.get("GIT_CONFIG_VALUE_0") != "https://github.com/microsoft/vcpkg":
         sys.exit("vcpkg registry 未使用进程级本地重定向")
     if os.environ.get("GIT_CONFIG_KEY_0") != "url.file://" + os.environ["VCPKG_ROOT"] + "/.insteadOf":
@@ -166,11 +174,144 @@ class BuildLowerTest(unittest.TestCase):
                            BUILDKIT_HOST="tcp://buildkit:1234")
         for key in ("BUILDKIT_CA_B64", "BUILDKIT_CERT_B64", "BUILDKIT_KEY_B64"):
             environment[key] = base64.b64encode(b"secret-test-certificate").decode()
+        for key in ("LOWER_CACHE_ROOT", "LOWER_CACHE_MOUNT", "EXPECT_CACHE_SENTINEL"):
+            environment.pop(key, None)
         return root, environment
 
     def run_phase(self, root, environment, phase):
         return subprocess.run(["bash", "script/gitlab/build_lower.sh", phase, environment["ARCH"]],
                               cwd=root, env=environment, capture_output=True, text=True, timeout=30)
+
+    def external_cache(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        return Path(temporary.name)
+
+    def seed_cache(self, root, cache, profile, sentinel):
+        source = cache / "vcpkg" / profile / "source"
+        shutil.copytree(root / ".cache/vcpkg" / profile / "source", source)
+        (source / "source-sentinel").write_text(sentinel)
+        ccache = cache / "ccache" / profile
+        ccache.mkdir(parents=True)
+        (ccache / "ccache-sentinel").write_text(sentinel)
+
+    def commands(self, root):
+        filename = root / "commands.jsonl"
+        return [json.loads(line) for line in filename.read_text().splitlines()] if filename.exists() else []
+
+    def assert_cache_environment(self, root, cache, profile):
+        environments = [command[1] for command in self.commands(root) if command[0] == "cache-environment"]
+        self.assertEqual(len(environments), 1)
+        expected = dict(VCPKG_ROOT=str(cache / "vcpkg" / profile / "source"),
+                        VCPKG_DOWNLOADS=str(cache / "vcpkg" / profile / "downloads"),
+                        VCPKG_DEFAULT_BINARY_CACHE=str(cache / "vcpkg" / profile / "archives"),
+                        VCPKG_BINARY_SOURCES="clear;files," + str(cache / "vcpkg" / profile / "archives") + ",readwrite",
+                        CCACHE_DIR=str(cache / "ccache" / profile))
+        self.assertEqual(environments[0], expected)
+
+    def test_external_cache_reuses_source_and_ccache_across_distinct_workspaces(self):
+        cache = self.external_cache()
+        first, first_environment = self.prepare("x64")
+        self.seed_cache(first, cache, "x64", "两轮作业共用的缓存种子")
+        workspaces = [(first, first_environment), self.prepare("x64")]
+        self.assertNotEqual(workspaces[0][0], workspaces[1][0])
+        for root, environment in workspaces:
+            shutil.rmtree(root / ".cache")
+            environment.update(LOWER_CACHE_ROOT=str(cache), EXPECT_CACHE_SENTINEL="两轮作业共用的缓存种子")
+            result = self.run_phase(root, environment, "build")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assert_cache_environment(root, cache, "x64")
+            self.assertFalse((root / ".cache").exists())
+            self.assertIn(str(cache), result.stdout)
+            self.assertIn("复用", result.stdout)
+            self.assertFalse(any(command[0] == "git" and "init" in command and "submodule" not in command
+                                 for command in self.commands(root)))
+        self.assertEqual((cache / "ccache/x64/ccache-sentinel").read_text(), "两轮作业共用的缓存种子")
+
+    def test_external_cache_keeps_x64_and_arm64_cross_state_separate(self):
+        cache = self.external_cache()
+        for arch, profile, phase in (("x64", "x64", "build"), ("arm64", "arm64-cross", "cross-build")):
+            root, environment = self.prepare(arch)
+            self.seed_cache(root, cache, profile, profile)
+            shutil.rmtree(root / ".cache")
+            environment.update(LOWER_CACHE_ROOT=str(cache), EXPECT_CACHE_SENTINEL=profile, TOOL_ARCH="x86_64")
+            result = self.run_phase(root, environment, phase)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assert_cache_environment(root, cache, profile)
+        for profile in ("x64", "arm64-cross"):
+            self.assertEqual((cache / "vcpkg" / profile / "source/source-sentinel").read_text(), profile)
+            self.assertEqual((cache / "ccache" / profile / "ccache-sentinel").read_text(), profile)
+
+    def test_local_build_keeps_project_cache_when_override_is_absent(self):
+        root, environment = self.prepare("x64")
+        result = self.run_phase(root, environment, "build")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_cache_environment(root, root / ".cache", "x64")
+
+    def test_real_mount_accepts_cache_inside_canonical_mount_boundary(self):
+        if not os.path.ismount("/dev/shm"):
+            self.skipTest("当前环境没有可验证的 /dev/shm 挂载")
+        temporary = tempfile.TemporaryDirectory(dir="/dev/shm")
+        self.addCleanup(temporary.cleanup)
+        cache = Path(temporary.name)
+        root, environment = self.prepare("x64")
+        self.seed_cache(root, cache, "x64", "真实挂载缓存种子")
+        shutil.rmtree(root / ".cache")
+        environment.update(LOWER_CACHE_ROOT=str(cache), LOWER_CACHE_MOUNT="/dev/shm",
+                           EXPECT_CACHE_SENTINEL="真实挂载缓存种子")
+        result = self.run_phase(root, environment, "build")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_cache_environment(root, cache, "x64")
+
+    def test_arm_test_does_not_require_build_cache_mount(self):
+        root, environment = self.prepare("arm64")
+        built = self.run_phase(root, environment | {"TOOL_ARCH": "x86_64"}, "cross-build")
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        environment.update(LOWER_CACHE_ROOT="无效的相对缓存", LOWER_CACHE_MOUNT="/不存在的构建挂载")
+        tested = self.run_phase(root, environment, "test")
+        self.assertEqual(tested.returncode, 0, tested.stdout + tested.stderr)
+
+    def test_nonmounted_cache_directory_is_rejected_before_cmake(self):
+        root, environment = self.prepare("x64")
+        cache = self.external_cache()
+        self.seed_cache(root, cache, "x64", "无挂载时不能编译")
+        environment.update(LOWER_CACHE_ROOT=str(cache), LOWER_CACHE_MOUNT=str(cache))
+        result = self.run_phase(root, environment, "build")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("挂载", result.stdout + result.stderr)
+        self.assertFalse(any(command[0] == "cmake" for command in self.commands(root)))
+
+    def test_relative_cache_root_is_rejected_before_cmake(self):
+        root, environment = self.prepare("x64")
+        environment["LOWER_CACHE_ROOT"] = ".cache"
+        result = self.run_phase(root, environment, "build")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("绝对路径", result.stdout + result.stderr)
+        self.assertFalse(any(command[0] == "cmake" for command in self.commands(root)))
+
+    def test_mounted_cache_cannot_resolve_into_project_workspace(self):
+        root, environment = self.prepare("x64")
+        environment.update(LOWER_CACHE_ROOT=str(root / ".cache"), LOWER_CACHE_MOUNT="/")
+        result = self.run_phase(root, environment, "build")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("工作区", result.stdout + result.stderr)
+        self.assertFalse(any(command[0] == "cmake" for command in self.commands(root)))
+
+    def test_cache_symlink_cannot_escape_real_mount(self):
+        if not os.path.ismount("/dev/shm"):
+            self.skipTest("当前环境没有可验证的 /dev/shm 挂载")
+        temporary = tempfile.TemporaryDirectory(dir="/dev/shm")
+        self.addCleanup(temporary.cleanup)
+        root, environment = self.prepare("x64")
+        cache = self.external_cache()
+        self.seed_cache(root, cache, "x64", "符号链接逃逸缓存")
+        link = Path(temporary.name) / "outside"
+        link.symlink_to(cache, target_is_directory=True)
+        environment.update(LOWER_CACHE_ROOT=str(link), LOWER_CACHE_MOUNT="/dev/shm")
+        result = self.run_phase(root, environment, "build")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("挂载", result.stdout + result.stderr)
+        self.assertFalse(any(command[0] == "cmake" for command in self.commands(root)))
 
     def test_protobuf_auth_uses_gitlab_header_and_hides_job_token(self):
         root, environment = self.prepare("x64")

@@ -174,6 +174,36 @@ PY
   log 'vcpkg registry 使用已验证的本地固定基线，避免联网读取 GitHub HEAD'
 }
 
+prepare_build_cache() {
+  local cache_root="${LOWER_CACHE_ROOT:-${ROOT}/.cache}"
+  local cache_mount="${LOWER_CACHE_MOUNT:-}"
+  [[ "${cache_root}" == /* ]] || fail '构建缓存根目录必须为绝对路径'
+  cache_root="$(realpath -m -- "${cache_root}")"
+  if [[ -n "${cache_mount}" ]]; then
+    [[ "${cache_mount}" == /* ]] || fail '构建缓存挂载目录必须为绝对路径'
+    cache_mount="$(realpath -m -- "${cache_mount}")"
+    mountpoint -q -- "${cache_mount}" || fail "持久缓存挂载不存在：${cache_mount}"
+    case "${cache_root}/" in
+      "${ROOT}/"*) fail '持久缓存目录不能位于项目工作区内' ;;
+    esac
+    case "${cache_root}/" in
+      "${cache_mount%/}/"*) ;;
+      *) fail '缓存根目录解析后不在指定挂载内' ;;
+    esac
+  fi
+  export VCPKG_ROOT="${cache_root}/vcpkg/${CACHE_ARCH}/source"
+  export VCPKG_DOWNLOADS="${cache_root}/vcpkg/${CACHE_ARCH}/downloads"
+  export VCPKG_DEFAULT_BINARY_CACHE="${cache_root}/vcpkg/${CACHE_ARCH}/archives"
+  export CCACHE_DIR="${cache_root}/ccache/${CACHE_ARCH}"
+  mkdir -p "${VCPKG_DOWNLOADS}" "${VCPKG_DEFAULT_BINARY_CACHE}" "${CCACHE_DIR}"
+  log "构建缓存根目录：${cache_root}，架构：${CACHE_ARCH}"
+  if [[ -d "${VCPKG_ROOT}/.git" ]]; then
+    log '复用已有 vcpkg 源码与持久编译缓存'
+  else
+    log '首次准备 vcpkg 源码，已有二进制及编译缓存继续复用'
+  fi
+}
+
 build_and_test() {
   if [[ "${MODE}" == cross-build ]]; then
     [[ "$(uname -m)" == x86_64 ]] || fail 'ARM64 交叉编译必须在 x64 工具镜像执行'
@@ -192,21 +222,18 @@ build_and_test() {
       *) fail '工具镜像架构与构建目标不一致' ;;
     esac
   fi
+  prepare_build_cache
   log "准备 ${ARCH} 主分支构建与 protobuf 子模块"
   python3 script/gitlab/lower_metadata.py build --arch "${ARCH}" --output "${RELEASE_DIR}/build_identity.json"
   fetch_protobuf
-  export VCPKG_ROOT="${ROOT}/.cache/vcpkg/${CACHE_ARCH}/source"
-  export VCPKG_DOWNLOADS="${ROOT}/.cache/vcpkg/${CACHE_ARCH}/downloads"
-  export VCPKG_DEFAULT_BINARY_CACHE="${ROOT}/.cache/vcpkg/${CACHE_ARCH}/archives"
   export VCPKG_BINARY_SOURCES="clear;files,${VCPKG_DEFAULT_BINARY_CACHE},readwrite"
   export VCPKG_OVERLAY_TRIPLETS="${ROOT}/cmake/vcpkg-triplets"
   export VCPKG_DISABLE_METRICS=1 VCPKG_MAX_CONCURRENCY=8
   # 仅重定向官方 GitHub archive，保留 REF 和 SHA512；失败不退回已知不通的首跳。
   # 占位参数由 vcpkg 自行做 shell 转义，外层再次加引号会破坏含空格的目标路径。
   export X_VCPKG_ASSET_SOURCES="clear;x-script,python3 \"${ROOT}/script/gitlab/download_asset.py\" {url} {sha512} {dst};x-block-origin"
-  export CCACHE_DIR="${ROOT}/.cache/ccache/${CACHE_ARCH}" CCACHE_BASEDIR="${ROOT}"
+  export CCACHE_BASEDIR="${ROOT}"
   export CCACHE_COMPILERCHECK=content CCACHE_MAXSIZE=1G
-  mkdir -p "${VCPKG_DOWNLOADS}" "${VCPKG_DEFAULT_BINARY_CACHE}" "${CCACHE_DIR}"
   local baseline
   baseline="$(python3 -c 'import json; print(json.load(open("vcpkg-configuration.json"))["default-registry"]["baseline"])')"
   if [[ ! -d "${VCPKG_ROOT}/.git" ]]; then

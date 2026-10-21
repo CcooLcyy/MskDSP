@@ -24,17 +24,13 @@ variables:
     name: ci-build
     action: prepare
   timeout: 8h
-  cache:
-    key:
-      prefix: lower-gcc14-$CACHE_ARCH-v1
-      files: [vcpkg.json, vcpkg-configuration.json]
-    paths:
-      - .cache/vcpkg/$CACHE_ARCH/
-      - .cache/ccache/$CACHE_ARCH/
-    policy: pull-push
-    when: always
+  variables:
+    LOWER_CACHE_ROOT: /ci-cache/mskdsp/gcc14-v1
+    LOWER_CACHE_MOUNT: /ci-cache
+  cache: []
+  resource_group: mskdsp-lower-build-$CACHE_ARCH
   after_script:
-    - CCACHE_DIR="$CI_PROJECT_DIR/.cache/ccache/$CACHE_ARCH" ccache --show-stats || true
+    - CCACHE_DIR="$LOWER_CACHE_ROOT/ccache/$CACHE_ARCH" ccache --show-stats || true
   artifacts:
     name: lower-build-$ARCH-$CI_JOB_ID
     when: always
@@ -62,9 +58,6 @@ build-arm64:
   variables:
     ARCH: arm64
     CACHE_ARCH: arm64-cross
-  cache:
-    key:
-      prefix: lower-gcc14-$CACHE_ARCH-v2
   script:
     - bash script/gitlab/build_lower.sh cross-build "${ARCH}"
   artifacts:

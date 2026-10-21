@@ -47,8 +47,7 @@ class LowerCiTest(unittest.TestCase):
         self.assertEqual(job["tags"], ["lower-ci"])
         self.assertEqual(job["environment"]["name"], "ci-build")
         self.assertEqual(job["artifacts"]["when"], "always")
-        self.assertEqual(job["cache"]["when"], "always")
-        self.assertIn("$CACHE_ARCH", job["cache"]["key"]["prefix"])
+        self.assertEqual(job["cache"], [])
         self.assertIn("junit", job["artifacts"]["reports"])
         script = (ROOT / "script/gitlab/build_lower.sh").read_text(encoding="utf-8")
         self.assertIn("--parallel 8", script)
@@ -68,10 +67,41 @@ class LowerCiTest(unittest.TestCase):
         self.assertIn('cross-build "${ARCH}"', "\n".join(job["script"]))
         self.assertEqual(job["variables"]["ARCH"], "arm64")
         self.assertEqual(job["variables"]["CACHE_ARCH"], "arm64-cross")
-        self.assertNotEqual(job["cache"]["key"], self.job("build-test-x64")["cache"]["key"])
+        self.assertEqual(job["cache"], [])
         self.assertIn("build-arm64/", job["artifacts"]["paths"])
         self.assertNotIn("reports", job["artifacts"])
         self.assertNotIn("build-test-arm64", self.config)
+
+    def test_builds_use_persistent_cache_and_architecture_resource_groups(self):
+        groups = []
+        for name, profile in (("build-test-x64", "x64"), ("build-arm64", "arm64-cross")):
+            with self.subTest(job=name):
+                job = self.job(name)
+                self.assertEqual(job["cache"], [])
+                self.assertEqual(job["variables"]["LOWER_CACHE_ROOT"], "/ci-cache/mskdsp/gcc14-v1")
+                self.assertEqual(job["variables"]["LOWER_CACHE_MOUNT"], "/ci-cache")
+                self.assertEqual(job["variables"]["CACHE_ARCH"], profile)
+                self.assertEqual(job["resource_group"], "mskdsp-lower-build-$CACHE_ARCH")
+                groups.append(job["resource_group"].replace("$CACHE_ARCH", profile))
+                stats = "\n".join(job["after_script"])
+                self.assertIn("$LOWER_CACHE_ROOT/ccache/$CACHE_ARCH", stats)
+                self.assertNotIn("$CI_PROJECT_DIR/.cache", stats)
+        self.assertEqual(len(set(groups)), 2)
+        self.assertNotIn("cache", self.config["build-arm64"])
+
+    def test_persistent_cache_stays_outside_artifacts_and_downstream_jobs(self):
+        for name in ("build-test-x64", "build-arm64", "test-arm64", "package-arm64", "package-x64"):
+            with self.subTest(job=name):
+                job = self.job(name)
+                paths = job["artifacts"]["paths"]
+                self.assertFalse(any("ci-cache" in path or ".cache" in path or "LOWER_CACHE" in path
+                                     for path in paths))
+                self.assertFalse(any(path in (".", "./", "/") for path in paths))
+                if name not in ("build-test-x64", "build-arm64"):
+                    self.assertNotIn("LOWER_CACHE_MOUNT", job.get("variables", {}))
+                    self.assertNotIn("resource_group", job)
+        self.assertIn("build-arm64/", self.job("build-arm64")["artifacts"]["paths"])
+        self.assertEqual(self.job("test-arm64")["needs"], [{"job": "build-arm64", "artifacts": True}])
 
     def test_arm_tests_execute_under_qemu_and_gate_packaging(self):
         job = self.job("test-arm64")

@@ -45,6 +45,19 @@ metadata.json 冻结 product、version、package_version、platform、file_name�
 
 编译镜像复用已准备的 Ubuntu 24.04 x64/ARM64 工具链，按仓库 baseline 初始化 vcpkg，并按架构隔离 vcpkg 和 ccache。镜像打包通过独立 BuildKit 服务导出普通 Docker 归档，不将宿主机 Docker socket 挂载到作业容器。
 
+### 下位机持久构建缓存
+
+为省去每轮 GitLab cache ZIP 的扫描、归档及恢复，下位机独立 Runner 将宿主机 `/home/daniel/mskdsp-lower-ci/cache-direct` 挂载到作业容器 `/ci-cache`，构建作业设置 `LOWER_CACHE_ROOT=/ci-cache/mskdsp/gcc14-v1`、`LOWER_CACHE_MOUNT=/ci-cache`。脚本在配置和编译前验证挂载存在、缓存根目录位于挂载内且不属于项目工作区；挂载缺失时明确失败，拒绝悄悄写入临时容器。非 CI 的脚本调用未指定变量时仍使用项目 `.cache`。
+
+- vcpkg 源码及其 buildtrees/packages、downloads、二进制 archives 和 ccache 按 `x64`、`arm64-cross` 分开持久保存；项目 `build-<arch>`、package、日志及发布产物仍属于本次作业。
+- 两种架构可以并行；同一项目同一架构的构建通过独立 `resource_group` 串行，覆盖依赖准备、配置、编译及安装整个阶段，避免同时 checkout 或修改同一 vcpkg 工作树。
+- CI 移除原 ZIP cache 配置，`after_script` 从同一持久根目录读取 ccache 统计。缓存路径和源码复用状态写入中文构建日志，baseline、SHA512 校验、编译参数和完整 CTest 门禁保持原有规则。
+- 切换时先暂停下位机专用 Runner 接新作业，等待活动作业结束并备份配置，再将现有两份 ZIP 一次性恢复到新目录并保留文件权限和符号链接。迁移保留源码 Git 库、vcpkg 可执行文件、downloads、archives 和 ccache，跳过可能包含旧绝对路径的 buildtrees/packages 临时目录。原 ZIP 不删除，只有迁移完成后才启用新挂载并恢复接单。后续容器直接访问展开的缓存，不再重新打包；首次命中情况以实际日志为准。
+- 工具链或缓存布局不兼容升级时变更 `gcc14-v1` 目录代号；清理旧代目录前须确认没有作业使用，不能在活动构建期间自动删除。缓存仅存在这台 Runner 主机，新加 Runner 必须准备各自的目录。
+- ARM64 构建到测试作业的 artifacts 归档传输继续保留，不随构建缓存调整。回退时恢复旧 Runner 配置和原 CI 缓存配置；保留的新目录不参与旧 ZIP 恢复。
+
+验收先覆盖外部缓存路径、缺失挂载拒绝、架构隔离、相同架构资源锁及原脚本回归，再在主分支连续执行两轮双架构 CI，核对挂载、命中统计、完整测试、打包发布及对应缓存恢复/保存阶段消失；同时记录耗时、I/O 延迟和 Runner Docker 超时告警。不通过缩短测试或改变构建并行度混淆对照结果。
+
 下位机 Runner 为 `gitlab-runner-lower`，独立 BuildKit 为 `mskdsp-lower-ci-buildkit`，配置保存在服务器 `/home/daniel/mskdsp-lower-ci/`。BuildKit 使用独立状态卷，通过内网 `tcp://192.168.10.198:1235` 提供 mTLS 服务，并配置 Docker Hub 镜像加速；其网络使用宿主机网络，以避开既有容器网络中的外网访问超时。平台原 Runner、原 BuildKit 的配置和状态卷保持不变。项目 `ci-build` 环境的 `BUILDKIT_HOST` 指向下位机独立实例，证书变量受保护且掩码保存。
 
 服务器直连 GitHub 源码归档入口可能超时；通过 vcpkg 自定义资源下载源将 GitHub tar.gz 归档映射到同一仓库、同一 ref 的官方 codeload 地址。下载器与 vcpkg 均保留 SHA512 校验，不改变依赖版本或校验值。依赖缓存失败时也保存，降低网络重试和首次构建成本。
