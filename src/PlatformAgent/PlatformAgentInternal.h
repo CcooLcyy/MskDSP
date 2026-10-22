@@ -40,7 +40,17 @@ struct TunnelConnection {
   std::condition_variable event;
   std::atomic<bool> remoteHalfClosed{false};
   std::atomic<bool> remoteEnded{false};
-  void Cancel();
+  std::atomic<uint64_t> receivedBytes{0};
+  std::atomic<uint64_t> localWrittenBytes{0};
+  std::atomic<uint64_t> localReadBytes{0};
+  std::atomic<uint64_t> sentBytes{0};
+  std::atomic<int64_t> lastLocalWrite{0};
+  std::atomic<int64_t> lastPlatformWrite{0};
+  std::mutex diagnosticMutex;
+  std::string closeReason;
+  void SetCloseReason(const char *reason);
+  std::string CloseReason();
+  void Cancel(const char *reason = "连接已取消");
   void Shutdown(int direction);
   void CloseSocket();
 };

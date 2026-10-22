@@ -10,6 +10,7 @@
 #include <chrono>
 #include <future>
 #include <map>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
 
@@ -145,6 +146,10 @@ public:
   std::promise<std::string> result;
   std::atomic<bool> completed{false};
   std::atomic<bool> helloReceived{false};
+  std::atomic<unsigned int> heartbeats{0};
+  std::atomic<bool> heartbeatDuringTransfer{false};
+  std::string payload{std::string("\0\1\2", 3)};
+  bool waitForTransferHeartbeat{false};
   grpc::Status ConnectDevice(grpc::ServerContext *context, grpc::ServerReaderWriter<remote::PlatformMessage, remote::DeviceMessage> *stream) override {
     remote::DeviceMessage input;
     if (!stream->Read(&input) || !input.has_hello())
@@ -163,6 +168,7 @@ public:
       if (input.has_tunnel_failure() && !completed.exchange(true))
         result.set_value("连接失败");
       if (input.has_heartbeat()) {
+        ++heartbeats;
         remote::PlatformMessage ack;
         ack.mutable_heartbeat_ack();
         stream->Write(ack);
@@ -177,9 +183,21 @@ public:
     frame.Clear();
     frame.mutable_ready();
     stream->Write(frame);
-    frame.Clear();
-    frame.set_data(std::string("\0\1\2", 3));
-    stream->Write(frame);
+    for (size_t offset = 0; offset < payload.size(); offset += 65536) {
+      frame.Clear();
+      frame.set_data(payload.substr(offset, 65536));
+      if (!stream->Write(frame))
+        return grpc::Status(grpc::StatusCode::CANCELLED, "测试传输已取消");
+      if (waitForTransferHeartbeat && offset == payload.size() / 2) {
+        const auto before = heartbeats.load();
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+        while (heartbeats.load() == before && std::chrono::steady_clock::now() < deadline)
+          std::this_thread::sleep_for(10ms);
+        heartbeatDuringTransfer = heartbeats.load() > before;
+        if (!heartbeatDuringTransfer)
+          return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "传输期间未收到控制心跳");
+      }
+    }
     frame.Clear();
     frame.mutable_half_close();
     stream->Write(frame);
@@ -194,6 +212,42 @@ public:
         frame.mutable_close();
         stream->Write(frame);
         break;
+      }
+    }
+    return grpc::Status::OK;
+  }
+};
+
+class ReconnectingPlatform final : public remote::DeviceAccessService::Service {
+public:
+  std::promise<bool> freshTransport;
+  std::atomic<unsigned int> attempts{0};
+  std::mutex peerMutex;
+  std::string firstPeer;
+
+  grpc::Status ConnectDevice(grpc::ServerContext *context, grpc::ServerReaderWriter<remote::PlatformMessage, remote::DeviceMessage> *stream) override {
+    remote::DeviceMessage input;
+    if (!stream->Read(&input) || !input.has_hello())
+      return {grpc::StatusCode::INVALID_ARGUMENT, "缺少设备握手"};
+    const auto attempt = ++attempts;
+    remote::PlatformMessage welcome;
+    welcome.mutable_welcome()->set_connection_id("reconnect-" + std::to_string(attempt));
+    welcome.mutable_welcome()->set_heartbeat_interval_seconds(1);
+    stream->Write(welcome);
+    if (attempt == 1) {
+      std::lock_guard lock(peerMutex);
+      firstPeer = context->peer();
+      return {grpc::StatusCode::UNAVAILABLE, "模拟控制连接失败"};
+    }
+    if (attempt == 2) {
+      std::lock_guard lock(peerMutex);
+      freshTransport.set_value(context->peer() != firstPeer);
+    }
+    while (stream->Read(&input)) {
+      if (input.has_heartbeat()) {
+        remote::PlatformMessage ack;
+        ack.mutable_heartbeat_ack();
+        stream->Write(ack);
       }
     }
     return grpc::Status::OK;
@@ -275,5 +329,74 @@ TEST_F(PlatformAgentIntegration, ReportsBackendFailureAndCancelsControlRead) {
   worker.request_stop();
   worker.join();
   EXPECT_LT(std::chrono::steady_clock::now() - begin, 3s);
+  server->Shutdown(std::chrono::system_clock::now() + 2s);
+}
+
+// 验证超过 SSH 初始窗口的 50 MiB 二进制传输完整保留，且中途控制心跳仍有进展。
+TEST_F(PlatformAgentIntegration, LargeTransferKeepsControlHeartbeatAlive) {
+  HalfCloseBackend backend;
+  FakePlatform service;
+  service.payload.resize(50 * 1024 * 1024);
+  for (size_t index = 0; index < service.payload.size(); ++index)
+    service.payload[index] = static_cast<char>(index % 251);
+  service.waitForTransferHeartbeat = true;
+  EmptyModuleManager manager;
+  grpc::ServerBuilder builder;
+  int port = 0;
+  builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+  builder.RegisterService(&service);
+  builder.RegisterService(&manager);
+  auto server = builder.BuildAndStart();
+  ASSERT_NE(server, nullptr);
+  agent::Config config;
+  config.enabled = true;
+  config.target = "127.0.0.1:" + std::to_string(port);
+  config.deviceId = "device-large";
+  config.token = "test-token";
+  config.sshEnabled = true;
+  config.sshPort = backend.port;
+  config.managerPort = port;
+  agent::PlatformAgent client(config);
+  auto result = service.result.get_future();
+  std::jthread worker([&](std::stop_token stop) { client.Run(stop); });
+  const auto status = result.wait_for(20s);
+  EXPECT_EQ(status, std::future_status::ready);
+  if (status == std::future_status::ready) {
+    const auto received = result.get();
+    EXPECT_EQ(received.size(), service.payload.size() + std::string("尾部").size());
+    EXPECT_TRUE(received == service.payload + "尾部") << "大文件内容或半关闭尾部不一致";
+  }
+  EXPECT_TRUE(service.heartbeatDuringTransfer.load());
+  worker.request_stop();
+  worker.join();
+  server->Shutdown(std::chrono::system_clock::now() + 2s);
+}
+
+// 验证控制 RPC 失败后重连使用新 TCP 连接，避免在旧传输连接上反复重新握手。
+TEST_F(PlatformAgentIntegration, RecreatesTransportAfterControlFailure) {
+  ReconnectingPlatform service;
+  EmptyModuleManager manager;
+  grpc::ServerBuilder builder;
+  int port = 0;
+  builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+  builder.RegisterService(&service);
+  builder.RegisterService(&manager);
+  auto server = builder.BuildAndStart();
+  ASSERT_NE(server, nullptr);
+  agent::Config config;
+  config.enabled = true;
+  config.target = "127.0.0.1:" + std::to_string(port);
+  config.deviceId = "device-reconnect";
+  config.token = "test-token";
+  config.managerPort = port;
+  agent::PlatformAgent client(config);
+  auto result = service.freshTransport.get_future();
+  std::jthread worker([&](std::stop_token stop) { client.Run(stop); });
+  const auto status = result.wait_for(10s);
+  EXPECT_EQ(status, std::future_status::ready);
+  if (status == std::future_status::ready)
+    EXPECT_TRUE(result.get());
+  worker.request_stop();
+  worker.join();
   server->Shutdown(std::chrono::system_clock::now() + 2s);
 }

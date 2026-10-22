@@ -1,3 +1,5 @@
+#include <grpc/impl/channel_arg_names.h>
+
 #include <algorithm>
 #include <chrono>
 #include <thread>
@@ -62,12 +64,15 @@ void PlatformAgent::Run(std::stop_token stop) {
   }
   // 冷启动日志准备必须在控制流首帧期限之外完成。
   ModuleManager::Logger::ensureModuleSink("PlatformAgent");
-  grpc::ChannelArguments arguments;
-  arguments.SetMaxReceiveMessageSize(128 * 1024);
-  auto channel = grpc::CreateCustomChannel(config_.target, grpc::InsecureChannelCredentials(), arguments);
-  auto stub = remote::DeviceAccessService::NewStub(channel);
   unsigned int failures = 0;
   while (!stop.stop_requested()) {
+    // 每次重连使用独立子连接池，旧 HTTP/2 传输异常时不会再次复用旧连接。
+    grpc::ChannelArguments arguments;
+    arguments.SetMaxReceiveMessageSize(128 * 1024);
+    arguments.SetInt(GRPC_ARG_USE_LOCAL_SUBCHANNEL_POOL, 1);
+    auto channel = grpc::CreateCustomChannel(config_.target, grpc::InsecureChannelCredentials(), arguments);
+    auto stub = remote::DeviceAccessService::NewStub(channel);
+    LOG_INFO("平台接入已创建新通道，等待握手，设备={}，连续失败次数={}", config_.deviceId, failures);
     auto control = std::make_shared<ControlConnection>();
     control->lastReceived = SteadyMilliseconds();
     control->context.AddMetadata("authorization", "Bearer " + config_.token);
@@ -79,7 +84,7 @@ void PlatformAgent::Run(std::stop_token stop) {
         const auto limit = control->welcomed.load() ? 90000 : 10000;
         if (stop.stop_requested() || (write != 0 && now >= write) ||
             now - control->lastReceived.load() >= limit) {
-          LOG_INFO("平台控制连接停止或超时，设备={}", config_.deviceId);
+          LOG_WARNING("平台控制连接停止或超时，设备={}，已欢迎={}，最后接收间隔毫秒={}，写入超时={}，请求停止={}", config_.deviceId, control->welcomed.load(), now - control->lastReceived.load(), write != 0 && now >= write, stop.stop_requested());
           control->Cancel();
           break;
         }
@@ -165,7 +170,7 @@ void PlatformAgent::Run(std::stop_token stop) {
               RunTunnel(config_, stub.get(), request, control, tunnel);
             } catch (...) {
               LOG_ERROR("平台隧道线程异常，隧道={}", request.tunnel_id());
-              tunnel->Cancel();
+              tunnel->Cancel("平台隧道线程异常");
               tunnel->CloseSocket();
             }
             tunnel->completed = true;
@@ -180,7 +185,7 @@ void PlatformAgent::Run(std::stop_token stop) {
     }
     control->Cancel();
     for (auto &task : tasks)
-      task.connection->Cancel();
+      task.connection->Cancel("平台控制连接已关闭");
     tasks.clear();
     heartbeat.request_stop();
     heartbeat.join();

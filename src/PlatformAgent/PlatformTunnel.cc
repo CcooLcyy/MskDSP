@@ -16,7 +16,19 @@
 namespace mskdsp::platformagent {
 using namespace std::chrono_literals;
 
-void TunnelConnection::Cancel() {
+void TunnelConnection::SetCloseReason(const char *reason) {
+  std::lock_guard lock(diagnosticMutex);
+  if (closeReason.empty())
+    closeReason = reason;
+}
+
+std::string TunnelConnection::CloseReason() {
+  std::lock_guard lock(diagnosticMutex);
+  return closeReason.empty() ? "隧道已结束" : closeReason;
+}
+
+void TunnelConnection::Cancel(const char *reason) {
+  SetCloseReason(reason);
   cancelled = true;
   context.TryCancel();
   Shutdown(SHUT_RDWR);
@@ -95,6 +107,8 @@ bool WriteSocket(const std::string &data, const std::shared_ptr<TunnelConnection
     if (count <= 0)
       return false;
     offset += static_cast<size_t>(count);
+    state->localWrittenBytes.fetch_add(static_cast<uint64_t>(count));
+    state->lastLocalWrite = SteadyMilliseconds();
   }
   return offset == data.size();
 }
@@ -111,20 +125,29 @@ void ReportFailure(const std::shared_ptr<ControlConnection> &control, const remo
 void RunTunnel(const Config &config, remote::DeviceAccessService::Stub *stub, remote::TunnelRequest request, const std::shared_ptr<ControlConnection> &control, const std::shared_ptr<TunnelConnection> &state) {
   struct SocketCleanup {
     std::shared_ptr<TunnelConnection> state;
+    const Config &config;
+    const remote::TunnelRequest &request;
+    const int64_t started{SteadyMilliseconds()};
     ~SocketCleanup() {
       state->CloseSocket();
+      const auto now = SteadyMilliseconds();
+      const auto local = state->lastLocalWrite.load();
+      const auto platform = state->lastPlatformWrite.load();
+      LOG_INFO("平台隧道传输结束，设备={}，隧道={}，服务={}，平台接收字节={}，本机写入字节={}，本机读取字节={}，平台发送字节={}，持续毫秒={}，本机写入停顿毫秒={}，平台发送停顿毫秒={}，原因={}", config.deviceId, request.tunnel_id(), request.service(), state->receivedBytes.load(), state->localWrittenBytes.load(), state->localReadBytes.load(), state->sentBytes.load(), now - started, local == 0 ? -1 : now - local, platform == 0 ? -1 : now - platform, state->CloseReason());
     }
-  } cleanup{state};
+  } cleanup{state, config, request};
   // 固定本机服务不依赖管理器查询；普通模块才需要动态发现运行端口。
   const auto running = request.service() == "ModuleManager" || request.service() == "ssh"
       ? std::vector<RunningModule>{}
       : DiscoverModules(config);
   const auto port = ResolveTarget(config, request.service(), running);
   if (!port) {
+    state->SetCloseReason("服务未开放或模块当前未运行");
     ReportFailure(control, request, "服务未开放或模块当前未运行");
     return;
   }
   if (!ConnectLoopback(*port, state)) {
+    state->SetCloseReason("连接本机服务失败或超时");
     ReportFailure(control, request, "连接本机服务失败或超时");
     return;
   }
@@ -135,8 +158,10 @@ void RunTunnel(const Config &config, remote::DeviceAccessService::Stub *stub, re
   auto watchdog = ModuleManager::StartModuleThread("PlatformAgent", [&](std::stop_token stop) {
     while (!stop.stop_requested()) {
       const auto deadline = state->rpcDeadline.load();
-      if (!control->active.load() || (deadline != 0 && SteadyMilliseconds() >= deadline))
-        state->Cancel();
+      if (!control->active.load())
+        state->Cancel("平台控制连接已关闭");
+      else if (deadline != 0 && SteadyMilliseconds() >= deadline)
+        state->Cancel("平台隧道 RPC 握手或发送超时");
       std::this_thread::sleep_for(100ms);
     }
   });
@@ -148,7 +173,11 @@ void RunTunnel(const Config &config, remote::DeviceAccessService::Stub *stub, re
     const bool success = stream->Write(frame);
     state->rpcDeadline = 0;
     if (!success)
-      state->Cancel();
+      state->Cancel("平台隧道 RPC 发送失败");
+    else if (frame.has_data()) {
+      state->sentBytes.fetch_add(frame.data().size());
+      state->lastPlatformWrite = SteadyMilliseconds();
+    }
     return success;
   };
   remote::TunnelFrame frame;
@@ -160,7 +189,7 @@ void RunTunnel(const Config &config, remote::DeviceAccessService::Stub *stub, re
   const bool ready = stream->Read(&frame) && frame.has_ready();
   state->rpcDeadline = 0;
   if (!ready) {
-    state->Cancel();
+    state->Cancel("平台隧道配对失败或超时");
     ReportFailure(control, request, "平台隧道配对失败或超时");
     return;
   }
@@ -169,34 +198,39 @@ void RunTunnel(const Config &config, remote::DeviceAccessService::Stub *stub, re
     remote::TunnelFrame incoming;
     while (!state->cancelled.load() && stream->Read(&incoming)) {
       if (incoming.has_data()) {
-        if (state->remoteHalfClosed.load() || incoming.data().empty() || incoming.data().size() > 65536 ||
-            !WriteSocket(incoming.data(), state)) {
-          LOG_WARNING("平台隧道接收数据无效或本机写入失败，隧道={}", request.tunnel_id());
-          state->Cancel();
+        if (state->remoteHalfClosed.load() || incoming.data().empty() || incoming.data().size() > 65536) {
+          state->Cancel("平台隧道接收数据无效");
+          break;
+        }
+        state->receivedBytes.fetch_add(incoming.data().size());
+        if (!WriteSocket(incoming.data(), state)) {
+          LOG_WARNING("平台隧道本机写入失败或超时，隧道={}，平台接收字节={}，本机写入字节={}", request.tunnel_id(), state->receivedBytes.load(), state->localWrittenBytes.load());
+          state->Cancel("平台隧道本机写入失败或超时");
           break;
         }
         LOG_DEBUG("平台隧道接收数据，隧道={}，字节数={}", request.tunnel_id(), incoming.data().size());
       } else if (incoming.has_half_close()) {
         if (state->remoteHalfClosed.exchange(true)) {
-          state->Cancel();
+          state->Cancel("平台隧道重复半关闭");
           break;
         }
         state->Shutdown(SHUT_WR);
         state->event.notify_all();
         LOG_DEBUG("平台隧道收到发送方向半关闭，隧道={}", request.tunnel_id());
       } else if (incoming.has_close()) {
+        state->SetCloseReason("平台已关闭隧道");
         state->remoteEnded = true;
         state->Shutdown(SHUT_RDWR);
         state->event.notify_all();
         return;
       } else {
-        state->Cancel();
+        state->Cancel("平台隧道消息类型无效");
         break;
       }
     }
     // 未收到正常关闭即结束 RPC，属于异常断线，不等待或重放另一方向。
     state->remoteEnded = true;
-    state->Cancel();
+    state->Cancel("平台隧道接收流异常结束");
   });
   struct ReceiverCleanup {
     std::shared_ptr<TunnelConnection> state;
@@ -212,16 +246,18 @@ void RunTunnel(const Config &config, remote::DeviceAccessService::Stub *stub, re
   bool localHalfClosed = false;
   while (!state->cancelled.load() && !state->remoteEnded.load()) {
     if (!WaitSocket(state->descriptor, POLLIN, state, 0)) {
-      state->Cancel();
+      state->Cancel("等待本机数据失败或连接已取消");
       break;
     }
     const auto count = recv(state->descriptor, buffer.data(), buffer.size(), 0);
     if (count < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK))
       continue;
     if (count < 0) {
-      state->Cancel();
+      state->Cancel("读取本机数据失败");
       break;
     }
+    if (count > 0)
+      state->localReadBytes.fetch_add(static_cast<uint64_t>(count));
     if (state->remoteEnded.load() || state->cancelled.load())
       break;
     frame.Clear();
@@ -242,6 +278,7 @@ void RunTunnel(const Config &config, remote::DeviceAccessService::Stub *stub, re
       state->event.wait_for(lock, 100ms);
   }
   if (localHalfClosed && state->remoteHalfClosed.load() && !state->remoteEnded.load() && !state->cancelled.load()) {
+    state->SetCloseReason("双向传输已正常半关闭");
     frame.Clear();
     frame.mutable_close();
     send(frame);
