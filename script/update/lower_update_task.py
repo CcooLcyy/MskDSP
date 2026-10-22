@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, ExitStack
 import hashlib
 import json
 import os
@@ -45,6 +45,27 @@ def ensure_secure(path):
         info = entry.lstat()
         if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
             raise ValueError(f"路径不是 root 独占且不可替换: {entry}")
+
+
+def ensure_secure_existing(path, directory=True):
+    """从根开始核对完整祖先，缺失的尾部只检查、不创建。"""
+    path = Path(path).absolute()
+    for entry in [*reversed(path.parents), path]:
+        try:
+            info = entry.lstat()
+        except FileNotFoundError:
+            return
+        is_directory = entry != path or directory
+        if (info.st_uid != 0 or info.st_mode & 0o022
+                or not (stat.S_ISDIR(info.st_mode) if is_directory else stat.S_ISREG(info.st_mode))):
+            raise ValueError(f"路径不是 root 独占的{'目录' if is_directory else '普通文件'}: {entry}，权限 {stat.S_IMODE(info.st_mode):04o}")
+
+
+def preflight_environment():
+    """安装前的纯只读环境检查，sudo 已由 SSH 根命令入口验证。"""
+    for path in (Path('/usr/local/libexec/mskdsp-update'), STATE_ROOT):
+        ensure_secure_existing(path)
+    Backend().environment_preflight()
 
 
 def atomic_json(path, data):
@@ -187,6 +208,42 @@ class Backend:
 
     def inspect(self):
         return json.loads(self.command("docker", "inspect", "mskdsp"))[0]
+
+    def environment_preflight(self):
+        for name in ("docker", "bash", "systemctl", "systemd-run"):
+            if not shutil.which(name):
+                raise ValueError(f"缺少独立更新所需命令: {name}")
+        if not Path('/run/systemd/system').is_dir():
+            raise ValueError("宿主机未运行 systemd")
+        self.command("systemctl", "show", "--property=Version", "--value")
+        self.command("docker", "info", "--format", "{{.ServerVersion}}")
+
+    def assert_idle(self):
+        """查不到任务前确认没有宿主机任务、孤立安装进程；观察失败即保留未知。"""
+        units = self.command("systemctl", "list-units", "--all", "--no-legend", "--plain",
+                             "--state=active,activating,reloading,deactivating", "mskdsp-update-*.service")
+        if units:
+            raise ValueError("宿主机仍有更新服务，不能确认原任务不存在")
+        for process in Path('/proc').iterdir():
+            if not process.name.isdigit() or int(process.name) == os.getpid():
+                continue
+            try:
+                arguments = (process / 'cmdline').read_bytes().split(b'\0')
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            values = [value.decode('utf-8', errors='replace') for value in arguments if value]
+            if not values:
+                continue
+            executable = Path(values[0]).name
+            # 只匹配参数中的文件名，避免把当前内存查询的 Python 源码当成安装进程。
+            files = [Path(value).name for value in values[1:] if '\n' not in value and len(value) < 4096]
+            helper = executable.startswith('python') and any(
+                value == 'helper.py' or value.startswith('lower_update_task') for value in files
+            ) and any(value in ('submit', 'run') for value in values)
+            installer = executable in ('bash', 'sh') and (any(value.startswith('mskdsp-') for value in files)
+                or any(value.startswith(str(STATE_ROOT) + '/') and value.endswith('/package') for value in values))
+            if helper or installer:
+                raise ValueError(f"宿主机仍有安装进程 {process.name}，不能确认原任务不存在")
 
     def preflight(self, package, expected):
         for name in ("docker", "bash", "systemctl", "systemd-run"):
@@ -446,6 +503,8 @@ class TaskManager:
             directory = self.root / operation
             if (directory / "state.json").exists():
                 data = self.state(operation)
+                if data.get('closed') is True:
+                    raise ValueError('LOWER_UPDATE_TASK_REJECTED: 原任务已显式关闭，拒绝迟到的安装请求；新安装必须使用新任务编号')
                 if data["package_sha256"] != digest or data["expected_image_id"] != expected:
                     raise ValueError("相同任务编号的内容不同，拒绝替换")
             else:
@@ -593,6 +652,213 @@ class TaskManager:
             (directory / "package").unlink(missing_ok=True)
 
 
+@contextmanager
+def observe_existing_lock(path, secure=True):
+    """已有锁只读打开，不存在时绝不创建；占用或观察错误均拒绝结束任务。"""
+    if secure:
+        ensure_secure_existing(path, directory=False)
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    except FileNotFoundError:
+        yield
+        return
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(f"更新锁不是普通文件: {path}")
+        if os.name != 'nt':
+            import fcntl
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise ValueError("宿主机提交或安装锁正在占用，不能确认原任务不存在") from None
+        else:
+            import msvcrt
+            msvcrt.locking(fd, msvcrt.LK_NBRLCK, 1)
+        yield
+    finally:
+        os.close(fd)
+
+
+class ReadOnlyTaskManager(TaskManager):
+    """恢复查询专用入口，不复用会创建目录的受理初始化。"""
+    def __init__(self, root=STATE_ROOT, host=HOST_ROOT, backend=None, secure=True):
+        self.root, self.host, self.backend, self.secure = Path(root), Path(host), backend or Backend(), secure
+        if secure:
+            ensure_secure_existing(self.root)
+
+    def read_file(self, path, limit=256 * 1024):
+        if self.secure:
+            ensure_secure_existing(path, directory=False)
+        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+                raise ValueError(f"更新记录不是有界普通文件: {path}")
+            with os.fdopen(fd, 'rb', closefd=False) as stream:
+                content = stream.read(limit + 1)
+            if len(content) > limit:
+                raise ValueError(f"更新记录超过大小限制: {path}")
+            return content
+        finally:
+            os.close(fd)
+
+    def state(self, operation):
+        data = json.loads(self.read_file(self.root / operation_id(operation) / 'state.json'))
+        if (not isinstance(data, dict) or data.get('operation_id') != operation
+                or data.get('phase') not in TERMINAL | {'accepted', 'preparing', 'installing', 'verifying', 'rolling_back'}
+                or not isinstance(data.get('message'), str)
+                or not re.fullmatch(r'sha256:[a-f0-9]{64}', data.get('expected_image_id', ''))):
+            raise ValueError(f"宿主机任务记录损坏或身份不匹配: {operation}")
+        if data.get('closed') is not None and (data.get('closed') is not True or data['phase'] != 'failed'
+                or not re.fullmatch(r'[a-f0-9]{64}', data.get('package_sha256', ''))):
+            raise ValueError(f"宿主机关闭任务记录损坏: {operation}")
+        return data
+
+    def render(self, data):
+        result = {key: data.get(key) for key in ('operation_id', 'phase', 'message', 'expected_image_id', 'actual_image_id', 'exit_code')}
+        log = self.root / data['operation_id'] / 'task.log'
+        try:
+            # 日志独立有界读取，拒绝链接、设备文件；不调用任何状态写入方法。
+            if self.secure:
+                ensure_secure_existing(log, directory=False)
+            fd = os.open(log, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode):
+                    raise ValueError('任务日志不是普通文件')
+                os.lseek(fd, max(0, info.st_size - 8192), os.SEEK_SET)
+                result['log_tail'] = os.read(fd, 8192).decode('utf-8', errors='replace')
+            finally:
+                os.close(fd)
+        except FileNotFoundError:
+            result['log_tail'] = ''
+        if data['phase'] not in TERMINAL and not self.backend.scheduled(data['operation_id']):
+            result['message'] += '；宿主机服务未运行，任务可能中断，请人工核查；本次查询未自动调度或修改任务'
+        return result
+
+    def query(self, operation, check_admission=True):
+        operation_id(operation)
+        try:
+            original = self.state(operation)
+        except FileNotFoundError:
+            original = None
+        if original is not None and not original.get('closed'):
+            return self.render(original)
+        # 双锁在整个观测期间保持共享锁，防止已有提交与安装进行到一半。
+        with ExitStack() as locks:
+            for name in (('admission.lock', 'execution.lock') if check_admission else ('execution.lock',)):
+                locks.enter_context(observe_existing_lock(self.root / name, self.secure))
+            if (self.root / operation).exists() and original is None:
+                raise ValueError('原更新任务目录不完整，不能确认原任务不存在')
+            if self.root.exists():
+                for directory in self.root.iterdir():
+                    if self.secure:
+                        ensure_secure_existing(directory, directory=directory.is_dir())
+                    if directory.is_dir():
+                        data = self.state(operation_id(directory.name))
+                        if data['phase'] not in TERMINAL or data['phase'] == 'rollback_failed':
+                            raise ValueError('设备已有活动或回退失败任务，不能确认原任务不存在: ' + directory.name)
+                active = self.root / 'active.json'
+                if active.exists():
+                    self.state(operation_id(json.loads(self.read_file(active))['operation_id']))
+            self.backend.assert_idle()
+            raise ValueError('LOWER_UPDATE_TASK_NOT_FOUND: 已核验宿主机没有原任务、活动或回退失败任务及安装进程')
+
+    def close(self, operation, digest, expected):
+        """仅显式结束入口可落盘拒绝标记，和受理共用独占锁防迟到提交。"""
+        operation_id(operation)
+        if not re.fullmatch(r'[a-f0-9]{64}', digest) or not re.fullmatch(r'sha256:[a-f0-9]{64}', expected):
+            raise ValueError('关闭任务所需的原安装包摘要或期望镜像身份无效')
+        if self.secure:
+            ensure_secure_existing(self.root)
+        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if self.secure:
+            ensure_secure(self.root)
+            ensure_secure_existing(self.root / 'admission.lock', directory=False)
+        with exclusive(self.root / 'admission.lock'):
+            if os.path.lexists(self.root / operation):
+                existing = self.state(operation)
+                if (existing.get('closed') is not True or existing.get('package_sha256') != digest
+                        or existing.get('expected_image_id') != expected):
+                    raise ValueError('原任务已存在或关闭记录身份不匹配，禁止结束本地记录')
+            try:
+                self.query(operation, check_admission=False)
+            except ValueError as error:
+                if not str(error).startswith('LOWER_UPDATE_TASK_NOT_FOUND:'):
+                    raise
+            else:
+                raise ValueError('原任务已存在，禁止结束本地记录')
+            snapshot = self.backend.inspect()
+            image = snapshot.get('Image')
+            if (not snapshot.get('State', {}).get('Running')
+                    or not isinstance(image, str) or not re.fullmatch(r'sha256:[a-f0-9]{64}', image)):
+                raise ValueError('业务容器未正常运行或镜像身份无效，禁止结束本地记录')
+            directory = self.root / operation
+            created = not directory.exists()
+            directory.mkdir(mode=0o700, exist_ok=True)
+            marker = directory / 'state.json'
+            if self.secure:
+                ensure_secure_existing(marker, directory=False)
+            # 旧版助手也识别 failed 终态，迟到 submit 不会再次调度旧包。
+            try:
+                atomic_json(marker, {'operation_id': operation, 'closed': True, 'closed_at': int(time.time()),
+                                     'phase': 'failed', 'package_sha256': digest, 'expected_image_id': expected,
+                                     'actual_image_id': image, 'exit_code': 1,
+                                     'message': '原任务未受理，用户已显式结束本地记录；禁止迟到提交'})
+            except Exception:
+                # 仅撤销本次创建且尚未落盘的空壳；已提交状态即使 fsync 失败也保留供重试。
+                if created and not os.path.lexists(marker):
+                    try:
+                        marker.with_name('state.json.new').unlink(missing_ok=True)
+                        directory.rmdir()
+                    except OSError:
+                        pass
+                raise
+            if os.name != 'nt':
+                parent = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(parent)
+                finally:
+                    os.close(parent)
+            return {'ok': True}
+
+
+def readonly_main(command, operation=None):
+    """可信内存源码入口，不安装助手、不写目录、状态和日志。"""
+    try:
+        if sys.version_info < (3, 9):
+            raise ValueError('独立更新任务需要 Python 3.9 或更高版本')
+        if not hasattr(os, 'geteuid') or os.geteuid() != 0:
+            raise ValueError('独立更新任务必须由 root 执行')
+        os.environ['PATH'] = '/usr/sbin:/usr/bin:/sbin:/bin'
+        if command == 'preflight':
+            preflight_environment()
+            result = {'ok': True}
+        elif command == 'query':
+            result = ReadOnlyTaskManager().query(operation)
+        else:
+            raise ValueError('未知只读检查命令')
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    except Exception as error:
+        print('更新任务只读检查失败: ' + str(error), file=sys.stderr)
+        return 1
+
+
+def close_main(operation, digest, expected):
+    """显式关闭入口可以写拒绝标记，但不安装、不删除业务包或恢复材料。"""
+    try:
+        if sys.version_info < (3, 9) or not hasattr(os, 'geteuid') or os.geteuid() != 0:
+            raise ValueError('关闭更新任务需要 root 和 Python 3.9 或更高版本')
+        os.umask(0o077)
+        os.environ['PATH'] = '/usr/sbin:/usr/bin:/sbin:/bin'
+        print(json.dumps(ReadOnlyTaskManager().close(operation, digest, expected), ensure_ascii=False))
+        return 0
+    except Exception as error:
+        print('关闭更新任务失败: ' + str(error), file=sys.stderr)
+        return 1
+
+
 def main():
     parser = argparse.ArgumentParser(description="宿主机独立应用更新任务")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -604,6 +870,8 @@ def main():
             sub.add_argument("--package-sha256", required=True)
             sub.add_argument("--expected-image-id", required=True)
     args = parser.parse_args()
+    if args.command == 'query':
+        return readonly_main('query', args.operation_id)
     try:
         if sys.version_info < (3, 9):
             raise ValueError("独立更新任务需要 Python 3.9 或更高版本")
@@ -615,9 +883,6 @@ def main():
         manager = TaskManager()
         if args.command == "submit":
             result = manager.submit(args.operation_id, Path(args.package_path), args.package_sha256, args.expected_image_id)
-        elif args.command == "query":
-            manager.query(args.operation_id)
-            result = manager.reconcile(args.operation_id)
         else:
             result = manager.run(args.operation_id)
         print(json.dumps(result, ensure_ascii=False))

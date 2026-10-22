@@ -4,6 +4,7 @@ import io
 from contextlib import closing
 import importlib.util
 import json
+import os
 import sqlite3
 import gzip
 from pathlib import Path
@@ -386,9 +387,10 @@ class BackendContractTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "LOWER_UPDATE_TASK_NOT_FOUND"):
                 manager.query(operation)
             data = {"operation_id": operation, "phase": "succeeded", "message": "完成"}
-            with patch.object(task, "TaskManager", return_value=manager), patch.object(manager, "query", return_value=data), patch.object(manager, "reconcile", return_value=data), patch.object(task.os, "geteuid", return_value=0, create=True), patch.object(task, "ensure_secure"), patch.object(sys, "argv", ["helper", "query", "--operation-id", operation]), patch.object(sys, "stdout", new_callable=io.StringIO) as stdout:
+            with patch.object(task, "ReadOnlyTaskManager", return_value=manager), patch.object(manager, "query", return_value=data), patch.object(manager, "reconcile") as reconcile, patch.object(task.os, "geteuid", return_value=0, create=True), patch.object(task, "ensure_secure"), patch.object(sys, "argv", ["helper", "query", "--operation-id", operation]), patch.object(sys, "stdout", new_callable=io.StringIO) as stdout:
                 self.assertEqual(task.main(), 0)
                 self.assertEqual(json.loads(stdout.getvalue()), data)
+                reconcile.assert_not_called()
 
     # 平台连接状态不参与健康检查；检查仅使用本地管理端口及原模块。
     def test_health_uses_local_endpoints(self):
@@ -444,6 +446,162 @@ class BackendContractTest(unittest.TestCase):
                 backend.install(Path("fake-installer"), Path(temporary) / "task.log")
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
         killpg.assert_called_once_with(123, task.signal.SIGTERM)
+
+
+class ReadOnlyRecoveryTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "tasks"
+        self.op = str(uuid.uuid4())
+        self.backend = MagicMock(unsafe=True)
+        self.backend.scheduled.return_value = False
+
+    def manager(self):
+        return task.ReadOnlyTaskManager(self.root, backend=self.backend, secure=False)
+
+    # 目录不存在时只能报告不存在，不创建目录或调度任务。
+    def test_missing_root_query_does_not_create_files(self):
+        with self.assertRaisesRegex(ValueError, "LOWER_UPDATE_TASK_NOT_FOUND:"):
+            self.manager().query(self.op)
+        self.assertFalse(self.root.exists())
+        self.backend.assert_idle.assert_called_once()
+        self.backend.schedule.assert_not_called()
+
+    def write_state(self, phase="accepted", operation=None):
+        operation = operation or self.op
+        folder = self.root / operation
+        folder.mkdir(parents=True, exist_ok=True)
+        data = {"operation_id": operation, "phase": phase, "message": "已受理", "expected_image_id": "sha256:" + "a" * 64}
+        (folder / "state.json").write_text(json.dumps(data), encoding="utf-8")
+        return folder / "state.json"
+
+    # 已受理但调度中断的查询只给出说明，不改状态或重发旧安装。
+    def test_accepted_query_never_reschedules_or_writes(self):
+        state = self.write_state()
+        before = state.read_bytes()
+        result = self.manager().query(self.op)
+        self.assertEqual(result["phase"], "accepted")
+        self.assertIn("未自动", result["message"])
+        self.assertEqual(state.read_bytes(), before)
+        self.backend.schedule.assert_not_called()
+
+    # 其他活动或回退失败任务不能被任务不存在掩盖。
+    def test_other_active_or_rollback_failed_blocks_not_found(self):
+        for phase in ("accepted", "installing", "rolling_back", "rollback_failed"):
+            with self.subTest(phase=phase):
+                state = self.write_state(phase, str(uuid.uuid4()))
+                with self.assertRaisesRegex(ValueError, "不能确认原任务不存在"):
+                    self.manager().query(self.op)
+                state.unlink()
+                state.parent.rmdir()
+
+    # 损坏的状态文件必须保留未知语义。
+    def test_corrupt_state_does_not_become_not_found(self):
+        state = self.write_state("succeeded", str(uuid.uuid4()))
+        state.write_text("broken", encoding="utf-8")
+        with self.assertRaises(Exception) as caught:
+            self.manager().query(self.op)
+        self.assertNotIn("LOWER_UPDATE_TASK_NOT_FOUND:", str(caught.exception))
+
+    # 孤立任务目录代表受理未完成，不能直接结束本地记录。
+    def test_incomplete_original_directory_is_not_not_found(self):
+        (self.root / self.op).mkdir(parents=True)
+        with self.assertRaisesRegex(ValueError, "不完整"):
+            self.manager().query(self.op)
+
+    # 安装进程存在或观察失败时不能报告任务不存在。
+    def test_running_installer_blocks_not_found(self):
+        self.backend.assert_idle.side_effect = RuntimeError("安装仍在执行")
+        with self.assertRaisesRegex(RuntimeError, "安装仍在执行"):
+            self.manager().query(self.op)
+
+    # 预检检查已有祖先并保持缺失目录原样。
+    def test_preflight_uses_readonly_existing_ancestor_validation(self):
+        with patch.object(task, "ensure_secure_existing") as secure, patch.object(task.Backend, "environment_preflight") as environment:
+            task.preflight_environment()
+        environment.assert_called_once()
+        self.assertTrue(any(call.args[0] == Path("/usr/local/libexec/mskdsp-update") for call in secure.call_args_list))
+        self.assertTrue(any(call.args[0] == Path("/var/lib/mskdsp-update") for call in secure.call_args_list))
+
+    # 目录检查覆盖根目录，拒绝任一已有祖先组可写。
+    def test_existing_ancestor_group_write_rejected(self):
+        import stat
+        info = MagicMock(st_uid=0, st_mode=stat.S_IFDIR | 0o755)
+        unsafe = MagicMock(st_uid=0, st_mode=stat.S_IFDIR | 0o775)
+        def lookup(path):
+            return unsafe if path == Path("/usr").absolute() else info
+        with patch.object(Path, "lstat", lookup):
+            with self.assertRaises(ValueError):
+                task.ensure_secure_existing(Path("/usr/local/libexec/mskdsp-update"))
+
+    # 显式关闭持久记录后，迟到的旧安装提交必须在受理前拒绝。
+    def test_close_prevents_late_submission(self):
+        self.backend.inspect.return_value = {'State': {'Running': True}, 'Image': 'sha256:' + 'a' * 64}
+        manager = self.manager()
+        manager.close(self.op, 'a' * 64, 'sha256:' + 'b' * 64)
+        self.assertTrue((self.root / self.op / 'state.json').is_file())
+        with self.assertRaisesRegex(ValueError, 'LOWER_UPDATE_TASK_REJECTED:'):
+            task.TaskManager(self.root, backend=self.backend, secure=False).submit(self.op, Path('absent'), 'a' * 64, 'sha256:' + 'b' * 64)
+        self.backend.schedule.assert_not_called()
+        # 模拟旧版 submit 的完整兼容分支：身份相同的 failed 状态绝不调度。
+        legacy = task.TaskManager(self.root, backend=self.backend, secure=False)
+        data = legacy.state(self.op)
+        self.assertEqual(data['package_sha256'], 'a' * 64)
+        self.assertEqual(data['expected_image_id'], 'sha256:' + 'b' * 64)
+        self.assertIn(data['phase'], task.TERMINAL)
+        manager.close(self.op, 'a' * 64, 'sha256:' + 'b' * 64)
+        with self.assertRaisesRegex(ValueError, 'LOWER_UPDATE_TASK_NOT_FOUND:'):
+            manager.query(self.op)
+
+    # 关闭记录写入失败撤销本次空目录，用户可重试，既有目录不得清理。
+    def test_close_write_failure_remains_blocked(self):
+        self.backend.inspect.return_value = {'State': {'Running': True}, 'Image': 'sha256:' + 'a' * 64}
+        with patch.object(task, 'atomic_json', side_effect=OSError('模拟落盘失败')):
+            with self.assertRaisesRegex(OSError, '落盘失败'):
+                self.manager().close(self.op, 'a' * 64, 'sha256:' + 'b' * 64)
+        with self.assertRaisesRegex(ValueError, 'LOWER_UPDATE_TASK_NOT_FOUND:'):
+            self.manager().query(self.op)
+        self.manager().close(self.op, 'a' * 64, 'sha256:' + 'b' * 64)
+        self.assertTrue(self.manager().state(self.op)['closed'])
+
+    # 已有提交锁被占用时只读查询不得宣称任务不存在。
+    @unittest.skipIf(os.name == 'nt', '生产使用 Linux flock，共享锁验证在 Linux 执行')
+    def test_busy_admission_lock_refuses_not_found(self):
+        self.root.mkdir()
+        with task.exclusive(self.root / 'admission.lock'):
+            with self.assertRaisesRegex(ValueError, '锁正在占用'):
+                self.manager().query(self.op)
+
+    # 无任务时仍须检查 systemd 更新服务，不能只读空目录就结束。
+    def test_active_systemd_unit_blocks_absence(self):
+        backend = task.Backend()
+        with patch.object(backend, 'command', return_value='mskdsp-update-old.service loaded active running'):
+            with self.assertRaisesRegex(ValueError, '更新服务'):
+                backend.assert_idle()
+
+    # 完整祖先中的符号链接即使 root 所有也必须拒绝。
+    def test_secure_ancestor_symlink_rejected(self):
+        import stat
+        info = MagicMock(st_uid=0, st_mode=stat.S_IFDIR | 0o755)
+        link = MagicMock(st_uid=0, st_mode=stat.S_IFLNK | 0o755)
+        with patch.object(Path, 'lstat', lambda path: link if path == Path('/usr').absolute() else info):
+            with self.assertRaises(ValueError):
+                task.ensure_secure_existing(Path('/usr/local/libexec/mskdsp-update'))
+
+    # 原任务已存在、容器停止或镜像不合法时禁止结束。
+    def test_close_refuses_existing_task_and_unhealthy_container(self):
+        self.write_state('succeeded')
+        with self.assertRaisesRegex(ValueError, '已存在'):
+            self.manager().close(self.op, 'a' * 64, 'sha256:' + 'b' * 64)
+        state = self.root / self.op / 'state.json'
+        state.unlink()
+        state.parent.rmdir()
+        for snapshot in ({'State': {'Running': False}, 'Image': 'sha256:' + 'a' * 64}, {'State': {'Running': True}, 'Image': 'bad'}):
+            self.backend.inspect.return_value = snapshot
+            with self.assertRaisesRegex(ValueError, '容器'):
+                self.manager().close(self.op, 'a' * 64, 'sha256:' + 'b' * 64)
+        self.assertFalse((self.root / self.op / 'state.json').exists())
 
 
 if __name__ == "__main__":
