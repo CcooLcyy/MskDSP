@@ -52,6 +52,8 @@ public:
                         IEC104Proto::QuerySoeResponse *out) const;
   grpc::Status GenerateSimulationValues(const IEC104Proto::SimulationRequest &request,
                                         IEC104Proto::SimulationSnapshot *out);
+  grpc::Status SetSimulationValues(const IEC104Proto::SetSimulationValuesRequest &request,
+                                   IEC104Proto::SimulationSnapshot *out);
   grpc::Status GetSimulationSnapshot(const std::string &connName, IEC104Proto::SimulationSnapshot *out) const;
   grpc::Status ApplySimulationValues(const std::string &connName);
   grpc::Status ClearSimulationValues(const std::string &connName);

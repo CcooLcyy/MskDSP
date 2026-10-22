@@ -272,6 +272,23 @@ grpc::Status IEC104GrpcServiceImpl::GenerateSimulationValues(
   return status;
 }
 
+grpc::Status IEC104GrpcServiceImpl::SetSimulationValues(
+    grpc::ServerContext *, const IEC104Proto::SetSimulationValuesRequest *request, IEC104Proto::SimulationSnapshot *response) {
+  if (iec104_ == nullptr) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
+  }
+  if (request == nullptr || response == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
+  }
+  auto status = iec104_->linkManager().SetSimulationValues(*request, response);
+  if (!status.ok()) {
+    LOG_ERROR("IEC104 手动设置临时模拟值失败: conn_name={}, 原因={}", request->conn_name(), status.error_message());
+  } else {
+    LOG_INFO("IEC104 手动设置临时模拟值成功: conn_name={}, 点数={}", request->conn_name(), response->points_size());
+  }
+  return status;
+}
+
 grpc::Status IEC104GrpcServiceImpl::GetSimulationSnapshot(
     grpc::ServerContext *, const IEC104Proto::SimulationRequest *request, IEC104Proto::SimulationSnapshot *response) {
   if (iec104_ == nullptr) {

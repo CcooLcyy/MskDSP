@@ -23,6 +23,7 @@ public:
   grpc::Status QuerySoe(grpc::ServerContext *context, const IEC104Proto::QuerySoeRequest *request, IEC104Proto::QuerySoeResponse *response) override;
   grpc::Status SendTimeSync(grpc::ServerContext *context, const IEC104Proto::SendTimeSyncRequest *request, IEC104Proto::Empty *) override;
   grpc::Status GenerateSimulationValues(grpc::ServerContext *context, const IEC104Proto::SimulationRequest *request, IEC104Proto::SimulationSnapshot *response) override;
+  grpc::Status SetSimulationValues(grpc::ServerContext *context, const IEC104Proto::SetSimulationValuesRequest *request, IEC104Proto::SimulationSnapshot *response) override;
   grpc::Status GetSimulationSnapshot(grpc::ServerContext *context, const IEC104Proto::SimulationRequest *request, IEC104Proto::SimulationSnapshot *response) override;
   grpc::Status ApplySimulationValues(grpc::ServerContext *context, const IEC104Proto::SimulationRequest *request, IEC104Proto::Empty *) override;
   grpc::Status ClearSimulationValues(grpc::ServerContext *context, const IEC104Proto::SimulationRequest *request, IEC104Proto::Empty *) override;

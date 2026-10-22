@@ -116,7 +116,293 @@ const IEC104Proto::SimulationPoint *FindSimulationPoint(
   }
   return nullptr;
 }
+
+class IEC104ManualSimulationTest : public ::testing::Test {
+protected:
+  void SetUp() override {
+    mgr.setDataCenterStub(MakeStub(&state));
+    LinkManager::LinkRuntime runtime;
+    runtime.connId = 7;
+    runtime.config = MakeClientConfig("manual", IEC104Proto::STATION_ROLE_SLAVE);
+    runtime.pointTable = MakePointTable();
+    mgr.linksByName_.emplace("manual", std::move(runtime));
+    request.set_conn_name("manual");
+  }
+
+  IEC104Proto::SimulationPoint *AddFloat(double value) {
+    auto *point = request.add_points();
+    point->set_tag("float-tag");
+    point->set_type(IEC104Proto::POINT_TYPE_FLOAT);
+    point->set_double_value(value);
+    return point;
+  }
+
+  IEC104Proto::SimulationPoint *AddSingle(bool value) {
+    auto *point = request.add_points();
+    point->set_tag("single-tag");
+    point->set_type(IEC104Proto::POINT_TYPE_SINGLE);
+    point->set_bool_value(value);
+    return point;
+  }
+
+  FakeDataCenterState state;
+  LinkManager mgr{"IEC104"};
+  IEC104Proto::SetSimulationValuesRequest request;
+  IEC104Proto::SimulationSnapshot response;
+};
 }  // 命名空间结束
+
+// 验证：无需批量生成或运行链路即可直接设置单点，零值存在性保留且其他点不被模拟。
+TEST_F(IEC104ManualSimulationTest, SetsOnePointWithoutPreviousSnapshot) {
+  AddFloat(0);
+  ASSERT_TRUE(mgr.SetSimulationValues(request, &response).ok());
+  ASSERT_EQ(response.points_size(), 1);
+  EXPECT_EQ(response.conn_name(), "manual");
+  EXPECT_EQ(response.points(0).tag(), "float-tag");
+  EXPECT_TRUE(response.points(0).has_double_value());
+  EXPECT_DOUBLE_EQ(response.points(0).double_value(), 0);
+  EXPECT_FALSE(response.points(0).has_bool_value());
+  EXPECT_TRUE(mgr.isSimulationValueActive("manual", "float-tag"));
+  EXPECT_FALSE(mgr.isSimulationValueActive("manual", "float-tag-2"));
+  EXPECT_FALSE(mgr.isSimulationValueActive("manual", "single-tag"));
+  EXPECT_TRUE(mgr.linksByName_.at("manual").lastReportedSingleByTag.empty());
+}
+
+// 验证：混合遥测和遥信按 IOA 排序，false 不被当成缺值，品质和统一时标仅由后端赋值。
+TEST_F(IEC104ManualSimulationTest, KeepsMixedValuesAndAssignsServerMetadata) {
+  auto *single = AddSingle(false);
+  single->set_quality(0x80);
+  single->set_ts_ms(-123);
+  auto *floating = AddFloat(11);
+  floating->set_quality(0x40);
+  floating->set_ts_ms(456);
+  ASSERT_TRUE(mgr.SetSimulationValues(request, &response).ok());
+  ASSERT_EQ(response.points_size(), 2);
+  EXPECT_EQ(response.points(0).tag(), "float-tag");
+  EXPECT_DOUBLE_EQ(response.points(0).double_value(), 11);
+  EXPECT_EQ(response.points(1).tag(), "single-tag");
+  EXPECT_TRUE(response.points(1).has_bool_value());
+  EXPECT_FALSE(response.points(1).bool_value());
+  EXPECT_FALSE(response.points(1).has_double_value());
+  EXPECT_EQ(response.points(0).quality(), 0);
+  EXPECT_EQ(response.points(1).quality(), 0);
+  EXPECT_GT(response.points(0).ts_ms(), 0);
+  EXPECT_EQ(response.points(0).ts_ms(), response.points(1).ts_ms());
+  IEC104Proto::SimulationSnapshot loaded;
+  ASSERT_TRUE(mgr.GetSimulationSnapshot("manual", &loaded).ok());
+  EXPECT_EQ(loaded.SerializeAsString(), response.SerializeAsString());
+}
+
+// 验证：保存完整替换旧快照，取消选中的点恢复真实总召与订阅路径，清除仍可移除手动模拟。
+TEST_F(IEC104ManualSimulationTest, ReplacesSnapshotAndRestoresUnselectedPoint) {
+  auto stub = MakeStub(&state);
+  mgr.setDataCenterStub(stub);
+  EXPECT_CALL(*stub, GetLatest(::testing::_, ::testing::_, ::testing::_))
+      .WillOnce(::testing::Invoke([&](grpc::ClientContext *, const DataCenterProto::GetLatestRequest &latest,
+                                     DataCenterProto::GetLatestResponse *out) {
+        EXPECT_EQ(latest.conn_id(), 7);
+        EXPECT_THAT(latest.tags(), ::testing::UnorderedElementsAre(
+            "float-tag", "float-tag-2", "remote-adjust-tag", "remote-control-tag", "double-control-tag"));
+        return state.GetLatest(latest, out);
+      }));
+  AddFloat(11);
+  AddSingle(true);
+  ASSERT_TRUE(mgr.SetSimulationValues(request, &response).ok());
+  request.clear_points();
+  AddSingle(false);
+  ASSERT_TRUE(mgr.SetSimulationValues(request, &response).ok());
+  ASSERT_EQ(response.points_size(), 1);
+  EXPECT_FALSE(mgr.isSimulationValueActive("manual", "float-tag"));
+  EXPECT_TRUE(mgr.isSimulationValueActive("manual", "single-tag"));
+
+  DataCenterProto::PublishRequest publish;
+  publish.set_conn_id(7);
+  publish.set_tag("float-tag");
+  publish.mutable_value()->set_double_value(21);
+  publish.set_quality(DataCenterProto::QUALITY_GOOD);
+  ASSERT_TRUE(state.Publish(publish).ok());
+  const auto snapshot = mgr.buildInterrogationSnapshot("manual");
+  ASSERT_EQ(snapshot.size(), 2);
+  EXPECT_EQ(snapshot[0].ioa, 100);
+  EXPECT_DOUBLE_EQ(snapshot[0].doubleValue, 10);
+  EXPECT_EQ(snapshot[1].ioa, 200);
+  EXPECT_FALSE(snapshot[1].boolValue);
+  ASSERT_TRUE(mgr.ClearSimulationValues("manual").ok());
+  EXPECT_FALSE(mgr.isSimulationValueActive("manual", "single-tag"));
+}
+
+// 验证：未知/重复点、类型不符、缺失/多余字段、非有限值及短浮点溢出均原子失败，保留旧快照。
+TEST_F(IEC104ManualSimulationTest, RejectsInvalidPointsAtomically) {
+  AddSingle(true);
+  ASSERT_TRUE(mgr.SetSimulationValues(request, &response).ok());
+  const auto previous = response.SerializeAsString();
+  std::vector<IEC104Proto::SetSimulationValuesRequest> invalidRequests;
+  const auto addInvalid = [&](const IEC104Proto::SimulationPoint &point) {
+    auto invalid = request;
+    *invalid.add_points() = point;
+    invalidRequests.push_back(std::move(invalid));
+  };
+  IEC104Proto::SimulationPoint point;
+  point.set_tag("unknown");
+  point.set_type(IEC104Proto::POINT_TYPE_FLOAT);
+  point.set_double_value(1);
+  addInvalid(point);
+  point = request.points(0);
+  addInvalid(point);
+  point.set_tag("float-tag");
+  addInvalid(point);
+  point.set_type(IEC104Proto::POINT_TYPE_FLOAT);
+  point.clear_bool_value();
+  addInvalid(point);
+  point.set_double_value(1);
+  point.set_bool_value(false);
+  addInvalid(point);
+  point.clear_bool_value();
+  for (double value : {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity(),
+                       -std::numeric_limits<double>::infinity(), std::numeric_limits<double>::max(),
+                       static_cast<double>(std::numeric_limits<float>::max()) * 4}) {
+    point.set_double_value(value);
+    addInvalid(point);
+  }
+  point.set_tag("single-tag");
+  point.set_type(IEC104Proto::POINT_TYPE_SINGLE);
+  point.clear_double_value();
+  request.clear_points();
+  addInvalid(point);
+  point.set_double_value(0);
+  addInvalid(point);
+  point.set_bool_value(false);
+  addInvalid(point);
+  invalidRequests.push_back(request);
+
+  for (const auto &invalid : invalidRequests) {
+    SCOPED_TRACE(invalid.DebugString());
+    EXPECT_EQ(mgr.SetSimulationValues(invalid, &response).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    IEC104Proto::SimulationSnapshot loaded;
+    ASSERT_TRUE(mgr.GetSimulationSnapshot("manual", &loaded).ok());
+    EXPECT_EQ(loaded.SerializeAsString(), previous);
+  }
+}
+
+// 验证：持久化固定上报点与非遥测/遥信业务点不能手动模拟，原快照和点表配置均保持不变。
+TEST_F(IEC104ManualSimulationTest, RejectsFixedAndOtherBusinessPointsWithoutChangingConfig) {
+  AddSingle(false);
+  ASSERT_TRUE(mgr.SetSimulationValues(request, &response).ok());
+  const auto previous = response.SerializeAsString();
+  auto &table = mgr.linksByName_.at("manual").pointTable;
+  IEC104Proto::PointTable configured;
+  table.ToProto("manual", &configured);
+  for (auto &point : *configured.mutable_points()) {
+    if (point.tag() == "float-tag") {
+      point.set_fixed_value_enabled(true);
+      point.set_fixed_value(10);
+    }
+  }
+  auto *unclassified = configured.add_points();
+  unclassified->set_tag("unclassified");
+  unclassified->set_ioa(0x700000);
+  unclassified->set_type(IEC104Proto::POINT_TYPE_FLOAT);
+  auto *parameter = configured.add_points();
+  parameter->set_tag("parameter");
+  parameter->set_ioa(0xA000);
+  parameter->set_type(IEC104Proto::POINT_TYPE_FLOAT);
+  parameter->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_PARAMETER);
+  auto *mismatched = configured.add_points();
+  mismatched->set_tag("mismatched-business");
+  mismatched->set_ioa(0x700001);
+  mismatched->set_type(IEC104Proto::POINT_TYPE_SINGLE);
+  mismatched->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_TELEMETRY);
+  ASSERT_TRUE(table.Upsert(configured.points(), true).ok());
+  table.ToProto("manual", &configured);
+  const auto previousConfig = configured.SerializeAsString();
+  for (const auto &tag : {"float-tag", "remote-adjust-tag", "remote-control-tag", "unclassified", "parameter", "mismatched-business"}) {
+    SCOPED_TRACE(tag);
+    request.clear_points();
+    auto *point = request.add_points();
+    point->set_tag(tag);
+    point->set_type(table.FindByTag(tag)->type);
+    if (point->type() == IEC104Proto::POINT_TYPE_SINGLE) {
+      point->set_bool_value(false);
+    } else {
+      point->set_double_value(0);
+    }
+    EXPECT_EQ(mgr.SetSimulationValues(request, &response).error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+    IEC104Proto::SimulationSnapshot loaded;
+    ASSERT_TRUE(mgr.GetSimulationSnapshot("manual", &loaded).ok());
+    EXPECT_EQ(loaded.SerializeAsString(), previous);
+    table.ToProto("manual", &configured);
+    EXPECT_EQ(configured.SerializeAsString(), previousConfig);
+  }
+}
+
+// 验证：输入工程量通过点表反向缩放校验，极小倍率导致的线格式溢出在保存前被拒绝。
+TEST_F(IEC104ManualSimulationTest, RejectsReverseScalingOverflowBeforeReplacingSnapshot) {
+  AddSingle(false);
+  ASSERT_TRUE(mgr.SetSimulationValues(request, &response).ok());
+  const auto previous = response.SerializeAsString();
+  auto &table = mgr.linksByName_.at("manual").pointTable;
+  IEC104Proto::PointTable configured;
+  table.ToProto("manual", &configured);
+  for (auto &point : *configured.mutable_points()) {
+    if (point.tag() == "float-tag") {
+      point.set_scale_decimal("0.00000000000000000001");
+      point.set_offset_decimal("0");
+    }
+  }
+  ASSERT_TRUE(table.Upsert(configured.points(), true).ok());
+  request.clear_points();
+  AddFloat(1e20);
+  EXPECT_EQ(mgr.SetSimulationValues(request, &response).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  IEC104Proto::SimulationSnapshot loaded;
+  ASSERT_TRUE(mgr.GetSimulationSnapshot("manual", &loaded).ok());
+  EXPECT_EQ(loaded.SerializeAsString(), previous);
+}
+
+// 验证：工程量允许超过短浮点范围，只要反向缩放后的原始值可发送；零倍率仍按一处理。
+TEST_F(IEC104ManualSimulationTest, AcceptsEngineeringValueBeyondFloatRangeAndZeroScale) {
+  auto &table = mgr.linksByName_.at("manual").pointTable;
+  IEC104Proto::PointTable configured;
+  table.ToProto("manual", &configured);
+  for (auto &point : *configured.mutable_points()) {
+    if (point.tag() == "float-tag") {
+      point.set_scale_decimal("100");
+      point.set_offset_decimal("0");
+    } else if (point.tag() == "float-tag-2") {
+      point.set_scale_decimal("0");
+      point.set_offset_decimal("1");
+    }
+  }
+  ASSERT_TRUE(table.Upsert(configured.points(), true).ok());
+  AddFloat(1e39);
+  auto *second = request.add_points();
+  second->set_tag("float-tag-2");
+  second->set_type(IEC104Proto::POINT_TYPE_FLOAT);
+  second->set_double_value(11);
+  ASSERT_TRUE(mgr.SetSimulationValues(request, &response).ok());
+  ASSERT_EQ(response.points_size(), 2);
+  EXPECT_DOUBLE_EQ(response.points(0).double_value(), 1e39);
+  const auto snapshot = mgr.buildInterrogationSnapshot("manual", {"float-tag", "float-tag-2"});
+  ASSERT_EQ(snapshot.size(), 2);
+  EXPECT_DOUBLE_EQ(snapshot[0].doubleValue, static_cast<double>(static_cast<float>(1e37)));
+  EXPECT_DOUBLE_EQ(snapshot[1].doubleValue, 10);
+}
+
+// 验证：手动接口拒绝未知链路、空链路名、空响应、主站和无点表，链路停止状态不妨碍保存。
+TEST_F(IEC104ManualSimulationTest, ValidatesConnectionAndStationPreconditions) {
+  AddFloat(11);
+  EXPECT_EQ(mgr.SetSimulationValues(request, nullptr).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  request.set_conn_name("");
+  EXPECT_EQ(mgr.SetSimulationValues(request, &response).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  request.set_conn_name("unknown");
+  EXPECT_EQ(mgr.SetSimulationValues(request, &response).error_code(), grpc::StatusCode::NOT_FOUND);
+  request.set_conn_name("manual");
+  auto &runtime = mgr.linksByName_.at("manual");
+  runtime.config.set_station_role(IEC104Proto::STATION_ROLE_MASTER);
+  EXPECT_EQ(mgr.SetSimulationValues(request, &response).error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+  runtime.config.set_station_role(IEC104Proto::STATION_ROLE_SLAVE);
+  runtime.pointTable = PointTable{};
+  EXPECT_EQ(mgr.SetSimulationValues(request, &response).error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+}
 
 // 验证：固定值直接使用报文数值及有效品质、当前时标，不参与倍率或偏移换算。
 TEST(IEC104FixedValueTest, BuildsWireValueAndSingleSoeBaseline) {

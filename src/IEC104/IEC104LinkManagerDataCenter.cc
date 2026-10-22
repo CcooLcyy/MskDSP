@@ -1457,6 +1457,91 @@ grpc::Status LinkManager::GenerateSimulationValues(
   return fillSimulationSnapshotLocked(it->second, out);
 }
 
+grpc::Status LinkManager::SetSimulationValues(
+    const IEC104Proto::SetSimulationValuesRequest& request, IEC104Proto::SimulationSnapshot* out) {
+  if (out == nullptr) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "响应为空");
+  }
+  const auto& connName = request.conn_name();
+  auto status = validateConnName(connName);
+  if (!status.ok()) {
+    return status;
+  }
+  if (request.points().empty()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请选择至少一个模拟点，清除全部模拟请使用清除接口");
+  }
+
+  // 校验和替换共用链路锁，避免并发点表更新或固定上报配置变更使已校验数据失效。
+  std::lock_guard<std::mutex> lock(mu_);
+  auto it = linksByName_.find(connName);
+  if (it == linksByName_.end()) {
+    return makeNotFound(connName);
+  }
+  auto& link = it->second;
+  if (!isSlaveStation(link.config)) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "仅允许 IEC104 从站设置模拟值");
+  }
+  if (link.pointTable.Tags().empty()) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "点表未配置，无法设置模拟值");
+  }
+
+  const auto now = currentTimestampMs();
+  std::unordered_map<std::string, IEC104Proto::SimulationPoint> values;
+  values.reserve(request.points_size());
+  for (const auto& requested : request.points()) {
+    const auto& tag = requested.tag();
+    const auto point = link.pointTable.FindByTag(tag);
+    if (!point) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::format("模拟点不存在: {}", tag));
+    }
+    if (values.contains(tag)) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::format("模拟点重复: {}", tag));
+    }
+    if (requested.type() != point->type) {
+      return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::format("模拟点类型与点表不一致: {}", tag));
+    }
+    if (point->fixedValueEnabled) {
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("已启用固定上报值的点不能设置临时模拟: {}", tag));
+    }
+    const bool isFloatTelemetry = point->type == IEC104Proto::POINT_TYPE_FLOAT &&
+        point->businessType == IEC104Proto::POINT_BUSINESS_TYPE_TELEMETRY;
+    const bool isSingleTeleindication = point->type == IEC104Proto::POINT_TYPE_SINGLE &&
+        point->businessType == IEC104Proto::POINT_BUSINESS_TYPE_TELEINDICATION;
+    if (!isFloatTelemetry && !isSingleTeleindication) {
+      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("仅浮点遥测和单点遥信支持临时模拟: {}", tag));
+    }
+
+    IEC104Proto::SimulationPoint value;
+    value.set_tag(tag);
+    value.set_type(point->type);
+    value.set_quality(kIec104QualityGood);
+    value.set_ts_ms(now);
+    if (isFloatTelemetry) {
+      if (!requested.has_double_value() || requested.has_bool_value()) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::format("遥测模拟点必须仅填写浮点值: {}", tag));
+      }
+      double rawValue = 0;
+      if (!std::isfinite(requested.double_value()) ||
+          !reverseScale(requested.double_value(), point->scale, point->offset, &rawValue)) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::format("遥测模拟值必须有限且可按点表换算为短浮点: {}", tag));
+      }
+      // 快照保留工程量，应用与总召继续通过既有逻辑执行倍率、偏移和线格式转换。
+      value.set_double_value(requested.double_value());
+    } else {
+      if (!requested.has_bool_value() || requested.has_double_value()) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::format("遥信模拟点必须仅填写布尔值: {}", tag));
+      }
+      value.set_bool_value(requested.bool_value());
+    }
+    values.emplace(tag, std::move(value));
+  }
+
+  // 整份请求通过校验才替换；未选点随旧快照移除，立即恢复真实数据路径，不主动发送。
+  link.simulationValues = std::move(values);
+  LOG_INFO("IEC104 已手动设置临时模拟快照: conn_name={}, 点数={}, 未选点恢复真实数据路径", connName, link.simulationValues.size());
+  return fillSimulationSnapshotLocked(link, out);
+}
+
 grpc::Status LinkManager::GetSimulationSnapshot(
     const std::string& connName, IEC104Proto::SimulationSnapshot* out) const {
   auto status = validateConnName(connName);
