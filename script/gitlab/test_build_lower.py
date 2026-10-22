@@ -359,7 +359,7 @@ class BuildLowerTest(unittest.TestCase):
                 self.assertNotIn("secret-test-certificate", packaged.stdout + packaged.stderr)
                 self.assertTrue((root / "logs" / arch / "ctest.xml").is_file())
                 commands = (root / "commands.jsonl").read_text()
-                self.assertIn('"--parallel", "8"', commands)
+                self.assertIn('"--parallel", "6"', commands)
                 self.assertIn('"--parallel", "2"', commands)
 
     def test_test_failure_blocks_install_and_package(self):

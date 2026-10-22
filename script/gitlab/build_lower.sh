@@ -228,7 +228,7 @@ build_and_test() {
   fetch_protobuf
   export VCPKG_BINARY_SOURCES="clear;files,${VCPKG_DEFAULT_BINARY_CACHE},readwrite"
   export VCPKG_OVERLAY_TRIPLETS="${ROOT}/cmake/vcpkg-triplets"
-  export VCPKG_DISABLE_METRICS=1 VCPKG_MAX_CONCURRENCY=8
+  export VCPKG_DISABLE_METRICS=1 VCPKG_MAX_CONCURRENCY=6
   # 仅重定向官方 GitHub archive，保留 REF 和 SHA512；失败不退回已知不通的首跳。
   # 占位参数由 vcpkg 自行做 shell 转义，外层再次加引号会破坏含空格的目标路径。
   export X_VCPKG_ASSET_SOURCES="clear;x-script,python3 \"${ROOT}/script/gitlab/download_asset.py\" {url} {sha512} {dst};x-block-origin"
@@ -271,8 +271,8 @@ build_and_test() {
     -DgRPC_CPP_PLUGIN_EXECUTABLE="${ROOT}/${BUILD_DIR}/vcpkg_installed/${HOST_TRIPLET}/tools/grpc/grpc_cpp_plugin" \
     "${extra_arguments[@]}"
   ccache --zero-stats
-  log "编译 ${ARCH}，并行度 8"
-  cmake --build "${BUILD_DIR}" --parallel 8
+  log "编译 ${ARCH}，并行度 6"
+  cmake --build "${BUILD_DIR}" --parallel 6
   if [[ "${MODE}" != cross-build ]]; then
     run_complete_ctest
     log '测试成功，安装运行文件并归档独立调试符号'

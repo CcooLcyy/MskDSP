@@ -7,6 +7,7 @@
 - 仅主分支 master/main 的 push 或手动流水线执行；MR、beta 分支和版本标签不重复构建。
 - ARM64、x64 均完成 GCC14 RelWithDebInfo 编译及现有完整 CTest 测试；ARM64 由 x64 交叉编译，在现有 x64 主机通过 QEMU 执行完整单测。
 - 使用独立下位机 Runner、标签、配置和缓存；并发 6，单作业 8 CPU、16 GiB。保留现有平台 Runner 配置。
+- 为对照构建期间的 I/O 等待，每个作业的 CMake 构建及 vcpkg 依赖构建并行度由 8 降为 6；CI 变量、脚本实际命令和中文日志统一为 6。Runner 作业并发仍为 6，单作业 CPU/内存限制及 CTest 并行度 2 保持不变。脚本回归需核对实际构建参数；I/O 改善效果由后续真实流水线验证。
 - 保留 Docker 镜像、自解压 gzip 安装包、SHA256SUMS；ARM64 独立调试符号包归档到 GitLab。
 - 不执行独立的 check_iec61850_package.sh；不减少已有协议单测。
 - 安装包经 gRPC 上传平台软件库，校验完成后自动发布对应架构 CI 通道；不安装设备，不触发 R2 或 GitHub 发布。
