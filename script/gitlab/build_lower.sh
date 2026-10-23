@@ -211,6 +211,11 @@ prepare_build_cache() {
 }
 
 build_package() {
+  export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-4}"
+  export VCPKG_MAX_CONCURRENCY="${VCPKG_MAX_CONCURRENCY:-4}"
+  [[ "${CMAKE_BUILD_PARALLEL_LEVEL}" =~ ^[1-9][0-9]*$ ]] || fail 'CMAKE_BUILD_PARALLEL_LEVEL 必须为正整数'
+  [[ "${VCPKG_MAX_CONCURRENCY}" =~ ^[1-9][0-9]*$ ]] || fail 'VCPKG_MAX_CONCURRENCY 必须为正整数'
+  log "构建资源：主工程并行度 ${CMAKE_BUILD_PARALLEL_LEVEL}，vcpkg 并行度 ${VCPKG_MAX_CONCURRENCY}"
   if [[ "${MODE}" == cross-build ]]; then
     [[ "$(uname -m)" == x86_64 ]] || fail 'ARM64 交叉编译必须在 x64 工具镜像执行'
     [[ "$("${TARGET_CC}" -dumpmachine)" == aarch64-linux-gnu ]] || fail '交叉编译器目标架构不一致'
@@ -234,7 +239,7 @@ build_package() {
   fetch_protobuf
   export VCPKG_BINARY_SOURCES="clear;files,${VCPKG_DEFAULT_BINARY_CACHE},readwrite"
   export VCPKG_OVERLAY_TRIPLETS="${ROOT}/cmake/vcpkg-triplets"
-  export VCPKG_DISABLE_METRICS=1 VCPKG_MAX_CONCURRENCY=6
+  export VCPKG_DISABLE_METRICS=1
   # 仅重定向官方 GitHub archive，保留 REF 和 SHA512；失败不退回已知不通的首跳。
   # 占位参数由 vcpkg 自行做 shell 转义，外层再次加引号会破坏含空格的目标路径。
   export X_VCPKG_ASSET_SOURCES="clear;x-script,python3 \"${ROOT}/script/gitlab/download_asset.py\" {url} {sha512} {dst};x-block-origin"
@@ -277,8 +282,8 @@ build_package() {
     -DgRPC_CPP_PLUGIN_EXECUTABLE="${ROOT}/${BUILD_DIR}/vcpkg_installed/${HOST_TRIPLET}/tools/grpc/grpc_cpp_plugin" \
     "${extra_arguments[@]}"
   ccache --zero-stats
-  log "编译 ${ARCH}，并行度 6"
-  cmake --build "${BUILD_DIR}" --parallel 6
+  log "编译 ${ARCH}，并行度 ${CMAKE_BUILD_PARALLEL_LEVEL}"
+  cmake --build "${BUILD_DIR}" --parallel "${CMAKE_BUILD_PARALLEL_LEVEL}"
   cmake --install "${BUILD_DIR}"
   if [[ "${MODE}" == cross-build ]]; then
     finish_package

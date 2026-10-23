@@ -1,5 +1,5 @@
 # 注册后的令牌只写入服务器私有配置，不提交仓库。
-concurrent = 6
+concurrent = 1
 check_interval = 3
 
 [[runners]]
@@ -7,15 +7,29 @@ check_interval = 3
   url = "http://192.168.10.198:8929"
   token = "REPLACE_ON_SERVER"
   executor = "docker"
-  limit = 6
-  request_concurrency = 6
+  limit = 1
+  request_concurrency = 1
+  environment = ["GIT_CLONE_PATH=/builds/lower/$CI_PROJECT_PATH", "GIT_STRATEGY=clone", "FF_ENABLE_JOB_CLEANUP=true"]
+  pre_build_script = ". /opt/ci-ram/pre-build.sh"
+  [runners.custom_build_dir]
+    enabled = true
   [runners.docker]
     image = "mskdsp-ci-tools:ubuntu24.04-x64"
     privileged = false
-    cpus = "8"
-    memory = "16g"
+    cpus = "4"
+    memory = "24g"
+    memory_swap = "24g"
+    service_memory = "64m"
+    service_memory_swap = "64m"
+    service_cpus = "0.1"
+    wait_for_services_timeout = -1
     shm_size = 1073741824
-    volumes = ["/home/daniel/gitlab-runner-lower-cache:/cache"]
+    volumes = ["mskdsp-ci-ram:/builds", "/home/daniel/gitlab-runner-lower-cache:/cache", "/home/daniel/mskdsp-lower-ci/cache-direct:/ci-cache", "/home/daniel/ci-ram/tools:/opt/ci-ram:ro"]
     pull_policy = ["if-not-present"]
     allowed_pull_policies = ["always", "if-not-present"]
     helper_image = "docker.m.daocloud.io/gitlab/gitlab-runner-helper@sha256:13188cca15a2d44fc621d42da4efb42b81c9527e072d07aab29468dea15af831"
+    [[runners.docker.services]]
+      name = "alpine:3.20"
+      alias = "ci-ram-lease"
+      entrypoint = ["/bin/sh"]
+      command = ["-c", "exec sleep 2147483647"]

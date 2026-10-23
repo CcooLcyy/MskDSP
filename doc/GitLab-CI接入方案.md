@@ -6,8 +6,8 @@
 - 本地仅保留 `gitlab` 远端，`master` 跟踪 `gitlab/master`，普通 `git push` 仅推送 GitLab。协议子模块固定提交保持不变，源地址改为 GitLab。
 - 仅主分支 master/main 的 push 或手动流水线执行；MR、beta 分支和版本标签不重复构建。
 - ARM64、x64 均完成 GCC14 RelWithDebInfo 编译；2026-10-24 起 x64 编译与测试拆成独立作业，只有 `test-x64` 执行现有完整 CTest。ARM64 在 x64 上交叉编译，不编译或执行 ARM64 测试程序，不再创建 ARM64 测试作业。
-- 使用独立下位机 Runner、标签、配置和缓存；并发 6，单作业 8 CPU、16 GiB。保留现有平台 Runner 配置。
-- 为对照构建期间的 I/O 等待，每个作业的 CMake 构建及 vcpkg 依赖构建并行度由 8 降为 6；CI 变量、脚本实际命令和中文日志统一为 6。Runner 作业并发仍为 6，单作业 CPU/内存限制及 CTest 并行度 2 保持不变。脚本回归需核对实际构建参数；I/O 改善效果由后续真实流水线验证。
+- 下位机与通用 Linux Runner 共用容量上限为 24 GiB 的内存工作区，标签、工程目录和持久缓存分开；各 Runner 接单并发为 1，单作业 4 CPU、24 GiB 内存且禁止交换。Windows Runner 不接入。
+- CMake 主工程及 vcpkg 默认并行度为 4，可分别通过 `CMAKE_BUILD_PARALLEL_LEVEL`、`VCPKG_MAX_CONCURRENCY` 设置正整数。两个 Linux Runner 的主脚本通过共享锁串行执行，CTest 并行度仍为 2；实际 I/O 改善以真实流水线测量为准。
 - 保留 Docker 镜像、自解压 gzip 安装包、SHA256SUMS；ARM64 独立调试符号包归档到 GitLab。
 - 不执行独立的 check_iec61850_package.sh；不减少已有协议单测。
 - 安装包经 gRPC 上传平台软件库，校验完成后自动发布对应架构 CI 通道；不安装设备，不触发 R2 或 GitHub 发布。
@@ -37,13 +37,13 @@ ARM64 在独立 x64 工具镜像中使用 GCC14 的 aarch64 交叉工具链编�
 
 - `build-arm64` 成功安装并生成 `release/arm64/*debugsymbols*.tar.gz` 后，上传 `package/`、`release/arm64/`、`logs/arm64/`，排除重复的 `package/debug/**`；不上传整个构建目录，也不生成 ARM64 JUnit 报告。
 - x64 全量测试、测试数量和测试工作区规则不变；ARM64 符号包仍参与打包阶段的 SHA256SUMS，失败不得继续交付。
-- `build-x64` 上传 `package/`、`release/x64/`、`logs/x64/`、`build-x64/`，仅排除 `build-x64/**/*.o`；`test-x64` 上传运行产物、原身份、测试日志和 `build-x64/Testing/`，提供 `logs/x64/ctest.xml` 报告。测试作业不使用构建缓存挂载或编译资源锁。
+- `build-x64` 上传 `package/`、`release/x64/`、`logs/x64/`、`build-x64/`，仅排除 `build-x64/**/*.o`；`test-x64` 上传运行产物、原身份、测试日志和 `build-x64/Testing/`，提供 `logs/x64/ctest.xml` 报告。测试作业不声明构建缓存变量或架构资源锁，但主脚本同样使用公共内存工作区的串行锁。
 
 验收检查 x64 编译阶段不执行测试、独立测试作业的来源校验和失败门禁、两种架构的产物隔离及符号包收集；主分支 CI 再核对 x64 完整 CTest、符号包可解包、打包发布及 SHA256 完整性。大小和耗时收益以真实归档为准。
 
 本轮本地验证：CI 配置测试 10/10、WSL Bash 编排测试 29/29 通过，覆盖 x64 编译与测试分离、来源及绝对路径拒绝、ARM64 符号包和 SHA256、失败门禁及诊断保留；另有元数据、交叉工具链及镜像配置检查 7 项通过，2 项因缺少 CMake 或未启用真实 Docker 镜像验证跳过。`bash -n` 与 `git diff --check` 通过。本轮未执行完整下位机编译、产品 CTest 或远端流水线，实际 Runner 的目录一致性及双包交付仍待 CI 验证。
 
-CI 完整测试的临时工作目录、系统临时目录和 CTest 过程日志使用作业独立的内存文件系统，避免缓存和大产物归档的共享磁盘争用触发 SQLite/SOE 处理等待超时或日志管道反压。内存目录使用短路径，保留 Unix socket 的路径长度余量。CTest 仍执行全部用例，保留原有断言、超时、并行度与失败门禁；测试种子文件读取磁盘原件，模块种子目录整体链接到磁盘以保留共享库的普通文件属性，避免内存挂载的 noexec 影响模块加载。成功及失败后均恢复原工作目录，并将 CTest 日志归档回磁盘。下位机 Runner 的共享内存上限为每作业 1 GiB，计入原有 16 GiB 内存限制。
+CI 完整测试的临时工作目录、系统临时目录和 CTest 过程日志使用作业独立的内存文件系统，避免缓存和大产物归档的共享磁盘争用触发 SQLite/SOE 处理等待超时或日志管道反压。内存目录使用短路径，保留 Unix socket 的路径长度余量。CTest 仍执行全部用例，保留原有断言、超时、并行度与失败门禁；测试种子文件读取磁盘原件，模块种子目录整体链接到磁盘以保留共享库的普通文件属性，避免内存挂载的 noexec 影响模块加载。成功及失败后均恢复原工作目录，并将 CTest 日志归档回磁盘。下位机 Runner 的 `/dev/shm` 上限为每作业 1 GiB，计入作业的 24 GiB 内存限制；它与所有 Linux 作业共用的 24 GiB `/builds` 卷是两个不同的文件系统。
 
 所有隔离测试的工作目录均位于 `build-<arch>/test_env/`，包括模块接口测试；避免特殊工作目录绕过 CI 内存隔离。
 
@@ -72,7 +72,7 @@ metadata.json 冻结 product、version、package_version、platform、file_name�
 
 验收先覆盖外部缓存路径、缺失挂载拒绝、架构隔离、相同架构资源锁及原脚本回归，再在主分支连续执行两轮双架构 CI，核对挂载、命中统计、完整测试、打包发布及对应缓存恢复/保存阶段消失；同时记录耗时、I/O 延迟和 Runner Docker 超时告警。不通过缩短测试或改变构建并行度混淆对照结果。
 
-下位机 Runner 为 `gitlab-runner-lower`，独立 BuildKit 为 `mskdsp-lower-ci-buildkit`，配置保存在服务器 `/home/daniel/mskdsp-lower-ci/`。BuildKit 使用独立状态卷，通过内网 `tcp://192.168.10.198:1235` 提供 mTLS 服务，并配置 Docker Hub 镜像加速；其网络使用宿主机网络，以避开既有容器网络中的外网访问超时。平台原 Runner、原 BuildKit 的配置和状态卷保持不变。项目 `ci-build` 环境的 `BUILDKIT_HOST` 指向下位机独立实例，证书变量受保护且掩码保存。
+下位机 Runner 为 `gitlab-runner-lower`，独立 BuildKit 为 `mskdsp-lower-ci-buildkit`，配置保存在服务器 `/home/daniel/mskdsp-lower-ci/`。BuildKit 使用独立状态卷，通过内网 `tcp://192.168.10.198:1235` 提供 mTLS 服务，并配置 Docker Hub 镜像加速；其网络使用宿主机网络，以避开既有容器网络中的外网访问超时。通用 Linux Runner 同时接入共享内存工作区，平台与下位机 BuildKit 的持久状态卷保持不变。项目 `ci-build` 环境的 `BUILDKIT_HOST` 指向下位机独立实例，证书变量受保护且掩码保存。
 
 服务器直连 GitHub 源码归档入口可能超时；通过 vcpkg 自定义资源下载源将 GitHub tar.gz 归档映射到同一仓库、同一 ref 的官方 codeload 地址。下载器与 vcpkg 均保留 SHA512 校验，不改变依赖版本或校验值。依赖缓存失败时也保存，降低网络重试和首次构建成本。
 

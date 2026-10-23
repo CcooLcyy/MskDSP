@@ -1,6 +1,7 @@
 """验证下位机流水线的触发、双架构门禁及隔离约束。"""
 from pathlib import Path
 import unittest
+import tomllib
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -51,10 +52,8 @@ class LowerCiTest(unittest.TestCase):
         self.assertNotIn("reports", job["artifacts"])
         self.assertIn("junit", self.job("test-x64")["artifacts"]["reports"])
         script = (ROOT / "script/gitlab/build_lower.sh").read_text(encoding="utf-8")
-        self.assertEqual(self.config["variables"]["CMAKE_BUILD_PARALLEL_LEVEL"], "6")
-        self.assertEqual(self.config["variables"]["VCPKG_MAX_CONCURRENCY"], "6")
-        self.assertIn("--parallel 6", script)
-        self.assertIn("VCPKG_MAX_CONCURRENCY=6", script)
+        self.assertEqual(self.config["variables"]["CMAKE_BUILD_PARALLEL_LEVEL"], "4")
+        self.assertEqual(self.config["variables"]["VCPKG_MAX_CONCURRENCY"], "4")
         self.assertIn("--parallel 2", script)
         self.assertIn("--no-tests=error", script)
         self.assertIn("type=docker", script)
@@ -63,6 +62,50 @@ class LowerCiTest(unittest.TestCase):
         self.assertIn("{url} {sha512} {dst};x-block-origin", script)
         self.assertNotIn("docker.sock", script)
         self.assertNotIn("check_iec61850_package", script)
+
+    def test_shared_ram_workspace_preserves_cross_job_path_and_cleanup_after_artifacts(self):
+        # 固定工程路径保证独立测试仍可使用原 CMake 路径，清理由 Runner 在上传后执行。
+        variables = self.config["variables"]
+        self.assertEqual(variables["GIT_CLONE_PATH"], "/builds/lower/$CI_PROJECT_PATH")
+        self.assertEqual(variables["GIT_STRATEGY"], "clone")
+        self.assertEqual(variables["FF_ENABLE_JOB_CLEANUP"], "true")
+        for name in ("build-x64", "build-arm64", "test-x64"):
+            scripts = "\n".join(self.job(name).get("after_script", []))
+            self.assertNotIn("rm -rf", scripts)
+
+    def test_runner_mounts_shared_volume_and_persistent_cache_with_bounded_resources(self):
+        # 作业和 helper 共用命名卷，持久缓存留在磁盘且单 Runner 串行接单。
+        config = tomllib.loads((ROOT / "docker/gitlab-runner/config.template.toml").read_text(encoding="utf-8"))
+        self.assertEqual(config["concurrent"], 1)
+        runner = config["runners"][0]
+        self.assertEqual(runner["limit"], 1)
+        self.assertEqual(runner["request_concurrency"], 1)
+        self.assertTrue(runner["custom_build_dir"]["enabled"])
+        self.assertEqual(runner["pre_build_script"], ". /opt/ci-ram/pre-build.sh")
+        environment = dict(item.split("=", 1) for item in runner["environment"])
+        self.assertEqual(environment["GIT_CLONE_PATH"], "/builds/lower/$CI_PROJECT_PATH")
+        self.assertEqual(environment["GIT_STRATEGY"], "clone")
+        self.assertEqual(environment["FF_ENABLE_JOB_CLEANUP"], "true")
+        docker = runner["docker"]
+        self.assertEqual(docker["cpus"], "4")
+        self.assertEqual(docker["memory"], "24g")
+        self.assertEqual(docker["memory_swap"], "24g")
+        self.assertFalse(docker["privileged"])
+        self.assertIn("mskdsp-ci-ram:/builds", docker["volumes"])
+        self.assertIn("/home/daniel/ci-ram/tools:/opt/ci-ram:ro", docker["volumes"])
+        self.assertIn("/home/daniel/mskdsp-lower-ci/cache-direct:/ci-cache", docker["volumes"])
+
+    def test_runner_lease_keeps_ram_mounted_between_helper_and_build_stages(self):
+        # 服务跨越检出、主脚本及归档阶段持有共享卷，避免阶段容器停止后丢失源码。
+        config = tomllib.loads((ROOT / "docker/gitlab-runner/config.template.toml").read_text(encoding="utf-8"))
+        docker = config["runners"][0]["docker"]
+        self.assertEqual(docker["services"], [{"name": "alpine:3.20", "alias": "ci-ram-lease",
+                                             "entrypoint": ["/bin/sh"],
+                                             "command": ["-c", "exec sleep 2147483647"]}])
+        self.assertEqual(docker["service_memory"], "64m")
+        self.assertEqual(docker["service_memory_swap"], "64m")
+        self.assertEqual(docker["service_cpus"], "0.1")
+        self.assertEqual(docker["wait_for_services_timeout"], -1)
 
     def test_arm_compiler_is_native_x64_with_separate_cross_cache(self):
         job = self.job("build-arm64")

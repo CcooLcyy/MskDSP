@@ -54,6 +54,8 @@ elif name == "cmake" and "-B" in args:
     cache_keys = ("VCPKG_ROOT", "VCPKG_DOWNLOADS", "VCPKG_DEFAULT_BINARY_CACHE", "VCPKG_BINARY_SOURCES", "CCACHE_DIR")
     with open(os.environ["COMMAND_LOG"], "a") as log:
         log.write(json.dumps(["cache-environment", {key: os.environ.get(key) for key in cache_keys}]) + "\n")
+        log.write(json.dumps(["build-resource-environment", {key: os.environ.get(key) for key in
+                              ("CMAKE_BUILD_PARALLEL_LEVEL", "VCPKG_MAX_CONCURRENCY")}]) + "\n")
     if os.environ.get("EXPECT_CACHE_SENTINEL"):
         if Path(os.environ["VCPKG_ROOT"], "source-sentinel").read_text() != os.environ["EXPECT_CACHE_SENTINEL"]:
             sys.exit("未复用持久 vcpkg 源码")
@@ -176,13 +178,40 @@ class BuildLowerTest(unittest.TestCase):
                            BUILDKIT_HOST="tcp://buildkit:1234")
         for key in ("BUILDKIT_CA_B64", "BUILDKIT_CERT_B64", "BUILDKIT_KEY_B64"):
             environment[key] = base64.b64encode(b"secret-test-certificate").decode()
-        for key in ("LOWER_CACHE_ROOT", "LOWER_CACHE_MOUNT", "EXPECT_CACHE_SENTINEL"):
+        for key in ("LOWER_CACHE_ROOT", "LOWER_CACHE_MOUNT", "EXPECT_CACHE_SENTINEL",
+                    "CMAKE_BUILD_PARALLEL_LEVEL", "VCPKG_MAX_CONCURRENCY"):
             environment.pop(key, None)
         return root, environment
 
     def run_phase(self, root, environment, phase):
         return subprocess.run(["bash", "script/gitlab/build_lower.sh", phase, environment["ARCH"]],
                               cwd=root, env=environment, capture_output=True, text=True, timeout=30)
+
+    def test_build_parallelism_defaults_to_four_and_honors_independent_overrides(self):
+        # 默认限制主工程与依赖并发，显式环境变量分别控制两类构建。
+        for overrides, expected in (({}, ("4", "4")),
+                                    ({"CMAKE_BUILD_PARALLEL_LEVEL": "2", "VCPKG_MAX_CONCURRENCY": "3"}, ("2", "3"))):
+            with self.subTest(overrides=overrides):
+                root, environment = self.prepare("x64")
+                result = self.run_phase(root, environment | overrides, "build")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                commands = self.commands(root)
+                build = next(command for command in commands if command[0] == "cmake" and "--build" in command)
+                self.assertEqual(build[build.index("--parallel") + 1], expected[0])
+                resources = next(command[1] for command in commands if command[0] == "build-resource-environment")
+                self.assertEqual(resources, dict(CMAKE_BUILD_PARALLEL_LEVEL=expected[0],
+                                                VCPKG_MAX_CONCURRENCY=expected[1]))
+
+    def test_invalid_parallelism_fails_before_dependency_or_project_build(self):
+        # 非正整数不得变成无界构建或传入编译器命令。
+        for variable in ("CMAKE_BUILD_PARALLEL_LEVEL", "VCPKG_MAX_CONCURRENCY"):
+            for value in ("0", "-1", "2.5", "unlimited", "2; echo unexpected"):
+                with self.subTest(variable=variable, value=value):
+                    root, environment = self.prepare("x64")
+                    result = self.run_phase(root, environment | {variable: value}, "build")
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(variable, result.stdout + result.stderr)
+                    self.assertFalse(any(command[0] in ("cmake", "git") for command in self.commands(root)))
 
     def external_cache(self):
         temporary = tempfile.TemporaryDirectory()
@@ -375,7 +404,7 @@ class BuildLowerTest(unittest.TestCase):
                 self.assertNotIn("secret-test-certificate", packaged.stdout + packaged.stderr)
                 self.assertEqual((root / "logs" / arch / "ctest.xml").is_file(), arch == "x64")
                 commands = (root / "commands.jsonl").read_text()
-                self.assertIn('"--parallel", "6"', commands)
+                self.assertIn('"--parallel", "4"', commands)
                 self.assertEqual('"--parallel", "2"' in commands, arch == "x64")
                 self.assertIn("-DMSKDSP_BUILD_TESTS=" + ("ON" if arch == "x64" else "OFF"), commands)
 
