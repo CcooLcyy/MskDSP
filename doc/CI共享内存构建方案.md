@@ -4,12 +4,12 @@
 
 两个 Linux Docker Runner 共用一个容量上限为 24 GiB 的临时文件系统，减少编译中间文件、临时文件和产物交接对系统盘的读写。Windows Runner、业务容器、持久依赖缓存与 BuildKit 的持久状态不迁移。
 
-24 GiB 仅限制共享文件容量，不是所有编译进程的总内存限额，也不预先分配物理内存。重编译阶段通过共享锁串行执行，各 Runner 的接单并发先限制为 1，主工程默认 4 路编译。
+24 GiB 仅限制共享文件容量，不是所有编译进程的总内存限额，也不预先分配物理内存。重编译阶段通过共享的两个编译槽控制并发，下位机 Runner 接单并发为 2，通用 Linux Runner 为 1，主工程默认 4 路编译。
 
 ## 输入、隔离与生命周期
 
 - 使用 Docker local 驱动创建命名卷 `mskdsp-ci-ram`，参数为 `type=tmpfs`、`device=tmpfs`、`o=size=24g,noswap,mode=1777`。Docker 守护进程负责挂载，无需额外修改宿主机 fstab 或启动特权容器。
-- 两个 Runner 都把同一个卷挂到实际作业容器、helper 和作业级保持服务的 `/builds`；管理容器本身无需挂载。下位机检出路径为 `/builds/lower/$CI_PROJECT_PATH`，通用 Linux Runner 为 `/builds/linux/$CI_PROJECT_PATH`。每个 Runner 仅允许一个作业，避免同一路径被并行使用；两类 Runner 的目录分离。
+- 两个 Runner 都把同一个卷挂到实际作业容器、helper 和作业级保持服务的 `/builds`；管理容器本身无需挂载。下位机检出路径为 `/builds/lower/$CI_PROJECT_PATH/$CI_PIPELINE_ID/$ARCH`，通用 Linux Runner 为 `/builds/linux/$CI_PROJECT_PATH`。同一流水线的同一架构按依赖关系顺序执行，编译与独立测试的路径保持一致；不同流水线和架构的目录隔离。通用 Runner 仍只允许一个作业。
 - 每个作业增加 `ci-ram-lease` 服务，使用本地已有 `alpine:3.20` 执行 sleep；单服务上限 64 MiB、0.1 CPU、禁止交换。服务不监听端口，两个专用 Runner 禁用服务端口健康等待。配置工具拒绝带其他服务的配置，避免影响已有数据库等服务。
 - 保持服务在源码准备之前运行，直到归档和清理结束后才移除。必须保留：Docker local tmpfs 会在最后运行容器停止时卸载，仅创建一个空命名卷不能保证 helper → 编译容器 → helper 之间的数据连续性。
 - 下位机 build/test 作业必须保留相同的工程绝对路径，继续验证构建身份与 `build_context.json`，完整 x64 CTest 门禁不变。
@@ -19,7 +19,7 @@
 
 ## 作业准备与资源边界
 
-公共准备脚本检查工作区文件系统为 tmpfs、剩余空间和作业目录边界，创建工程内的临时目录并设置 TMPDIR/GOTMPDIR。共享锁贯穿本次作业的主脚本执行，覆盖 buildctl 请求的远端编译，避免两个 Runner 同时发起重编译。归档与源码准备仍可能重叠，需监测峰值。
+公共准备脚本检查工作区文件系统为 tmpfs、剩余空间和作业目录边界，创建工程内的临时目录并设置 TMPDIR/GOTMPDIR。每个编译槽贯穿本次作业的主脚本执行，覆盖 buildctl 请求的远端编译，全局最多同时运行两个主脚本；第三个作业等待可用槽。归档与源码准备仍可能重叠，需监测峰值。
 
 现有 ccache、vcpkg 源码/下载/二进制缓存、Cargo target/CARGO_HOME、Go 编译缓存继续持久保存。BuildKit 内部缓存不属于 Runner 的工作区，保留其磁盘缓存以免每轮全量重编；内存工作区不等于消除全部磁盘写入。
 
@@ -35,3 +35,9 @@
 2. 两个容器看到相同文件，容量合计为 24 GiB，挂载含 noswap；保持服务覆盖源码准备、编译与归档容器的切换，最后消费者退出后实际内存文件释放。
 3. 实际 Runner 作业校验工作区、跨 Runner 隔离、归档 helper 可见性与任务成功/失败后的清理。
 4. 运行下位机 build → artifact → 独立 x64 CTest 验证，记录内存、空间、CPU I/O 等待与产物状态；不绕过原测试或发布门禁。
+
+## 编译缓存跨目录复用
+
+RelWithDebInfo 的调试信息会把工作目录纳入 ccache 缓存键。仅设置 CCACHE_BASEDIR 不足以跨流水线目录复用，C/C++ 编译参数同时添加 -fdebug-prefix-map 和 -ffile-prefix-map，将工程路径映射为 /usr/src/mskdsp；不关闭 hash_dir 或放松文件校验。实际工具镜像 ccache 4.9.1 / GCC14 的最小真实编译验证：未映射时两次跨目录编译均未命中，映射后第二次直接命中且两份对象字节相同。
+
+持久 ccache 默认上限调整为每架构 8G（ccache 配置值），可通过 CCACHE_MAXSIZE 配置；不占共享内存卷配额。首次启用新参数需要建立新缓存，后续流水线分别记录命中率，不能将冷缓存首轮当作温缓存提速结论。

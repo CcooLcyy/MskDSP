@@ -54,6 +54,7 @@ class LowerCiTest(unittest.TestCase):
         script = (ROOT / "script/gitlab/build_lower.sh").read_text(encoding="utf-8")
         self.assertEqual(self.config["variables"]["CMAKE_BUILD_PARALLEL_LEVEL"], "4")
         self.assertEqual(self.config["variables"]["VCPKG_MAX_CONCURRENCY"], "4")
+        self.assertEqual(self.config["variables"]["CCACHE_MAXSIZE"], "8G")
         self.assertIn("--parallel 2", script)
         self.assertIn("--no-tests=error", script)
         self.assertIn("type=docker", script)
@@ -64,26 +65,29 @@ class LowerCiTest(unittest.TestCase):
         self.assertNotIn("check_iec61850_package", script)
 
     def test_shared_ram_workspace_preserves_cross_job_path_and_cleanup_after_artifacts(self):
-        # 固定工程路径保证独立测试仍可使用原 CMake 路径，清理由 Runner 在上传后执行。
+        # 同流水线同架构路径一致，不同流水线及架构隔离，清理由 Runner 在上传后执行。
         variables = self.config["variables"]
-        self.assertEqual(variables["GIT_CLONE_PATH"], "/builds/lower/$CI_PROJECT_PATH")
+        self.assertEqual(variables["GIT_CLONE_PATH"], "/builds/lower/$CI_PROJECT_PATH/$CI_PIPELINE_ID/$ARCH")
         self.assertEqual(variables["GIT_STRATEGY"], "clone")
         self.assertEqual(variables["FF_ENABLE_JOB_CLEANUP"], "true")
         for name in ("build-x64", "build-arm64", "test-x64"):
             scripts = "\n".join(self.job(name).get("after_script", []))
             self.assertNotIn("rm -rf", scripts)
+        for name in ("build-x64", "build-arm64", "test-x64", "package-x64", "package-arm64", "publish-x64", "publish-arm64"):
+            self.assertIn(self.job(name)["variables"]["ARCH"], ("x64", "arm64"))
+        self.assertEqual(self.job("build-x64")["variables"]["ARCH"], self.job("test-x64")["variables"]["ARCH"])
 
     def test_runner_mounts_shared_volume_and_persistent_cache_with_bounded_resources(self):
-        # 作业和 helper 共用命名卷，持久缓存留在磁盘且单 Runner 串行接单。
+        # 作业和 helper 共用命名卷，持久缓存留在磁盘且下位机允许两个隔离作业。
         config = tomllib.loads((ROOT / "docker/gitlab-runner/config.template.toml").read_text(encoding="utf-8"))
-        self.assertEqual(config["concurrent"], 1)
+        self.assertEqual(config["concurrent"], 2)
         runner = config["runners"][0]
-        self.assertEqual(runner["limit"], 1)
-        self.assertEqual(runner["request_concurrency"], 1)
+        self.assertEqual(runner["limit"], 2)
+        self.assertEqual(runner["request_concurrency"], 2)
         self.assertTrue(runner["custom_build_dir"]["enabled"])
         self.assertEqual(runner["pre_build_script"], ". /opt/ci-ram/pre-build.sh")
         environment = dict(item.split("=", 1) for item in runner["environment"])
-        self.assertEqual(environment["GIT_CLONE_PATH"], "/builds/lower/$CI_PROJECT_PATH")
+        self.assertEqual(environment["GIT_CLONE_PATH"], "/builds/lower/$CI_PROJECT_PATH/$CI_PIPELINE_ID/$ARCH")
         self.assertEqual(environment["GIT_STRATEGY"], "clone")
         self.assertEqual(environment["FF_ENABLE_JOB_CLEANUP"], "true")
         docker = runner["docker"]

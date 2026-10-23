@@ -1,5 +1,5 @@
 # 注册后的令牌只写入服务器私有配置，不提交仓库。
-concurrent = 1
+concurrent = 2
 check_interval = 3
 
 [[runners]]
@@ -7,9 +7,9 @@ check_interval = 3
   url = "http://192.168.10.198:8929"
   token = "REPLACE_ON_SERVER"
   executor = "docker"
-  limit = 1
-  request_concurrency = 1
-  environment = ["GIT_CLONE_PATH=/builds/lower/$CI_PROJECT_PATH", "GIT_STRATEGY=clone", "FF_ENABLE_JOB_CLEANUP=true"]
+  limit = 2
+  request_concurrency = 2
+  environment = ["GIT_CLONE_PATH=/builds/lower/$CI_PROJECT_PATH/$CI_PIPELINE_ID/$ARCH", "GIT_STRATEGY=clone", "FF_ENABLE_JOB_CLEANUP=true"]
   pre_build_script = ". /opt/ci-ram/pre-build.sh"
   [runners.custom_build_dir]
     enabled = true

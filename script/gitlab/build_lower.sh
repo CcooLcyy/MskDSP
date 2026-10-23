@@ -244,7 +244,8 @@ build_package() {
   # 占位参数由 vcpkg 自行做 shell 转义，外层再次加引号会破坏含空格的目标路径。
   export X_VCPKG_ASSET_SOURCES="clear;x-script,python3 \"${ROOT}/script/gitlab/download_asset.py\" {url} {sha512} {dst};x-block-origin"
   export CCACHE_BASEDIR="${ROOT}"
-  export CCACHE_COMPILERCHECK=content CCACHE_MAXSIZE=1G
+  export CCACHE_COMPILERCHECK=content CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-8G}"
+  log "编译缓存：${CCACHE_DIR}，每架构上限 ${CCACHE_MAXSIZE}，调试与文件路径统一到 /usr/src/mskdsp"
   local baseline
   baseline="$(python3 -c 'import json; print(json.load(open("vcpkg-configuration.json"))["default-registry"]["baseline"])')"
   if [[ ! -d "${VCPKG_ROOT}/.git" ]]; then
@@ -271,8 +272,12 @@ build_package() {
   if [[ "${MODE}" == cross-build ]]; then
     extra_arguments+=("-DVCPKG_CHAINLOAD_TOOLCHAIN_FILE=${ROOT}/cmake/toolchains/aarch64-linux-gcc14.cmake")
   fi
+  # 流水线和架构使用独立工作区；统一调试及 __FILE__ 路径，安全复用跨目录编译缓存。
+  local prefix_flags="-fdebug-prefix-map=${ROOT}=/usr/src/mskdsp -ffile-prefix-map=${ROOT}=/usr/src/mskdsp"
   cmake -S . -B "${BUILD_DIR}" -G Ninja \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_COMPILER="${TARGET_CC}" -DCMAKE_CXX_COMPILER="${TARGET_CXX}" \
+    "-DCMAKE_C_FLAGS=${CFLAGS:+${CFLAGS} }${prefix_flags}" \
+    "-DCMAKE_CXX_FLAGS=${CXXFLAGS:+${CXXFLAGS} }${prefix_flags}" \
     -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
     -DCMAKE_CXX_SCAN_FOR_MODULES=OFF \
     -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \

@@ -56,6 +56,8 @@ elif name == "cmake" and "-B" in args:
         log.write(json.dumps(["cache-environment", {key: os.environ.get(key) for key in cache_keys}]) + "\n")
         log.write(json.dumps(["build-resource-environment", {key: os.environ.get(key) for key in
                               ("CMAKE_BUILD_PARALLEL_LEVEL", "VCPKG_MAX_CONCURRENCY")}]) + "\n")
+        log.write(json.dumps(["compiler-cache-environment", {key: os.environ.get(key) for key in
+                              ("CCACHE_BASEDIR", "CCACHE_MAXSIZE", "CCACHE_COMPILERCHECK")}]) + "\n")
     if os.environ.get("EXPECT_CACHE_SENTINEL"):
         if Path(os.environ["VCPKG_ROOT"], "source-sentinel").read_text() != os.environ["EXPECT_CACHE_SENTINEL"]:
             sys.exit("未复用持久 vcpkg 源码")
@@ -179,7 +181,7 @@ class BuildLowerTest(unittest.TestCase):
         for key in ("BUILDKIT_CA_B64", "BUILDKIT_CERT_B64", "BUILDKIT_KEY_B64"):
             environment[key] = base64.b64encode(b"secret-test-certificate").decode()
         for key in ("LOWER_CACHE_ROOT", "LOWER_CACHE_MOUNT", "EXPECT_CACHE_SENTINEL",
-                    "CMAKE_BUILD_PARALLEL_LEVEL", "VCPKG_MAX_CONCURRENCY"):
+                    "CMAKE_BUILD_PARALLEL_LEVEL", "VCPKG_MAX_CONCURRENCY", "CCACHE_MAXSIZE", "CFLAGS", "CXXFLAGS"):
             environment.pop(key, None)
         return root, environment
 
@@ -212,6 +214,31 @@ class BuildLowerTest(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn(variable, result.stdout + result.stderr)
                     self.assertFalse(any(command[0] in ("cmake", "git") for command in self.commands(root)))
+
+    def test_ccache_capacity_defaults_to_eight_gigabytes_and_honors_override(self):
+        # 持久磁盘上的 ccache 不受内存工作区容量影响，允许按宿主磁盘容量调整上限。
+        for override, expected in (({}, "8G"), ({"CCACHE_MAXSIZE": "2G"}, "2G")):
+            with self.subTest(override=override):
+                root, environment = self.prepare("x64")
+                result = self.run_phase(root, environment | override, "build")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                cache = next(command[1] for command in self.commands(root) if command[0] == "compiler-cache-environment")
+                self.assertEqual(cache["CCACHE_MAXSIZE"], expected)
+                self.assertEqual(cache["CCACHE_BASEDIR"], str(root))
+                self.assertEqual(cache["CCACHE_COMPILERCHECK"], "content")
+
+    def test_debug_prefix_is_stable_across_pipeline_roots_without_dropping_user_flags(self):
+        # 真实命中另用编译器探针验收，此处验证两种架构的调试路径映射及参数传递。
+        for arch, mode in (("x64", "build"), ("arm64", "cross-build")):
+            with self.subTest(arch=arch):
+                root, environment = self.prepare(arch)
+                environment.update(TOOL_ARCH="x86_64", CFLAGS="-Wall", CXXFLAGS="-Wextra")
+                result = self.run_phase(root, environment, mode)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                configure = next(command for command in self.commands(root) if command[0] == "cmake" and "-B" in command)
+                prefix = "-fdebug-prefix-map=" + str(root) + "=/usr/src/mskdsp -ffile-prefix-map=" + str(root) + "=/usr/src/mskdsp"
+                self.assertIn("-DCMAKE_C_FLAGS=-Wall " + prefix, configure)
+                self.assertIn("-DCMAKE_CXX_FLAGS=-Wextra " + prefix, configure)
 
     def external_cache(self):
         temporary = tempfile.TemporaryDirectory()

@@ -1,5 +1,5 @@
 #!/bin/sh
-# 本文件由 Runner 的主作业 shell 引入，文件描述符 9 将持续持有共享锁。
+# 本文件由主作业 shell 引入，描述符 8 持有编译槽，描述符 9 仅保护准入并兼容旧版作业。
 ci_ram_prepare() {
     case "${CI_PROJECT_DIR:-}" in
         /builds/lower/*|/builds/linux/*) ;;
@@ -15,9 +15,29 @@ ci_ram_prepare() {
         return 1
     fi
     command -v flock >/dev/null 2>&1 || { echo '共享内存准备失败：缺少 flock' >&2; return 1; }
-    echo '等待共享编译锁，同一时刻只执行一个作业主脚本'
+    echo '等待共享编译槽，同一时刻最多执行两个作业主脚本'
     exec 9>/builds/.compile.lock || return 1
-    flock 9 || { echo '共享内存准备失败：无法取得共享编译锁' >&2; return 1; }
+    while :; do
+        # 先等待旧版作业的长期锁，再在短暂互斥区内尝试两个编译槽。
+        flock 9 || { echo '共享内存准备失败：无法取得编译准入锁' >&2; return 1; }
+        ci_ram_acquired=false
+        for ci_ram_slot in 0 1; do
+            exec 8>"/builds/.compile-slot-$ci_ram_slot.lock" || return 1
+            if flock -n 8; then
+                ci_ram_acquired=true
+                break
+            fi
+            exec 8>&-
+        done
+        flock -u 9 || { echo '共享内存准备失败：无法释放编译准入锁' >&2; return 1; }
+        if [ "$ci_ram_acquired" = true ]; then
+            break
+        fi
+        # 等待期间不占用准入互斥锁，避免阻止其他作业释放或获取编译槽。
+        sleep 1
+    done
+    exec 9>&-
+    echo "已取得共享编译槽 $ci_ram_slot，作业退出时自动释放"
     ci_ram_free_kib=$(df -Pk /builds | awk 'END {print $4}')
     case "$ci_ram_free_kib" in
         ''|*[!0-9]*) echo '共享内存准备失败：无法读取剩余容量' >&2; return 1 ;;

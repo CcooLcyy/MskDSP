@@ -6,8 +6,8 @@
 - 本地仅保留 `gitlab` 远端，`master` 跟踪 `gitlab/master`，普通 `git push` 仅推送 GitLab。协议子模块固定提交保持不变，源地址改为 GitLab。
 - 仅主分支 master/main 的 push 或手动流水线执行；MR、beta 分支和版本标签不重复构建。
 - ARM64、x64 均完成 GCC14 RelWithDebInfo 编译；2026-10-24 起 x64 编译与测试拆成独立作业，只有 `test-x64` 执行现有完整 CTest。ARM64 在 x64 上交叉编译，不编译或执行 ARM64 测试程序，不再创建 ARM64 测试作业。
-- 下位机与通用 Linux Runner 共用容量上限为 24 GiB 的内存工作区，标签、工程目录和持久缓存分开；各 Runner 接单并发为 1，单作业 4 CPU、24 GiB 内存且禁止交换。Windows Runner 不接入。
-- CMake 主工程及 vcpkg 默认并行度为 4，可分别通过 `CMAKE_BUILD_PARALLEL_LEVEL`、`VCPKG_MAX_CONCURRENCY` 设置正整数。两个 Linux Runner 的主脚本通过共享锁串行执行，CTest 并行度仍为 2；实际 I/O 改善以真实流水线测量为准。
+- 下位机与通用 Linux Runner 共用容量上限为 24 GiB 的内存工作区，标签、工程目录和持久缓存分开；下位机接单并发为 2、通用 Linux 接单并发为 1，单作业 4 CPU、24 GiB 内存且禁止交换。Windows Runner 不接入。
+- CMake 主工程及 vcpkg 默认并行度为 4，可分别通过 `CMAKE_BUILD_PARALLEL_LEVEL`、`VCPKG_MAX_CONCURRENCY` 设置正整数。两个 Linux Runner 的主脚本通过共享编译槽最多并行执行两个，CTest 并行度仍为 2；实际 I/O 改善以真实流水线测量为准。
 - 保留 Docker 镜像、自解压 gzip 安装包、SHA256SUMS；ARM64 独立调试符号包归档到 GitLab。
 - 不执行独立的 check_iec61850_package.sh；不减少已有协议单测。
 - 安装包经 gRPC 上传平台软件库，校验完成后自动发布对应架构 CI 通道；不安装设备，不触发 R2 或 GitHub 发布。

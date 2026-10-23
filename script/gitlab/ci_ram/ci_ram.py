@@ -68,13 +68,15 @@ def patch_runner(block, runner, kind):
     top_key = "[[runners]]"
     top = sections[top_key]
     env = list(runner.get("environment", []))
-    wanted = {"GIT_STRATEGY": "clone", "FF_ENABLE_JOB_CLEANUP": "true", "GIT_CLONE_PATH": f"/builds/{kind}/$CI_PROJECT_PATH"}
+    clone_path = "/builds/lower/$CI_PROJECT_PATH/$CI_PIPELINE_ID/$ARCH" if kind == "lower" else "/builds/linux/$CI_PROJECT_PATH"
+    wanted = {"GIT_STRATEGY": "clone", "FF_ENABLE_JOB_CLEANUP": "true", "GIT_CLONE_PATH": clone_path}
     env = [item for item in env if item.split("=", 1)[0] not in wanted]
     env.extend(f"{key}={value}" for key, value in wanted.items())
     script = runner.get("pre_build_script", "")
     if script != PRE_BUILD and not script.startswith(PRE_BUILD + "\n"):
         script = PRE_BUILD + ("\n" + script if script else "")
-    for key, value in {"limit": 1, "request_concurrency": 1, "environment": env, "pre_build_script": script}.items():
+    concurrency = 2 if kind == "lower" else 1
+    for key, value in {"limit": concurrency, "request_concurrency": concurrency, "environment": env, "pre_build_script": script}.items():
         top = set_value(top, key, value)
     sections[top_key] = top
     custom = "[runners.custom_build_dir]"
@@ -125,7 +127,7 @@ def patch_config(source, kind):
     prefix = source[:starts[0].start()]
     first_table = re.search(r"(?m)^\s*\[", prefix)
     global_end = first_table.start() if first_table else len(prefix)
-    prefix = set_value(prefix[:global_end], "concurrent", 1) + prefix[global_end:]
+    prefix = set_value(prefix[:global_end], "concurrent", 2 if kind == "lower" else 1) + prefix[global_end:]
     chunks = [prefix]
     for index, start in enumerate(starts):
         end = starts[index + 1].start() if index + 1 < len(starts) else len(source)
