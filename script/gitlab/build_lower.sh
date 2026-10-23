@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 两种架构共用编译测试与打包逻辑，发布作业仅消费冻结产物。
+# 两种架构共用构建与打包逻辑，仅 x64 执行测试，发布作业仅消费冻结产物。
 set -euo pipefail
 
 log() { printf '[lower-ci] %s\n' "$*"; }
@@ -11,12 +11,17 @@ ARCH="${2:-}"
 case "${ARCH}" in
   arm64) TRIPLET=arm64-linux-dynamic; PLATFORM=linux/arm64; BASE_IMAGE=arm64v8/ubuntu:noble; STRIP_DEBUG=ON ;;
   x64) TRIPLET=x64-linux-dynamic; PLATFORM=linux/amd64; BASE_IMAGE=amd64/ubuntu:noble; STRIP_DEBUG=OFF ;;
-  *) fail '用法：build_lower.sh build|package arm64|x64' ;;
+  *) fail '用法：build_lower.sh build x64 | test x64 | cross-build arm64 | package arm64|x64' ;;
+esac
+case "${MODE}:${ARCH}" in
+  build:x64|test:x64|cross-build:arm64|package:arm64|package:x64) ;;
+  *) fail '用法：build_lower.sh build x64 | test x64 | cross-build arm64 | package arm64|x64；仅 x64 执行测试' ;;
 esac
 HOST_TRIPLET="${TRIPLET}"
 CACHE_ARCH="${ARCH}"
 TARGET_CC=gcc-14
 TARGET_CXX=g++-14
+BUILD_TESTS=ON
 if [[ "${MODE}" == cross-build ]]; then
   [[ "${ARCH}" == arm64 ]] || fail '交叉编译模式仅支持 ARM64'
   TRIPLET=arm64-linux-dynamic-cross
@@ -24,6 +29,7 @@ if [[ "${MODE}" == cross-build ]]; then
   CACHE_ARCH=arm64-cross
   TARGET_CC=aarch64-linux-gnu-gcc-14
   TARGET_CXX=aarch64-linux-gnu-g++-14
+  BUILD_TESTS=OFF
 fi
 BUILD_DIR="build-${ARCH}"
 RELEASE_DIR="release/${ARCH}"
@@ -55,7 +61,7 @@ print("已通过临时 CI_JOB_TOKEN 配置获取 protobuf 子模块")
 PY
 }
 
-finish_tested_package() {
+finish_package() {
   find package -maxdepth 1 -type f -name '*_test' -delete
   if [[ "${ARCH}" == arm64 ]]; then
     [[ -d package/debug ]] || fail 'ARM64 安装结果缺少独立调试符号目录'
@@ -204,7 +210,7 @@ prepare_build_cache() {
   fi
 }
 
-build_and_test() {
+build_package() {
   if [[ "${MODE}" == cross-build ]]; then
     [[ "$(uname -m)" == x86_64 ]] || fail 'ARM64 交叉编译必须在 x64 工具镜像执行'
     [[ "$("${TARGET_CC}" -dumpmachine)" == aarch64-linux-gnu ]] || fail '交叉编译器目标架构不一致'
@@ -254,7 +260,7 @@ build_and_test() {
     "${VCPKG_ROOT}/bootstrap-vcpkg.sh" -disableMetrics
   fi
   configure_local_registry "${baseline}"
-  log "配置 ${ARCH} RelWithDebInfo，完整测试开启，strip=${STRIP_DEBUG}"
+  log "配置 ${ARCH} RelWithDebInfo，测试程序编译=${BUILD_TESTS}，strip=${STRIP_DEBUG}"
   log '启用官方 codeload 归档下载与严格 SHA512 校验'
   local extra_arguments=()
   if [[ "${MODE}" == cross-build ]]; then
@@ -265,7 +271,7 @@ build_and_test() {
     -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
     -DCMAKE_CXX_SCAN_FOR_MODULES=OFF \
     -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
-    -DMSKDSP_BUILD_TESTS=ON -DMSKDSP_STRIP_DEBUG="${STRIP_DEBUG}" \
+    -DMSKDSP_BUILD_TESTS="${BUILD_TESTS}" -DMSKDSP_STRIP_DEBUG="${STRIP_DEBUG}" \
     -DVCPKG_HOST_TRIPLET="${HOST_TRIPLET}" -DVCPKG_TARGET_TRIPLET="${TRIPLET}" \
     -DProtobuf_PROTOC_EXECUTABLE="${ROOT}/${BUILD_DIR}/vcpkg_installed/${HOST_TRIPLET}/tools/protobuf/protoc" \
     -DgRPC_CPP_PLUGIN_EXECUTABLE="${ROOT}/${BUILD_DIR}/vcpkg_installed/${HOST_TRIPLET}/tools/grpc/grpc_cpp_plugin" \
@@ -273,32 +279,25 @@ build_and_test() {
   ccache --zero-stats
   log "编译 ${ARCH}，并行度 6"
   cmake --build "${BUILD_DIR}" --parallel 6
-  if [[ "${MODE}" != cross-build ]]; then
-    run_complete_ctest
-    log '测试成功，安装运行文件并归档独立调试符号'
-  else
-    log '交叉编译完成，安装运行依赖并保留全部测试程序供 ARM64 作业执行'
-  fi
   cmake --install "${BUILD_DIR}"
   if [[ "${MODE}" == cross-build ]]; then
+    finish_package
+    log 'ARM64 交叉编译、安装及独立调试符号归档完成，打包等待 x64 完整测试通过'
+  else
     python3 - "${ROOT}" "${RELEASE_DIR}/build_context.json" <<'PY'
 import json
 from pathlib import Path
 import sys
-Path(sys.argv[2]).write_text(json.dumps({"project_dir": sys.argv[1], "target_triplet": "arm64-linux-dynamic-cross",
+Path(sys.argv[2]).write_text(json.dumps({"project_dir": sys.argv[1], "target_triplet": "x64-linux-dynamic",
                                       "host_triplet": "x64-linux-dynamic"}) + "\n", encoding="utf-8")
 PY
-    log 'ARM64 交叉编译与安装完成，等待独立 ARM64 完整 CTest'
-  else
-    finish_tested_package
-    log "${ARCH} 编译、完整测试与安装完成"
+    log 'x64 编译与安装完成，保留完整测试依赖，等待独立 x64 完整 CTest'
   fi
 }
 
-test_arm64() {
-  [[ "${ARCH}" == arm64 ]] || fail '独立测试模式仅支持 ARM64'
-  case "$(uname -m)" in aarch64|arm64) ;; *) fail 'ARM64 测试必须在 ARM64 工具镜像执行' ;; esac
-  [[ -f "${BUILD_DIR}/CTestTestfile.cmake" && -f package/MskDSP ]] || fail '缺少完整交叉编译构建目录或测试产物'
+test_x64() {
+  [[ "$(uname -m)" == x86_64 ]] || fail 'x64 测试必须在原生 x64 工具镜像执行'
+  [[ -f "${BUILD_DIR}/CTestTestfile.cmake" && -f package/MskDSP ]] || fail '缺少完整 x64 构建目录或测试产物'
   python3 - "${ROOT}" "${RELEASE_DIR}" <<'PY'
 import json
 import os
@@ -308,17 +307,19 @@ sys.path.insert(0, str(Path("script/gitlab").resolve()))
 from lower_metadata import package_identity
 release = Path(sys.argv[2])
 identity = json.loads((release / "build_identity.json").read_text(encoding="utf-8"))
-# 复用来源验证，但不生成测试作业身份，继续保留原编译作业的 build_job_id。
+# 仅验证原构建来源，不使用测试作业身份覆盖 build_job_id。
 package_identity(identity, os.environ)
+if identity.get("platform") != "linux-x64":
+    raise SystemExit("x64 测试构建产物架构不一致")
 context = json.loads((release / "build_context.json").read_text(encoding="utf-8"))
-if context != {"project_dir": sys.argv[1], "target_triplet": "arm64-linux-dynamic-cross", "host_triplet": "x64-linux-dynamic"}:
-    raise SystemExit("ARM64 测试路径或交叉编译来源不一致，拒绝执行其他构建的测试")
-print("已核对 ARM64 原构建身份与跨镜像绝对路径")
+if context != {"project_dir": sys.argv[1], "target_triplet": "x64-linux-dynamic", "host_triplet": "x64-linux-dynamic"}:
+    raise SystemExit("x64 测试路径或构建来源不一致，拒绝执行其他构建的测试")
+print("已核对 x64 原构建身份与测试绝对路径")
 PY
   fetch_protobuf
   run_complete_ctest
-  finish_tested_package
-  log 'ARM64 完整 CTest 成功，保留原构建身份并完成独立调试符号归档'
+  finish_package
+  log 'x64 完整 CTest 成功，保留原构建身份并完成交付目录清理'
 }
 
 package_release() {
@@ -327,7 +328,7 @@ package_release() {
   : "${BUILDKIT_CERT_B64:?缺少 BuildKit 客户端证书}"
   : "${BUILDKIT_KEY_B64:?缺少 BuildKit 客户端私钥}"
   [[ "${BUILDKIT_HOST}" == tcp://* ]] || fail 'BuildKit 必须通过 mTLS TCP 地址访问'
-  [[ -f package/MskDSP && -f "${RELEASE_DIR}/build_identity.json" ]] || fail '缺少已测试的编译产物'
+  [[ -f package/MskDSP && -f "${RELEASE_DIR}/build_identity.json" ]] || fail '缺少编译产物或原始构建身份'
   local temporary version image_tar
   temporary="$(mktemp -d)"
   trap 'rm -rf "${temporary:-}"' EXIT
@@ -370,9 +371,9 @@ package_release() {
 }
 
 case "${MODE}" in
-  build) build_and_test ;;
-  cross-build) build_and_test ;;
-  test) test_arm64 ;;
+  build) build_package ;;
+  cross-build) build_package ;;
+  test) test_x64 ;;
   package) package_release ;;
-  *) fail '用法：build_lower.sh build|package arm64|x64' ;;
+  *) fail '用法：build_lower.sh build x64 | test x64 | cross-build arm64 | package arm64|x64' ;;
 esac

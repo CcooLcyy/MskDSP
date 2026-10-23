@@ -43,12 +43,13 @@ class LowerCiTest(unittest.TestCase):
         self.assertNotIn("build_lower.sh", scripts)
 
     def test_build_cache_architectures_and_reports_are_isolated(self):
-        job = self.job("build-test-x64")
+        job = self.job("build-x64")
         self.assertEqual(job["tags"], ["lower-ci"])
         self.assertEqual(job["environment"]["name"], "ci-build")
         self.assertEqual(job["artifacts"]["when"], "always")
         self.assertEqual(job["cache"], [])
-        self.assertIn("junit", job["artifacts"]["reports"])
+        self.assertNotIn("reports", job["artifacts"])
+        self.assertIn("junit", self.job("test-x64")["artifacts"]["reports"])
         script = (ROOT / "script/gitlab/build_lower.sh").read_text(encoding="utf-8")
         self.assertEqual(self.config["variables"]["CMAKE_BUILD_PARALLEL_LEVEL"], "6")
         self.assertEqual(self.config["variables"]["VCPKG_MAX_CONCURRENCY"], "6")
@@ -71,13 +72,13 @@ class LowerCiTest(unittest.TestCase):
         self.assertEqual(job["variables"]["ARCH"], "arm64")
         self.assertEqual(job["variables"]["CACHE_ARCH"], "arm64-cross")
         self.assertEqual(job["cache"], [])
-        self.assertIn("build-arm64/", job["artifacts"]["paths"])
+        self.assertNotIn("build-arm64/", job["artifacts"]["paths"])
         self.assertNotIn("reports", job["artifacts"])
         self.assertNotIn("build-test-arm64", self.config)
 
     def test_builds_use_persistent_cache_and_architecture_resource_groups(self):
         groups = []
-        for name, profile in (("build-test-x64", "x64"), ("build-arm64", "arm64-cross")):
+        for name, profile in (("build-x64", "x64"), ("build-arm64", "arm64-cross")):
             with self.subTest(job=name):
                 job = self.job(name)
                 self.assertEqual(job["cache"], [])
@@ -93,48 +94,67 @@ class LowerCiTest(unittest.TestCase):
         self.assertNotIn("cache", self.config["build-arm64"])
 
     def test_persistent_cache_stays_outside_artifacts_and_downstream_jobs(self):
-        for name in ("build-test-x64", "build-arm64", "test-arm64", "package-arm64", "package-x64"):
+        for name in ("build-x64", "build-arm64", "test-x64", "package-arm64", "package-x64"):
             with self.subTest(job=name):
                 job = self.job(name)
                 paths = job["artifacts"]["paths"]
                 self.assertFalse(any("ci-cache" in path or ".cache" in path or "LOWER_CACHE" in path
                                      for path in paths))
                 self.assertFalse(any(path in (".", "./", "/") for path in paths))
-                if name not in ("build-test-x64", "build-arm64"):
+                if name not in ("build-x64", "build-arm64"):
                     self.assertNotIn("LOWER_CACHE_MOUNT", job.get("variables", {}))
                     self.assertNotIn("resource_group", job)
-        self.assertIn("build-arm64/", self.job("build-arm64")["artifacts"]["paths"])
-        self.assertEqual(self.job("test-arm64")["needs"], [{"job": "build-arm64", "artifacts": True}])
+        self.assertNotIn("build-arm64/", self.job("build-arm64")["artifacts"]["paths"])
 
-    def test_arm_tests_execute_under_qemu_and_gate_packaging(self):
-        job = self.job("test-arm64")
-        self.assertEqual(job["image"]["docker"]["platform"], "linux/arm64")
-        self.assertEqual(job["image"]["name"], "mskdsp-ci-tools:ubuntu24.04-arm64")
-        self.assertIn('test "${ARCH}"', "\n".join(job["script"]))
-        self.assertEqual(job["needs"], [{"job": "build-arm64", "artifacts": True}])
-        self.assertEqual(job["artifacts"]["reports"]["junit"], "logs/arm64/ctest.xml")
-        self.assertEqual(self.job("package-arm64")["needs"], [{"job": "test-arm64", "artifacts": True}])
+    def test_only_x64_tests_gate_both_architecture_packages(self):
+        self.assertEqual(self.config["stages"], ["build", "test", "package", "publish"])
+        self.assertNotIn("build-test-x64", self.config)
+        self.assertNotIn("test-arm64", self.config)
+        self.assertNotIn("test-arm64", self.config["stages"])
+        self.assertEqual(self.job("package-arm64")["needs"], [
+            {"job": "build-arm64", "artifacts": True},
+            {"job": "test-x64", "artifacts": False},
+        ])
+        self.assertEqual(self.job("package-x64")["needs"], [
+            {"job": "test-x64", "artifacts": True},
+        ])
+        for name in ("build-x64", "build-arm64", "test-x64", "package-arm64", "package-x64"):
+            with self.subTest(job=name):
+                job = self.job(name)
+                self.assertFalse(job.get("allow_failure", False))
+                self.assertEqual(job.get("when", "on_success"), "on_success")
+                for need in job.get("needs", []):
+                    self.assertFalse(need.get("optional", False))
 
-    def test_arm_build_artifacts_only_exclude_linked_object_files(self):
-        # 编译结束后只省略对象文件，保留测试程序、运行依赖、符号和 CTest 目录。
+    def test_x64_tests_run_in_separate_native_job_with_build_artifacts(self):
+        build = self.job("build-x64")
+        tested = self.job("test-x64")
+        self.assertEqual(build["stage"], "build")
+        self.assertIn('build "$ARCH"', "\n".join(build["script"]))
+        self.assertIn("build-x64/", build["artifacts"]["paths"])
+        self.assertEqual(build["artifacts"]["exclude"], ["build-x64/**/*.o"])
+        self.assertEqual(tested["stage"], "test")
+        self.assertEqual(tested["image"]["docker"]["platform"], "linux/amd64")
+        self.assertEqual(tested["image"]["name"], "mskdsp-ci-tools:ubuntu24.04-x64")
+        self.assertIn('test "${ARCH}"', "\n".join(tested["script"]))
+        self.assertEqual(tested["needs"], [{"job": "build-x64", "artifacts": True}])
+        self.assertEqual(tested["artifacts"]["paths"],
+                         ["package/", "release/x64/", "logs/x64/", "build-x64/Testing/"])
+        self.assertEqual(tested["artifacts"]["reports"]["junit"], "logs/x64/ctest.xml")
+        self.assertEqual(tested["artifacts"]["when"], "always")
+
+    def test_arm_build_artifacts_keep_runtime_symbols_and_diagnostics(self):
+        # 交叉编译直接交付运行文件和符号归档，不再传递测试目录及重复符号。
         artifacts = self.job("build-arm64")["artifacts"]
-        self.assertEqual(artifacts.get("exclude", []), ["build-arm64/**/*.o"])
-        self.assertEqual(artifacts["paths"],
-                         ["package/", "release/arm64/", "logs/arm64/", "build-arm64/"])
-        self.assertEqual(artifacts["when"], "always")
-
-    def test_arm_test_artifacts_preserve_symbols_archive_and_diagnostics(self):
-        # 原始符号只在测试完成并生成符号归档后省略；符号归档、失败日志和报告仍传递。
-        artifacts = self.job("test-arm64")["artifacts"]
         self.assertEqual(artifacts.get("exclude", []), ["package/debug/**"])
         self.assertEqual(artifacts["paths"],
-                         ["package/", "release/arm64/", "logs/arm64/", "build-arm64/Testing/"])
+                         ["package/", "release/arm64/", "logs/arm64/"])
         self.assertEqual(artifacts["when"], "always")
-        self.assertEqual(artifacts["reports"]["junit"], "logs/arm64/ctest.xml")
+        self.assertNotIn("reports", artifacts)
 
     def test_artifact_exclusions_do_not_spread_to_other_jobs(self):
-        # 精简规则必须局限于两个 ARM64 作业，避免继承影响其他架构或发布包。
-        for name in (".build", ".build-test", "build-test-x64", ".package", "package-arm64", "package-x64"):
+        # 排除规则仅限对应构建作业，避免继承影响测试作业或发布包。
+        for name in (".build", "test-x64", ".package", "package-arm64", "package-x64"):
             with self.subTest(job=name):
                 self.assertNotIn("exclude", self.job(name)["artifacts"])
 

@@ -72,9 +72,10 @@ ModuleManager 使用模块 manifest 构建依赖图，并自动处理依赖启�
 ### 默认 CI 与软件发布
 
 本仓库默认使用 GitLab CI，入口为 `.gitlab-ci.yml`，作业定义见
-`.gitlab/ci/ci.yml`。仅 `master/main` 的 push 或手动流水线运行：两个架构完成编译与
-完整 CTest 后生成 Docker gzip 自解压安装包，双架构打包成功后上传平台软件库并发布各自 CI 通道。
-ARM64 使用 x64 GCC14 交叉编译，在 ARM64 工具镜像中通过 QEMU 执行完整测试。
+`.gitlab/ci/ci.yml`。仅 `master/main` 的 push 或手动流水线运行：完成双架构编译和
+x64 完整 CTest 后生成 Docker gzip 自解压安装包，双架构打包成功后上传平台软件库并发布各自 CI 通道。
+ARM64 使用 x64 GCC14 交叉编译，不编译或运行 ARM64 测试程序；两种架构的打包均以 x64 测试成功为前提。
+流水线按 `build → test → package → publish` 展示：`build-x64` 仅编译和安装，独立 `test-x64` 作业运行全部 CTest。
 
 安装包、SHA256SUMS、冻结元数据、测试日志和 ARM64 独立调试符号保存在 GitLab artifacts。
 现场安装包可从平台软件库获取；软件入库、通道发布与设备安装分别执行。

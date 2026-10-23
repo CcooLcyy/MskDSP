@@ -1,10 +1,12 @@
 """通过可控命令替身验证真实 Bash 编排、失败门禁及产物传递。"""
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 
@@ -45,7 +47,7 @@ elif name == "cmake" and "--install" in args:
         Path("package", child).mkdir(parents=True, exist_ok=True)
     Path("package/MskDSP").write_bytes(b"binary")
     Path("package/temporary_test").write_bytes(b"test")
-    if os.environ["ARCH"] == "arm64":
+    if os.environ["ARCH"] == "arm64" and os.environ.get("MISSING_SYMBOLS") != "1":
         Path("package/debug").mkdir()
         Path("package/debug/MskDSP.debug").write_bytes(b"symbols")
 elif name == "cmake" and "-B" in args:
@@ -263,13 +265,13 @@ class BuildLowerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assert_cache_environment(root, cache, "x64")
 
-    def test_arm_test_does_not_require_build_cache_mount(self):
+    def test_arm_package_does_not_require_build_cache_mount(self):
         root, environment = self.prepare("arm64")
         built = self.run_phase(root, environment | {"TOOL_ARCH": "x86_64"}, "cross-build")
         self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
         environment.update(LOWER_CACHE_ROOT="无效的相对缓存", LOWER_CACHE_MOUNT="/不存在的构建挂载")
-        tested = self.run_phase(root, environment, "test")
-        self.assertEqual(tested.returncode, 0, tested.stdout + tested.stderr)
+        packaged = self.run_phase(root, environment, "package")
+        self.assertEqual(packaged.returncode, 0, packaged.stdout + packaged.stderr)
 
     def test_nonmounted_cache_directory_is_rejected_before_cmake(self):
         root, environment = self.prepare("x64")
@@ -343,8 +345,15 @@ class BuildLowerTest(unittest.TestCase):
         for arch in ("arm64", "x64"):
             with self.subTest(arch=arch):
                 root, environment = self.prepare(arch)
-                built = self.run_phase(root, environment, "build")
+                environment["TOOL_ARCH"] = "x86_64"
+                built = self.run_phase(root, environment, "cross-build" if arch == "arm64" else "build")
                 self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+                if arch == "x64":
+                    self.assertTrue((root / "package/temporary_test").is_file())
+                    self.assertFalse(any(command[0] == "ctest" for command in self.commands(root)))
+                    environment["CI_JOB_ID"] = "49"
+                    tested = self.run_phase(root, environment, "test")
+                    self.assertEqual(tested.returncode, 0, tested.stdout + tested.stderr)
                 self.assertFalse((root / "package/temporary_test").exists())
                 environment["CI_JOB_ID"] = "50"
                 packaged = self.run_phase(root, environment, "package")
@@ -355,20 +364,33 @@ class BuildLowerTest(unittest.TestCase):
                 self.assertEqual(metadata["package_job_id"], "50")
                 self.assertTrue((release / metadata["file_name"]).is_file())
                 self.assertEqual(len(list(release.glob("*debugsymbols*.tar.gz"))), 1 if arch == "arm64" else 0)
+                checksums = {}
+                for line in (release / "SHA256SUMS").read_text().splitlines():
+                    digest, filename = line.split(maxsplit=1)
+                    checksums[filename] = digest
+                    self.assertEqual(hashlib.sha256((release / filename).read_bytes()).hexdigest(), digest)
+                self.assertEqual(set(checksums), {metadata["file_name"]} | {
+                    item.name for item in release.glob("*debugsymbols*.tar.gz")})
                 self.assertNotIn("secret-token-value", built.stdout + built.stderr)
                 self.assertNotIn("secret-test-certificate", packaged.stdout + packaged.stderr)
-                self.assertTrue((root / "logs" / arch / "ctest.xml").is_file())
+                self.assertEqual((root / "logs" / arch / "ctest.xml").is_file(), arch == "x64")
                 commands = (root / "commands.jsonl").read_text()
                 self.assertIn('"--parallel", "6"', commands)
-                self.assertIn('"--parallel", "2"', commands)
+                self.assertEqual('"--parallel", "2"' in commands, arch == "x64")
+                self.assertIn("-DMSKDSP_BUILD_TESTS=" + ("ON" if arch == "x64" else "OFF"), commands)
 
-    def test_test_failure_blocks_install_and_package(self):
-        root, environment = self.prepare("arm64")
-        result = self.run_phase(root, environment | {"TEST_FAILURE": "1"}, "build")
+    def test_x64_test_failure_preserves_test_files_and_reports(self):
+        root, environment = self.prepare("x64")
+        built = self.run_phase(root, environment, "build")
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        result = self.run_phase(root, environment | {"TEST_FAILURE": "1"}, "test")
         self.assertNotEqual(result.returncode, 0)
-        self.assertFalse((root / "package/MskDSP").exists())
-        self.assertTrue((root / "logs/arm64/ctest.xml").is_file())
-        self.assertNotIn('"--install"', (root / "commands.jsonl").read_text())
+        self.assertTrue((root / "package/temporary_test").is_file())
+        self.assertTrue((root / "logs/x64/ctest.xml").is_file())
+        self.assertFalse((root / "release/x64/metadata.json").exists())
+        self.assertFalse(any(command[0] == "buildctl" for command in self.commands(root)))
+        self.assertEqual(sum(command[0] == "cmake" and "--install" in command
+                             for command in self.commands(root)), 1)
 
     def test_other_pipeline_cannot_repackage_frozen_build(self):
         root, environment = self.prepare("x64")
@@ -379,7 +401,7 @@ class BuildLowerTest(unittest.TestCase):
         self.assertFalse((root / "release/x64/metadata.json").exists())
         self.assertNotIn('"buildctl"', (root / "commands.jsonl").read_text())
 
-    def test_cross_build_uses_host_tools_and_leaves_tests_for_arm_job(self):
+    def test_cross_build_uses_host_tools_and_archives_symbols_without_tests(self):
         root, environment = self.prepare("arm64")
         built = self.run_phase(root, environment | {"TOOL_ARCH": "x86_64"}, "cross-build")
         self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
@@ -389,30 +411,97 @@ class BuildLowerTest(unittest.TestCase):
         self.assertIn("-DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++-14", configure)
         self.assertIn("-DVCPKG_HOST_TRIPLET=x64-linux-dynamic", configure)
         self.assertIn("-DVCPKG_TARGET_TRIPLET=arm64-linux-dynamic-cross", configure)
+        self.assertIn("-DMSKDSP_BUILD_TESTS=OFF", configure)
         self.assertIn("-DProtobuf_PROTOC_EXECUTABLE=" + str(root / "build-arm64/vcpkg_installed/x64-linux-dynamic/tools/protobuf/protoc"), configure)
-        self.assertTrue((root / "package/temporary_test").is_file())
-        self.assertEqual(list((root / "release/arm64").glob("*debugsymbols*")), [])
+        self.assertFalse((root / "package/temporary_test").exists())
+        symbols = list((root / "release/arm64").glob("*debugsymbols*.tar.gz"))
+        self.assertEqual(len(symbols), 1)
+        with tarfile.open(symbols[0], "r:gz") as archive:
+            self.assertEqual(archive.extractfile("debug/MskDSP.debug").read(), b"symbols")
+        self.assertFalse((root / "logs/arm64/ctest.xml").exists())
+        self.assertEqual(list((root / "release/arm64").glob("*context*")), [])
         identity = (root / "release/arm64/build_identity.json").read_bytes()
         tested = self.run_phase(root, environment | {"CI_JOB_ID": "49"}, "test")
-        self.assertEqual(tested.returncode, 0, tested.stdout + tested.stderr)
-        self.assertFalse((root / "package/temporary_test").exists())
+        self.assertNotEqual(tested.returncode, 0)
+        self.assertIn("仅 x64 执行测试", tested.stdout + tested.stderr)
         self.assertEqual((root / "release/arm64/build_identity.json").read_bytes(), identity)
-        self.assertEqual(len(list((root / "release/arm64").glob("*debugsymbols*"))), 1)
         all_commands = [json.loads(line) for line in (root / "commands.jsonl").read_text().splitlines()]
+        self.assertFalse(any(command[0] == "ctest" for command in all_commands))
         self.assertEqual(sum(command[0] == "cmake" and "--install" in command for command in all_commands), 1)
-        self.assertEqual(sum(command[0] == "git" and "submodule" in command and "update" in command for command in all_commands), 2)
+        self.assertEqual(sum(command[0] == "git" and "submodule" in command and "update" in command for command in all_commands), 1)
 
-    def test_arm_test_rejects_wrong_pipeline_and_preserves_tests_on_failure(self):
-        root, environment = self.prepare("arm64")
-        built = self.run_phase(root, environment | {"TOOL_ARCH": "x86_64"}, "cross-build")
+    def test_removed_modes_reject_before_running_tools(self):
+        for arch, phase in (("arm64", "build"), ("arm64", "test"), ("x64", "cross-build")):
+            with self.subTest(arch=arch, phase=phase):
+                root, environment = self.prepare(arch)
+                result = self.run_phase(root, environment, phase)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("仅 x64 执行测试", result.stdout + result.stderr)
+                self.assertEqual(self.commands(root), [])
+
+    def test_x64_build_and_test_are_separate_and_preserve_original_build_identity(self):
+        root, environment = self.prepare("x64")
+        built = self.run_phase(root, environment, "build")
         self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
-        wrong = self.run_phase(root, environment | {"CI_PIPELINE_ID": "101"}, "test")
-        self.assertNotEqual(wrong.returncode, 0)
-        failed = self.run_phase(root, environment | {"TEST_FAILURE": "1"}, "test")
-        self.assertNotEqual(failed.returncode, 0)
         self.assertTrue((root / "package/temporary_test").is_file())
-        self.assertTrue((root / "logs/arm64/ctest.xml").is_file())
-        self.assertEqual(list((root / "release/arm64").glob("*debugsymbols*")), [])
+        self.assertFalse((root / "logs/x64/ctest.xml").exists())
+        commands = self.commands(root)
+        self.assertFalse(any(command[0] == "ctest" for command in commands))
+        configure = next(command for command in commands if command[0] == "cmake" and "-B" in command)
+        self.assertIn("-DMSKDSP_BUILD_TESTS=ON", configure)
+        release = root / "release/x64"
+        identity = (release / "build_identity.json").read_bytes()
+        context = json.loads((release / "build_context.json").read_text())
+        self.assertEqual(context, dict(project_dir=str(root), target_triplet="x64-linux-dynamic",
+                                       host_triplet="x64-linux-dynamic"))
+        environment.update(CI_JOB_ID="49", LOWER_CACHE_ROOT="无效的相对缓存", LOWER_CACHE_MOUNT="/不存在的构建挂载")
+        tested = self.run_phase(root, environment, "test")
+        self.assertEqual(tested.returncode, 0, tested.stdout + tested.stderr)
+        self.assertEqual((release / "build_identity.json").read_bytes(), identity)
+        self.assertFalse((root / "package/temporary_test").exists())
+        self.assertTrue((root / "logs/x64/ctest.xml").is_file())
+        all_commands = self.commands(root)
+        self.assertEqual(sum(command[0] == "ctest" for command in all_commands), 1)
+        self.assertEqual(sum(command[0] == "cmake" and "--install" in command for command in all_commands), 1)
+        self.assertEqual(sum(command[0] == "git" and "submodule" in command and "update" in command
+                             for command in all_commands), 2)
+
+    def test_x64_test_rejects_other_pipeline_or_inconsistent_build_context(self):
+        for mismatch in ("pipeline", "project_dir", "target_triplet", "host_triplet"):
+            with self.subTest(mismatch=mismatch):
+                root, environment = self.prepare("x64")
+                built = self.run_phase(root, environment, "build")
+                self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+                if mismatch == "pipeline":
+                    environment["CI_PIPELINE_ID"] = "101"
+                else:
+                    filename = root / "release/x64/build_context.json"
+                    context = json.loads(filename.read_text())
+                    context[mismatch] = "与原构建不一致"
+                    filename.write_text(json.dumps(context))
+                count = len(self.commands(root))
+                tested = self.run_phase(root, environment, "test")
+                self.assertNotEqual(tested.returncode, 0)
+                self.assertTrue((root / "package/temporary_test").is_file())
+                self.assertFalse(any(command[0] == "ctest" for command in self.commands(root)[count:]))
+
+    def test_cross_build_symbol_failure_blocks_success(self):
+        for failure in ("missing", "archive"):
+            with self.subTest(failure=failure):
+                root, environment = self.prepare("arm64")
+                environment["TOOL_ARCH"] = "x86_64"
+                if failure == "missing":
+                    environment["MISSING_SYMBOLS"] = "1"
+                else:
+                    executable = root / "bin/tar"
+                    executable.write_text("#!/bin/sh\nprintf '符号归档失败\\n' >&2\nexit 27\n", encoding="utf-8")
+                    executable.chmod(0o755)
+                result = self.run_phase(root, environment, "cross-build")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("符号", result.stdout + result.stderr)
+                self.assertFalse(any(command[0] in ("ctest", "buildctl") for command in self.commands(root)))
+                self.assertEqual(list((root / "release/arm64").glob("*debugsymbols*.tar.gz")), [])
+                self.assertFalse((root / "release/arm64/metadata.json").exists())
 
     def test_cross_make_ports_do_not_inherit_native_compiler_environment(self):
         root, environment = self.prepare("arm64")

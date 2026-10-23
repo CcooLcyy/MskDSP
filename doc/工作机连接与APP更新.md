@@ -47,7 +47,7 @@ python script/dev/lower_device_ssh.py sudo "docker ps"             # 需要 root
 
 ## 4. 从平台软件库获取安装包
 
-GitLab CI 完成双架构编译、完整测试及打包后，自动上传平台软件库并发布到 CI 通道。登录平台的[软件版本页面](http://192.168.10.198:8082/software)，选择「下位机 / CI」及 `linux-arm64` 即可下载安装包和 `SHA256SUMS`。
+GitLab CI 完成双架构编译、x64 完整测试及打包后，自动上传平台软件库并发布到 CI 通道。登录平台的[软件版本页面](http://192.168.10.198:8082/software)，选择「下位机 / CI」及 `linux-arm64` 即可下载安装包和 `SHA256SUMS`。
 
 命令行也可通过平台公开清单下载，并校验实际文件：
 
