@@ -428,9 +428,7 @@ if(MSKDSP_STRIP_DEBUG)
     if(NOT MSKDSP_TARGET_TYPE)
       continue()
     endif()
-    if(MSKDSP_TARGET MATCHES ".*_test$")
-      continue()
-    endif()
+    # 测试程序同样读取待处理共享库，必须等待它们链接完成后再原地分离符号。
     if(MSKDSP_TARGET_TYPE STREQUAL "EXECUTABLE"
        OR MSKDSP_TARGET_TYPE STREQUAL "SHARED_LIBRARY"
        OR MSKDSP_TARGET_TYPE STREQUAL "MODULE_LIBRARY")
@@ -439,6 +437,7 @@ if(MSKDSP_STRIP_DEBUG)
   endforeach()
 
   message(STATUS "MSKDSP strip-debug enabled; output: ${MSKDSP_DEBUG_DIR}")
+  message(STATUS "符号分离将等待全部生产目标和测试目标链接完成；测试程序仍由脚本跳过")
 
   add_custom_target(mskdsp_strip_debug ALL
     COMMAND bash "${MSKDSP_STRIP_SCRIPT}" "${packPath}" "${MSKDSP_DEBUG_DIR}"
