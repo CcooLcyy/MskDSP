@@ -474,7 +474,10 @@ TEST(IEC104LinkManagerTest, RenameLinkKeepsConnIdAndMovesPointTable) {
 
   IEC104Proto::UpsertPointTableRequest ptReq;
   ptReq.set_conn_name("conn-old");
-  *ptReq.add_points() = MakePoint("A", 100);
+  auto *telemetryPoint = ptReq.add_points();
+  *telemetryPoint = MakePoint("A", 100);
+  // 历史低地址点必须明确遥测业务类型，才能作为 FLOAT 临时模拟输入。
+  telemetryPoint->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_TELEMETRY);
   ptReq.set_replace(true);
   ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
   ASSERT_TRUE(mgr.StopLink("conn-old").ok());
@@ -486,7 +489,8 @@ TEST(IEC104LinkManagerTest, RenameLinkKeepsConnIdAndMovesPointTable) {
   simulatedPoint->set_type(IEC104Proto::POINT_TYPE_FLOAT);
   simulatedPoint->set_double_value(12.0);
   IEC104Proto::SimulationSnapshot simulatedSnapshot;
-  ASSERT_TRUE(mgr.SetSimulationValues(simulated, &simulatedSnapshot).ok());
+  const auto simulationStatus = mgr.SetSimulationValues(simulated, &simulatedSnapshot);
+  ASSERT_TRUE(simulationStatus.ok()) << simulationStatus.error_message();
   IEC104Proto::SimulationPeriodicReportRequest periodic;
   periodic.set_conn_name("conn-old");
   periodic.set_enabled(true);
