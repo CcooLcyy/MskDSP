@@ -131,6 +131,7 @@ class UpdateTaskTest(unittest.TestCase):
         self.assertEqual(previous["operation_id"], self.op)
         self.assertTrue((self.root / "tasks" / self.op / "backup" / "conf" / "original").exists())
         self.assertEqual((self.host / "log" / "original").read_text(), "log")
+        self.assertIn("默认容器部署校验通过", result["log_tail"])
 
     # 健康失败必须自动恢复模块、配置和旧镜像，不能报告升级成功。
     def test_health_failure_restores(self):
@@ -343,6 +344,73 @@ class BackendContractTest(unittest.TestCase):
                         backend.validate_deployment(data)
                 else:
                     backend.validate_deployment(data)
+
+    # 特权容器的默认 SELinux 标记与 host 网络默认主机名应组合通过预检。
+    def test_docker_normalized_defaults_accepted(self):
+        backend = task.Backend()
+        container_id = "418aed6321b7" + "a" * 52
+        for options in (None, [], ["label=disable"]):
+            for hostname in (None, "", container_id[:12], "daniel-H410M-K"):
+                with self.subTest(options=options, hostname=hostname):
+                    data = self.default_snapshot()
+                    data["Id"] = container_id
+                    data["HostConfig"]["SecurityOpt"] = options
+                    data["Config"]["Hostname"] = hostname
+                    before = json.dumps(data, sort_keys=True)
+                    with patch.object(task.socket, "gethostname", return_value="daniel-H410M-K"), patch.object(backend, "command", return_value=json.dumps([{"Config": {"Env": []}}])):
+                        backend.validate_deployment(data)
+                    self.assertEqual(json.dumps(data, sort_keys=True), before)
+
+    # 只兼容单项默认标记，不能放行显式定制、混合列表或错误类型。
+    def test_custom_security_options_rejected(self):
+        backend = task.Backend()
+        for options in (["seccomp=unconfined"], ["apparmor=unconfined"], ["no-new-privileges"],
+                        ["label=type:custom_t"], ["label=disable", "seccomp=unconfined"],
+                        ["label=disable", "label=disable"], "label=disable", "", {}):
+            with self.subTest(options=options):
+                data = self.default_snapshot()
+                data["HostConfig"]["SecurityOpt"] = options
+                with patch.object(backend, "command", return_value=json.dumps([{"Config": {"Env": []}}])):
+                    with self.assertRaisesRegex(ValueError, "SecurityOpt"):
+                        backend.validate_deployment(data)
+
+    # 默认安全标记不能绕过自定义主机名或原有默认部署约束。
+    def test_normalized_defaults_keep_custom_guards(self):
+        backend = task.Backend()
+        cases = [("Config", "Hostname", "custom-host", "自定义主机名"),
+                 ("HostConfig", "Privileged", False, "默认部署"),
+                 ("HostConfig", "NetworkMode", "bridge", "默认部署"),
+                 ("HostConfig", "CapDrop", ["ALL"], "CapDrop"),
+                 ("Config", "Env", ["CUSTOM=1"], "自定义环境变量")]
+        for section, key, value, error in cases:
+            with self.subTest(key=key):
+                data = self.default_snapshot()
+                data["HostConfig"]["SecurityOpt"] = ["label=disable"]
+                data["Config"]["Hostname"] = "daniel-H410M-K"
+                data[section][key] = value
+                with patch.object(task.socket, "gethostname", return_value="daniel-H410M-K"), patch.object(backend, "command", return_value=json.dumps([{"Config": {"Env": []}}])):
+                    with self.assertRaisesRegex(ValueError, error):
+                        backend.validate_deployment(data)
+
+    # 安装与回退均依赖默认特权和 host 网络，不应传入主机名或安全选项覆盖。
+    def test_install_and_restore_keep_docker_defaults(self):
+        backend = task.Backend()
+        process = MagicMock()
+        process.wait.return_value = 0
+        with tempfile.TemporaryDirectory() as temporary, patch.object(task.subprocess, "Popen", return_value=process) as popen:
+            backend.install(Path("package"), Path(temporary) / "task.log")
+        self.assertEqual(popen.call_args.args[0], ["/bin/bash", "package", "start"])
+        self.assertEqual(popen.call_args.kwargs["env"]["MSKDSP_MANAGED_UPDATE"], "1")
+        data = self.default_snapshot()
+        data["HostConfig"]["SecurityOpt"] = ["label=disable"]
+        data["Config"]["Hostname"] = "daniel-H410M-K"
+        with patch.object(backend, "command") as command:
+            backend.restore(data, Path("unused"))
+        args = command.call_args.args
+        self.assertIn("--privileged", args)
+        self.assertEqual(args[args.index("--network") + 1], "host")
+        self.assertNotIn("--security-opt", args)
+        self.assertNotIn("--hostname", args)
 
     # 真实包解析在调用安装器前验证配置摘要、主机架构和受管理更新标记。
     def test_preflight_archive_identity_architecture_and_marker(self):

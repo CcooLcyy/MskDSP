@@ -317,7 +317,10 @@ class Backend:
         image = json.loads(self.command("docker", "image", "inspect", data["Image"]))[0]
         if config.get("Env") != image["Config"].get("Env"):
             raise ValueError("容器具有自定义环境变量，拒绝无法精确恢复的更新")
-        for key in ("Devices", "DeviceRequests", "CapAdd", "CapDrop", "SecurityOpt", "Dns", "DnsOptions", "DnsSearch", "ExtraHosts", "VolumesFrom", "Links", "Tmpfs", "PortBindings", "Mounts", "GroupAdd", "Ulimits", "Sysctls", "PidMode", "UTSMode", "DeviceCgroupRules", "StorageOpt", "CgroupParent", "VolumeDriver", "ContainerIDFile"):
+        # Docker 可为默认特权容器补充此 SELinux 标记；其他安全定制仍无法精确恢复。
+        if host.get("SecurityOpt") not in (None, [], ["label=disable"]):
+            raise ValueError("容器具有不支持的自定义配置: SecurityOpt")
+        for key in ("Devices", "DeviceRequests", "CapAdd", "CapDrop", "Dns", "DnsOptions", "DnsSearch", "ExtraHosts", "VolumesFrom", "Links", "Tmpfs", "PortBindings", "Mounts", "GroupAdd", "Ulimits", "Sysctls", "PidMode", "UTSMode", "DeviceCgroupRules", "StorageOpt", "CgroupParent", "VolumeDriver", "ContainerIDFile"):
             if host.get(key):
                 raise ValueError(f"容器具有不支持的自定义配置: {key}")
         if any(host.get(key) for key in ("ReadonlyRootfs", "Init", "Memory", "NanoCpus", "CpuQuota", "PidsLimit")):
@@ -329,7 +332,8 @@ class Backend:
         for key in ("Healthcheck", "StopSignal", "Labels", "Volumes", "ExposedPorts", "Shell"):
             if (config.get(key) or None) != (image["Config"].get(key) or None):
                 raise ValueError(f"容器具有不支持的自定义镜像配置: {key}")
-        if config.get("Hostname") and config.get("Hostname") != data.get("Id", "")[:12]:
+        # host 网络默认继承宿主机名，同时兼容旧部署使用容器短 ID 的默认形式。
+        if config.get("Hostname") not in (None, "", data.get("Id", "")[:12], socket.gethostname()):
             raise ValueError("容器具有不支持的自定义主机名")
 
     def module_sockets(self, snapshot):
@@ -560,6 +564,7 @@ class TaskManager:
                     ensure_secure(package)
                     ensure_secure(self.host)
                 snapshot = self.backend.preflight(package, data["expected_image_id"])
+                self.log(operation, "默认容器部署校验通过（含安全选项与主机名），开始准备恢复材料")
                 required = package.stat().st_size * 3 + snapshot.get("update_payload_bytes", 0) * 2
                 for name in ("module", "conf"):
                     required += sum(item.stat().st_size for item in (self.host / name).rglob("*") if item.is_file())
