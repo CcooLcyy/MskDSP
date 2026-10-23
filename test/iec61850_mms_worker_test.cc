@@ -29,6 +29,27 @@ namespace {
 
 using namespace std::chrono_literals;
 
+// 普通建链等待为CI调度保留余量，不改变协议请求自身的超时与结果断言。
+constexpr auto kMmsReadyTimeout = 10s;
+
+testing::AssertionResult WaitForMmsReady(
+    std::condition_variable &condition, std::unique_lock<std::mutex> &lock, const std::vector<IEC61850::MmsConnectionEvent> &events) {
+  if (condition.wait_for(lock, kMmsReadyTimeout, [&] {
+        return std::any_of(events.begin(), events.end(), [](const auto &event) {
+          return event.state == IEC61850::ProtocolSessionState::READY;
+        });
+      })) {
+    return testing::AssertionSuccess();
+  }
+  auto failure = testing::AssertionFailure();
+  failure << "等待MMS就绪超时（上限10秒），已收到事件数=" << events.size();
+  if (!events.empty()) {
+    failure << "，最后状态=" << static_cast<int>(events.back().state)
+            << "，最后错误=" << events.back().error;
+  }
+  return failure;
+}
+
 struct FactoryState {
   std::mutex mutex;
   std::condition_variable condition;
@@ -1504,9 +1525,10 @@ ScriptedResponses MakeControlResponseAndLog(
 }
 
 
-// 验证MMS工作器使用注入的脚本传输完成ISO ACCEPT、Initiate和空NameList建链。
+// 验证MMS工作器在脚本连接延迟超过旧两秒等待时仍完成ISO ACCEPT、Initiate和空NameList建链。
 TEST(IEC61850MmsWorkerTest, UsesInjectedTransportForMinimalSession) {
   auto state = std::make_shared<FactoryState>();
+  state->connectDelay = 2500ms;
   std::mutex callbackMutex;
   std::condition_variable callbackCondition;
   std::vector<IEC61850::MmsConnectionEvent> events;
@@ -1532,11 +1554,7 @@ TEST(IEC61850MmsWorkerTest, UsesInjectedTransportForMinimalSession) {
   ASSERT_TRUE(worker.Start().ok());
   {
     std::unique_lock lock(callbackMutex);
-    ASSERT_TRUE(callbackCondition.wait_for(lock, 2s, [&] {
-      return std::any_of(events.begin(), events.end(), [](const auto& event) {
-        return event.state == IEC61850::ProtocolSessionState::READY;
-      });
-    }));
+    ASSERT_TRUE(WaitForMmsReady(callbackCondition, lock, events));
   }
   worker.Stop();
 

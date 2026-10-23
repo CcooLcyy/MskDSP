@@ -85,24 +85,36 @@ TEST(IEC61850ProtectionActionDispatcherTest,
   EXPECT_TRUE(completions[1].success);
 }
 
-// 验证发布函数异常会转换为失败完成结果，发送线程不会退出或向外抛异常。
-TEST(IEC61850ProtectionActionDispatcherTest,
-     PublishExceptionProducesFailureCompletion) {
+// 验证发布函数延迟超过旧轮询预算后抛异常仍会产生失败完成结果，发送线程继续运行。
+TEST(IEC61850ProtectionActionDispatcherTest, PublishExceptionProducesFailureCompletion) {
   IEC61850::ProtectionActionDispatcher dispatcher(
-      MakeEngine(), "line-1", 2, 1,
-      [](std::uint32_t, std::span<const IEC61850::ProtocolRealtimeValue>,
-         bool) -> grpc::Status { throw std::runtime_error("test publish"); });
+      MakeEngine(), "line-1", 2, 1, [](std::uint32_t, std::span<const IEC61850::ProtocolRealtimeValue>, bool) -> grpc::Status {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        throw std::runtime_error("测试发布异常");
+      });
   ASSERT_TRUE(dispatcher.Start().ok());
   std::vector<IEC61850::ProtocolRealtimeValue> values;
   ASSERT_TRUE(dispatcher.TryEnqueue(MakeAction(&values)));
 
   std::array<IEC61850::ProtectionActionCompletion, 1> completions;
   std::size_t count = 0;
-  for (int attempt = 0; attempt != 100 && count == 0; ++attempt) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  const auto waitStarted = std::chrono::steady_clock::now();
+  const auto deadline = waitStarted + std::chrono::seconds(10);
+  // 必须读取真实完成队列，发布回调开始或抛异常均不代表完成结果已经入队。
+  while (true) {
     count = dispatcher.DrainCompletions(completions);
+    if (count != 0 || std::chrono::steady_clock::now() >= deadline) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
-  ASSERT_EQ(count, 1u);
+  ASSERT_EQ(count, 1u)
+      << "等待保护动作失败完成结果超时，已等待毫秒="
+      << std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now() - waitStarted)
+             .count()
+      << "，发送线程运行中=" << dispatcher.IsRunning()
+      << "，发布失败次数=" << dispatcher.statistics().publishFailures;
   EXPECT_FALSE(completions[0].success);
   EXPECT_TRUE(dispatcher.IsRunning());
   dispatcher.Stop();
