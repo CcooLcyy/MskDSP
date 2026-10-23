@@ -53,6 +53,55 @@ ConfigPusherProto::ModbusRtuConfig MakeMqttModbusConfig(bool start, bool withMqt
 }
 }  // 命名空间结束
 
+// 验证：含来源的配置导入使用目标设备版本，保留来源且不复用导出设备版本。
+TEST(ConfigPusherApplyModbusRtuTest, TemplateImportUsesTargetRevision) {
+  auto config = MakeMqttModbusConfig(false, true);
+  config.mutable_links(0)->mutable_link()->set_expected_point_table_revision(999);
+  auto* request = config.mutable_links(0)->mutable_point_table();
+  request->set_expected_revision(999);
+  request->set_template_bindings_json(R"({"schema_version":1,"applications":[]})");
+  ModbusRTUProto::MockModbusRTUServiceStub stub;
+  EXPECT_CALL(stub, ListLinks(_, _, _)).WillOnce(Invoke([](auto*, const auto&, auto* out) { out->Clear(); return grpc::Status::OK; }));
+  EXPECT_CALL(stub, UpdateConfig(_, _, _)).WillOnce(Invoke([](auto*, const auto&, auto* out) { out->set_ok(true); return grpc::Status::OK; }));
+  EXPECT_CALL(stub, UpsertLink(_, _, _)).WillOnce(Invoke([](auto*, const auto& req, auto* out) { EXPECT_FALSE(req.has_expected_point_table_revision()); out->set_conn_id(1); return grpc::Status::OK; }));
+  EXPECT_CALL(stub, GetPointTable(_, _, _)).WillOnce(Invoke([](auto*, const auto&, auto* out) { out->set_revision(42); return grpc::Status::OK; }));
+  EXPECT_CALL(stub, UpsertPointTable(_, _, _)).WillOnce(Invoke([](auto*, const auto& req, auto*) {
+    EXPECT_EQ(req.expected_revision(), 42);
+    EXPECT_TRUE(req.has_template_bindings_json());
+    return grpc::Status::OK;
+  }));
+  EXPECT_TRUE(ConfigPusher::applyModbusRtuConfig(config, &stub));
+}
+
+// 验证：旧下位机零版本或读取失败时明确拒绝来源导入，不降级写入无来源点表。
+TEST(ConfigPusherApplyModbusRtuTest, RejectsTemplateImportWithoutTargetRevision) {
+  for (bool readFails : {false, true}) {
+    auto config = MakeMqttModbusConfig(false, true);
+    config.mutable_links(0)->mutable_point_table()->set_template_bindings_json(R"({"schema_version":1,"applications":[]})");
+    ModbusRTUProto::MockModbusRTUServiceStub stub;
+    EXPECT_CALL(stub, ListLinks(_, _, _)).WillOnce(Invoke([](auto*, const auto&, auto* out) { out->Clear(); return grpc::Status::OK; }));
+    EXPECT_CALL(stub, UpdateConfig(_, _, _)).WillOnce(Invoke([](auto*, const auto&, auto* out) { out->set_ok(true); return grpc::Status::OK; }));
+    EXPECT_CALL(stub, UpsertLink(_, _, _)).WillOnce(Invoke([](auto*, const auto&, auto* out) { out->set_conn_id(1); return grpc::Status::OK; }));
+    EXPECT_CALL(stub, GetPointTable(_, _, _)).WillOnce(Invoke([readFails](auto*, const auto&, auto* out) {
+      out->set_revision(0);
+      return readFails ? grpc::Status(grpc::StatusCode::UNAVAILABLE, "测试读取失败") : grpc::Status::OK;
+    }));
+    EXPECT_CALL(stub, UpsertPointTable(_, _, _)).Times(0);
+    EXPECT_FALSE(ConfigPusher::applyModbusRtuConfig(config, &stub));
+  }
+}
+
+// 验证：导入点表连接名必须与链路一致，不能将目标版本保护误用于其他连接。
+TEST(ConfigPusherApplyModbusRtuTest, RejectsMismatchedPointTableConnection) {
+  auto config = MakeMqttModbusConfig(false, true);
+  config.mutable_links(0)->mutable_point_table()->set_conn_name("other-connection");
+  ModbusRTUProto::MockModbusRTUServiceStub stub;
+  EXPECT_CALL(stub, ListLinks(_, _, _)).Times(0);
+  EXPECT_CALL(stub, UpsertLink(_, _, _)).Times(0);
+  EXPECT_CALL(stub, UpsertPointTable(_, _, _)).Times(0);
+  EXPECT_FALSE(ConfigPusher::applyModbusRtuConfig(config, &stub));
+}
+
 // 验证：ModbusRTU gRPC stub 为空时下发失败。
 TEST(ConfigPusherApplyModbusRtuTest, NullStubReturnsFalse) {
   ConfigPusherProto::ModbusRtuConfig config;

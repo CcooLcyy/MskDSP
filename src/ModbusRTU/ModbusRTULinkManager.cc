@@ -18,6 +18,7 @@
 #include "ModbusRegisterBool.hpp"
 #include "ThreadUtil.hpp"
 #include "mskdsp/Decimal20.hpp"
+#include "mskdsp/ModbusTemplateBindings.hpp"
 
 namespace ModbusRTU {
 namespace {
@@ -333,6 +334,7 @@ LinkManager::~LinkManager() {
 }
 
 void LinkManager::LoadPersistedConfig() {
+  std::unique_lock mutationLock(pointTableMutationMu_);
   LOG_INFO("ModbusRTU 开始加载本地持久化配置");
 
   {
@@ -462,6 +464,8 @@ void LinkManager::LoadPersistedConfig() {
         needResavePointTables = true;
       } else {
         runtime.pointTable = std::move(pointTable);
+        runtime.pointTableRevision = std::max<uint64_t>(1, tableIt->second.revision());
+        runtime.templateBindingsJson = tableIt->second.template_bindings_json();
         pointCount = static_cast<size_t>(tableIt->second.points_size());
         runtime.pointTableConfigured = pointCount > 0;
         if (!runtime.pointTableConfigured) {
@@ -543,6 +547,7 @@ void LinkManager::LoadPersistedConfig() {
   }
 
   LOG_INFO("ModbusRTU 本地持久化配置加载完成: 链路数={}", linksSnapshot.links_size());
+  mutationLock.unlock();
   TryAutoStartReadyLinks("持久化恢复完成后");
 }
 
@@ -892,9 +897,8 @@ ModbusRTUProto::PointTablesConfig LinkManager::dumpPointTablesConfigLocked() con
     }
     ModbusRTUProto::PointTable table;
     it->second.pointTable.ToProto(connName, &table);
-    if (table.points_size() == 0) {
-      continue;
-    }
+    table.set_revision(it->second.pointTableRevision);
+    table.set_template_bindings_json(it->second.templateBindingsJson);
     *config.add_point_tables() = std::move(table);
   }
   return config;
@@ -1594,6 +1598,7 @@ grpc::Status LinkManager::ExecuteCommand(
 }
 
 grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& request, ModbusRTUProto::LinkInfo* out) {
+  std::lock_guard mutationLock(pointTableMutationMu_);
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
@@ -1617,6 +1622,14 @@ grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& re
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = linksByName_.find(connName);
+    if (request.has_expected_config() && (it == linksByName_.end() || it->second.config.SerializeAsString() != request.expected_config().SerializeAsString())) {
+      LOG_WARNING("ModbusRTU 连接配置版本冲突，拒绝覆盖: conn_name={}", connName);
+      return {grpc::StatusCode::ABORTED, "连接配置已变化或连接不存在，请重新读取并比对"};
+    }
+    if (request.has_expected_point_table_revision() && (it == linksByName_.end() || it->second.pointTableRevision != request.expected_point_table_revision())) {
+      LOG_WARNING("ModbusRTU 点表版本已变化，拒绝更新或回滚连接配置: conn_name={}, 预期点表版本={}", connName, request.expected_point_table_revision());
+      return {grpc::StatusCode::ABORTED, "点表已变化或连接不存在，不能覆盖连接配置，请重新读取并比对"};
+    }
     if (it != linksByName_.end()) {
       if (request.create_only()) {
         return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "conn_name 已存在");
@@ -1772,6 +1785,7 @@ grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& re
 grpc::Status LinkManager::RenameLink(const std::string& oldConnName,
                                      const std::string& newConnName,
                                      ModbusRTUProto::LinkInfo* out) {
+  std::lock_guard mutationLock(pointTableMutationMu_);
   if (out == nullptr) {
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out 为空");
   }
@@ -1823,6 +1837,8 @@ grpc::Status LinkManager::RenameLink(const std::string& oldConnName,
     reservedRenameName = false;
   };
 
+  const auto originalLinksConfig = linksConfig;
+  const auto originalPointTablesConfig = pointTablesConfig;
   if (!renamePersistedLinkConfig(&linksConfig, oldConnName, newConnName)) {
     releaseRenameReservation();
     return grpc::Status(grpc::StatusCode::INTERNAL, "本地链路配置快照缺少待改名连接");
@@ -1874,13 +1890,22 @@ grpc::Status LinkManager::RenameLink(const std::string& oldConnName,
     return grpc::Status(grpc::StatusCode::INTERNAL, "DataCenter 返回的 conn_id 与本地链路不一致");
   }
 
+  const auto rollbackRenamePersistence = [&] {
+    const auto linksRollback = saveLinksConfig(originalLinksConfig);
+    const auto pointsRollback = savePointTablesConfig(originalPointTablesConfig);
+    DataCenterProto::ConnectionInfo rollbackInfo;
+    const auto dcRollback = dataCenter_.RenameConnection(newConnName, oldConnName, &rollbackInfo);
+    LOG_WARNING("ModbusRTU 改名落盘失败后已尝试恢复原配置: 原连接名={}, 新连接名={}, 连接恢复={}, 点表恢复={}, 标签连接恢复={}", oldConnName, newConnName, linksRollback.ok(), pointsRollback.ok(), dcRollback.ok());
+  };
   status = saveLinksConfig(linksConfig);
   if (!status.ok()) {
+    rollbackRenamePersistence();
     releaseRenameReservation();
     return status;
   }
   status = savePointTablesConfig(pointTablesConfig);
   if (!status.ok()) {
+    rollbackRenamePersistence();
     releaseRenameReservation();
     return status;
   }
@@ -1954,6 +1979,7 @@ grpc::Status LinkManager::ListLinks(ModbusRTUProto::ListLinksResponse* out) cons
 }
 
 grpc::Status LinkManager::StartLink(const std::string& connName) {
+  std::lock_guard mutationLock(pointTableMutationMu_);
   auto status = validateConnName(connName);
   if (!status.ok()) {
     return status;
@@ -2189,6 +2215,7 @@ grpc::Status LinkManager::StopLink(const std::string& connName) {
 }
 
 grpc::Status LinkManager::DeleteLink(const std::string& connName) {
+  std::lock_guard mutationLock(pointTableMutationMu_);
   auto status = validateConnName(connName);
   if (!status.ok()) {
     return status;
@@ -2240,57 +2267,69 @@ grpc::Status LinkManager::DeleteLink(const std::string& connName) {
 }
 
 grpc::Status LinkManager::UpsertPointTable(const ModbusRTUProto::UpsertPointTableRequest& request) {
+  std::lock_guard mutationLock(pointTableMutationMu_);
   auto status = validateConnName(request.conn_name());
-  if (!status.ok()) {
-    return status;
+  if (!status.ok()) return status;
+  if (request.has_template_bindings_json()) {
+    if (!request.replace() || !request.has_expected_revision() || request.expected_revision() == 0) {
+      return {grpc::StatusCode::INVALID_ARGUMENT, "更新模板来源必须完整替换并提供非零预期版本"};
+    }
   }
-
-  uint32_t connId = 0;
-  PointTable current;
-  ModbusRTUProto::PointTablesConfig pointTablesConfig;
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    auto it = linksByName_.find(request.conn_name());
-    if (it == linksByName_.end()) {
-      return makeNotFound(request.conn_name());
-    }
-    if (it->second.state == ModbusRTUProto::LINK_STATE_RUNNING) {
-      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "更新点表前请先停止链路");
-    }
-    if (it->second.state == ModbusRTUProto::LINK_STATE_PENDING_DELETE) {
-      return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "链路处于待删除状态");
-    }
-    connId = it->second.connId;
-    current = it->second.pointTable;
+  std::lock_guard lock(mu_);
+  auto it = linksByName_.find(request.conn_name());
+  if (it == linksByName_.end()) return makeNotFound(request.conn_name());
+  auto& link = it->second;
+  if (request.has_expected_link_config() && link.config.SerializeAsString() != request.expected_link_config().SerializeAsString()) {
+    LOG_WARNING("ModbusRTU 点表保存时连接配置已变化: conn_name={}", request.conn_name());
+    return {grpc::StatusCode::ABORTED, "连接配置已变化，请重新读取并比对"};
   }
-
-  PointTable next = current;
+  if (request.has_template_bindings_json()) {
+    status = mskdsp::ValidateTemplateBindings(request.template_bindings_json(), link.config.address_base());
+    if (!status.ok()) {
+      LOG_WARNING("ModbusRTU 拒绝非法或地址基准不一致的模板来源: conn_name={}, 字节数={}, 原因={}", request.conn_name(), request.template_bindings_json().size(), status.error_message());
+      return status;
+    }
+  }
+  if (link.state == ModbusRTUProto::LINK_STATE_RUNNING || link.state == ModbusRTUProto::LINK_STATE_PENDING_DELETE) {
+    return {grpc::StatusCode::FAILED_PRECONDITION, "更新点表前请先停止链路，且不能处于待删除状态"};
+  }
+  if (request.has_expected_revision() && request.expected_revision() != link.pointTableRevision) {
+    LOG_WARNING("ModbusRTU 点表版本冲突: conn_name={}, 预期={}, 实际={}", request.conn_name(), request.expected_revision(), link.pointTableRevision);
+    return {grpc::StatusCode::ABORTED, "点表已被其他操作修改，请重新读取并比对"};
+  }
+  if (link.pointTableRevision == std::numeric_limits<uint64_t>::max()) {
+    return {grpc::StatusCode::RESOURCE_EXHAUSTED, "点表版本已达到上限"};
+  }
+  PointTable next = link.pointTable;
   status = next.Upsert(request.points(), request.replace());
+  if (!status.ok()) return status;
+  const auto nextRevision = link.pointTableRevision + 1;
+  const auto nextBindings = request.has_template_bindings_json() ? request.template_bindings_json() : link.templateBindingsJson;
+  const auto previousPointTablesConfig = dumpPointTablesConfigLocked();
+  auto pointTablesConfig = previousPointTablesConfig;
+  for (auto& table : *pointTablesConfig.mutable_point_tables()) {
+    if (table.conn_name() != request.conn_name()) continue;
+    next.ToProto(request.conn_name(), &table);
+    table.set_revision(nextRevision);
+    table.set_template_bindings_json(nextBindings);
+  }
+  status = pointTableStore_.Save(pointTablesConfig);
   if (!status.ok()) {
+    LOG_ERROR("ModbusRTU 点表落盘失败，未改动标签和路由并保留原版本: conn_name={}, 版本={}, 原因={}", request.conn_name(), link.pointTableRevision, status.error_message());
     return status;
   }
-
-  auto tags = next.Tags();
-  status = dataCenter_.UpsertConnTags(connId, tags, true);
+  status = dataCenter_.UpsertConnTags(link.connId, next.Tags(), true);
   if (!status.ok()) {
+    const auto rollback = pointTableStore_.Save(previousPointTablesConfig);
+    LOG_ERROR("ModbusRTU 标签同步失败，已尝试恢复磁盘点表: conn_name={}, 版本={}, 磁盘恢复成功={}, 同步原因={}, 恢复原因={}", request.conn_name(), link.pointTableRevision, rollback.ok(), status.error_message(), rollback.error_message());
+    if (!rollback.ok()) return {grpc::StatusCode::INTERNAL, "标签同步失败且磁盘点表恢复失败，请检查设备配置持久化状态"};
     return status;
   }
-
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    auto it = linksByName_.find(request.conn_name());
-    if (it == linksByName_.end()) {
-      return makeNotFound(request.conn_name());
-    }
-    it->second.pointTable = std::move(next);
-    it->second.pointTableConfigured = !it->second.pointTable.Points().empty();
-    pointTablesConfig = dumpPointTablesConfigLocked();
-  }
-  status = savePointTablesConfig(pointTablesConfig);
-  if (!status.ok()) {
-    return status;
-  }
-  LOG_INFO("ModbusRTU 点表配置更新成功，当前不会自动启动链路连接功能，等待显式调用 StartLink: conn_name={}", request.conn_name());
+  link.pointTable = std::move(next);
+  link.pointTableConfigured = !link.pointTable.Points().empty();
+  link.pointTableRevision = nextRevision;
+  link.templateBindingsJson = nextBindings;
+  LOG_INFO("ModbusRTU 点表及来源保存成功，链路内功能保持停止: conn_name={}, 版本={}, 来源字节数={}", request.conn_name(), nextRevision, nextBindings.size());
   return grpc::Status::OK;
 }
 
@@ -2309,6 +2348,8 @@ grpc::Status LinkManager::GetPointTable(const std::string& connName, ModbusRTUPr
     return makeNotFound(connName);
   }
   it->second.pointTable.ToProto(connName, out);
+  out->set_revision(it->second.pointTableRevision);
+  out->set_template_bindings_json(it->second.templateBindingsJson);
   return grpc::Status::OK;
 }
 

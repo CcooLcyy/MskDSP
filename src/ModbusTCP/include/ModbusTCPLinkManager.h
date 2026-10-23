@@ -41,6 +41,8 @@ private:
     ModbusTCPProto::LinkState state = ModbusTCPProto::LINK_STATE_STOPPED;
     std::string lastError;
     ModbusRTU::PointTable pointTable;
+    uint64_t pointTableRevision = 1;
+    std::string templateBindingsJson;
     bool pointTableConfigured = false;
     std::shared_ptr<TcpBus> bus;
     std::jthread pollThread;
@@ -50,6 +52,7 @@ private:
   grpc::Status fillInfoLocked(const Link& link, ModbusTCPProto::LinkInfo* out) const;
   grpc::Status saveLinksLocked();
   grpc::Status savePointTablesLocked();
+  ModbusTCPProto::PointTablesConfig dumpPointTablesLocked() const;
   void pollLoop(std::string name, uint32_t connId, ModbusTCPProto::LinkConfig config, ModbusRTU::PointTable table, std::shared_ptr<TcpBus> bus, std::stop_token stop);
   grpc::Status executePointWrite(const Link& link, const ModbusRTU::PointTable::Point& point, const DataCenterProto::PointValue& value, DataCenterProto::ExecuteCommandResponse* response);
 

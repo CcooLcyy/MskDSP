@@ -43,6 +43,8 @@ bool buildPlan(const ConfigPusherProto::ModbusTcpConfig &config,
     PlannedTask planned;
     planned.connName = name;
     planned.linkReq = task.link();
+    planned.linkReq.clear_expected_config();
+    planned.linkReq.clear_expected_point_table_revision();
     planned.pointTableReq.set_conn_name(name);
     planned.pointTableReq.set_replace(true);
     if (task.has_point_table()) {
@@ -127,8 +129,26 @@ bool applyModbusTcpConfig(const ConfigPusherProto::ModbusTcpConfig &config,
 
     ModbusTCPProto::Empty pointResp;
     grpc::ClientContext pointCtx;
+    auto pointTableRequest = planned.pointTableReq;
+    pointTableRequest.clear_expected_revision();
+    pointTableRequest.clear_expected_link_config();
+    if (pointTableRequest.has_template_bindings_json()) {
+      ModbusTCPProto::GetPointTableRequest currentRequest;
+      currentRequest.set_conn_name(planned.connName);
+      ModbusTCPProto::PointTable currentTable;
+      grpc::ClientContext currentContext;
+      LOG_INFO("ModbusTCP 导入模板来源前读取目标点表版本: 连接名={}", planned.connName);
+      status = stub->GetPointTable(&currentContext, currentRequest, &currentTable);
+      if (!status.ok() || currentTable.revision() == 0) {
+        LOG_ERROR("ModbusTCP 无法导入模板来源，目标不支持版本保护或读取失败: 连接名={}, 原因={}", planned.connName, status.error_message());
+        ok = false;
+        continue;
+      }
+      pointTableRequest.set_expected_revision(currentTable.revision());
+      if (info.has_config()) *pointTableRequest.mutable_expected_link_config() = info.config();
+    }
     LOG_INFO("发送 ModbusTCP 点表请求报文: {}", formatProtoForLog(planned.pointTableReq));
-    status = stub->UpsertPointTable(&pointCtx, planned.pointTableReq, &pointResp);
+    status = stub->UpsertPointTable(&pointCtx, pointTableRequest, &pointResp);
     if (!status.ok()) {
       LOG_ERROR("ModbusTCP 点表下发失败: 连接名={}, 原因={}", planned.connName, status.error_message());
       ok = false;

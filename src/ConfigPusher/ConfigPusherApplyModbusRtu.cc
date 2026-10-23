@@ -41,6 +41,10 @@ bool buildModbusPlan(const ConfigPusherProto::ModbusRtuConfig &config,
       LOG_ERROR("ModbusRTU 配置任务缺少 config.conn_name");
       return false;
     }
+    if (task.has_point_table() && !task.point_table().conn_name().empty() && task.point_table().conn_name() != linkConfig.conn_name()) {
+      LOG_ERROR("ModbusRTU 点表连接名与链路不一致: 链路={}, 点表={}", linkConfig.conn_name(), task.point_table().conn_name());
+      return false;
+    }
     if (!outDesiredConnNames->insert(linkConfig.conn_name()).second) {
       LOG_ERROR("ModbusRTU 配置任务存在重复连接名: {}", linkConfig.conn_name());
       return false;
@@ -52,6 +56,8 @@ bool buildModbusPlan(const ConfigPusherProto::ModbusRtuConfig &config,
     PlannedModbusTask planned;
     planned.connName = linkConfig.conn_name();
     planned.linkReq = task.link();
+    planned.linkReq.clear_expected_config();
+    planned.linkReq.clear_expected_point_table_revision();
     planned.pointTableReq.set_conn_name(linkConfig.conn_name());
     planned.pointTableReq.set_replace(true);
     if (task.has_point_table()) {
@@ -194,6 +200,24 @@ bool applyModbusRtuConfig(const ConfigPusherProto::ModbusRtuConfig &config,
     LOG_INFO("收到 ModbusRTU 连接配置响应报文: {}", formatProtoForLog(linkInfo));
     LOG_INFO("ModbusRTU 连接配置成功: 连接名={}, 连接ID={}", planned.connName, linkInfo.conn_id());
 
+    auto pointTableRequest = planned.pointTableReq;
+    pointTableRequest.clear_expected_revision();
+    pointTableRequest.clear_expected_link_config();
+    if (pointTableRequest.has_template_bindings_json()) {
+      ModbusRTUProto::GetPointTableRequest currentRequest;
+      currentRequest.set_conn_name(planned.connName);
+      ModbusRTUProto::PointTable currentTable;
+      grpc::ClientContext currentContext;
+      LOG_INFO("ModbusRTU 导入模板来源前读取目标点表版本: 连接名={}", planned.connName);
+      status = stub->GetPointTable(&currentContext, currentRequest, &currentTable);
+      if (!status.ok() || currentTable.revision() == 0) {
+        LOG_ERROR("ModbusRTU 无法导入模板来源，目标不支持版本保护或读取失败: 连接名={}, 原因={}", planned.connName, status.error_message());
+        ok = false;
+        continue;
+      }
+      pointTableRequest.set_expected_revision(currentTable.revision());
+      if (linkInfo.has_config()) *pointTableRequest.mutable_expected_link_config() = linkInfo.config();
+    }
     LOG_INFO("开始按全量覆盖语义下发 ModbusRTU 点表: 连接名={}, 点数={}, 是否替换={}",
              planned.pointTableReq.conn_name(),
              planned.pointTableReq.points_size(),
@@ -201,7 +225,7 @@ bool applyModbusRtuConfig(const ConfigPusherProto::ModbusRtuConfig &config,
     LOG_INFO("发送 ModbusRTU 点表请求报文: {}", formatProtoForLog(planned.pointTableReq));
     grpc::ClientContext ptCtx;
     ModbusRTUProto::Empty ptResp;
-    status = stub->UpsertPointTable(&ptCtx, planned.pointTableReq, &ptResp);
+    status = stub->UpsertPointTable(&ptCtx, pointTableRequest, &ptResp);
     if (!status.ok()) {
       LOG_ERROR("ModbusRTU 点表下发失败: 连接名={}, 请求={}, 原因={}",
                 planned.pointTableReq.conn_name(),

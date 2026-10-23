@@ -32,6 +32,7 @@
 #include "ConfigPusherConfigLoader.h"
 #include "ConfigPusherDataCenter.h"
 #include "ConfigPusherGrpcService.h"
+#include "mskdsp/ModbusTemplateBindings.hpp"
 #include "ConfigPusherLibInfo.h"
 #include "ConfigPusherModuleManager.h"
 #include "DLT645.grpc.pb.h"
@@ -605,7 +606,10 @@ void ConfigPusher::applyConfig() {
   }
 
   if (hasModbus && runningModbus) {
-    auto modbusChannel = grpc::CreateChannel(runningModbus->inner_grpc_server(), grpc::InsecureChannelCredentials());
+    grpc::ChannelArguments arguments;
+    arguments.SetMaxReceiveMessageSize(mskdsp::kMaxModbusPointTableMessageBytes);
+    arguments.SetMaxSendMessageSize(mskdsp::kMaxModbusPointTableMessageBytes);
+    auto modbusChannel = grpc::CreateCustomChannel(runningModbus->inner_grpc_server(), grpc::InsecureChannelCredentials(), arguments);
     auto modbusStub = ModbusRTUProto::ModbusRTUService::NewStub(modbusChannel);
     if (!applyModbusRtuConfig(modbusConfig->modbus_rtu(), modbusStub.get())) {
       LOG_ERROR("ModbusRTU 配置下发存在错误");
@@ -615,7 +619,10 @@ void ConfigPusher::applyConfig() {
   }
 
   if (hasModbusTcp && runningModbusTcp) {
-    auto channel = grpc::CreateChannel(runningModbusTcp->inner_grpc_server(), grpc::InsecureChannelCredentials());
+    grpc::ChannelArguments arguments;
+    arguments.SetMaxReceiveMessageSize(mskdsp::kMaxModbusPointTableMessageBytes);
+    arguments.SetMaxSendMessageSize(mskdsp::kMaxModbusPointTableMessageBytes);
+    auto channel = grpc::CreateCustomChannel(runningModbusTcp->inner_grpc_server(), grpc::InsecureChannelCredentials(), arguments);
     auto stub = ModbusTCPProto::ModbusTCPService::NewStub(channel);
     if (!applyModbusTcpConfig(modbusTcpConfig->modbus_tcp(), stub.get())) {
       LOG_ERROR("ModbusTCP 配置下发存在错误");

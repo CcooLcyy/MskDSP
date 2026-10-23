@@ -12,6 +12,7 @@
 #include "ModbusRTUGrpcService.h"
 #include "ModbusRTULibInfo.h"
 #include "ModuleManager.pb.h"
+#include "mskdsp/ModbusTemplateBindings.hpp"
 
 namespace {
 const std::string &GetSerializedManifest() {
@@ -54,7 +55,7 @@ void ModbusRTU::start(std::stop_token stopToken) {
   commandService_->setModbusRTU(this);
   LOG_INFO("ModbusRTU 服务实例绑定完成");
   std::vector<std::shared_ptr<grpc::Service>> services{modbusRTUService_, commandService_};
-  grpcServerBuilder(services);
+  grpcServerBuilder(services, mskdsp::kMaxModbusPointTableMessageBytes);
   LOG_INFO("ModbusRTU gRPC 服务已启动");
   linkManager_.LoadPersistedConfig();
 

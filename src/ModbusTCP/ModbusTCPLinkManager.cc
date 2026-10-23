@@ -1,5 +1,6 @@
 #include "ModbusTCPLinkManager.h"
 
+#include <algorithm>
 #include <chrono>
 #include <concepts>
 #include <format>
@@ -12,6 +13,7 @@
 #include "ModbusTCPLibInfo.h"
 #include "ModbusRegisterBool.hpp"
 #include "mskdsp/Decimal20.hpp"
+#include "mskdsp/ModbusTemplateBindings.hpp"
 
 namespace ModbusTCP {
 namespace {
@@ -99,20 +101,23 @@ grpc::Status LinkManager::normalize(const ModbusTCPProto::LinkConfig& in, Modbus
 grpc::Status LinkManager::fillInfoLocked(const Link& link, ModbusTCPProto::LinkInfo* out) const { if (!out) return {grpc::StatusCode::INVALID_ARGUMENT, "out 为空"}; out->Clear(); *out->mutable_config() = link.config; out->set_conn_id(link.connId); out->set_state(link.state); out->set_last_error(link.lastError); return grpc::Status::OK; }
 grpc::Status LinkManager::saveLinksLocked() { ModbusTCPProto::LinksConfig c; for (const auto& [_, link] : links_) { auto* p=c.add_links(); *p->mutable_config()=link.config; p->set_conn_id(link.connId); p->set_pending_delete(link.state == ModbusTCPProto::LINK_STATE_PENDING_DELETE); } return linkStore_.Save(c); }
 grpc::Status LinkManager::savePointTablesLocked() {
+  return pointTableStore_.Save(dumpPointTablesLocked());
+}
+
+ModbusTCPProto::PointTablesConfig LinkManager::dumpPointTablesLocked() const {
   ModbusTCPProto::PointTablesConfig config;
   for (const auto& [name, link] : links_) {
-    if (!link.pointTableConfigured) {
-      continue;
-    }
     auto* table = config.add_point_tables();
     table->set_conn_name(name);
+    table->set_revision(link.pointTableRevision);
+    table->set_template_bindings_json(link.templateBindingsJson);
     ModbusRTUProto::PointTable normalized;
     link.pointTable.ToProto(name, &normalized);
     for (const auto& point : normalized.points()) {
       *table->add_points() = point;
     }
   }
-  return pointTableStore_.Save(config);
+  return config;
 }
 
 void LinkManager::LoadPersistedConfig() {
@@ -147,8 +152,10 @@ void LinkManager::LoadPersistedConfig() {
       auto it = links_.find(table.conn_name());
       if (it == links_.end()) continue;
       if (it->second.pointTable.Upsert(table.points(), true).ok()) {
-        it->second.pointTableConfigured = true;
-        if (it->second.state == ModbusTCPProto::LINK_STATE_STOPPED) autoStartNames.push_back(table.conn_name());
+        it->second.pointTableRevision = std::max<uint64_t>(1, table.revision());
+        it->second.templateBindingsJson = table.template_bindings_json();
+        it->second.pointTableConfigured = !it->second.pointTable.Points().empty();
+        if (it->second.pointTableConfigured && it->second.state == ModbusTCPProto::LINK_STATE_STOPPED) autoStartNames.push_back(table.conn_name());
       }
     }
     LOG_INFO("ModbusTCP 已恢复配置: 链路数={}, 点表数={}", links_.size(), tables.point_tables_size());
@@ -161,11 +168,53 @@ void LinkManager::LoadPersistedConfig() {
 
 grpc::Status LinkManager::UpsertLink(const ModbusTCPProto::UpsertLinkRequest& request, ModbusTCPProto::LinkInfo* out) {
   ModbusTCPProto::LinkConfig normalized; auto status=normalize(request.config(), &normalized); if (!status.ok()) return status;
+  std::lock_guard lock(mu_);
+  auto it = links_.find(normalized.conn_name());
+  if (request.has_expected_config() && (it == links_.end() || it->second.config.SerializeAsString() != request.expected_config().SerializeAsString())) {
+    LOG_WARNING("ModbusTCP 连接配置版本冲突，拒绝覆盖: conn_name={}", normalized.conn_name());
+    return {grpc::StatusCode::ABORTED, "连接配置已变化或连接不存在，请重新读取并比对"};
+  }
+  if (request.has_expected_point_table_revision() && (it == links_.end() || it->second.pointTableRevision != request.expected_point_table_revision())) {
+    LOG_WARNING("ModbusTCP 点表版本已变化，拒绝更新或回滚连接配置: conn_name={}, 预期点表版本={}", normalized.conn_name(), request.expected_point_table_revision());
+    return {grpc::StatusCode::ABORTED, "点表已变化或连接不存在，不能覆盖连接配置，请重新读取并比对"};
+  }
+  if (it != links_.end() && request.create_only()) return {grpc::StatusCode::ALREADY_EXISTS, "ModbusTCP 链路已存在"};
+  if (it != links_.end() && (it->second.state == ModbusTCPProto::LINK_STATE_RUNNING || it->second.state == ModbusTCPProto::LINK_STATE_PENDING_DELETE)) return {grpc::StatusCode::FAILED_PRECONDITION, "运行中或待删除的链路不能修改"};
   DataCenterProto::ConnectionInfo connection; status=dataCenter_.GetOrCreateConnection(normalized.conn_name(), &connection); if (!status.ok()) return status;
-  std::lock_guard lock(mu_); auto it=links_.find(normalized.conn_name()); if (it!=links_.end() && request.create_only()) return {grpc::StatusCode::ALREADY_EXISTS,"ModbusTCP 链路已存在"}; if (it!=links_.end() && it->second.state==ModbusTCPProto::LINK_STATE_RUNNING) return {grpc::StatusCode::FAILED_PRECONDITION,"运行中的链路不能修改"}; Link& link=links_[normalized.conn_name()]; link.config=normalized; link.connId=connection.conn_id(); link.state=ModbusTCPProto::LINK_STATE_STOPPED; link.lastError.clear(); status=saveLinksLocked(); if (!status.ok()) return status; LOG_INFO("ModbusTCP 链路配置已更新: conn_name={}, host={}, port={}, unit_id={}", normalized.conn_name(), normalized.tcp().host(), normalized.tcp().port(), normalized.tcp().unit_id()); return fillInfoLocked(link,out);
+  Link& link=links_[normalized.conn_name()]; link.config=normalized; link.connId=connection.conn_id(); link.state=ModbusTCPProto::LINK_STATE_STOPPED; link.lastError.clear(); status=saveLinksLocked(); if (!status.ok()) return status; LOG_INFO("ModbusTCP 链路配置已更新: conn_name={}, host={}, port={}, unit_id={}", normalized.conn_name(), normalized.tcp().host(), normalized.tcp().port(), normalized.tcp().unit_id()); return fillInfoLocked(link,out);
 }
 
-grpc::Status LinkManager::RenameLink(const ModbusTCPProto::RenameLinkRequest& request, ModbusTCPProto::LinkInfo* out) { if(request.old_conn_name().empty()||request.new_conn_name().empty()) return {grpc::StatusCode::INVALID_ARGUMENT,"连接名不能为空"}; std::lock_guard lock(mu_); auto it=links_.find(request.old_conn_name()); if(it==links_.end())return notFound(request.old_conn_name()); if(links_.contains(request.new_conn_name()))return {grpc::StatusCode::ALREADY_EXISTS,"新连接名已存在"}; if(it->second.state==ModbusTCPProto::LINK_STATE_RUNNING)return {grpc::StatusCode::FAILED_PRECONDITION,"运行中的链路不能改名"}; DataCenterProto::ConnectionInfo info; auto status=dataCenter_.RenameConnection(request.old_conn_name(),request.new_conn_name(),&info); if(!status.ok())return status; Link link=std::move(it->second); links_.erase(it); link.config.set_conn_name(request.new_conn_name()); links_[request.new_conn_name()]=std::move(link); status=saveLinksLocked(); if(!status.ok())return status; (void)savePointTablesLocked(); return fillInfoLocked(links_.at(request.new_conn_name()),out); }
+grpc::Status LinkManager::RenameLink(const ModbusTCPProto::RenameLinkRequest& request, ModbusTCPProto::LinkInfo* out) {
+  if (!out || request.old_conn_name().empty() || request.new_conn_name().empty()) return {grpc::StatusCode::INVALID_ARGUMENT, "连接名或响应不能为空"};
+  std::lock_guard lock(mu_);
+  auto it = links_.find(request.old_conn_name());
+  if (it == links_.end()) return notFound(request.old_conn_name());
+  if (request.old_conn_name() == request.new_conn_name()) return fillInfoLocked(it->second, out);
+  if (links_.contains(request.new_conn_name())) return {grpc::StatusCode::ALREADY_EXISTS, "新连接名已存在"};
+  if (it->second.state == ModbusTCPProto::LINK_STATE_RUNNING || it->second.state == ModbusTCPProto::LINK_STATE_PENDING_DELETE) return {grpc::StatusCode::FAILED_PRECONDITION, "运行中或待删除的链路不能改名"};
+  DataCenterProto::ConnectionInfo info;
+  auto status = dataCenter_.RenameConnection(request.old_conn_name(), request.new_conn_name(), &info);
+  if (!status.ok()) return status;
+  auto node = links_.extract(it);
+  node.key() = request.new_conn_name();
+  node.mapped().config.set_conn_name(request.new_conn_name());
+  links_.insert(std::move(node));
+  status = savePointTablesLocked();
+  if (status.ok()) status = saveLinksLocked();
+  if (!status.ok()) {
+    auto original = links_.extract(request.new_conn_name());
+    original.key() = request.old_conn_name();
+    original.mapped().config.set_conn_name(request.old_conn_name());
+    links_.insert(std::move(original));
+    const auto tableRollback = savePointTablesLocked();
+    const auto linkRollback = saveLinksLocked();
+    const auto dcRollback = dataCenter_.RenameConnection(request.new_conn_name(), request.old_conn_name(), &info);
+    LOG_ERROR("ModbusTCP 连接改名落盘失败，已尝试恢复原配置: 原连接名={}, 新连接名={}, 点表恢复={}, 连接恢复={}, 标签连接恢复={}, 原因={}", request.old_conn_name(), request.new_conn_name(), tableRollback.ok(), linkRollback.ok(), dcRollback.ok(), status.error_message());
+    return status;
+  }
+  LOG_INFO("ModbusTCP 连接改名成功并保留点表来源: 原连接名={}, 新连接名={}", request.old_conn_name(), request.new_conn_name());
+  return fillInfoLocked(links_.at(request.new_conn_name()), out);
+}
 grpc::Status LinkManager::GetLink(const std::string& name, ModbusTCPProto::LinkInfo* out) const { if(name.empty())return {grpc::StatusCode::INVALID_ARGUMENT,"conn_name 不能为空"}; std::lock_guard lock(mu_); auto it=links_.find(name); if(it==links_.end())return notFound(name); return fillInfoLocked(it->second,out); }
 grpc::Status LinkManager::ListLinks(ModbusTCPProto::ListLinksResponse* out) const { if(!out)return {grpc::StatusCode::INVALID_ARGUMENT,"out 为空"}; std::lock_guard lock(mu_); out->Clear(); for(const auto& [_,link]:links_) fillInfoLocked(link,out->add_links()); return grpc::Status::OK; }
 grpc::Status LinkManager::DeleteLink(const std::string& name) {
@@ -186,9 +235,16 @@ grpc::Status LinkManager::DeleteLink(const std::string& name) {
   return savePointTablesLocked();
 }
 
-grpc::Status LinkManager::StartLink(const std::string& name) { ModbusTCPProto::LinkConfig config; ModbusRTU::PointTable table; uint32_t id=0; { std::lock_guard lock(mu_); auto it=links_.find(name); if(it==links_.end())return notFound(name); if(it->second.state==ModbusTCPProto::LINK_STATE_RUNNING)return grpc::Status::OK; if(it->second.state==ModbusTCPProto::LINK_STATE_PENDING_DELETE)return {grpc::StatusCode::FAILED_PRECONDITION,"链路处于待删除状态"}; if(!it->second.pointTableConfigured)return {grpc::StatusCode::FAILED_PRECONDITION,"点表尚未配置"}; config=it->second.config; table=it->second.pointTable; id=it->second.connId; }
+grpc::Status LinkManager::StartLink(const std::string& name) { ModbusTCPProto::LinkConfig config; ModbusRTU::PointTable table; uint32_t id=0; uint64_t pointTableRevision=0; { std::lock_guard lock(mu_); auto it=links_.find(name); if(it==links_.end())return notFound(name); if(it->second.state==ModbusTCPProto::LINK_STATE_RUNNING)return grpc::Status::OK; if(it->second.state==ModbusTCPProto::LINK_STATE_PENDING_DELETE)return {grpc::StatusCode::FAILED_PRECONDITION,"链路处于待删除状态"}; if(!it->second.pointTableConfigured)return {grpc::StatusCode::FAILED_PRECONDITION,"点表尚未配置"}; config=it->second.config; table=it->second.pointTable; id=it->second.connId; pointTableRevision=it->second.pointTableRevision; }
   auto bus=std::make_shared<TcpBus>(config.tcp()); auto status=bus->Open(); if(!status.ok()){std::lock_guard lock(mu_);links_[name].lastError=status.error_message();return status;}
-  std::lock_guard lock(mu_); auto it=links_.find(name); if(it==links_.end()){bus->Close();return notFound(name);} it->second.bus=bus; it->second.state=ModbusTCPProto::LINK_STATE_RUNNING; it->second.lastError.clear(); it->second.pollThread=std::jthread([this,name,id,config,table,bus](std::stop_token stop){pollLoop(name,id,config,table,bus,stop);}); LOG_INFO("ModbusTCP 链路功能已启动: conn_name={}",name); return grpc::Status::OK;
+  std::lock_guard lock(mu_); auto it=links_.find(name); if(it==links_.end()){bus->Close();return notFound(name);}
+  if (it->second.state == ModbusTCPProto::LINK_STATE_RUNNING) { bus->Close(); return grpc::Status::OK; }
+  if (it->second.state == ModbusTCPProto::LINK_STATE_PENDING_DELETE || it->second.pointTableRevision != pointTableRevision || it->second.config.SerializeAsString() != config.SerializeAsString()) {
+    bus->Close();
+    LOG_WARNING("ModbusTCP 准备启动链路内功能时配置发生变化，请重新操作: conn_name={}", name);
+    return {grpc::StatusCode::ABORTED, "链路配置或点表已发生变化，请重新启动链路内功能"};
+  }
+  it->second.bus=bus; it->second.state=ModbusTCPProto::LINK_STATE_RUNNING; it->second.lastError.clear(); it->second.pollThread=std::jthread([this,name,id,config,table,bus](std::stop_token stop){pollLoop(name,id,config,table,bus,stop);}); LOG_INFO("ModbusTCP 链路功能已启动: conn_name={}",name); return grpc::Status::OK;
 }
 grpc::Status LinkManager::StopLink(const std::string& name) {
   std::shared_ptr<TcpBus> bus;
@@ -216,27 +272,69 @@ grpc::Status LinkManager::StopLink(const std::string& name) {
 
 grpc::Status LinkManager::UpsertPointTable(const ModbusTCPProto::UpsertPointTableRequest& request) {
   if (request.conn_name().empty()) return {grpc::StatusCode::INVALID_ARGUMENT, "conn_name 不能为空"};
-  bool ready = false;
-  {
-    std::lock_guard lock(mu_);
-    auto it = links_.find(request.conn_name());
-    if (it == links_.end()) return notFound(request.conn_name());
-    if (it->second.state == ModbusTCPProto::LINK_STATE_RUNNING) return {grpc::StatusCode::FAILED_PRECONDITION, "运行中的链路不能更新点表"};
-    ModbusRTU::PointTable next = it->second.pointTable;
-    auto status = next.Upsert(request.points(), request.replace());
-    if (!status.ok()) return status;
-    status = dataCenter_.UpsertConnTags(it->second.connId, next.Tags(), true);
-    if (!status.ok()) return status;
-    it->second.pointTable = std::move(next);
-    it->second.pointTableConfigured = !it->second.pointTable.Points().empty();
-    ready = it->second.pointTableConfigured;
-    status = savePointTablesLocked();
-    if (!status.ok()) return status;
+  if (request.has_template_bindings_json()) {
+    if (!request.replace() || !request.has_expected_revision() || request.expected_revision() == 0) {
+      return {grpc::StatusCode::INVALID_ARGUMENT, "更新模板来源必须完整替换并提供非零预期版本"};
+    }
   }
-  if (ready) {
-    auto status = StartLink(request.conn_name());
-    if (!status.ok()) LOG_WARNING("ModbusTCP 点表下发后自动启动失败: conn_name={}, 原因={}", request.conn_name(), status.error_message());
+  std::lock_guard lock(mu_);
+  auto it = links_.find(request.conn_name());
+  if (it == links_.end()) return notFound(request.conn_name());
+  auto& link = it->second;
+  if (request.has_expected_link_config() && link.config.SerializeAsString() != request.expected_link_config().SerializeAsString()) {
+    LOG_WARNING("ModbusTCP 点表保存时连接配置已变化: conn_name={}", request.conn_name());
+    return {grpc::StatusCode::ABORTED, "连接配置已变化，请重新读取并比对"};
   }
+  if (request.has_template_bindings_json()) {
+    const auto status = mskdsp::ValidateTemplateBindings(request.template_bindings_json(), link.config.address_base());
+    if (!status.ok()) {
+      LOG_WARNING("ModbusTCP 拒绝非法或地址基准不一致的模板来源: conn_name={}, 字节数={}, 原因={}", request.conn_name(), request.template_bindings_json().size(), status.error_message());
+      return status;
+    }
+  }
+  if (link.state == ModbusTCPProto::LINK_STATE_RUNNING || link.state == ModbusTCPProto::LINK_STATE_PENDING_DELETE) {
+    return {grpc::StatusCode::FAILED_PRECONDITION, "更新点表前请先停止链路，且不能处于待删除状态"};
+  }
+  if (request.has_expected_revision() && request.expected_revision() != link.pointTableRevision) {
+    LOG_WARNING("ModbusTCP 点表版本冲突: conn_name={}, 预期={}, 实际={}", request.conn_name(), request.expected_revision(), link.pointTableRevision);
+    return {grpc::StatusCode::ABORTED, "点表已被其他操作修改，请重新读取并比对"};
+  }
+  if (link.pointTableRevision == std::numeric_limits<uint64_t>::max()) {
+    return {grpc::StatusCode::RESOURCE_EXHAUSTED, "点表版本已达到上限"};
+  }
+  ModbusRTU::PointTable next = link.pointTable;
+  auto status = next.Upsert(request.points(), request.replace());
+  if (!status.ok()) return status;
+  const auto nextRevision = link.pointTableRevision + 1;
+  const auto nextBindings = request.has_template_bindings_json() ? request.template_bindings_json() : link.templateBindingsJson;
+  const auto previousConfig = dumpPointTablesLocked();
+  auto config = previousConfig;
+  for (auto& table : *config.mutable_point_tables()) {
+    if (table.conn_name() != request.conn_name()) continue;
+    table.clear_points();
+    ModbusRTUProto::PointTable normalized;
+    next.ToProto(request.conn_name(), &normalized);
+    for (const auto& point : normalized.points()) *table.add_points() = point;
+    table.set_revision(nextRevision);
+    table.set_template_bindings_json(nextBindings);
+  }
+  status = pointTableStore_.Save(config);
+  if (!status.ok()) {
+    LOG_ERROR("ModbusTCP 点表落盘失败，未改动标签和路由并保留原版本: conn_name={}, 版本={}, 原因={}", request.conn_name(), link.pointTableRevision, status.error_message());
+    return status;
+  }
+  status = dataCenter_.UpsertConnTags(link.connId, next.Tags(), true);
+  if (!status.ok()) {
+    const auto rollback = pointTableStore_.Save(previousConfig);
+    LOG_ERROR("ModbusTCP 标签同步失败，已尝试恢复磁盘点表: conn_name={}, 版本={}, 磁盘恢复成功={}, 同步原因={}, 恢复原因={}", request.conn_name(), link.pointTableRevision, rollback.ok(), status.error_message(), rollback.error_message());
+    if (!rollback.ok()) return {grpc::StatusCode::INTERNAL, "标签同步失败且磁盘点表恢复失败，请检查设备配置持久化状态"};
+    return status;
+  }
+  link.pointTable = std::move(next);
+  link.pointTableConfigured = !link.pointTable.Points().empty();
+  link.pointTableRevision = nextRevision;
+  link.templateBindingsJson = nextBindings;
+  LOG_INFO("ModbusTCP 点表及来源保存成功，链路内功能保持停止: conn_name={}, 版本={}, 来源字节数={}", request.conn_name(), nextRevision, nextBindings.size());
   return grpc::Status::OK;
 }
 grpc::Status LinkManager::GetPointTable(
@@ -251,6 +349,8 @@ grpc::Status LinkManager::GetPointTable(
   }
   out->Clear();
   out->set_conn_name(name);
+  out->set_revision(it->second.pointTableRevision);
+  out->set_template_bindings_json(it->second.templateBindingsJson);
   ModbusRTUProto::PointTable normalized;
   it->second.pointTable.ToProto(name, &normalized);
   for (const auto& point : normalized.points()) {

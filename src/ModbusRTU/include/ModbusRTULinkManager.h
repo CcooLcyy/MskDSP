@@ -169,6 +169,8 @@ private:
     std::string lifecycleError;
     uint64_t pollingErrorRevision = 0;
     PointTable pointTable;
+    uint64_t pointTableRevision = 1;
+    std::string templateBindingsJson;
     bool pointTableConfigured = false;
     std::shared_ptr<Bus> bus;
     std::shared_ptr<CommandGate> commandGate = std::make_shared<CommandGate>();
@@ -223,6 +225,8 @@ private:
   static void clearLastErrorLocked(LinkRuntime* link, LastErrorSource source);
 
   mutable std::mutex mu_;
+  // 整表快照的生成到落盘需要串行化，避免链路修改的旧快照覆盖 CAS 保存结果。
+  std::mutex pointTableMutationMu_;
   std::unordered_map<std::string, LinkRuntime> linksByName_;
   std::unordered_map<SerialKey, BusEntry, SerialKeyHash> buses_;
   std::unordered_map<MqttKey, BusEntry, MqttKeyHash> mqttBuses_;

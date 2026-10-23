@@ -1490,6 +1490,7 @@ mskdsp_add_isolated_test(iec104SoeStore_test)
 add_executable(modbusRtuLinkManager_test
   modbus_rtu_data_center_client_test.cc
   modbus_rtu_link_manager_test.cc
+  modbus_template_bindings_test.cc
   modbus_rtu_serial_bus_test.cc
   ${CMAKE_SOURCE_DIR}/src/ModbusRTU/ModbusRTUDataCenterClient.cc
   ${CMAKE_SOURCE_DIR}/src/ModbusRTU/ModbusRTULinkManager.cc
@@ -1540,7 +1541,7 @@ target_link_libraries(modbusTcpBus_test PRIVATE
 
 mskdsp_add_isolated_test(modbusTcpBus_test)
 
-add_executable(modbusTcpEnum_test modbus_tcp_enum_test.cc)
+add_executable(modbusTcpEnum_test modbus_tcp_enum_test.cc modbus_tcp_template_bindings_test.cc)
 target_link_libraries(modbusTcpEnum_test PRIVATE
   GTest::gtest_main
   GTest::gmock

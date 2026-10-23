@@ -4,11 +4,13 @@
 #include "Logger.h"
 #include "ModbusRTUPointTable.h"
 #include "mskdsp/detail/ProtoSqliteStore.hpp"
+#include "mskdsp/ModbusTemplateBindings.hpp"
 namespace ModbusTCP {
 namespace {
 grpc::Status validate(const ModbusTCPProto::PointTablesConfig& c) {
   std::unordered_set<std::string> names;
   for (const auto& table : c.point_tables()) {
+    if (auto status = mskdsp::ValidateTemplateBindings(table.template_bindings_json()); !status.ok()) return status;
     if (table.conn_name().empty() || !names.insert(table.conn_name()).second) return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "ModbusTCP 持久化点表连接名非法");
     ModbusRTU::PointTable checker;
     if (auto status = checker.Upsert(table.points(), true); !status.ok()) return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "ModbusTCP 持久化点表非法: " + status.error_message());
@@ -19,5 +21,16 @@ void trace(const std::string& message) { LOG_INFO("{}", message); }
 }
 PointTableStore::PointTableStore(std::filesystem::path path) : path_(std::move(path)) {}
 grpc::Status PointTableStore::Save(const ModbusTCPProto::PointTablesConfig& c) { mskdsp::detail::ProtoSqliteStore<ModbusTCPProto::PointTablesConfig> s(path_, "ModbusTCP", "point_tables", "ModbusTCPProto.PointTablesConfig", validate, trace); return s.Save(c); }
-grpc::Status PointTableStore::Load(ModbusTCPProto::PointTablesConfig* out) { mskdsp::detail::ProtoSqliteStore<ModbusTCPProto::PointTablesConfig> s(path_, "ModbusTCP", "point_tables", "ModbusTCPProto.PointTablesConfig", validate, trace); return s.Load(out); }
+grpc::Status PointTableStore::Load(ModbusTCPProto::PointTablesConfig* out) {
+  mskdsp::detail::ProtoSqliteStore<ModbusTCPProto::PointTablesConfig> store(path_, "ModbusTCP", "point_tables", "ModbusTCPProto.PointTablesConfig", validate, trace);
+  auto status = store.Load(out);
+  if (status.ok()) {
+    for (auto& table : *out->mutable_point_tables()) {
+      if (table.revision() != 0) continue;
+      table.set_revision(1);
+      LOG_INFO("ModbusTCP 旧点表已迁移初始版本: conn_name={}, 版本=1", table.conn_name());
+    }
+  }
+  return status;
+}
 }
