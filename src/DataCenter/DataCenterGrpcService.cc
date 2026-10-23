@@ -384,6 +384,8 @@ struct DataCenterGrpcServiceImpl::Impl {
   std::mutex mu;
   DataCenterCore core;
   DataCenterStateStore stateStore;
+  // 完整状态保存失败后保留标记，避免将仅存在于内存的变更当作已持久化。
+  bool stateNeedsPersistence{false};
 
   std::mutex commandLanesMu;
   std::unordered_map<std::string, std::shared_ptr<CommandLane>> commandLanes;
@@ -550,6 +552,7 @@ struct DataCenterGrpcServiceImpl::Impl {
   }
 
   grpc::Status saveStateLocked(const std::string& source) {
+    stateNeedsPersistence = true;
     auto state = dumpStateLocked();
     const auto summary = summarizeRoutes(state.routes().routes());
     LOG_INFO("DataCenter 准备保存完整状态: 来源={}, connections={}, conn_tags={}, routes_size={}, 业务路由数={}, 路由hash={}, 路由样本={}",
@@ -569,6 +572,7 @@ struct DataCenterGrpcServiceImpl::Impl {
                 summary.total, summary.business, summary.hash, status.error_message());
       logStateStoreFiles("状态落盘失败后", stateStore, summary, source);
     } else {
+      stateNeedsPersistence = false;
       logStateStoreFiles("状态落盘后", stateStore, summary, source);
       const auto databaseFile = inspectRouteFileState(stateStore.databasePath());
       if (isExistingFileWithSize(databaseFile, 0)) {
@@ -671,7 +675,19 @@ grpc::Status DataCenterGrpcServiceImpl::GetOrCreateConnection(grpc::ServerContex
   const auto& key = request->key();
 
   std::lock_guard<std::mutex> lock(impl_->mu);
-  auto status = impl_->core.GetOrCreateConnection(*request, response);
+  auto status = impl_->core.GetConnectionByKey(key, response);
+  if (status.ok() && !impl_->stateNeedsPersistence) {
+    LOG_DEBUG("DataCenter 已有连接状态无变化，跳过重复落盘: module_name={}, conn_name={}, conn_id={}", key.module_name(), key.conn_name(), response->conn_id());
+    return grpc::Status::OK;
+  }
+  if (!status.ok() && status.error_code() != grpc::StatusCode::NOT_FOUND) {
+    LOG_ERROR("DataCenter 查询连接失败: module_name={}, conn_name={}, 原因={}", key.module_name(), key.conn_name(), status.error_message());
+    return status;
+  }
+  if (impl_->stateNeedsPersistence) {
+    LOG_INFO("DataCenter 存在未落盘状态，获取连接时重试保存: module_name={}, conn_name={}", key.module_name(), key.conn_name());
+  }
+  status = impl_->core.GetOrCreateConnection(*request, response);
   if (!status.ok()) {
     LOG_ERROR("DataCenter 获取/创建连接失败: module_name={}, conn_name={}, 原因={}",
               key.module_name(), key.conn_name(), status.error_message());

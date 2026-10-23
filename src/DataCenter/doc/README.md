@@ -140,7 +140,8 @@ DataCenter 会将连接注册表、连接标签注册表与路由配置作为同
 - 状态版本：`DataCenterState.schema_version=1`，保存时自动写入，用于校验 SQLite payload 格式。
 
 ### 保存时机与语义
-- 每次 `GetOrCreateConnection` / `RenameConnection` / `DeleteConnection` / `UpsertConnection` / `UpsertConnTags` / `UpsertRoutes` / `DeleteRoutes` 成功后自动落盘完整状态。
+- `GetOrCreateConnection` 新建连接时保存完整状态；已有连接且无待落盘状态时直接返回，不重复访问数据库。此前完整状态保存失败时，获取已有连接也会重试保存，成功后才恢复免落盘路径。
+- `RenameConnection` / `DeleteConnection` / `UpsertConnection` / `UpsertConnTags` / `UpsertRoutes` / `DeleteRoutes` 成功后自动落盘完整状态。
 - `DeleteConnection` 会先在内存中同步删除该连接关联的连接标签注册表/路由/源端与目的端最新值缓存，再将完整状态一次落盘。
 - `UpsertConnTags(replace=true)` 会先在内存中同步删除引用已移除 tag 的路由，再将完整状态一次落盘。
 - 落盘失败会返回 `INTERNAL`，但内存中的状态不会回滚（配置端可重试）。

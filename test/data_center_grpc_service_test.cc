@@ -21,6 +21,7 @@
 #include <grpcpp/server_builder.h>
 
 #include "DataCenterGrpcService.h"
+#include "DataCenterStateStore.h"
 #include "Logger.h"
 
 namespace {
@@ -64,6 +65,28 @@ public:
 
 private:
   std::filesystem::path old_;
+};
+
+// 用目录阻断数据库文件路径，确定性模拟写库失败，退出作用域时恢复原数据库。
+class ScopedDatabaseBlocker {
+public:
+  ScopedDatabaseBlocker() {
+    std::filesystem::rename(path_, backup_);
+    std::filesystem::create_directory(path_);
+  }
+
+  ~ScopedDatabaseBlocker() {
+    std::error_code error;
+    std::filesystem::remove(path_, error);
+    std::filesystem::rename(backup_, path_, error);
+  }
+
+  ScopedDatabaseBlocker(const ScopedDatabaseBlocker &) = delete;
+  ScopedDatabaseBlocker &operator=(const ScopedDatabaseBlocker &) = delete;
+
+private:
+  const std::filesystem::path path_{"./conf/config.db"};
+  const std::filesystem::path backup_{"./conf/config.db.test-backup"};
 };
 
 class BlockingCommandExecutor final : public DataCenterProto::CommandExecutor::Service {
@@ -285,6 +308,110 @@ protected:
   std::unique_ptr<DataCenterProto::DataCenterService::Stub> stub_;
 };
 }  // 命名空间结束
+
+// 验证：已成功落盘的连接重复获取时不访问数据库，即使数据库路径不可写仍返回原 ID。
+TEST_F(DataCenterGrpcServiceTest, ExistingConnectionDoesNotRequireDatabaseWrite) {
+  const auto connection = GetOrCreateConnection("ModbusRTU", "existing");
+  ASSERT_NE(connection.conn_id(), 0u);
+
+  ScopedDatabaseBlocker blocker;
+  const auto repeated = GetOrCreateConnection("ModbusRTU", "existing");
+  EXPECT_EQ(repeated.SerializeAsString(), connection.SerializeAsString());
+}
+
+// 验证：新连接仍保存完整状态，重新构造服务后可读取相同主键及 ID。
+TEST_F(DataCenterGrpcServiceTest, NewConnectionsPersistAcrossServiceRecreation) {
+  const auto first = GetOrCreateConnection("ModbusRTU", "first");
+  const auto second = GetOrCreateConnection("ModbusRTU", "second");
+  ASSERT_NE(first.conn_id(), second.conn_id());
+
+  DataCenter::DataCenterGrpcServiceImpl restored;
+  grpc::ServerContext context;
+  DataCenterProto::Empty request;
+  DataCenterProto::ListConnectionsResponse response;
+  ASSERT_TRUE(restored.ListConnections(&context, &request, &response).ok());
+  ASSERT_EQ(response.conns_size(), 2);
+  for (const auto &connection : response.conns()) {
+    if (connection.conn_name() == first.conn_name()) {
+      EXPECT_EQ(connection.SerializeAsString(), first.SerializeAsString());
+    } else {
+      EXPECT_EQ(connection.SerializeAsString(), second.SerializeAsString());
+    }
+  }
+
+  ScopedDatabaseBlocker blocker;
+  grpc::ServerContext lookupContext;
+  DataCenterProto::GetOrCreateConnectionRequest lookupRequest;
+  lookupRequest.mutable_key()->set_module_name(first.module_name());
+  lookupRequest.mutable_key()->set_conn_name(first.conn_name());
+  DataCenterProto::ConnectionInfo lookupResponse;
+  ASSERT_TRUE(restored.GetOrCreateConnection(&lookupContext, &lookupRequest, &lookupResponse).ok());
+  EXPECT_EQ(lookupResponse.SerializeAsString(), first.SerializeAsString());
+}
+
+// 验证：新建落盘失败后不能因内存已有连接误报成功，恢复数据库后重试保存原 ID。
+TEST_F(DataCenterGrpcServiceTest, FailedCreationRetriesPersistenceBeforeReturningSuccess) {
+  DataCenterProto::GetOrCreateConnectionRequest request;
+  request.mutable_key()->set_module_name("ModbusRTU");
+  request.mutable_key()->set_conn_name("retry");
+  uint32_t allocatedId = 0;
+  {
+    ScopedDatabaseBlocker blocker;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+      grpc::ServerContext context;
+      DataCenterProto::ConnectionInfo response;
+      const auto status = service_->GetOrCreateConnection(&context, &request, &response);
+      EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+      ASSERT_NE(response.conn_id(), 0u);
+      if (attempt == 0) {
+        allocatedId = response.conn_id();
+      } else {
+        EXPECT_EQ(response.conn_id(), allocatedId);
+      }
+    }
+  }
+
+  EXPECT_EQ(GetOrCreateConnection("ModbusRTU", "retry").conn_id(), allocatedId);
+  DataCenter::DataCenterStateStore store;
+  DataCenterProto::DataCenterState persisted;
+  ASSERT_TRUE(store.Load(&persisted).ok());
+  ASSERT_EQ(persisted.connections().conns_size(), 1);
+  EXPECT_EQ(persisted.connections().conns(0).conn_id(), allocatedId);
+}
+
+// 验证：其他状态变更落盘失败时，获取已有连接仍重试保存，成功后才恢复免写库路径。
+TEST_F(DataCenterGrpcServiceTest, ExistingConnectionRetriesOtherFailedStateChanges) {
+  const auto connection = GetOrCreateConnection("ModbusRTU", "with-tags");
+  {
+    ScopedDatabaseBlocker blocker;
+    grpc::ServerContext context;
+    DataCenterProto::UpsertConnTagsRequest request;
+    request.set_conn_id(connection.conn_id());
+    request.set_replace(true);
+    request.add_tags("功率");
+    DataCenterProto::Empty response;
+    EXPECT_EQ(service_->UpsertConnTags(&context, &request, &response).error_code(), grpc::StatusCode::INTERNAL);
+
+    grpc::ServerContext retryContext;
+    DataCenterProto::GetOrCreateConnectionRequest retryRequest;
+    retryRequest.mutable_key()->set_module_name("ModbusRTU");
+    retryRequest.mutable_key()->set_conn_name("with-tags");
+    DataCenterProto::ConnectionInfo retryResponse;
+    EXPECT_EQ(service_->GetOrCreateConnection(&retryContext, &retryRequest, &retryResponse).error_code(), grpc::StatusCode::INTERNAL);
+  }
+
+  EXPECT_EQ(GetOrCreateConnection("ModbusRTU", "with-tags").conn_id(), connection.conn_id());
+  DataCenter::DataCenterStateStore store;
+  DataCenterProto::DataCenterState persisted;
+  ASSERT_TRUE(store.Load(&persisted).ok());
+  ASSERT_EQ(persisted.conn_tags().conn_tags_size(), 1);
+  ASSERT_EQ(persisted.conn_tags().conn_tags(0).tags_size(), 1);
+  EXPECT_EQ(persisted.conn_tags().conn_tags(0).tags(0), "功率");
+  {
+    ScopedDatabaseBlocker blocker;
+    EXPECT_EQ(GetOrCreateConnection("ModbusRTU", "with-tags").conn_id(), connection.conn_id());
+  }
+}
 
 // 验证：连接生命周期（创建/重命名/删除）与 UpsertConnection 的冲突/未分配错误能正确返回。
 TEST_F(DataCenterGrpcServiceTest, ConnectionLifecycleAndUpsertConnectionValidations) {
