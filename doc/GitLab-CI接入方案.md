@@ -37,7 +37,7 @@ ARM64 在独立 x64 工具镜像中使用 GCC14 的 aarch64 交叉工具链编�
 
 - 两架构均在构建作业生成 `symbols/$ARCH/*debugsymbols*.tar.gz`、符号 SHA256SUMS 和原始构建身份；构建归档保留 30 天，符号缺失、为空或校验失败时拒绝成功。延长保留期会同时保留构建归档内的运行文件和测试依赖。
 - `build-arm64` 上传 `package/`、`release/arm64/`、`logs/arm64/`、`symbols/arm64/`，排除重复的 `package/debug/**`；不上传整个构建目录，也不生成 ARM64 JUnit 报告。
-- x64 全量测试、测试数量和测试工作区规则不变，测试在已分离符号的生产库上执行。安装包 SHA256SUMS 与符号 SHA256SUMS 分开保存，符号不再进入打包和发布输入。
+- x64 全量测试、测试数量和测试工作区规则不变，测试在已分离符号的生产库上执行。安装包 SHA256SUMS 与符号 SHA256SUMS 分开保存；打包不消费符号，发布归档不包含符号。GitLab needs 仍下载整个上游归档，因此 x64 测试和 ARM64 打包仍会收到各自构建归档中的压缩符号，但不会将其再次向后上传。
 - `build-x64` 上传 `package/`、`release/x64/`、`logs/x64/`、`build-x64/`、`symbols/x64/`，排除 `build-x64/**/*.o` 和 `package/debug/**`；`test-x64` 上传运行产物、原身份、测试日志和 `build-x64/Testing/`，排除原始 debug、不再上传 symbols，提供 `logs/x64/ctest.xml` 报告。测试作业不声明构建缓存变量或架构资源锁，主脚本继续使用公共内存工作区的两个编译槽。
 - 打包作业归档仅含 `release/$ARCH/mskdsp-*` 安装包、metadata.json、安装包 SHA256SUMS 和 `logs/$ARCH/package.log`；发布不再取回符号和旧构建/测试日志。仅发布使用 `GIT_DEPTH=1`，构建仍保留完整历史，远端 HEAD 及冻结来源校验不变。
 
