@@ -50,6 +50,7 @@ void IEC104::start(std::stop_token stopToken) {
   std::stop_callback cb(stopToken, [&cv]() { cv.notify_all(); });
   std::unique_lock lock(mu);
   cv.wait(lock, [&stopToken]() { return stopToken.stop_requested(); });
+  linkManager_.StopSimulationPeriodicReports();
   LOG_INFO("IEC104 模块停止");
 }
 

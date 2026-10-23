@@ -196,13 +196,18 @@ void TcpLink::SendPointValue(const PointValue& value, uint8_t cause) {
   s->SendPointValue(value, cause);
 }
 
-void TcpLink::SendPointValuesWithoutTime(std::vector<PointValue> values, uint8_t cause) {
+bool TcpLink::IsDataTransferActive() const {
+  auto s = session();
+  return s && s->IsDataTransferActive();
+}
+
+bool TcpLink::SendPointValuesWithoutTime(std::vector<PointValue> values, uint8_t cause, bool activeOnly) {
   auto s = session();
   if (!s) {
     LOG_WARNING("IEC104 不带时标快照未提交发送，当前无 TCP 会话: conn_name={}, 点数={}", config_.conn_name(), values.size());
-    return;
+    return false;
   }
-  s->SendPointValuesWithoutTime(std::move(values), cause);
+  return s->SendPointValuesWithoutTime(std::move(values), cause, activeOnly);
 }
 
 void TcpLink::SendSoe(const SoeEvent& event) {

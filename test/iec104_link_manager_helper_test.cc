@@ -152,6 +152,104 @@ protected:
 };
 }  // 命名空间结束
 
+// 验证默认状态、空快照/非法间隔原子拒绝和停止链路时允许预先启用。
+TEST_F(IEC104ManualSimulationTest, PeriodicReportValidatesBeforeChangingState) {
+  IEC104Proto::SimulationPeriodicStatus status;
+  ASSERT_TRUE(mgr.GetSimulationPeriodicStatus("manual", &status).ok());
+  EXPECT_FALSE(status.enabled());
+  EXPECT_FALSE(status.running());
+  EXPECT_EQ(status.interval_seconds(), 5u);
+  EXPECT_EQ(status.last_sent_ms(), 0);
+  IEC104Proto::SimulationPeriodicReportRequest config;
+  config.set_conn_name("manual");
+  config.set_enabled(true);
+  config.set_interval_seconds(5);
+  EXPECT_EQ(mgr.SetSimulationPeriodicReport(config, &status).error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+  AddFloat(11.0);
+  ASSERT_TRUE(mgr.SetSimulationValues(request, &response).ok());
+  ASSERT_TRUE(mgr.SetSimulationPeriodicReport(config, &status).ok());
+  EXPECT_TRUE(status.enabled());
+  EXPECT_FALSE(status.running());
+  for (const auto invalid : {0u, 3601u}) {
+    config.set_interval_seconds(invalid);
+    EXPECT_EQ(mgr.SetSimulationPeriodicReport(config, &status).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    ASSERT_TRUE(mgr.GetSimulationPeriodicStatus("manual", &status).ok());
+    EXPECT_TRUE(status.enabled());
+    EXPECT_EQ(status.interval_seconds(), 5u);
+  }
+  ASSERT_TRUE(mgr.ClearSimulationValues("manual").ok());
+  ASSERT_TRUE(mgr.GetSimulationPeriodicStatus("manual", &status).ok());
+  EXPECT_FALSE(status.enabled());
+  EXPECT_EQ(status.last_sent_ms(), 0);
+}
+
+// 验证主站角色、缺失连接及空输出拒绝，不创建后台上报任务。
+TEST_F(IEC104ManualSimulationTest, PeriodicReportRejectsMasterAndMissingLink) {
+  IEC104Proto::SimulationPeriodicStatus status;
+  IEC104Proto::SimulationPeriodicReportRequest config;
+  config.set_conn_name("missing");
+  config.set_interval_seconds(5);
+  EXPECT_EQ(mgr.SetSimulationPeriodicReport(config, &status).error_code(), grpc::StatusCode::NOT_FOUND);
+  EXPECT_EQ(mgr.GetSimulationPeriodicStatus("missing", &status).error_code(), grpc::StatusCode::NOT_FOUND);
+  config.set_conn_name("manual");
+  mgr.linksByName_.at("manual").config.set_station_role(IEC104Proto::STATION_ROLE_MASTER);
+  EXPECT_EQ(mgr.SetSimulationPeriodicReport(config, &status).error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+  EXPECT_EQ(mgr.GetSimulationPeriodicStatus("manual", nullptr).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+// 验证停止模块的周期功能会关闭计划，重新启用不继承旧定时线程。
+TEST_F(IEC104ManualSimulationTest, PeriodicModuleStopResetsEnabledState) {
+  AddFloat(11.0);
+  ASSERT_TRUE(mgr.SetSimulationValues(request, &response).ok());
+  IEC104Proto::SimulationPeriodicReportRequest config;
+  config.set_conn_name("manual");
+  config.set_enabled(true);
+  config.set_interval_seconds(1);
+  IEC104Proto::SimulationPeriodicStatus status;
+  ASSERT_TRUE(mgr.SetSimulationPeriodicReport(config, &status).ok());
+  mgr.StopSimulationPeriodicReports();
+  ASSERT_TRUE(mgr.GetSimulationPeriodicStatus("manual", &status).ok());
+  EXPECT_FALSE(status.enabled());
+  ASSERT_TRUE(mgr.SetSimulationPeriodicReport(config, &status).ok());
+  EXPECT_TRUE(status.enabled());
+}
+
+// 验证快照替换与停止链路均保留周期配置和计划，下一周期读取替换后的值。
+TEST_F(IEC104ManualSimulationTest, PeriodicSnapshotReplacementAndLinkStopPreserveSchedule) {
+  AddFloat(11.0);
+  ASSERT_TRUE(mgr.SetSimulationValues(request, &response).ok());
+  const auto start = IEC104::detail::SimulationPeriodicSchedule::Clock::time_point{};
+  auto &link = mgr.linksByName_.at("manual");
+  link.simulationPeriodic.Configure(true, 5, start);
+  request.mutable_points(0)->set_double_value(21.0);
+  ASSERT_TRUE(mgr.SetSimulationValues(request, &response).ok());
+  ASSERT_TRUE(mgr.StopLink("manual").ok());
+  IEC104Proto::SimulationPeriodicStatus status;
+  ASSERT_TRUE(mgr.GetSimulationPeriodicStatus("manual", &status).ok());
+  EXPECT_TRUE(status.enabled());
+  EXPECT_FALSE(status.running());
+  EXPECT_TRUE(link.simulationPeriodic.ConsumeDue(start + std::chrono::seconds(5), true));
+  EXPECT_DOUBLE_EQ(link.simulationValues.at("float-tag").double_value(), 21.0);
+  EXPECT_EQ(status.last_sent_ms(), 0);
+}
+
+// 验证点表替换清空模拟快照时关闭周期上报，避免继续发送失效点。
+TEST_F(IEC104ManualSimulationTest, PointTableReplacementDisablesPeriodicReport) {
+  AddFloat(11.0);
+  ASSERT_TRUE(mgr.SetSimulationValues(request, &response).ok());
+  auto &link = mgr.linksByName_.at("manual");
+  link.simulationPeriodic.Configure(true, 5, IEC104::detail::SimulationPeriodicSchedule::Clock::time_point{});
+  IEC104Proto::UpsertPointTableRequest points;
+  points.set_conn_name("manual");
+  points.set_replace(true);
+  ASSERT_TRUE(mgr.UpsertPointTable(points).ok());
+  IEC104Proto::SimulationPeriodicStatus status;
+  ASSERT_TRUE(mgr.GetSimulationPeriodicStatus("manual", &status).ok());
+  EXPECT_FALSE(status.enabled());
+  EXPECT_FALSE(status.running());
+  EXPECT_TRUE(link.simulationValues.empty());
+}
+
 // 验证：无需批量生成或运行链路即可直接设置单点，零值存在性保留且其他点不被模拟。
 TEST_F(IEC104ManualSimulationTest, SetsOnePointWithoutPreviousSnapshot) {
   AddFloat(0);

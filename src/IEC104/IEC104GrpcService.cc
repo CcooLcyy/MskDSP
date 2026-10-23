@@ -333,4 +333,30 @@ grpc::Status IEC104GrpcServiceImpl::ClearSimulationValues(
   }
   return status;
 }
+grpc::Status IEC104GrpcServiceImpl::SetSimulationPeriodicReport(
+    grpc::ServerContext *, const IEC104Proto::SimulationPeriodicReportRequest *request, IEC104Proto::SimulationPeriodicStatus *response) {
+  if (!iec104_) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
+  }
+  if (!request || !response) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
+  }
+  auto status = iec104_->linkManager().SetSimulationPeriodicReport(*request, response);
+  if (!status.ok()) {
+    LOG_ERROR("IEC104 设置模拟周期上报失败: conn_name={}, 原因={}", request->conn_name(), status.error_message());
+  }
+  return status;
+}
+
+grpc::Status IEC104GrpcServiceImpl::GetSimulationPeriodicStatus(
+    grpc::ServerContext *, const IEC104Proto::SimulationRequest *request, IEC104Proto::SimulationPeriodicStatus *response) {
+  if (!iec104_) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模块未就绪");
+  }
+  if (!request || !response) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "请求/响应为空");
+  }
+  return iec104_->linkManager().GetSimulationPeriodicStatus(request->conn_name(), response);
+}
+
 }  // namespace IEC104

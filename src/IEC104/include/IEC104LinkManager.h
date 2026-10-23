@@ -4,6 +4,7 @@
 #include <grpcpp/support/status.h>
 
 #include <cstdint>
+#include <condition_variable>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -19,6 +20,7 @@
 #include "IEC104DataCenterClient.h"
 #include "IEC104PointTable.h"
 #include "IEC104ReportPolicy.hpp"
+#include "IEC104SimulationPeriodic.hpp"
 #include "IEC104TcpLink.h"
 
 namespace IEC104 {
@@ -57,6 +59,10 @@ public:
   grpc::Status GetSimulationSnapshot(const std::string &connName, IEC104Proto::SimulationSnapshot *out) const;
   grpc::Status ApplySimulationValues(const std::string &connName);
   grpc::Status ClearSimulationValues(const std::string &connName);
+  grpc::Status SetSimulationPeriodicReport(const IEC104Proto::SimulationPeriodicReportRequest &request,
+                                            IEC104Proto::SimulationPeriodicStatus *out);
+  grpc::Status GetSimulationPeriodicStatus(const std::string &connName, IEC104Proto::SimulationPeriodicStatus *out) const;
+  void StopSimulationPeriodicReports();
 
 private:
   friend class IEC104LinkManagerTestPeer;
@@ -93,6 +99,7 @@ private:
     // 链路启动、点表更新与配置重载时清空，清空后每个点会重新上送一次（首次规则）。
     std::unordered_map<std::string, detail::LastReportedSinglePoint> lastReportedSingleByTag;
     std::unordered_map<std::string, IEC104Proto::SimulationPoint> simulationValues;
+    detail::SimulationPeriodicSchedule simulationPeriodic;
     // 配置切换后需主动恢复的点；每次激活取最新快照，后续点表更新过滤已删除或非上报点。
     std::unordered_set<std::string> fixedRefreshTags;
 
@@ -177,10 +184,18 @@ private:
   void rememberReportedSinglePoint(const std::string &connName, const std::string &tag, bool value,
                                    DataCenterProto::Quality quality);
   grpc::Status fillSimulationSnapshotLocked(const LinkRuntime &link, IEC104Proto::SimulationSnapshot *out) const;
+  grpc::Status sendSimulationValuesLocked(const std::string &connName, LinkRuntime &link, bool activeOnly);
+  bool simulationPeriodicReadyLocked(const LinkRuntime &link) const;
+  void fillSimulationPeriodicStatusLocked(const LinkRuntime &link, IEC104Proto::SimulationPeriodicStatus *out) const;
+  void runSimulationPeriodic(std::stop_token stopToken);
 
   static std::string normalizeTimeSyncTag(const IEC104Proto::LinkConfig &config);
 
   mutable std::mutex mu_;
+  // 工作线程不持有连接指针；停机先摘出线程，释放 mu_ 后再等待退出。
+  std::mutex simulationLifecycleMu_;
+  std::condition_variable_any simulationPeriodicCv_;
+  std::jthread simulationPeriodicThread_;
   // 必须晚于运行中链路析构，避免会话关闭回调访问已释放的 SOE 存储。
   std::unique_ptr<IEC104SoeStore> soeStore_;
   std::unordered_map<std::string, LinkRuntime> linksByName_;

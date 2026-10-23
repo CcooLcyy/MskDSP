@@ -157,6 +157,8 @@ void TcpSession::Start(boost::asio::ip::tcp::socket socket) {
   socket_ = std::move(socket);
   closing_ = false;
   dataTransferActive_ = false;
+  dataTransferReady_.store(false);
+  dataTransferGeneration_.fetch_add(1);
   ackPending_ = false;
   autoInterrogationSent_ = false;
   sendSeq_ = 0;
@@ -194,6 +196,8 @@ void TcpSession::Stop() {
     return;
   }
   closing_ = true;
+  dataTransferReady_.store(false);
+  dataTransferGeneration_.fetch_add(1);
   LOG_INFO("IEC104 会话停止: conn_name={}, 角色={}", config_.conn_name(), isClient_ ? "客户端" : "服务端");
   auto onClosed = onClosed_;
   boost::asio::post(io_, [self = shared_from_this(), onClosed = std::move(onClosed)]() mutable {
@@ -278,14 +282,20 @@ void TcpSession::SendPointValue(const PointValue &value, uint8_t cause) {
   });
 }
 
-void TcpSession::SendPointValuesWithoutTime(std::vector<PointValue> values, uint8_t cause) {
-  boost::asio::post(io_, [self = shared_from_this(), values = std::move(values), cause]() mutable {
-    if (self->closing_) {
+bool TcpSession::SendPointValuesWithoutTime(std::vector<PointValue> values, uint8_t cause, bool activeOnly) {
+  const auto generation = dataTransferGeneration_.load();
+  if (activeOnly && !IsDataTransferActive()) {
+    return false;
+  }
+  boost::asio::post(io_, [self = shared_from_this(), values = std::move(values), cause, activeOnly, generation]() mutable {
+    // STOPDT/恢复之间遗留在 io_ 队列中的周期快照必须丢弃，避免恢复后补发旧周期。
+    if (self->closing_ || (activeOnly && (!self->dataTransferActive_ || generation != self->dataTransferGeneration_.load()))) {
       return;
     }
     LOG_INFO("IEC104 提交不带时标点值快照: conn_name={}, 点数={}, cause={}", self->config_.conn_name(), values.size(), cause);
     self->enqueuePointValuesBatch(std::move(values), cause, false);
   });
+  return true;
 }
 
 void TcpSession::SendSoe(const SoeEvent &event) {
@@ -1980,6 +1990,8 @@ void TcpSession::setDataTransferActive(bool active, const char *reason) {
     return;
   }
   dataTransferActive_ = active;
+  dataTransferGeneration_.fetch_add(1);
+  dataTransferReady_.store(active);
   if (active) {
     LOG_INFO("IEC104 数据传输已激活: conn_name={}, 原因={}", config_.conn_name(), reason);
     stopT0();

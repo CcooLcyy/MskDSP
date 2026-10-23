@@ -75,7 +75,8 @@ public:
 
   void SendPointValue(const PointValue& value, uint8_t cause);
   // 显式发送不带时标的点值快照，不改变连接时标配置，也不生成 SOE。
-  void SendPointValuesWithoutTime(std::vector<PointValue> values, uint8_t cause);
+  bool SendPointValuesWithoutTime(std::vector<PointValue> values, uint8_t cause, bool activeOnly = false);
+  bool IsDataTransferActive() const;
   void SendSoe(const SoeEvent& event);
   void SendTimeSync(int64_t tsMs);
   void SendSingleCommand(uint32_t ioa, bool value, bool useSelect);

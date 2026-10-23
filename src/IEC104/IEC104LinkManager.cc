@@ -96,7 +96,9 @@ LinkManager::LinkManager(std::string moduleName, std::filesystem::path configDbP
   loadPersistedConfig("构造阶段");
 }
 
-LinkManager::~LinkManager() = default;
+LinkManager::~LinkManager() {
+  StopSimulationPeriodicReports();
+}
 
 LinkManager::LinkRuntime::~LinkRuntime() {
   if (!transport) {
@@ -1472,6 +1474,7 @@ grpc::Status LinkManager::UpsertPointTable(const IEC104Proto::UpsertPointTableRe
     it->second.lastReportedByTag.clear();
     it->second.lastReportedSingleByTag.clear();
     it->second.simulationValues.clear();
+    it->second.simulationPeriodic.Disable();
   }
   LOG_INFO("IEC104 点表配置更新成功，当前不会自动启动链路连接功能，等待显式调用 StartLink: conn_name={}", request.conn_name());
   return grpc::Status::OK;

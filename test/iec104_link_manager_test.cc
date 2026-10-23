@@ -479,10 +479,29 @@ TEST(IEC104LinkManagerTest, RenameLinkKeepsConnIdAndMovesPointTable) {
   ASSERT_TRUE(mgr.UpsertPointTable(ptReq).ok());
   ASSERT_TRUE(mgr.StopLink("conn-old").ok());
 
+  IEC104Proto::SetSimulationValuesRequest simulated;
+  simulated.set_conn_name("conn-old");
+  auto *simulatedPoint = simulated.add_points();
+  simulatedPoint->set_tag("A");
+  simulatedPoint->set_type(IEC104Proto::POINT_TYPE_FLOAT);
+  simulatedPoint->set_double_value(12.0);
+  IEC104Proto::SimulationSnapshot simulatedSnapshot;
+  ASSERT_TRUE(mgr.SetSimulationValues(simulated, &simulatedSnapshot).ok());
+  IEC104Proto::SimulationPeriodicReportRequest periodic;
+  periodic.set_conn_name("conn-old");
+  periodic.set_enabled(true);
+  periodic.set_interval_seconds(5);
+  IEC104Proto::SimulationPeriodicStatus periodicStatus;
+  ASSERT_TRUE(mgr.SetSimulationPeriodicReport(periodic, &periodicStatus).ok());
+
   IEC104Proto::LinkInfo renamed;
   ASSERT_TRUE(mgr.RenameLink("conn-old", "conn-new", &renamed).ok());
   EXPECT_EQ(renamed.conn_id(), created.conn_id());
   EXPECT_EQ(renamed.config().conn_name(), "conn-new");
+  ASSERT_TRUE(mgr.GetSimulationPeriodicStatus("conn-new", &periodicStatus).ok());
+  EXPECT_TRUE(periodicStatus.enabled());
+  EXPECT_EQ(periodicStatus.conn_name(), "conn-new");
+  EXPECT_EQ(mgr.GetSimulationPeriodicStatus("conn-old", &periodicStatus).error_code(), grpc::StatusCode::NOT_FOUND);
   EXPECT_FALSE(state.HasConnection("IEC104", "conn-old"));
   EXPECT_TRUE(state.HasConnection("IEC104", "conn-new"));
 

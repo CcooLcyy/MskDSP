@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -69,7 +70,8 @@ public:
 
   void SendPointValue(const PointValue& value, uint8_t cause);
   // 显式快照独立选择不带时标编码，普通点值和 SOE 仍沿用各自规则。
-  void SendPointValuesWithoutTime(std::vector<PointValue> values, uint8_t cause);
+  bool SendPointValuesWithoutTime(std::vector<PointValue> values, uint8_t cause, bool activeOnly = false);
+  bool IsDataTransferActive() const { return dataTransferReady_.load(); }
   void SendSoe(const SoeEvent& event);
   void SendTimeSync(int64_t tsMs);
   void SendSingleCommand(uint32_t ioa, bool value, bool useSelect);
@@ -128,6 +130,9 @@ private:
   size_t sendUnacked_ = 0;
   size_t recvSinceLastAck_ = 0;
   bool dataTransferActive_ = false;
+  // 仅为跨线程查询与周期发送门控提供原子镜像，其余会话状态仍由 io_ 线程维护。
+  std::atomic_bool dataTransferReady_{false};
+  std::atomic_uint64_t dataTransferGeneration_{0};
   bool closing_ = false;
   bool ackPending_ = false;
   bool autoInterrogationSent_ = false;

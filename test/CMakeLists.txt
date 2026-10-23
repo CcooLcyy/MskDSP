@@ -1408,6 +1408,7 @@ add_executable(iec104LinkManager_test
   iec104_link_manager_helper_test.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104DataCenterClient.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104LinkManager.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104LinkManagerSimulationPeriodic.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104LinkManagerDataCenter.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104LinkStore.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104PointTable.cc
@@ -1437,6 +1438,7 @@ add_executable(iec104Persistence_test
   iec104_persistence_test.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104DataCenterClient.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104LinkManager.cc
+  ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104LinkManagerSimulationPeriodic.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104LinkManagerDataCenter.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104LinkStore.cc
   ${CMAKE_SOURCE_DIR}/src/IEC104/IEC104PointTable.cc
@@ -1461,6 +1463,11 @@ target_link_libraries(iec104Persistence_test PRIVATE
 )
 
 mskdsp_add_isolated_test(iec104Persistence_test)
+
+add_executable(iec104SimulationPeriodic_test iec104_simulation_periodic_test.cc)
+target_include_directories(iec104SimulationPeriodic_test PRIVATE ${CMAKE_SOURCE_DIR}/src/IEC104/include)
+target_link_libraries(iec104SimulationPeriodic_test PRIVATE GTest::gtest_main)
+mskdsp_add_isolated_test(iec104SimulationPeriodic_test)
 
 add_executable(iec104SoeStore_test
   iec104_soe_store_test.cc

@@ -27,6 +27,8 @@ public:
   grpc::Status GetSimulationSnapshot(grpc::ServerContext *context, const IEC104Proto::SimulationRequest *request, IEC104Proto::SimulationSnapshot *response) override;
   grpc::Status ApplySimulationValues(grpc::ServerContext *context, const IEC104Proto::SimulationRequest *request, IEC104Proto::Empty *) override;
   grpc::Status ClearSimulationValues(grpc::ServerContext *context, const IEC104Proto::SimulationRequest *request, IEC104Proto::Empty *) override;
+  grpc::Status SetSimulationPeriodicReport(grpc::ServerContext *context, const IEC104Proto::SimulationPeriodicReportRequest *request, IEC104Proto::SimulationPeriodicStatus *response) override;
+  grpc::Status GetSimulationPeriodicStatus(grpc::ServerContext *context, const IEC104Proto::SimulationRequest *request, IEC104Proto::SimulationPeriodicStatus *response) override;
 
 private:
   IEC104 *iec104_{nullptr};

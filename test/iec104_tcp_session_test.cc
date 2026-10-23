@@ -1395,6 +1395,65 @@ TEST(IEC104TcpSessionTest, PointWithTimeUsesTimestampTypes) {
   io->stop();
 }
 
+// 验证周期快照仅在 STARTDT 激活后提交，STOPDT 后拒绝，恢复不会发送暂停期间的旧快照。
+TEST(IEC104TcpSessionTest, PeriodicSnapshotRequiresActiveDataTransfer) {
+  auto io = std::make_shared<boost::asio::io_context>();
+  auto sockets = MakeConnectedSockets(*io);
+  auto config = MakeConfig("periodic-snapshot-gate", IEC104Proto::ROLE_SERVER, 5, 5, 1, 5, 8);
+  config.set_point_with_time(true);
+  auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
+  session->Start(std::move(sockets.session_socket));
+  std::jthread sessionThread = ModuleManager::StartModuleThread(IEC104LibInfo.LIB_NAME, [&]() { io->run(); });
+  struct Cleanup {
+    std::shared_ptr<IEC104::TcpSession> session;
+    std::shared_ptr<boost::asio::io_context> io;
+    ~Cleanup() { session->Stop(); io->stop(); }
+  } cleanup{session, io};
+  auto syncIo = [&]() {
+    auto barrier = std::make_shared<std::promise<void>>();
+    auto done = barrier->get_future();
+    boost::asio::post(*io, [barrier]() { barrier->set_value(); });
+    EXPECT_EQ(done.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+  };
+  IEC104::PointValue value;
+  value.ioa = 100;
+  value.type = IEC104Proto::POINT_TYPE_FLOAT;
+  value.doubleValue = 1.0;
+  EXPECT_FALSE(session->IsDataTransferActive());
+  EXPECT_FALSE(session->SendPointValuesWithoutTime({value}, kCotSpontaneous, true));
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildUFrame(kUStartDtAct)));
+  const auto start = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "周期快照激活确认");
+  ASSERT_EQ(start.size(), 6u);
+  syncIo();
+  EXPECT_TRUE(session->IsDataTransferActive());
+  ASSERT_TRUE(session->SendPointValuesWithoutTime({value}, kCotSpontaneous, true));
+  const auto first = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "首批周期快照");
+  ASSERT_EQ(first.size(), 20u);
+  EXPECT_EQ(first[6], kTypeIdMeasuredValueShort);
+  EXPECT_EQ(first[8] & 0x3F, kCotSpontaneous);
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildSFrame(1)));
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildUFrame(0x13)));
+  const auto stop = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "周期快照停止确认");
+  ASSERT_EQ(stop.size(), 6u);
+  EXPECT_EQ(stop[2], 0x23);
+  syncIo();
+  EXPECT_FALSE(session->IsDataTransferActive());
+  EXPECT_FALSE(session->SendPointValuesWithoutTime({value}, kCotSpontaneous, true));
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildUFrame(kUStartDtAct)));
+  const auto resume = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "周期快照恢复确认");
+  ASSERT_EQ(resume.size(), 6u);
+  syncIo();
+  value.doubleValue = 2.0;
+  ASSERT_TRUE(session->SendPointValuesWithoutTime({value}, kCotSpontaneous, true));
+  const auto latest = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "最新周期快照");
+  ASSERT_EQ(latest.size(), 20u);
+  const uint32_t bits = static_cast<uint32_t>(latest[15]) | (static_cast<uint32_t>(latest[16]) << 8) |
+      (static_cast<uint32_t>(latest[17]) << 16) | (static_cast<uint32_t>(latest[18]) << 24);
+  float sentValue = 0;
+  std::memcpy(&sentValue, &bits, sizeof(sentValue));
+  EXPECT_FLOAT_EQ(sentValue, 2.0f);
+}
+
 // 验证显式无时标混合快照不受连接时标开关影响，重复提交不丢点，普通上送和真实 SOE 的时标语义保持不变。
 TEST(IEC104TcpSessionTest, ExplicitSnapshotWithoutTimePreservesConfiguredPointAndSoeTypes) {
   for (const bool withTime : {false, true}) {

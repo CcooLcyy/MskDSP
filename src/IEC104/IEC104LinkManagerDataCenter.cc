@@ -1569,7 +1569,10 @@ grpc::Status LinkManager::ApplySimulationValues(const std::string& connName) {
   if (it == linksByName_.end()) {
     return makeNotFound(connName);
   }
-  auto& link = it->second;
+  return sendSimulationValuesLocked(connName, it->second, false);
+}
+
+grpc::Status LinkManager::sendSimulationValuesLocked(const std::string& connName, LinkRuntime& link, bool activeOnly) {
   if (!isSlaveStation(link.config)) {
     return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "仅允许 IEC104 从站应用模拟值");
   }
@@ -1609,7 +1612,10 @@ grpc::Status LinkManager::ApplySimulationValues(const std::string& connName) {
   }
   // 全部点值校验完成后再提交；模拟遥信作为普通快照发送，不写入 SOE 历史。
   const size_t sentCount = values.size();
-  link.transport->SendPointValuesWithoutTime(values, kCotSpontaneous);
+  const bool submitted = link.transport->SendPointValuesWithoutTime(values, kCotSpontaneous, activeOnly);
+  if (activeOnly && (!submitted || values.empty())) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模拟周期快照未提交，数据传输未激活或快照为空");
+  }
   size_t singleCount = 0;
   for (const auto &pv : values) {
     if (pv.type != IEC104Proto::POINT_TYPE_SINGLE) {
@@ -1645,6 +1651,7 @@ grpc::Status LinkManager::ClearSimulationValues(const std::string& connName) {
     return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "模拟值仅支持 IEC104 从站链路");
   }
   it->second.simulationValues.clear();
+  it->second.simulationPeriodic.Disable();
   LOG_INFO("IEC104 已清除模拟值并恢复 DataCenter 数据路径: conn_name={}", connName);
   return grpc::Status::OK;
 }

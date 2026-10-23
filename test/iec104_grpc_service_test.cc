@@ -35,6 +35,11 @@ TEST(IEC104GrpcServiceTest, RejectsWhenModuleNotReady) {
   IEC104Proto::QuerySoeResponse soeResp;
   st = service.QuerySoe(&ctx, &soeReq, &soeResp);
   EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+  IEC104Proto::SimulationPeriodicReportRequest periodicReq;
+  IEC104Proto::SimulationPeriodicStatus periodicResp;
+  EXPECT_EQ(service.SetSimulationPeriodicReport(&ctx, &periodicReq, &periodicResp).error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+  IEC104Proto::SimulationRequest simulationReq;
+  EXPECT_EQ(service.GetSimulationPeriodicStatus(&ctx, &simulationReq, &periodicResp).error_code(), grpc::StatusCode::FAILED_PRECONDITION);
 }
 
 // 验证：请求/响应为空时返回 INVALID_ARGUMENT。
@@ -56,6 +61,8 @@ TEST(IEC104GrpcServiceTest, RejectsNullRequestOrResponse) {
 
   st = service.QuerySoe(&ctx, nullptr, nullptr);
   EXPECT_EQ(st.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  EXPECT_EQ(service.SetSimulationPeriodicReport(&ctx, nullptr, nullptr).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  EXPECT_EQ(service.GetSimulationPeriodicStatus(&ctx, nullptr, nullptr).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
 }
 
 // 验证：正常委托路径可执行。
