@@ -160,6 +160,8 @@ class InstallerIdentityTest(unittest.TestCase):
 
     def run_installer(self, *, oci: bool = False, current_id: str = "", loaded_id: str | None = None,
                       existing_content: bytes | None = None, payload_fault: str | None = None,
+                      payload_content: bytes | None = None,
+                      host_os: str = "Linux", host_arch: str = "x86_64", host_probe_fail: bool = False,
                       archive_limit: int | None = None,
                       compressed_input: str | None = None,
                       build_archive_limit: int | None = None,
@@ -169,7 +171,7 @@ class InstallerIdentityTest(unittest.TestCase):
                            if key in {"corrupt_config", "corrupt_manifest", "wrong_link", "multiple",
                                       "multiple_platforms", "wrong_platform", "duplicate_config",
                                       "oversized_config"}}
-        identity = image_archive(self.payload, oci=oci, **archive_options)
+        identity = image_archive(self.payload, oci=oci, content=payload_content, **archive_options)
         build_input = self.payload
         if compressed_input:
             build_input = self.payload.with_suffix(".tar." + compressed_input)
@@ -202,6 +204,15 @@ class InstallerIdentityTest(unittest.TestCase):
         package = self.root / "images" / "mskdsp-test"
         package.write_bytes(package.read_bytes().replace(b'HOST_DIR="/data/mskdsp"',
                             f"HOST_DIR={shlex.quote(bash_path(self.root / 'runtime'))}".encode()))
+        # 仅在隔离安装器中替换探测函数，保留真实调用语句以覆盖变量遮蔽等问题。
+        host_system = repr(host_os) if not host_probe_fail else '(_ for _ in ()).throw(OSError("模拟探测失败"))'
+        patched = package.read_bytes()
+        for module_name, import_line in (("platform", "import platform\n"),
+                                         ("host_platform", "import platform as host_platform\n")):
+            replacement = (import_line + f"{module_name}.system = lambda: {host_system}\n"
+                           + f"{module_name}.machine = lambda: {host_arch!r}\n")
+            patched = patched.replace(import_line.encode(), replacement.encode())
+        package.write_bytes(patched)
         self.package = package
         if archive_limit is not None:
             package.write_bytes(package.read_bytes().replace(
@@ -236,6 +247,62 @@ class InstallerIdentityTest(unittest.TestCase):
     def calls(self, command: str) -> list[list[str]]:
         state = json.loads(self.state_path.read_text(encoding="utf-8"))
         return [args for args in state["calls"] if args[0] == command]
+
+    # 匹配平台与常见别名均允许安装，避免安装行为依赖当前测试机平台。
+    def test_matching_host_and_payload_platforms_are_allowed(self) -> None:
+        for host_arch, image_arch in (("x86_64", "amd64"), ("amd64", "x86_64"),
+                                      ("aarch64", "arm64"), ("arm64", "aarch64")):
+            with self.subTest(host_arch=host_arch, image_arch=image_arch):
+                result = self.run_installer(host_arch=host_arch, payload_content=json.dumps(
+                    {"os": "linux", "architecture": image_arch}).encode())
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("安装平台校验通过", result.stdout)
+                self.assertEqual(len(self.calls("load")), 1)
+
+    # 不匹配、未知平台、缺失字段与探测失败均在任何 Docker 或现场目录写入前拒绝。
+    def test_platform_rejection_preserves_existing_installation(self) -> None:
+        cases = [
+            ({"host_arch": "aarch64"}, {"os": "linux", "architecture": "amd64"}),
+            ({"host_arch": "x86_64"}, {"os": "linux", "architecture": "arm64"}),
+            ({"host_arch": "riscv64"}, {"os": "linux", "architecture": "amd64"}),
+            ({}, {"os": "linux", "architecture": "riscv64"}),
+            ({}, {"os": "linux"}),
+            ({}, {"architecture": "amd64"}),
+            ({"host_os": "Windows"}, {"os": "linux", "architecture": "amd64"}),
+            ({}, {"os": "windows", "architecture": "amd64"}),
+            ({"host_probe_fail": True}, {"os": "linux", "architecture": "amd64"}),
+        ]
+        for host_options, config in cases:
+            with self.subTest(host_options=host_options, config=config):
+                for directory in ("module", "conf"):
+                    preserved = self.root / "runtime" / directory
+                    preserved.mkdir(parents=True, exist_ok=True)
+                    (preserved / "preserve.txt").write_text("现场内容", encoding="utf-8")
+                result = self.run_installer(payload_content=json.dumps(config).encode(), **host_options)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("宿主机平台", result.stderr)
+                self.assertIn("安装包平台", result.stderr)
+                state = json.loads(self.state_path.read_text(encoding="utf-8"))
+                self.assertEqual(state["calls"], [], "平台校验失败不能进入 Docker 操作")
+                for directory in ("module", "conf"):
+                    preserved = self.root / "runtime" / directory
+                    self.assertEqual([path.name for path in preserved.iterdir()], ["preserve.txt"])
+                    self.assertEqual((preserved / "preserve.txt").read_text(encoding="utf-8"), "现场内容")
+                self.assertEqual(list(self.payload_temp.iterdir()), [])
+
+    # 已有同摘要镜像也不能绕过平台检查，以免跳过加载后仍替换容器和模块。
+    def test_same_image_identity_cannot_bypass_platform_check(self) -> None:
+        identity = image_archive(self.payload)
+        result = self.run_installer(current_id=identity["config_id"], host_arch="aarch64")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(self.state_path.read_text(encoding="utf-8"))["calls"], [])
+
+    # OCI 描述符的平台字段不能遮蔽宿主机探测模块，合法 OCI 包应正常安装。
+    def test_matching_oci_platform_is_allowed(self) -> None:
+        result = self.run_installer(oci=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("安装平台校验通过", result.stdout)
+        self.assertEqual(len(self.calls("load")), 1)
 
     # 发布仅压缩归档载荷，关闭 gzip 文件名和时间戳，Docker 完整还原原始 tar。
     def test_generated_payload_is_reproducible_gzip(self) -> None:

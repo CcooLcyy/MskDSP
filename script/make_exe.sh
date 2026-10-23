@@ -223,6 +223,7 @@ parse_manifest() {
   if ! parsed="$(python3 - "${tar_path}" <<'PY'
 import hashlib
 import json
+import platform as host_platform
 import re
 import sys
 import tarfile
@@ -286,6 +287,36 @@ try:
         print(config_id)
         print(repo_tag)
         print(manifest_id)
+        # 平台数据来自已通过摘要校验的 config；别名统一后仅允许本机 Linux ARM64/x64。
+        def normalize_arch(value):
+            aliases = {"aarch64": "arm64", "arm64": "arm64", "amd64": "x64",
+                       "x86_64": "x64", "x64": "x64"}
+            return aliases.get(value.strip().lower()) if isinstance(value, str) else None
+
+        def platform_label(os_name, architecture):
+            return f"{os_name or '未知'}/{architecture or '未知'}"
+
+        image_os = config.get("os")
+        image_arch = config.get("architecture")
+        image_platform = platform_label(image_os, image_arch)
+        host_os = ""
+        host_arch = ""
+        try:
+            host_os = host_platform.system()
+            host_arch = host_platform.machine()
+        except (OSError, ValueError) as error:
+            sys.exit(f"宿主机平台 {platform_label(host_os, host_arch)}，安装包平台 {image_platform}；"
+                     f"平台探测失败，已停止安装: {error}")
+        platforms = f"宿主机平台 {platform_label(host_os, host_arch)}，安装包平台 {image_platform}"
+        normalized_host = normalize_arch(host_arch)
+        normalized_image = normalize_arch(image_arch)
+        if (not isinstance(host_os, str) or host_os.strip().lower() != "linux"
+                or not isinstance(image_os, str) or image_os.strip().lower() != "linux"
+                or normalized_host is None or normalized_image is None):
+            sys.exit(f"{platforms}；平台未知或不支持，仅支持 Linux ARM64/x64，已停止安装")
+        if normalized_host != normalized_image:
+            sys.exit(f"{platforms}；架构不匹配，已停止安装，请使用与宿主机架构一致的安装包")
+        print(f"安装平台校验通过：{platforms}")
 except (KeyError, ValueError, TypeError, AttributeError, tarfile.TarError, OSError) as error:
     sys.exit(f"解析镜像归档失败: {error}")
 PY
@@ -305,6 +336,7 @@ PY
   IMAGE_TAG="${repo_tag}"
   IMAGE_REPO="${IMAGE_TAG%:*}"
   echo "安装包镜像配置摘要: ${IMAGE_ID}，关联 manifest 摘要: ${IMAGE_MANIFEST_ID:-无}"
+  printf '%s\n' "${parsed}" | sed -n '4p'
 }
 
 saved_image_config_id() {
