@@ -67,18 +67,24 @@ private:
   std::filesystem::path old_;
 };
 
-// 用目录阻断数据库文件路径，确定性模拟写库失败，退出作用域时恢复原数据库。
+// 用目录阻断数据库文件路径，确定性模拟写库失败，退出作用域时恢复原有或缺失状态。
 class ScopedDatabaseBlocker {
 public:
   ScopedDatabaseBlocker() {
-    std::filesystem::rename(path_, backup_);
+    std::filesystem::create_directories(path_.parent_path());
+    if (std::filesystem::exists(path_)) {
+      std::filesystem::rename(path_, backup_);
+      backedUp_ = true;
+    }
     std::filesystem::create_directory(path_);
   }
 
   ~ScopedDatabaseBlocker() {
     std::error_code error;
     std::filesystem::remove(path_, error);
-    std::filesystem::rename(backup_, path_, error);
+    if (backedUp_) {
+      std::filesystem::rename(backup_, path_, error);
+    }
   }
 
   ScopedDatabaseBlocker(const ScopedDatabaseBlocker &) = delete;
@@ -87,6 +93,7 @@ public:
 private:
   const std::filesystem::path path_{"./conf/config.db"};
   const std::filesystem::path backup_{"./conf/config.db.test-backup"};
+  bool backedUp_{false};
 };
 
 class BlockingCommandExecutor final : public DataCenterProto::CommandExecutor::Service {
@@ -308,6 +315,38 @@ protected:
   std::unique_ptr<DataCenterProto::DataCenterService::Stub> stub_;
 };
 }  // 命名空间结束
+
+// 验证：首次落盘前可阻断数据库路径，解除阻断后仍保持数据库及备份不存在。
+TEST_F(DataCenterGrpcServiceTest, DatabaseBlockerRestoresMissingDatabasePath) {
+  SCOPED_TRACE("数据库尚未创建时阻断并恢复路径");
+  ASSERT_FALSE(std::filesystem::exists("./conf/config.db"));
+  {
+    ScopedDatabaseBlocker blocker;
+    EXPECT_TRUE(std::filesystem::is_directory("./conf/config.db"));
+    EXPECT_FALSE(std::filesystem::exists("./conf/config.db.test-backup"));
+  }
+  EXPECT_FALSE(std::filesystem::exists("./conf/config.db"));
+  EXPECT_FALSE(std::filesystem::exists("./conf/config.db.test-backup"));
+}
+
+// 验证：已有数据库阻断期间保存备份，解除后恢复原连接内容且不遗留备份。
+TEST_F(DataCenterGrpcServiceTest, DatabaseBlockerRestoresExistingDatabaseContents) {
+  SCOPED_TRACE("已有数据库阻断后恢复原连接快照");
+  const auto connection = GetOrCreateConnection("ModbusRTU", "blocker-restore");
+  ASSERT_NE(connection.conn_id(), 0u);
+  {
+    ScopedDatabaseBlocker blocker;
+    EXPECT_TRUE(std::filesystem::is_directory("./conf/config.db"));
+    EXPECT_TRUE(std::filesystem::is_regular_file("./conf/config.db.test-backup"));
+  }
+  EXPECT_TRUE(std::filesystem::is_regular_file("./conf/config.db"));
+  EXPECT_FALSE(std::filesystem::exists("./conf/config.db.test-backup"));
+  DataCenter::DataCenterStateStore store;
+  DataCenterProto::DataCenterState persisted;
+  ASSERT_TRUE(store.Load(&persisted).ok());
+  ASSERT_EQ(persisted.connections().conns_size(), 1);
+  EXPECT_EQ(persisted.connections().conns(0).SerializeAsString(), connection.SerializeAsString());
+}
 
 // 验证：已成功落盘的连接重复获取时不访问数据库，即使数据库路径不可写仍返回原 ID。
 TEST_F(DataCenterGrpcServiceTest, ExistingConnectionDoesNotRequireDatabaseWrite) {
