@@ -38,10 +38,11 @@ variables:
   artifacts:
     name: lower-build-$ARCH-$CI_JOB_ID
     when: always
-    expire_in: 7 days
+    expire_in: 30 days
     paths:
       - package/
       - release/$ARCH/
+      - symbols/$ARCH/
       - logs/$ARCH/
 
 build-arm64:
@@ -61,6 +62,7 @@ build-arm64:
     paths:
       - package/
       - release/arm64/
+      - symbols/arm64/
       - logs/arm64/
     exclude:
       - package/debug/**
@@ -81,10 +83,12 @@ build-x64:
     paths:
       - package/
       - release/x64/
+      - symbols/x64/
       - logs/x64/
       - build-x64/
     exclude:
       - build-x64/**/*.o
+      - package/debug/**
 
 test-x64:
   stage: test
@@ -110,6 +114,8 @@ test-x64:
       - release/x64/
       - logs/x64/
       - build-x64/Testing/
+    exclude:
+      - package/debug/**
     reports:
       junit: logs/x64/ctest.xml
 
@@ -129,8 +135,10 @@ test-x64:
     when: always
     expire_in: 30 days
     paths:
-      - release/$ARCH/
-      - logs/$ARCH/
+      - release/$ARCH/mskdsp-*
+      - release/$ARCH/metadata.json
+      - release/$ARCH/SHA256SUMS
+      - logs/$ARCH/package.log
 
 package-arm64:
   extends: .package
@@ -157,6 +165,8 @@ package-x64:
     name: mskdsp-platform-ci-tools:bookworm-v2
     pull_policy: if-not-present
   timeout: 2h
+  variables:
+    GIT_DEPTH: "1"
   script:
     - python3 script/gitlab/init_platform_proto.py
     - python3 script/gitlab/platform_client.py --metadata "release/$ARCH/metadata.json" --proto-root .ci/platform-proto

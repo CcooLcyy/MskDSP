@@ -179,7 +179,7 @@ class LowerCiTest(unittest.TestCase):
         self.assertEqual(build["stage"], "build")
         self.assertIn('build "$ARCH"', "\n".join(build["script"]))
         self.assertIn("build-x64/", build["artifacts"]["paths"])
-        self.assertEqual(build["artifacts"]["exclude"], ["build-x64/**/*.o"])
+        self.assertEqual(build["artifacts"]["exclude"], ["build-x64/**/*.o", "package/debug/**"])
         self.assertEqual(tested["stage"], "test")
         self.assertEqual(tested["image"]["docker"]["platform"], "linux/amd64")
         self.assertEqual(tested["image"]["name"], "mskdsp-ci-tools:ubuntu24.04-x64")
@@ -189,21 +189,55 @@ class LowerCiTest(unittest.TestCase):
                          ["package/", "release/x64/", "logs/x64/", "build-x64/Testing/"])
         self.assertEqual(tested["artifacts"]["reports"]["junit"], "logs/x64/ctest.xml")
         self.assertEqual(tested["artifacts"]["when"], "always")
+        self.assertEqual(tested["artifacts"]["exclude"], ["package/debug/**"])
 
     def test_arm_build_artifacts_keep_runtime_symbols_and_diagnostics(self):
         # 交叉编译直接交付运行文件和符号归档，不再传递测试目录及重复符号。
         artifacts = self.job("build-arm64")["artifacts"]
         self.assertEqual(artifacts.get("exclude", []), ["package/debug/**"])
         self.assertEqual(artifacts["paths"],
-                         ["package/", "release/arm64/", "logs/arm64/"])
+                         ["package/", "release/arm64/", "symbols/arm64/", "logs/arm64/"])
         self.assertEqual(artifacts["when"], "always")
         self.assertNotIn("reports", artifacts)
 
-    def test_artifact_exclusions_do_not_spread_to_other_jobs(self):
-        # 排除规则仅限对应构建作业，避免继承影响测试作业或发布包。
-        for name in (".build", "test-x64", ".package", "package-arm64", "package-x64"):
+    def test_debug_artifact_exclusions_do_not_spread_to_package_jobs(self):
+        # 原始符号只在构建及测试交接排除，不影响安装包或诊断日志。
+        for name in (".build", ".package", "package-arm64", "package-x64"):
             with self.subTest(job=name):
                 self.assertNotIn("exclude", self.job(name)["artifacts"])
+
+    def test_symbols_remain_in_build_artifacts_for_thirty_days_without_test_duplicates(self):
+        # 独立符号保留在原构建归档，不再重复经过测试与打包归档传递。
+        for arch in ("arm64", "x64"):
+            with self.subTest(arch=arch):
+                artifacts = self.job("build-" + arch)["artifacts"]
+                self.assertEqual(artifacts["expire_in"], "30 days")
+                self.assertIn("symbols/" + arch + "/", artifacts["paths"])
+                self.assertIn("package/debug/**", artifacts["exclude"])
+                self.assertEqual(artifacts["when"], "always")
+        for name in ("test-x64", "package-arm64", "package-x64"):
+            with self.subTest(job=name):
+                self.assertFalse(any(path.startswith("symbols/") for path in self.job(name)["artifacts"]["paths"]))
+
+    def test_package_artifacts_only_transfer_installer_frozen_metadata_and_current_log(self):
+        # 发布只下载必需安装包与冻结校验信息，失败诊断保留本次打包日志。
+        expected = ["release/$ARCH/mskdsp-*", "release/$ARCH/metadata.json",
+                    "release/$ARCH/SHA256SUMS", "logs/$ARCH/package.log"]
+        for arch in ("arm64", "x64"):
+            with self.subTest(arch=arch):
+                artifacts = self.job("package-" + arch)["artifacts"]
+                self.assertEqual(artifacts["paths"], expected)
+                self.assertEqual(artifacts["when"], "always")
+                self.assertEqual(artifacts["expire_in"], "30 days")
+
+    def test_shallow_clone_is_limited_to_publish_and_preserves_build_history(self):
+        # 仅发布浅检出，构建历史与 vcpkg 基线验证维持完整历史契约。
+        self.assertEqual(self.config["variables"]["GIT_DEPTH"], "0")
+        for arch in ("arm64", "x64"):
+            self.assertEqual(self.job("publish-" + arch)["variables"]["GIT_DEPTH"], "1")
+        for name in (".build", "build-arm64", "build-x64", "test-x64", ".package", "package-arm64", "package-x64"):
+            with self.subTest(job=name):
+                self.assertNotIn("GIT_DEPTH", self.job(name).get("variables", {}))
 
 
 if __name__ == "__main__":

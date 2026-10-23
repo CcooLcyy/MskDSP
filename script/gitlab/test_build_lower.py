@@ -47,9 +47,10 @@ elif name == "cmake" and "--install" in args:
         Path("package", child).mkdir(parents=True, exist_ok=True)
     Path("package/MskDSP").write_bytes(b"binary")
     Path("package/temporary_test").write_bytes(b"test")
-    if os.environ["ARCH"] == "arm64" and os.environ.get("MISSING_SYMBOLS") != "1":
+    if os.environ.get("MISSING_SYMBOLS") != "1":
         Path("package/debug").mkdir()
-        Path("package/debug/MskDSP.debug").write_bytes(b"symbols")
+        if os.environ.get("EMPTY_SYMBOLS") != "1":
+            Path("package/debug/MskDSP.debug").write_bytes(b"" if os.environ.get("ZERO_SYMBOLS") == "1" else b"symbols")
 elif name == "cmake" and "-B" in args:
     cache_keys = ("VCPKG_ROOT", "VCPKG_DOWNLOADS", "VCPKG_DEFAULT_BINARY_CACHE", "VCPKG_BINARY_SOURCES", "CCACHE_DIR")
     with open(os.environ["COMMAND_LOG"], "a") as log:
@@ -257,6 +258,23 @@ class BuildLowerTest(unittest.TestCase):
         filename = root / "commands.jsonl"
         return [json.loads(line) for line in filename.read_text().splitlines()] if filename.exists() else []
 
+    def assert_symbol_archive(self, root, arch):
+        identity_file = root / "release" / arch / "build_identity.json"
+        identity = json.loads(identity_file.read_text())
+        directory = root / "symbols" / arch
+        symbols = list(directory.glob("*debugsymbols*.tar.gz"))
+        self.assertEqual(len(symbols), 1)
+        self.assertEqual(symbols[0].name, "mskdsp-" + identity["version"] + "-debugsymbols-linux-" + arch + ".tar.gz")
+        self.assertEqual((directory / "build_identity.json").read_bytes(), identity_file.read_bytes())
+        with tarfile.open(symbols[0], "r:gz") as archive:
+            self.assertEqual(archive.extractfile("debug/MskDSP.debug").read(), b"symbols")
+        checksums = {}
+        for line in (directory / "SHA256SUMS").read_text().splitlines():
+            digest, filename = line.split(maxsplit=1)
+            checksums[filename] = digest
+            self.assertEqual(hashlib.sha256((directory / filename).read_bytes()).hexdigest(), digest)
+        self.assertEqual(set(checksums), {symbols[0].name, "build_identity.json"})
+
     def assert_cache_environment(self, root, cache, profile):
         environments = [command[1] for command in self.commands(root) if command[0] == "cache-environment"]
         self.assertEqual(len(environments), 1)
@@ -404,6 +422,10 @@ class BuildLowerTest(unittest.TestCase):
                 environment["TOOL_ARCH"] = "x86_64"
                 built = self.run_phase(root, environment, "cross-build" if arch == "arm64" else "build")
                 self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+                self.assert_symbol_archive(root, arch)
+                # 下游不依赖符号目录；保留运行文件、测试依赖和身份即可继续。
+                shutil.rmtree(root / "package/debug")
+                shutil.rmtree(root / "symbols")
                 if arch == "x64":
                     self.assertTrue((root / "package/temporary_test").is_file())
                     self.assertFalse(any(command[0] == "ctest" for command in self.commands(root)))
@@ -419,14 +441,13 @@ class BuildLowerTest(unittest.TestCase):
                 self.assertEqual(metadata["build_job_id"], "42")
                 self.assertEqual(metadata["package_job_id"], "50")
                 self.assertTrue((release / metadata["file_name"]).is_file())
-                self.assertEqual(len(list(release.glob("*debugsymbols*.tar.gz"))), 1 if arch == "arm64" else 0)
+                self.assertEqual(list(release.glob("*debugsymbols*.tar.gz")), [])
                 checksums = {}
                 for line in (release / "SHA256SUMS").read_text().splitlines():
                     digest, filename = line.split(maxsplit=1)
                     checksums[filename] = digest
                     self.assertEqual(hashlib.sha256((release / filename).read_bytes()).hexdigest(), digest)
-                self.assertEqual(set(checksums), {metadata["file_name"]} | {
-                    item.name for item in release.glob("*debugsymbols*.tar.gz")})
+                self.assertEqual(set(checksums), {metadata["file_name"]})
                 self.assertNotIn("secret-token-value", built.stdout + built.stderr)
                 self.assertNotIn("secret-test-certificate", packaged.stdout + packaged.stderr)
                 self.assertEqual((root / "logs" / arch / "ctest.xml").is_file(), arch == "x64")
@@ -434,6 +455,7 @@ class BuildLowerTest(unittest.TestCase):
                 self.assertIn('"--parallel", "4"', commands)
                 self.assertEqual('"--parallel", "2"' in commands, arch == "x64")
                 self.assertIn("-DMSKDSP_BUILD_TESTS=" + ("ON" if arch == "x64" else "OFF"), commands)
+                self.assertIn("-DMSKDSP_STRIP_DEBUG=ON", commands)
 
     def test_x64_test_failure_preserves_test_files_and_reports(self):
         root, environment = self.prepare("x64")
@@ -470,10 +492,7 @@ class BuildLowerTest(unittest.TestCase):
         self.assertIn("-DMSKDSP_BUILD_TESTS=OFF", configure)
         self.assertIn("-DProtobuf_PROTOC_EXECUTABLE=" + str(root / "build-arm64/vcpkg_installed/x64-linux-dynamic/tools/protobuf/protoc"), configure)
         self.assertFalse((root / "package/temporary_test").exists())
-        symbols = list((root / "release/arm64").glob("*debugsymbols*.tar.gz"))
-        self.assertEqual(len(symbols), 1)
-        with tarfile.open(symbols[0], "r:gz") as archive:
-            self.assertEqual(archive.extractfile("debug/MskDSP.debug").read(), b"symbols")
+        self.assert_symbol_archive(root, "arm64")
         self.assertFalse((root / "logs/arm64/ctest.xml").exists())
         self.assertEqual(list((root / "release/arm64").glob("*context*")), [])
         identity = (root / "release/arm64/build_identity.json").read_bytes()
@@ -505,6 +524,11 @@ class BuildLowerTest(unittest.TestCase):
         self.assertFalse(any(command[0] == "ctest" for command in commands))
         configure = next(command for command in commands if command[0] == "cmake" and "-B" in command)
         self.assertIn("-DMSKDSP_BUILD_TESTS=ON", configure)
+        self.assertIn("-DMSKDSP_STRIP_DEBUG=ON", configure)
+        self.assert_symbol_archive(root, "x64")
+        # 即使下游没有符号资料，独立测试也不能再次归档或要求符号目录。
+        shutil.rmtree(root / "package/debug")
+        shutil.rmtree(root / "symbols")
         release = root / "release/x64"
         identity = (release / "build_identity.json").read_bytes()
         context = json.loads((release / "build_context.json").read_text())
@@ -541,23 +565,30 @@ class BuildLowerTest(unittest.TestCase):
                 self.assertTrue((root / "package/temporary_test").is_file())
                 self.assertFalse(any(command[0] == "ctest" for command in self.commands(root)[count:]))
 
-    def test_cross_build_symbol_failure_blocks_success(self):
-        for failure in ("missing", "archive"):
-            with self.subTest(failure=failure):
-                root, environment = self.prepare("arm64")
-                environment["TOOL_ARCH"] = "x86_64"
-                if failure == "missing":
-                    environment["MISSING_SYMBOLS"] = "1"
-                else:
-                    executable = root / "bin/tar"
-                    executable.write_text("#!/bin/sh\nprintf '符号归档失败\\n' >&2\nexit 27\n", encoding="utf-8")
-                    executable.chmod(0o755)
-                result = self.run_phase(root, environment, "cross-build")
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("符号", result.stdout + result.stderr)
-                self.assertFalse(any(command[0] in ("ctest", "buildctl") for command in self.commands(root)))
-                self.assertEqual(list((root / "release/arm64").glob("*debugsymbols*.tar.gz")), [])
-                self.assertFalse((root / "release/arm64/metadata.json").exists())
+    def test_both_builds_reject_missing_empty_unarchivable_or_unverified_symbols(self):
+        # 两种架构在构建阶段即阻断缺失、空符号、归档失败或摘要校验失败。
+        for arch, mode in (("arm64", "cross-build"), ("x64", "build")):
+            for failure in ("missing", "empty", "zero", "archive", "checksum"):
+                with self.subTest(arch=arch, failure=failure):
+                    root, environment = self.prepare(arch)
+                    environment["TOOL_ARCH"] = "x86_64"
+                    if failure in ("missing", "empty", "zero"):
+                        environment[failure.upper() + "_SYMBOLS"] = "1"
+                    elif failure == "archive":
+                        executable = root / "bin/tar"
+                        executable.write_text("#!/bin/sh\nprintf '符号归档失败\\n' >&2\nexit 27\n", encoding="utf-8")
+                        executable.chmod(0o755)
+                    else:
+                        executable = root / "bin/sha256sum"
+                        executable.write_text('#!/bin/sh\nif [ "$1" = --check ]; then printf "符号校验失败\\n" >&2; exit 27; fi\n'
+                                              + 'exec "' + shutil.which("sha256sum") + '" "$@"\n', encoding="utf-8")
+                        executable.chmod(0o755)
+                    result = self.run_phase(root, environment, mode)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("符号", result.stdout + result.stderr)
+                    self.assertFalse(any(command[0] in ("ctest", "buildctl") for command in self.commands(root)))
+                    self.assertEqual(list((root / "release" / arch).glob("*debugsymbols*.tar.gz")), [])
+                    self.assertFalse((root / "release" / arch / "metadata.json").exists())
 
     def test_cross_make_ports_do_not_inherit_native_compiler_environment(self):
         root, environment = self.prepare("arm64")

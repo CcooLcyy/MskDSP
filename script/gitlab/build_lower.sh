@@ -10,7 +10,7 @@ MODE="${1:-}"
 ARCH="${2:-}"
 case "${ARCH}" in
   arm64) TRIPLET=arm64-linux-dynamic; PLATFORM=linux/arm64; BASE_IMAGE=arm64v8/ubuntu:noble; STRIP_DEBUG=ON ;;
-  x64) TRIPLET=x64-linux-dynamic; PLATFORM=linux/amd64; BASE_IMAGE=amd64/ubuntu:noble; STRIP_DEBUG=OFF ;;
+  x64) TRIPLET=x64-linux-dynamic; PLATFORM=linux/amd64; BASE_IMAGE=amd64/ubuntu:noble; STRIP_DEBUG=ON ;;
   *) fail '用法：build_lower.sh build x64 | test x64 | cross-build arm64 | package arm64|x64' ;;
 esac
 case "${MODE}:${ARCH}" in
@@ -63,12 +63,23 @@ PY
 
 finish_package() {
   find package -maxdepth 1 -type f -name '*_test' -delete
-  if [[ "${ARCH}" == arm64 ]]; then
-    [[ -d package/debug ]] || fail 'ARM64 安装结果缺少独立调试符号目录'
-    local symbol_name
-    symbol_name="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "${RELEASE_DIR}/build_identity.json")"
-    tar -C package -czf "${RELEASE_DIR}/mskdsp-${symbol_name}-debugsymbols-linux-${ARCH}.tar.gz" debug
-  fi
+}
+
+archive_debug_symbols() {
+  [[ -d package/debug && ! -L package/debug ]] || fail "${ARCH} 安装结果缺少独立调试符号目录"
+  [[ -n "$(find package/debug -type f -name '*.debug' -size +0c -print -quit)" ]] \
+    || fail "${ARCH} 独立调试符号目录为空或缺少非空符号文件"
+  local symbol_name symbol_file symbol_dir="symbols/${ARCH}"
+  symbol_name="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "${RELEASE_DIR}/build_identity.json")"
+  symbol_file="mskdsp-${symbol_name}-debugsymbols-linux-${ARCH}.tar.gz"
+  mkdir -p "${symbol_dir}"
+  log "归档 ${ARCH} 独立调试符号，保留原始构建身份"
+  tar -C package -czf "${symbol_dir}/${symbol_file}" debug
+  tar -tzf "${symbol_dir}/${symbol_file}" >/dev/null
+  cp -- "${RELEASE_DIR}/build_identity.json" "${symbol_dir}/build_identity.json"
+  (cd "${symbol_dir}"; sha256sum "${symbol_file}" build_identity.json > SHA256SUMS
+    sha256sum --check --strict SHA256SUMS)
+  log "${ARCH} 独立调试符号及原始构建身份校验完成：${symbol_dir}"
 }
 
 run_complete_ctest() {
@@ -290,6 +301,7 @@ build_package() {
   log "编译 ${ARCH}，并行度 ${CMAKE_BUILD_PARALLEL_LEVEL}"
   cmake --build "${BUILD_DIR}" --parallel "${CMAKE_BUILD_PARALLEL_LEVEL}"
   cmake --install "${BUILD_DIR}"
+  archive_debug_symbols
   if [[ "${MODE}" == cross-build ]]; then
     finish_package
     log 'ARM64 交叉编译、安装及独立调试符号归档完成，打包等待 x64 完整测试通过'
@@ -301,7 +313,7 @@ import sys
 Path(sys.argv[2]).write_text(json.dumps({"project_dir": sys.argv[1], "target_triplet": "x64-linux-dynamic",
                                       "host_triplet": "x64-linux-dynamic"}) + "\n", encoding="utf-8")
 PY
-    log 'x64 编译与安装完成，保留完整测试依赖，等待独立 x64 完整 CTest'
+    log 'x64 编译、安装及独立符号归档完成，保留完整测试依赖，等待独立 x64 完整 CTest'
   fi
 }
 
@@ -366,14 +378,7 @@ package_release() {
   python3 script/gitlab/lower_metadata.py freeze --identity "${RELEASE_DIR}/package_identity.json" \
     --artifact "${RELEASE_DIR}/mskdsp-${version}" --image-tar "${image_tar}" \
     --output "${RELEASE_DIR}/metadata.json"
-  local checksums=("mskdsp-${version}")
-  if [[ "${ARCH}" == arm64 ]]; then
-    local symbols=("${RELEASE_DIR}"/*debugsymbols*.tar.gz)
-    [[ -f "${symbols[0]}" ]] || fail 'ARM64 构建产物缺少独立调试符号包'
-    local symbol
-    for symbol in "${symbols[@]}"; do checksums+=("$(basename "${symbol}")"); done
-  fi
-  (cd "${RELEASE_DIR}"; sha256sum "${checksums[@]}" > SHA256SUMS)
+  (cd "${RELEASE_DIR}"; sha256sum "mskdsp-${version}" > SHA256SUMS)
   rm -f "${image_tar}"
   rm -rf "${temporary}"
   trap - EXIT

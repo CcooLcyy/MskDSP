@@ -8,14 +8,14 @@
 - ARM64、x64 均完成 GCC14 RelWithDebInfo 编译；2026-10-24 起 x64 编译与测试拆成独立作业，只有 `test-x64` 执行现有完整 CTest。ARM64 在 x64 上交叉编译，不编译或执行 ARM64 测试程序，不再创建 ARM64 测试作业。
 - 下位机与通用 Linux Runner 共用容量上限为 24 GiB 的内存工作区，标签、工程目录和持久缓存分开；下位机接单并发为 2、通用 Linux 接单并发为 1，单作业 4 CPU、24 GiB 内存且禁止交换。Windows Runner 不接入。
 - CMake 主工程及 vcpkg 默认并行度为 4，可分别通过 `CMAKE_BUILD_PARALLEL_LEVEL`、`VCPKG_MAX_CONCURRENCY` 设置正整数。两个 Linux Runner 的主脚本通过共享编译槽最多并行执行两个，CTest 并行度仍为 2；实际 I/O 改善以真实流水线测量为准。
-- 保留 Docker 镜像、自解压 gzip 安装包、SHA256SUMS；ARM64 独立调试符号包归档到 GitLab。
+- 保留 Docker 镜像、自解压 gzip 安装包、SHA256SUMS；ARM64、x64 均生成独立调试符号包，随各自构建归档保留 30 天。
 - 不执行独立的 check_iec61850_package.sh；不减少已有协议单测。
 - 安装包经 gRPC 上传平台软件库，校验完成后自动发布对应架构 CI 通道；不安装设备，不触发 R2 或 GitHub 发布。
 - Beta/Stable 从同一已通过 CI 的安装包晋升，文件及 SHA256 不改变。此次不创建 Beta/Stable 重构建流水线。
 
 ## 作业与身份
 
-阶段顺序为 `build → test → package → publish`：`build-x64`、`build-arm64` 编译，`test-x64` 独立测试，随后双架构打包和发布。两个架构使用同一套构建脚本和不同工具镜像，各自产出 release/<arch>/ 下的安装包、metadata.json、SHA256SUMS、构建日志及可选符号包；JUnit 报告仅由 `test-x64` 生成。两个打包作业均以 x64 完整测试成功为门禁，再完成双架构打包后执行发布，避免失败流水线发布另一个架构。发布作业不重新编译。
+阶段顺序为 `build → test → package → publish`：`build-x64`、`build-arm64` 编译，`test-x64` 独立测试，随后双架构打包和发布。两个架构使用同一套构建脚本和不同工具镜像，各自产出 release/<arch>/ 下的安装包、metadata.json、SHA256SUMS；独立符号位于 symbols/<arch>/，日志位于 logs/<arch>/。JUnit 报告仅由 `test-x64` 生成。两个打包作业均以 x64 完整测试成功为门禁，再完成双架构打包后执行发布，避免失败流水线发布另一个架构。发布作业不重新编译。
 
 ### x64 全量测试与 ARM64 交叉编译
 
@@ -25,23 +25,25 @@ ARM64 在独立 x64 工具镜像中使用 GCC14 的 aarch64 交叉工具链编�
 - vcpkg 明确区分 host=x64 与 target=ARM64，protoc 与 grpc_cpp_plugin 由 host triplet 提供；目标库及主程序使用同一交叉工具链。
 - 交叉镜像默认主机 `cc/c++` 必须为 x64 GCC14；交叉编译入口清除继承的 `CC/CXX`，避免 OpenSSL 等 make 端口沿用主机编译器而忽略目标工具链。
 - 使用独立交叉 triplet、chainload toolchain 与缓存版本，避免复用旧 QEMU 编译器生成的 ARM64 二进制缓存。
-- `build-x64` 仅编译、安装并记录原构建身份和绝对路径上下文；上传完整构建目录及测试程序，只排除中间 `.o` 文件。`test-x64` 在相同绝对路径校验流水线、提交、仓库和上下文后执行全部 CTest，拒绝零测试，成功后清理交付目录中的测试程序；不重新编译或安装。失败时保留测试日志，两个架构均不得打包或发布。
+- `build-x64` 仅编译、安装、归档独立符号并记录原构建身份和绝对路径上下文；上传完整构建目录及测试程序，排除中间 `.o` 文件和已有压缩归档的原始 `package/debug/**`。`test-x64` 在相同绝对路径校验流水线、提交、仓库和上下文后执行全部 CTest，拒绝零测试，成功后清理交付目录中的测试程序；不重新编译或安装。失败时保留测试日志，两个架构均不得打包或发布。
 - `package-x64` 只下载 `test-x64` 的产物；`package-arm64` 只下载 `build-arm64` 的产物，对 `test-x64` 使用 `artifacts: false`，防止同名 `package/` 被 x64 文件覆盖。
 - ARM64 安装及独立符号归档在交叉编译作业内完成，保留原 `build_job_id`。取消 ARM64 路径上下文与独立 ARM64 测试入口；原生 ARM64 构建入口也拒绝。独立 `test` 模式仅接受 x64。
 - 独立安装脚本初始化 CMake 策略，提前查询并收集目标 GCC 运行库；ARM64 glibc 及加载器由 Ubuntu 基础镜像提供，其他缺失依赖仍拒绝交付。
 - 验收覆盖仅 x64 测试、交叉编译不调用 CTest、符号包生成、x64 失败阻断双架构交付及产物架构隔离。实际流水线另核对交叉编译器版本、x64 完整 CTest、双架构打包发布和 SHA256；不得将这些结果表述为 ARM64 测试通过。
 
-### ARM64 作业产物精简
+### 双架构作业产物精简
 
 取消 ARM64 测试作业后，构建目录不再向下游传递；保留打包所需运行文件、构建身份及独立符号包，不删除构建工作区或持久缓存：
 
-- `build-arm64` 成功安装并生成 `release/arm64/*debugsymbols*.tar.gz` 后，上传 `package/`、`release/arm64/`、`logs/arm64/`，排除重复的 `package/debug/**`；不上传整个构建目录，也不生成 ARM64 JUnit 报告。
-- x64 全量测试、测试数量和测试工作区规则不变；ARM64 符号包仍参与打包阶段的 SHA256SUMS，失败不得继续交付。
-- `build-x64` 上传 `package/`、`release/x64/`、`logs/x64/`、`build-x64/`，仅排除 `build-x64/**/*.o`；`test-x64` 上传运行产物、原身份、测试日志和 `build-x64/Testing/`，提供 `logs/x64/ctest.xml` 报告。测试作业不声明构建缓存变量或架构资源锁，但主脚本同样使用公共内存工作区的串行锁。
+- 两架构均在构建作业生成 `symbols/$ARCH/*debugsymbols*.tar.gz`、符号 SHA256SUMS 和原始构建身份；构建归档保留 30 天，符号缺失、为空或校验失败时拒绝成功。延长保留期会同时保留构建归档内的运行文件和测试依赖。
+- `build-arm64` 上传 `package/`、`release/arm64/`、`logs/arm64/`、`symbols/arm64/`，排除重复的 `package/debug/**`；不上传整个构建目录，也不生成 ARM64 JUnit 报告。
+- x64 全量测试、测试数量和测试工作区规则不变，测试在已分离符号的生产库上执行。安装包 SHA256SUMS 与符号 SHA256SUMS 分开保存，符号不再进入打包和发布输入。
+- `build-x64` 上传 `package/`、`release/x64/`、`logs/x64/`、`build-x64/`、`symbols/x64/`，排除 `build-x64/**/*.o` 和 `package/debug/**`；`test-x64` 上传运行产物、原身份、测试日志和 `build-x64/Testing/`，排除原始 debug、不再上传 symbols，提供 `logs/x64/ctest.xml` 报告。测试作业不声明构建缓存变量或架构资源锁，主脚本继续使用公共内存工作区的两个编译槽。
+- 打包作业归档仅含 `release/$ARCH/mskdsp-*` 安装包、metadata.json、安装包 SHA256SUMS 和 `logs/$ARCH/package.log`；发布不再取回符号和旧构建/测试日志。仅发布使用 `GIT_DEPTH=1`，构建仍保留完整历史，远端 HEAD 及冻结来源校验不变。
 
 验收检查 x64 编译阶段不执行测试、独立测试作业的来源校验和失败门禁、两种架构的产物隔离及符号包收集；主分支 CI 再核对 x64 完整 CTest、符号包可解包、打包发布及 SHA256 完整性。大小和耗时收益以真实归档为准。
 
-本轮本地验证：CI 配置测试 10/10、WSL Bash 编排测试 29/29 通过，覆盖 x64 编译与测试分离、来源及绝对路径拒绝、ARM64 符号包和 SHA256、失败门禁及诊断保留；另有元数据、交叉工具链及镜像配置检查 7 项通过，2 项因缺少 CMake 或未启用真实 Docker 镜像验证跳过。`bash -n` 与 `git diff --check` 通过。本轮未执行完整下位机编译、产品 CTest 或远端流水线，实际 Runner 的目录一致性及双包交付仍待 CI 验证。
+此前独立 x64 测试改造的本地验证：CI 配置测试 10/10、WSL Bash 编排测试 29/29 通过，覆盖 x64 编译与测试分离、来源及绝对路径拒绝、ARM64 符号包和 SHA256、失败门禁及诊断保留；另有元数据、交叉工具链及镜像配置检查 7 项通过，2 项因缺少 CMake 或未启用真实 Docker 镜像验证跳过。共享内存及发布交接优化的契约与验收记录见《CI共享内存构建方案》。
 
 CI 完整测试的临时工作目录、系统临时目录和 CTest 过程日志使用作业独立的内存文件系统，避免缓存和大产物归档的共享磁盘争用触发 SQLite/SOE 处理等待超时或日志管道反压。内存目录使用短路径，保留 Unix socket 的路径长度余量。CTest 仍执行全部用例，保留原有断言、超时、并行度与失败门禁；测试种子文件读取磁盘原件，模块种子目录整体链接到磁盘以保留共享库的普通文件属性，避免内存挂载的 noexec 影响模块加载。成功及失败后均恢复原工作目录，并将 CTest 日志归档回磁盘。下位机 Runner 的 `/dev/shm` 上限为每作业 1 GiB，计入作业的 24 GiB 内存限制；它与所有 Linux 作业共用的 24 GiB `/builds` 卷是两个不同的文件系统。
 
