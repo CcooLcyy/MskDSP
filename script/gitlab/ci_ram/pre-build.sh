@@ -1,5 +1,21 @@
 #!/bin/sh
 # 本文件由主作业 shell 引入，描述符 8 持有编译槽，描述符 9 仅保护准入并兼容旧版作业。
+ci_ram_prepare_lock() {
+    # 仅首次创建时设置共享读权限；独占创建避免并发覆盖既有 inode。
+    if [ ! -e "$1" ]; then
+        (umask 000; set -C; : > "$1") 2>/dev/null || {
+            if [ ! -f "$1" ] || [ -L "$1" ]; then
+                echo "共享内存准备失败：无法创建共享锁 $1" >&2
+                return 1
+            fi
+        }
+    fi
+    if [ ! -f "$1" ] || [ -L "$1" ] || [ ! -r "$1" ]; then
+        echo "共享内存准备失败：共享锁必须是可读的普通文件且不能为符号链接 $1" >&2
+        return 1
+    fi
+}
+
 ci_ram_prepare() {
     case "${CI_PROJECT_DIR:-}" in
         /builds/lower/*|/builds/linux/*) ;;
@@ -20,13 +36,16 @@ ci_ram_prepare() {
     fi
     command -v flock >/dev/null 2>&1 || { echo '共享内存准备失败：缺少 flock' >&2; return 1; }
     echo '等待共享编译槽，同一时刻最多执行两个作业主脚本'
-    exec 9>/builds/.compile.lock || return 1
+    ci_ram_prepare_lock /builds/.compile.lock || return 1
+    # 只读打开不带 O_CREAT，兼容 sticky 目录中其他 UID 创建的锁。
+    exec 9</builds/.compile.lock || return 1
     while :; do
         # 先等待旧版作业的长期锁，再在短暂互斥区内尝试两个编译槽。
         flock 9 || { echo '共享内存准备失败：无法取得编译准入锁' >&2; return 1; }
         ci_ram_acquired=false
         for ci_ram_slot in 0 1; do
-            exec 8>"/builds/.compile-slot-$ci_ram_slot.lock" || return 1
+            ci_ram_prepare_lock "/builds/.compile-slot-$ci_ram_slot.lock" || return 1
+            exec 8<"/builds/.compile-slot-$ci_ram_slot.lock" || return 1
             if flock -n 8; then
                 ci_ram_acquired=true
                 break

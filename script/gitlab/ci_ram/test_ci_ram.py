@@ -157,7 +157,7 @@ class VolumeTests(unittest.TestCase):
 
     def test_prebuild_guards_and_lock_are_present(self):
         source = (ROOT / "pre-build.sh").read_text(encoding="utf-8")
-        for text in ("stat -f -c %T", "/builds/lower/*", "/builds/linux/*", "exec 9>", "flock 9", "flock -n 8", "256", "GOTMPDIR", "MemAvailable"):
+        for text in ("stat -f -c %T", "/builds/lower/*", "/builds/linux/*", "exec 9<", "flock 9", "flock -n 8", "256", "GOTMPDIR", "MemAvailable"):
             self.assertIn(text, source)
 
 
@@ -219,6 +219,37 @@ test "$TMPDIR" = "$CI_PROJECT_DIR/.ci-tmp" || exit 42
                 self.assertIn(expected, result.stderr)
                 self.assertFalse((root / "stat-called").exists())
                 self.assertFalse((project / ".ci-tmp").exists())
+
+    # 验证准入锁和两个槽锁均拒绝目录与符号链接，不触碰链接目标或目录内原有内容。
+    def test_directory_and_symlink_locks_are_rejected_without_touching_targets(self):
+        import fcntl
+
+        for name in (".compile.lock", ".compile-slot-0.lock", ".compile-slot-1.lock"):
+            for kind in ("directory", "symlink"):
+                with self.subTest(lock=name, kind=kind), tempfile.TemporaryDirectory() as folder:
+                    root = pathlib.Path(folder)
+                    project = root / "lower/team/project"
+                    project.mkdir(parents=True)
+                    lock = root / name
+                    if kind == "directory":
+                        lock.mkdir()
+                        target = lock / "原有内容"
+                    else:
+                        target = root / "链接目标"
+                        lock.symlink_to(target)
+                    target.write_bytes(b"keep-existing-content")
+                    inode = target.stat().st_ino
+                    with contextlib.ExitStack() as stack:
+                        if name == ".compile-slot-1.lock":
+                            first_slot = stack.enter_context((root / ".compile-slot-0.lock").open("wb"))
+                            fcntl.flock(first_slot, fcntl.LOCK_EX)
+                        result = self.run_path_probe(root, project)
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("锁", result.stderr)
+                    self.assertEqual(target.stat().st_ino, inode)
+                    self.assertEqual(target.read_bytes(), b"keep-existing-content")
+                    self.assertTrue(lock.is_symlink() if kind == "symlink" else lock.is_dir())
+                    self.assertFalse((project / ".ci-tmp").exists())
 
     def test_lock_lives_until_job_shell_exits_and_tmp_is_exported(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -300,6 +331,95 @@ read -r ci_test_finish
                                     env=dict(os.environ, CI_PROJECT_DIR=directory, CI_TEST_PREPARE=str(source)), capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertNotEqual(result.returncode, 42)
+
+
+@unittest.skipUnless(os.name == "posix" and shutil.which("flock"), "需要 POSIX shell 与 flock")
+class ProtectedRegularLockTests(unittest.TestCase):
+    def setUp(self):
+        if os.geteuid() != 0:
+            self.skipTest("跨 UID 回归需要 root")
+        protection = pathlib.Path("/proc/sys/fs/protected_regular")
+        if not protection.exists() or int(protection.read_text().strip()) < 1:
+            self.skipTest("需要 Linux protected_regular 防护")
+
+    def prepare_workspace(self, root):
+        root.chmod(0o1777)
+        project = root / "lower/team/project"
+        project.mkdir(parents=True)
+        for path in (project.parent.parent, project.parent, project):
+            path.chmod(0o777)
+        script = root / "pre-build.sh"
+        script.write_text((ROOT / "pre-build.sh").read_text(encoding="utf-8").replace("/builds", str(root)), encoding="utf-8")
+        script.chmod(0o644)
+        return project, script
+
+    def run_job(self, project, script, uid=0):
+        command = '''umask 077
+stat() { printf 'tmpfs\\n'; }
+df() { printf '文件系统 1024块 已用 可用 使用率 挂载点\\n共享盘 25165824 0 25165824 0%% /builds\\n'; }
+. "$CI_TEST_PREPARE"
+test "$TMPDIR" = "$CI_PROJECT_DIR/.ci-tmp" || exit 41
+'''
+
+        def change_identity():
+            os.setgroups([])
+            os.setgid(uid)
+            os.setuid(uid)
+
+        return subprocess.run(["sh", "-c", command], env=dict(os.environ, CI_PROJECT_DIR=str(project), CI_TEST_PREPARE=str(script)),
+                              cwd=project, preexec_fn=change_identity, capture_output=True, text=True, timeout=10)
+
+    # 验证受保护的 sticky 目录中跨 UID 的既有三把锁均可使用，且不截断、不换 inode 或改属主。
+    def test_foreign_owned_locks_keep_inode_owner_and_contents(self):
+        import fcntl
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = pathlib.Path(folder)
+            project, script = self.prepare_workspace(root)
+            snapshots = {}
+            for name in (".compile.lock", ".compile-slot-0.lock", ".compile-slot-1.lock"):
+                path = root / name
+                content = ("已有锁内容：" + name).encode("utf-8")
+                path.write_bytes(content)
+                path.chmod(0o666)
+                os.chown(path, 65534, 65534)
+                snapshots[path] = (path.stat().st_ino, path.stat().st_uid, content)
+            with (root / ".compile-slot-0.lock").open("rb") as held:
+                fcntl.flock(held, fcntl.LOCK_EX)
+                for uid in (0, 2001):
+                    with self.subTest(uid=uid):
+                        result = self.run_job(project, script, uid)
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                        self.assertIn("已取得共享编译槽 1", result.stdout)
+                        for path, expected in snapshots.items():
+                            self.assertEqual((path.stat().st_ino, path.stat().st_uid, path.read_bytes()), expected)
+
+    # 验证首次创建无视作业的严格 umask，锁可跨 UID 读取并复用，另一 UID 可创建尚未使用的槽。
+    def test_cold_start_locks_are_readable_and_reusable_by_another_uid(self):
+        import fcntl
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = pathlib.Path(folder)
+            project, script = self.prepare_workspace(root)
+            result = self.run_job(project, script)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            existing = [root / ".compile.lock", root / ".compile-slot-0.lock"]
+            snapshots = {path: (path.stat().st_ino, path.stat().st_uid) for path in existing}
+            for path in existing:
+                self.assertEqual(path.stat().st_mode & 0o777, 0o666)
+            with (root / ".compile-slot-0.lock").open("rb") as held:
+                fcntl.flock(held, fcntl.LOCK_EX)
+                result = self.run_job(project, script, 2001)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("已取得共享编译槽 1", result.stdout)
+                result = self.run_job(project, script)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("已取得共享编译槽 1", result.stdout)
+            for path, expected in snapshots.items():
+                self.assertEqual((path.stat().st_ino, path.stat().st_uid), expected)
+            second_slot = root / ".compile-slot-1.lock"
+            self.assertEqual(second_slot.stat().st_uid, 2001)
+            self.assertEqual(second_slot.stat().st_mode & 0o777, 0o666)
 
 
 if __name__ == "__main__":
