@@ -72,7 +72,7 @@ bool WaitSocket(int descriptor, short events, const std::shared_ptr<TunnelConnec
   return false;
 }
 
-bool ConnectLoopback(uint16_t port, const std::shared_ptr<TunnelConnection> &state) {
+bool ConnectEndpoint(const ServiceEndpoint &target, const std::shared_ptr<TunnelConnection> &state) {
   const int descriptor = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
   if (descriptor < 0)
     return false;
@@ -84,8 +84,9 @@ bool ConnectLoopback(uint16_t port, const std::shared_ptr<TunnelConnection> &sta
     return false;
   sockaddr_in address{};
   address.sin_family = AF_INET;
-  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  address.sin_port = htons(port);
+  if (inet_pton(AF_INET, target.host.c_str(), &address.sin_addr) != 1)
+    return false;
+  address.sin_port = htons(target.port);
   if (connect(descriptor, reinterpret_cast<sockaddr *>(&address), sizeof(address)) == 0)
     return true;
   if (errno != EINPROGRESS || !WaitSocket(descriptor, POLLOUT, state, SteadyMilliseconds() + 5000))
@@ -136,21 +137,24 @@ void RunTunnel(const Config &config, remote::DeviceAccessService::Stub *stub, re
       LOG_INFO("平台隧道传输结束，设备={}，隧道={}，服务={}，平台接收字节={}，本机写入字节={}，本机读取字节={}，平台发送字节={}，持续毫秒={}，本机写入停顿毫秒={}，平台发送停顿毫秒={}，原因={}", config.deviceId, request.tunnel_id(), request.service(), state->receivedBytes.load(), state->localWrittenBytes.load(), state->localReadBytes.load(), state->sentBytes.load(), now - started, local == 0 ? -1 : now - local, platform == 0 ? -1 : now - platform, state->CloseReason());
     }
   } cleanup{state, config, request};
-  // 固定本机服务不依赖管理器查询；普通模块才需要动态发现运行端口。
-  const auto running = request.service() == "ModuleManager" || request.service() == "ssh"
+  // 固定服务不依赖管理器查询；普通模块才需要动态发现运行端口。
+  const auto running = request.service() == "ModuleManager" || request.service() == "ssh" || request.service() == kVerticalSecurityService
       ? std::vector<RunningModule>{}
       : DiscoverModules(config);
-  const auto port = ResolveTarget(config, request.service(), running);
-  if (!port) {
+  const auto target = ResolveEndpoint(config, request.service(), running);
+  if (!target) {
     state->SetCloseReason("服务未开放或模块当前未运行");
     ReportFailure(control, request, "服务未开放或模块当前未运行");
     return;
   }
-  if (!ConnectLoopback(*port, state)) {
-    state->SetCloseReason("连接本机服务失败或超时");
-    ReportFailure(control, request, "连接本机服务失败或超时");
+  LOG_INFO("平台隧道开始连接受控目标，设备={}，隧道={}，服务={}，目标={}:{}", config.deviceId, request.tunnel_id(), request.service(), target->host, target->port);
+  if (!ConnectEndpoint(*target, state)) {
+    const char *reason = request.service() == kVerticalSecurityService ? "连接纵密管理服务失败或超时" : "连接本机服务失败或超时";
+    state->SetCloseReason(reason);
+    ReportFailure(control, request, reason);
     return;
   }
+  LOG_INFO("平台隧道受控目标已连接，设备={}，隧道={}，服务={}，目标={}:{}", config.deviceId, request.tunnel_id(), request.service(), target->host, target->port);
   if (!control->active.load() || state->cancelled.load())
     return;
   state->context.AddMetadata("authorization", "Bearer " + config.token);

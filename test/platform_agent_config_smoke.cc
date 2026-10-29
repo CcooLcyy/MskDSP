@@ -37,6 +37,11 @@ int main() {
     require(!agent::ResolveTarget(config, "DataCenter", {{"DataCenter", "192.168.1.2:17123"}}));
     require(!agent::ResolveTarget(config, "DataCenter", {}));
     require(!agent::ResolveTarget(config, "ssh", {}));
+    // 未启用平台维护能力时，纵密固定服务不可解析，也不能作为普通模块伪造。
+    require(!agent::ResolveEndpoint(config, "vertical-security", {}));
+    config.allowedModules.insert("vertical-security");
+    require(!agent::ResolveEndpoint(config, "vertical-security", {{"vertical-security", "127.0.0.1:9999"}}));
+    config.allowedModules.erase("vertical-security");
     require(!agent::ResolveTarget(config, "127.0.0.1:22", {}));
     require(!agent::ResolveTarget(config, "../ssh", {}));
     require(!agent::ResolveTarget(config, "DataCenter", {{"DataCenter", "0.0.0.0:99999"}}));
@@ -45,7 +50,18 @@ int main() {
     values["MSKDSP_PLATFORM_SSH_PORT"] = "10022";
     config = agent::LoadConfig(environment);
     require(agent::ResolveTarget(config, "ssh", {}) == 10022);
-    require(agent::AvailableServices(config, {}) == (std::vector<std::string>{"ModuleManager", "ssh"}));
+    require(agent::AvailableServices(config, {}) == (std::vector<std::string>{"ModuleManager", "ssh", "vertical-security"}));
+    // 维护能力只开放固定的纵密管理服务，不允许请求自选目标或端口。
+    const auto vertical = agent::ResolveEndpoint(config, "vertical-security", {{"vertical-security", "127.0.0.1:9999"}});
+    require(vertical && vertical->host == "11.22.33.44" && vertical->port == 8888);
+    const auto ssh = agent::ResolveEndpoint(config, "ssh", {});
+    require(ssh && ssh->host == "127.0.0.1" && ssh->port == 10022);
+    const auto module = agent::ResolveEndpoint(config, "DataCenter", {{"DataCenter", "0.0.0.0:17123"}});
+    require(module && module->host == "127.0.0.1" && module->port == 17123);
+    require(!agent::ResolveEndpoint(config, "DataCenter", {{"DataCenter", "11.22.33.44:8888"}}));
+    require(!agent::ResolveEndpoint(config, "11.22.33.44:8888", {}));
+    require(!agent::ResolveEndpoint(config, "vertical-security:8889", {}));
+    require(!agent::ResolveEndpoint(config, "VERTICAL-SECURITY", {}));
     values["MSKDSP_PLATFORM_MODULES"] = "DataCenter,127.0.0.1:22";
     rejected = false;
     try {

@@ -78,6 +78,37 @@ TEST(PlatformAgentTargets, AnnouncesOnlyCurrentAllowedServices) {
   EXPECT_EQ(agent::AvailableServices(config, {}), (std::vector<std::string>{"ModuleManager"}));
   config.sshEnabled = true;
   EXPECT_EQ(agent::ResolveTarget(config, "ssh", {}), 22);
+  EXPECT_EQ(agent::AvailableServices(config, {}), (std::vector<std::string>{"ModuleManager", "ssh", "vertical-security"}));
+}
+
+// 验证纵密维护能力由 SSH 维护开关控制，且始终解析到固定管理服务。
+TEST(PlatformAgentTargets, VerticalSecurityUsesFixedMaintenanceEndpoint) {
+  agent::Config config;
+  config.allowedModules = {"vertical-security", "DataCenter"};
+  const std::vector<agent::RunningModule> running{{"vertical-security", "127.0.0.1:12345"}, {"DataCenter", "0.0.0.0:17123"}};
+  EXPECT_FALSE(agent::ResolveEndpoint(config, "vertical-security", running));
+  EXPECT_EQ(agent::AvailableServices(config, {}), (std::vector<std::string>{"ModuleManager"}));
+  config.sshEnabled = true;
+  const auto target = agent::ResolveEndpoint(config, "vertical-security", running);
+  ASSERT_TRUE(target);
+  EXPECT_EQ(target->host, "11.22.33.44");
+  EXPECT_EQ(target->port, 8888);
+  // 旧端口解析接口只表示本机服务，不能把纵密目标意外当作环回服务。
+  EXPECT_FALSE(agent::ResolveTarget(config, "vertical-security", running));
+  const auto module = agent::ResolveEndpoint(config, "DataCenter", running);
+  ASSERT_TRUE(module);
+  EXPECT_EQ(module->host, "127.0.0.1");
+  EXPECT_EQ(module->port, 17123);
+}
+
+// 验证普通模块仍不能指向现场地址，服务名称也不能携带用户指定的主机或端口。
+TEST(PlatformAgentTargets, ExternalEndpointsCannotBeRequestedOrSpoofed) {
+  agent::Config config;
+  config.sshEnabled = true;
+  EXPECT_FALSE(agent::ResolveEndpoint(config, "DataCenter", {{"DataCenter", "11.22.33.44:8888"}}));
+  EXPECT_FALSE(agent::ResolveEndpoint(config, "11.22.33.44:8888", {}));
+  EXPECT_FALSE(agent::ResolveEndpoint(config, "vertical-security:8889", {}));
+  EXPECT_FALSE(agent::ResolveEndpoint(config, "VERTICAL-SECURITY", {}));
 }
 
 namespace {

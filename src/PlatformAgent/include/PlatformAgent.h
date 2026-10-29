@@ -27,9 +27,18 @@ struct RunningModule {
   std::string address;
 };
 
+// 只有固定维护服务可以使用非环回地址；调用方不能传入自选主机。
+struct ServiceEndpoint {
+  std::string host;
+  uint16_t port;
+};
+
+inline constexpr std::string_view kVerticalSecurityService = "vertical-security";
+
 Config LoadConfig(const std::function<std::string(std::string_view)> &environment);
 Config LoadEnvironmentConfig();
 std::optional<uint16_t> ResolveTarget(const Config &config, std::string_view service, const std::vector<RunningModule> &running);
+std::optional<ServiceEndpoint> ResolveEndpoint(const Config &config, std::string_view service, const std::vector<RunningModule> &running);
 std::vector<std::string> AvailableServices(const Config &config, const std::vector<RunningModule> &running);
 
 using PlatformStatusObserver = std::function<void(bool, std::string)>;

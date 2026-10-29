@@ -111,8 +111,21 @@ std::vector<std::string> AvailableServices(const Config &config, const std::vect
     if (ResolveTarget(config, name, running))
       result.push_back(name);
   }
-  if (config.sshEnabled)
+  if (config.sshEnabled) {
     result.emplace_back("ssh");
+    result.emplace_back(kVerticalSecurityService);
+  }
   return result;
+}
+
+std::optional<ServiceEndpoint> ResolveEndpoint(const Config &config, std::string_view service, const std::vector<RunningModule> &running) {
+  if (service == kVerticalSecurityService) {
+    if (!config.sshEnabled)
+      return std::nullopt;
+    return ServiceEndpoint{"11.22.33.44", 8888};
+  }
+  if (const auto port = ResolveTarget(config, service, running))
+    return ServiceEndpoint{"127.0.0.1", *port};
+  return std::nullopt;
 }
 }  // namespace mskdsp::platformagent
