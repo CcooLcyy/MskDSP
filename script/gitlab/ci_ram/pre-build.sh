@@ -5,7 +5,11 @@ ci_ram_prepare() {
         /builds/lower/*|/builds/linux/*) ;;
         *) echo '共享内存准备失败：工程路径超出允许范围' >&2; return 1 ;;
     esac
-    ci_ram_real=$(realpath -e "$CI_PROJECT_DIR") || return 1
+    # 在子 shell 中解析物理路径，兼容 BusyBox 且不改变主作业当前目录。
+    ci_ram_real=$(CDPATH= cd "$CI_PROJECT_DIR" && pwd -P) || {
+        echo '共享内存准备失败：无法解析工程真实路径' >&2
+        return 1
+    }
     case "$ci_ram_real" in
         /builds/lower/*|/builds/linux/*) ;;
         *) echo '共享内存准备失败：工程真实路径超出允许范围' >&2; return 1 ;;

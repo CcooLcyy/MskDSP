@@ -163,6 +163,63 @@ class VolumeTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "posix" and shutil.which("flock"), "需要 POSIX shell 与 flock")
 class PrepareShellTests(unittest.TestCase):
+    def run_path_probe(self, root, project):
+        script = root / "pre-build.sh"
+        script.write_text((ROOT / "pre-build.sh").read_text(encoding="utf-8").replace("/builds", str(root)), encoding="utf-8")
+        command = '''realpath() { echo '禁止依赖 GNU realpath 参数' >&2; return 125; }
+stat() { touch "$CI_TEST_STAT_CALLED"; printf 'tmpfs\\n'; }
+df() { printf '文件系统 1024块 已用 可用 使用率 挂载点\\n共享盘 25165824 0 25165824 0%% /builds\\n'; }
+ci_test_original_pwd=$(pwd -P)
+. "$CI_TEST_PREPARE"
+test "$(pwd -P)" = "$ci_test_original_pwd" || exit 41
+test "$TMPDIR" = "$CI_PROJECT_DIR/.ci-tmp" || exit 42
+'''
+        env = dict(os.environ, CI_PROJECT_DIR=str(project), CI_TEST_PREPARE=str(script),
+                   CI_TEST_STAT_CALLED=str(root / "stat-called"))
+        return subprocess.run(["sh", "-c", command], env=env, cwd=root, capture_output=True, text=True, timeout=10)
+
+    # 验证两种目录前缀及含空格路径均不依赖 GNU realpath，且不改变作业当前目录。
+    def test_existing_directories_do_not_require_gnu_realpath(self):
+        for relative in ("lower/team/project", "linux/team/project with spaces"):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as folder:
+                root = pathlib.Path(folder)
+                project = root / relative
+                project.mkdir(parents=True)
+                result = self.run_path_probe(root, project)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertTrue((project / ".ci-tmp").is_dir())
+
+    # 验证允许范围内的符号链接可使用，并通过物理路径校验。
+    def test_symlink_inside_workspace_is_accepted(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = pathlib.Path(folder)
+            target = root / "linux/team/actual project"
+            target.mkdir(parents=True)
+            project = root / "lower/project link"
+            project.parent.mkdir()
+            project.symlink_to(target, target_is_directory=True)
+            result = self.run_path_probe(root, project)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue((target / ".ci-tmp").is_dir())
+
+    # 验证缺失目录和符号链接越界在检查文件系统或创建临时目录前失败。
+    def test_missing_directory_and_escaping_symlink_are_rejected(self):
+        for mode in ("missing", "escape"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as folder:
+                root = pathlib.Path(folder)
+                project = root / "lower/project"
+                project.parent.mkdir()
+                if mode == "escape":
+                    target = root / "outside"
+                    target.mkdir()
+                    project.symlink_to(target, target_is_directory=True)
+                result = self.run_path_probe(root, project)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                expected = "无法解析工程真实路径" if mode == "missing" else "工程真实路径超出允许范围"
+                self.assertIn(expected, result.stderr)
+                self.assertFalse((root / "stat-called").exists())
+                self.assertFalse((project / ".ci-tmp").exists())
+
     def test_lock_lives_until_job_shell_exits_and_tmp_is_exported(self):
         with tempfile.TemporaryDirectory() as folder:
             root = pathlib.Path(folder)
