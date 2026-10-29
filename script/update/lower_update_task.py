@@ -63,9 +63,226 @@ def ensure_secure_existing(path, directory=True):
 
 def preflight_environment():
     """安装前的纯只读环境检查，sudo 已由 SSH 根命令入口验证。"""
+    errors = []
     for path in (Path('/usr/local/libexec/mskdsp-update'), STATE_ROOT):
-        ensure_secure_existing(path)
-    Backend().environment_preflight()
+        try:
+            ensure_secure_existing(path)
+        except (ValueError, OSError) as error:
+            errors.append(str(error))
+    try:
+        Backend().environment_preflight()
+    except (ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+        errors.append(str(error))
+    errors.extend(scan_business_sources())
+    if errors:
+        raise ValueError("更新环境检查发现问题：\n" + "\n".join(errors))
+
+
+def source_signature(info):
+    """不比较读取产生的 atime，检查对象身份和复制期间的内容变化。"""
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+            info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+class SourceLimit(ValueError):
+    """预算耗尽必须终止整个扫描，不能作为普通条目错误继续遍历。"""
+
+
+def copy_configuration(source, destination=None, errors=None, budget=None):
+    """只放宽配置根内部数据权限；使用固定目录描述符，拒绝链接、特殊文件和替换。"""
+    source = Path(source)
+    ensure_secure(source)
+    if not hasattr(os, 'O_NOFOLLOW') or os.stat not in os.supports_dir_fd:
+        raise ValueError("配置安全备份需要支持目录描述符和禁止跟随链接的宿主机")
+    budget = budget if budget is not None else [0, time.monotonic() + (10 if destination is None else 120)]
+
+    def check_deadline():
+        if budget[0] > 10000 or time.monotonic() > budget[1]:
+            raise SourceLimit("配置来源超过 10000 项或扫描/备份时间限制")
+
+    def tick():
+        budget[0] += 1
+        check_deadline()
+
+    def stable(before, after, path):
+        if source_signature(before) != source_signature(after):
+            raise ValueError(f"配置来源发生变化或被替换: {path}")
+
+    def open_file(fd, name, info, path, content=True):
+        incoming = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        try:
+            current = os.fstat(incoming)
+            if content:
+                stable(info, current, path)
+            elif (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_nlink) != (current.st_dev, current.st_ino, current.st_mode, current.st_uid, current.st_gid, current.st_nlink):
+                raise ValueError(f"配置来源对象被替换: {path}")
+            return incoming
+        except BaseException:
+            os.close(incoming)
+            raise
+
+    def visit(fd, path, output):
+        check_deadline()
+        before = os.fstat(fd)
+        names = []
+        with os.scandir(fd) as listing:
+            for item in listing:
+                tick()
+                names.append(item.name)
+        names.sort()
+        entries = {}
+        databases = set()
+        for name in names:
+            check_deadline()
+            entry = path / name
+            try:
+                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+                    raise ValueError(f"配置备份拒绝符号链接、设备和特殊文件: {entry}")
+                if stat.S_ISREG(info.st_mode):
+                    if info.st_nlink != 1 or info.st_size > MAX_PACKAGE:
+                        raise ValueError(f"配置备份拒绝硬链接或超限文件: {entry}")
+                    incoming = open_file(fd, name, info, entry, content=False)
+                    try:
+                        header = os.read(incoming, 16)
+                        check_deadline()
+                    finally:
+                        os.close(incoming)
+                    if header == b"SQLite format 3\x00":
+                        databases.add(name)
+                entries[name] = info
+            except SourceLimit:
+                raise
+            except (ValueError, OSError) as error:
+                if errors is None:
+                    raise
+                errors.append(str(error))
+        if output is not None:
+            output.mkdir(mode=0o700)
+        for name, info in entries.items():
+            check_deadline()
+            entry = path / name
+            try:
+                if stat.S_ISDIR(info.st_mode):
+                    child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                    try:
+                        stable(info, os.fstat(child), entry)
+                        visit(child, entry, output / name if output is not None else None)
+                        stable(info, os.stat(name, dir_fd=fd, follow_symlinks=False), entry)
+                    finally:
+                        os.close(child)
+                elif name in databases:
+                    # SQLite 会自行按路径重开数据库及 WAL，故数据库与完整父链仍须独占。
+                    try:
+                        ensure_secure(entry)
+                        for ancestor in entry.parents:
+                            ensure_secure(ancestor)
+                        for suffix in ('-wal', '-shm', '-journal'):
+                            side = path / (name + suffix)
+                            if side.exists() or side.is_symlink():
+                                ensure_secure(side)
+                    except (ValueError, OSError) as error:
+                        raise ValueError(f"SQLite 来源及父目录必须由 root 独占: {entry}: {error}") from error
+                    if output is not None:
+                        check_deadline()
+                        copy_database(entry, output / name)
+                        check_deadline()
+                elif any(name == database + suffix for database in databases for suffix in ('-wal', '-shm', '-journal')):
+                    continue
+                elif output is not None:
+                    incoming = open_file(fd, name, info, entry)
+                    try:
+                        with open(output / name, 'xb') as outgoing:
+                            os.chmod(output / name, 0o600)
+                            total = 0
+                            while True:
+                                if time.monotonic() > budget[1]:
+                                    raise ValueError(f"配置来源备份超过时间限制: {entry}")
+                                chunk = os.read(incoming, 1024**2)
+                                if not chunk:
+                                    break
+                                total += len(chunk)
+                                if total > MAX_PACKAGE:
+                                    raise ValueError(f"配置来源复制期间超过文件大小限制: {entry}")
+                                outgoing.write(chunk)
+                            outgoing.flush()
+                            os.fsync(outgoing.fileno())
+                        stable(info, os.fstat(incoming), entry)
+                    finally:
+                        os.close(incoming)
+                if name not in databases and not any(name == database + suffix for database in databases for suffix in ('-wal', '-shm', '-journal')):
+                    stable(info, os.stat(name, dir_fd=fd, follow_symlinks=False), entry)
+            except SourceLimit:
+                raise
+            except (ValueError, OSError) as error:
+                if errors is None:
+                    raise
+                errors.append(str(error))
+        stable(before, os.fstat(fd), path)
+        check_deadline()
+
+    info = source.lstat()
+    fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        stable(info, os.fstat(fd), source)
+        visit(fd, source, Path(destination) if destination is not None else None)
+        stable(info, source.lstat(), source)
+    finally:
+        os.close(fd)
+
+
+def scan_business_sources(host=None):
+    """上传前只读聚合业务来源问题，不创建备份、任务或日志。"""
+    host = Path(host) if host is not None else HOST_ROOT
+    errors = []
+    budget = [0, time.monotonic() + 10]
+    try:
+        ensure_secure(host)
+    except (ValueError, OSError) as error:
+        return [str(error)]
+
+    def modules(path):
+        budget[0] += 1
+        if budget[0] > 10000 or time.monotonic() > budget[1]:
+            raise SourceLimit("业务目录检查超过 10000 项或 10 秒限制")
+        try:
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                target = os.readlink(path)
+                if os.path.isabs(target) or not path.resolve().is_relative_to((host / 'module').resolve()):
+                    raise ValueError(f"模块符号链接越界: {path}")
+                ensure_secure(path.resolve())
+            elif stat.S_ISDIR(info.st_mode):
+                ensure_secure(path)
+                with os.scandir(path) as listing:
+                    for entry in listing:
+                        modules(Path(entry.path))
+            elif stat.S_ISREG(info.st_mode):
+                ensure_secure(path)
+            else:
+                raise ValueError(f"模块备份拒绝设备和特殊文件: {path}")
+        except SourceLimit:
+            raise
+        except (ValueError, OSError, RuntimeError) as error:
+            errors.append(str(error))
+
+    try:
+        try:
+            ensure_secure(host / 'module')
+            if not (host / 'module').is_dir():
+                raise ValueError(f"模块根路径不是目录: {host / 'module'}")
+            modules(host / 'module')
+        except SourceLimit:
+            raise
+        except (ValueError, OSError) as error:
+            errors.append(str(error))
+        copy_configuration(host / 'conf', errors=errors, budget=budget)
+    except (ValueError, OSError) as error:
+        errors.append(str(error))
+    displayed = [error[:500] for error in errors[:50]]
+    if len(errors) > 50:
+        displayed.append(f"另有 {len(errors) - 50} 项问题，修复上述问题后请重新检查")
+    return displayed
 
 
 def atomic_json(path, data):
@@ -177,6 +394,8 @@ def copy_tree(source, destination, secure, link_root=None):
         if stat.S_ISDIR(mode):
             copy_tree(entry, destination / entry.name, secure, link_root)
         elif stat.S_ISREG(mode):
+            if secure:
+                ensure_secure(entry)
             if entry.name in databases:
                 copy_database(entry, destination / entry.name)
             else:
@@ -563,6 +782,10 @@ class TaskManager:
                 if self.secure:
                     ensure_secure(package)
                     ensure_secure(self.host)
+                    problems = scan_business_sources(self.host)
+                    if problems:
+                        raise ValueError("业务来源检查发现问题：\n" + "\n".join(problems))
+                    self.log(operation, "业务来源检查通过：模块保持 root 独占，配置数据使用禁止链接的目录描述符读取；SQLite 保持独占路径")
                 snapshot = self.backend.preflight(package, data["expected_image_id"])
                 self.log(operation, "默认容器部署校验通过（含安全选项与主机名），开始准备恢复材料")
                 required = package.stat().st_size * 3 + snapshot.get("update_payload_bytes", 0) * 2
@@ -574,8 +797,11 @@ class TaskManager:
                     raise ValueError("宿主机模块目录空间不足以展开候选版本")
                 backup.mkdir(mode=0o700)
                 for name in ("module", "conf"):
-                    copy_tree(self.host / name, backup / name, self.secure,
-                              self.host / "module" if name == "module" else None)
+                    if name == 'conf' and self.secure:
+                        copy_configuration(self.host / name, backup / name)
+                    else:
+                        copy_tree(self.host / name, backup / name, self.secure,
+                                  self.host / "module" if name == "module" else None)
                 atomic_json(backup / "deployment.json", snapshot)
                 tag = "mskdsp-rollback:" + operation
                 self.backend.pin_image(snapshot["Image"], tag)

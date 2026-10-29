@@ -586,7 +586,7 @@ class ReadOnlyRecoveryTest(unittest.TestCase):
 
     # 预检检查已有祖先并保持缺失目录原样。
     def test_preflight_uses_readonly_existing_ancestor_validation(self):
-        with patch.object(task, "ensure_secure_existing") as secure, patch.object(task.Backend, "environment_preflight") as environment:
+        with patch.object(task, "ensure_secure_existing") as secure, patch.object(task.Backend, "environment_preflight") as environment, patch.object(task, "scan_business_sources", return_value=[]):
             task.preflight_environment()
         environment.assert_called_once()
         self.assertTrue(any(call.args[0] == Path("/usr/local/libexec/mskdsp-update") for call in secure.call_args_list))
