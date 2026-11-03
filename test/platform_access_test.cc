@@ -339,4 +339,189 @@ TEST_F(PlatformAccessTest, ServesManagementRpcOnRandomLocalPort) {
   }
   server->Shutdown(std::chrono::system_clock::now() + 2s);
 }
+// 平台关闭时仍应用普通出口，旧请求省略网络消息时保留配置，并能从持久文件恢复。
+TEST_F(PlatformAccessTest, NetworkConfigurationIsIndependentAndBackwardCompatible) {
+  std::vector<pa::OrdinaryNetworkConfig> applied;
+  auto apply = [&](const pa::OrdinaryNetworkConfig &network) {
+    applied.push_back(network);
+    return pa::OrdinaryNetworkResult{true, "", "192.168.2.219"};
+  };
+  pa::PlatformAccessSupervisor control(path, {}, apply);
+  auto request = Request();
+  request.set_enabled(false);
+  auto *network = request.mutable_network_config();
+  network->set_interface_name("eth0.102");
+  network->set_gateway("192.168.2.1");
+  network->add_dns_servers("192.168.2.1");
+  ModuleManagerProto::PlatformAccessStatus saved;
+  ASSERT_TRUE(control.Set(request, &saved).ok());
+  EXPECT_FALSE(saved.enabled());
+  EXPECT_TRUE(saved.network_applied());
+  EXPECT_EQ(saved.network_source_address(), "192.168.2.219");
+  ASSERT_EQ(applied.size(), 1);
+  request = Request(1);
+  request.set_enabled(false);
+  request.clear_device_token();
+  ASSERT_TRUE(control.Set(request, &saved).ok());
+  EXPECT_EQ(saved.revision(), 1);
+  EXPECT_EQ(saved.network_config().gateway(), "192.168.2.1");
+  EXPECT_EQ(applied.size(), 1);
+  pa::PlatformAccessSupervisor restored(path, {}, apply);
+  EXPECT_EQ(Read(restored).network_config().interface_name(), "eth0.102");
+  EXPECT_FALSE(Read(restored).network_applied());
+  std::jthread background([&](std::stop_token stop) { restored.Run(stop); });
+  const auto deadline = std::chrono::steady_clock::now() + 5s;
+  while (!Read(restored).network_applied() && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(10ms);
+  EXPECT_TRUE(Read(restored).network_applied());
+  EXPECT_FALSE(Read(restored).enabled());
+  background.request_stop();
+  background.join();
+}
+
+// 网络应用失败必须回滚且不增加持久修订，后续用相同修订可以重试。
+TEST_F(PlatformAccessTest, NetworkFailureRollsBackAndCanRetry) {
+  int attempts = 0;
+  pa::PlatformAccessSupervisor control(path, {}, [&](const pa::OrdinaryNetworkConfig &network) {
+    if (!network.interfaceName.empty() && ++attempts == 1)
+      return pa::OrdinaryNetworkResult{false, "网络命令失败", ""};
+    return pa::OrdinaryNetworkResult{true, "", ""};
+  });
+  auto request = Request();
+  request.mutable_network_config()->set_interface_name("eth0.102");
+  request.mutable_network_config()->set_gateway("192.168.2.1");
+  ModuleManagerProto::PlatformAccessStatus saved;
+  EXPECT_EQ(control.Set(request, &saved).error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+  EXPECT_EQ(Read(control).revision(), 0);
+  EXPECT_FALSE(Read(control).network_error().empty());
+  EXPECT_FALSE(std::filesystem::exists(path));
+  ASSERT_TRUE(control.Set(request, &saved).ok());
+  EXPECT_TRUE(saved.network_error().empty());
+  EXPECT_EQ(saved.revision(), 1);
+}
+
+// 已应用网络后的保存失败会恢复旧网络；回滚失败单独报告，不能显示应用成功。
+TEST_F(PlatformAccessTest, FailedNetworkSaveReportsRollbackFailure) {
+  int calls = 0;
+  pa::PlatformAccessSupervisor control(directory / "missing" / "platform_access.json", {}, [&](const pa::OrdinaryNetworkConfig &) {
+    ++calls;
+    return calls == 1 ? pa::OrdinaryNetworkResult{true, "", "192.168.2.219"}
+                      : pa::OrdinaryNetworkResult{false, "恢复失败", ""};
+  });
+  auto request = Request();
+  request.mutable_network_config()->set_interface_name("eth0.102");
+  request.mutable_network_config()->set_gateway("192.168.2.1");
+  ModuleManagerProto::PlatformAccessStatus saved;
+  EXPECT_EQ(control.Set(request, &saved).error_code(), grpc::StatusCode::INTERNAL);
+  EXPECT_EQ(Read(control).revision(), 0);
+  EXPECT_FALSE(Read(control).network_applied());
+  EXPECT_NE(Read(control).network_error().find("恢复失败"), std::string::npos);
+  EXPECT_EQ(calls, 2);
+}
+
+// 非法网络参数应在执行任何系统命令和写文件之前拒绝。
+TEST_F(PlatformAccessTest, RejectsInvalidNetworkBeforeApplying) {
+  int calls = 0;
+  pa::PlatformAccessSupervisor control(path, {}, [&](const pa::OrdinaryNetworkConfig &) {
+    ++calls;
+    return pa::OrdinaryNetworkResult{true, "", ""};
+  });
+  auto request = Request();
+  request.mutable_network_config()->set_interface_name("eth0.102;reboot");
+  request.mutable_network_config()->set_gateway("192.168.2.1");
+  ModuleManagerProto::PlatformAccessStatus status;
+  EXPECT_EQ(control.Set(request, &status).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  EXPECT_EQ(calls, 0);
+  EXPECT_FALSE(std::filesystem::exists(path));
+}
+
+// 旧版文件缺少网络字段时保留系统现有网络，读取时不执行任何网络修改。
+TEST_F(PlatformAccessTest, LoadsLegacyFileWithoutNetworkFields) {
+  std::ofstream(path) << R"({"schema_version":1,"revision":7,"enabled":false,"device_id":"legacy","device_token":"","ssh_enabled":false,"ssh_port":22})";
+  ASSERT_EQ(::chmod(path.c_str(), 0600), 0);
+  int applied = 0;
+  pa::PlatformAccessSupervisor restored(path, {}, [&](const pa::OrdinaryNetworkConfig &) {
+    ++applied;
+    return pa::OrdinaryNetworkResult{true, "", ""};
+  });
+  auto status = Read(restored);
+  EXPECT_EQ(status.revision(), 7);
+  EXPECT_TRUE(status.has_network_config());
+  EXPECT_TRUE(status.network_config().interface_name().empty());
+  EXPECT_EQ(applied, 0);
+}
+
+// 显式空网络消息恢复系统网络，省略消息的兼容语义不得误当成撤销。
+TEST_F(PlatformAccessTest, ExplicitEmptyNetworkRestoresSystemNetwork) {
+  std::vector<std::string> interfaces;
+  pa::PlatformAccessSupervisor control(path, {}, [&](const pa::OrdinaryNetworkConfig &network) {
+    interfaces.push_back(network.interfaceName);
+    return pa::OrdinaryNetworkResult{true, "", ""};
+  });
+  auto request = Request();
+  request.mutable_network_config()->set_interface_name("eth0.102");
+  request.mutable_network_config()->set_gateway("192.168.2.1");
+  ModuleManagerProto::PlatformAccessStatus status;
+  ASSERT_TRUE(control.Set(request, &status).ok());
+  request = Request(1);
+  request.clear_device_token();
+  request.mutable_network_config();
+  ASSERT_TRUE(control.Set(request, &status).ok());
+  ASSERT_EQ(interfaces.size(), 2);
+  EXPECT_TRUE(interfaces.back().empty());
+  EXPECT_TRUE(status.network_config().interface_name().empty());
+  EXPECT_EQ(status.revision(), 2);
+}
+
+// 启动网络恢复失败时不能启动平台连接且独立报告网络错误。
+TEST_F(PlatformAccessTest, StartupNetworkFailureDoesNotStartPlatform) {
+  pa::StoredPlatformAccess stored;
+  stored.revision = 1;
+  stored.config.enabled = true;
+  stored.config.deviceId = "configured";
+  stored.config.token = "secret";
+  stored.config.networkConfig.interfaceName = "eth0.102";
+  stored.config.networkConfig.gateway = "192.168.2.1";
+  ASSERT_EQ(pa::PlatformAccessStore(path).Save(stored), pa::PlatformAccessSave::Durable);
+  std::atomic_int attempts{0}, starts{0};
+  pa::PlatformAccessSupervisor control(path, [&](const pa::Config &, std::stop_token, pa::PlatformStatusObserver) { ++starts; }, [&](const pa::OrdinaryNetworkConfig &) {
+        ++attempts;
+        return pa::OrdinaryNetworkResult{false, "宿主机网络服务不可用", ""}; });
+  std::jthread background([&](std::stop_token stop) { control.Run(stop); });
+  const auto deadline = std::chrono::steady_clock::now() + 5s;
+  while (Read(control).network_error().empty() && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(10ms);
+  EXPECT_EQ(attempts.load(), 1);
+  EXPECT_EQ(starts.load(), 0);
+  EXPECT_FALSE(Read(control).network_applied());
+  EXPECT_EQ(Read(control).network_error(), "宿主机网络服务不可用");
+  EXPECT_TRUE(Read(control).last_error().empty());
+  background.request_stop();
+  background.join();
+}
+
+// 冷启动网口稍后就绪时自动重试恢复，即使平台关闭也无需用户再次保存。
+TEST_F(PlatformAccessTest, RetriesStartupNetworkUntilInterfaceReady) {
+  pa::StoredPlatformAccess stored;
+  stored.revision = 1;
+  stored.config.networkConfig.interfaceName = "eth0.102";
+  stored.config.networkConfig.gateway = "192.168.2.1";
+  ASSERT_EQ(pa::PlatformAccessStore(path).Save(stored), pa::PlatformAccessSave::Durable);
+  std::atomic_int attempts{0};
+  pa::PlatformAccessSupervisor control(path, {}, [&](const pa::OrdinaryNetworkConfig &) {
+    if (++attempts == 1)
+      return pa::OrdinaryNetworkResult{false, "网口尚未就绪", ""};
+    return pa::OrdinaryNetworkResult{true, "", "192.168.2.219"};
+  });
+  std::jthread background([&](std::stop_token stop) { control.Run(stop); });
+  const auto deadline = std::chrono::steady_clock::now() + 8s;
+  while (!Read(control).network_applied() && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(10ms);
+  EXPECT_EQ(attempts.load(), 2);
+  EXPECT_TRUE(Read(control).network_applied());
+  EXPECT_TRUE(Read(control).network_error().empty());
+  EXPECT_FALSE(Read(control).enabled());
+  background.request_stop();
+  background.join();
+}
 }  // namespace

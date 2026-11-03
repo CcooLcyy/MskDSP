@@ -9,6 +9,8 @@
 #include <string_view>
 #include <vector>
 
+#include "OrdinaryNetworkConfig.h"
+
 namespace mskdsp::platformagent {
 
 struct Config {
@@ -19,6 +21,7 @@ struct Config {
   std::string token;
   uint16_t managerPort{17000};
   uint16_t sshPort{22};
+  OrdinaryNetworkConfig networkConfig;
   std::set<std::string> allowedModules{"DataCenter", "IEC104", "IEC61850", "ModbusRTU", "ModbusTCP", "DLT645", "AGC", "AVC", "Calc", "ControlOrchestrator", "ConfigPusher", "MQTTManager", "BoardIO", "DeviceInfo"};
 };
 

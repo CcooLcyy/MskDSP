@@ -24,6 +24,6 @@ set_target_properties(platformRemoteProto PROPERTIES POSITION_INDEPENDENT_CODE O
 target_include_directories(platformRemoteProto PUBLIC "${PLATFORM_PROTO_GENERATED}")
 target_link_libraries(platformRemoteProto PUBLIC gRPC::grpc++ protobuf::libprotobuf)
 
-add_library(platformAgent STATIC PlatformAgent.cc PlatformAgentConfig.cc PlatformTunnel.cc PlatformAccessStore.cc PlatformAccessSupervisor.cc)
+add_library(platformAgent STATIC PlatformAgent.cc PlatformAgentConfig.cc PlatformTunnel.cc PlatformAccessStore.cc PlatformAccessSupervisor.cc OrdinaryNetworkRuntime.cc)
 target_include_directories(platformAgent PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(platformAgent PUBLIC platformRemoteProto moduleManager dspProto)

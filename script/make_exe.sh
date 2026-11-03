@@ -568,6 +568,16 @@ start_container() {
   fi
   echo "运行容器固定使用 Asia/Shanghai（北京时间，UTC+8），并关闭 Docker 日志收集"
   echo "运行容器共享宿主机 /dev，支持访问真实串口与伪串口"
+  local -a system_bus_mount=()
+  local -a host_resolved_dns=()
+  if [[ -S /run/dbus/system_bus_socket ]]; then
+    system_bus_mount=(-v /run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro)
+    echo "运行容器连接宿主机系统总线，支持逐接口 DNS 配置"
+    if [[ -f /run/systemd/resolve/stub-resolv.conf ]]; then
+      host_resolved_dns=(--dns 127.0.0.53)
+      echo "运行容器使用宿主机 resolved 的共享环回 DNS"
+    fi
+  fi
   if ! docker run -d \
     --name "${CONTAINER_NAME}" \
     --privileged \
@@ -578,6 +588,8 @@ start_container() {
     -v "${HOST_DIR}/conf:${CONTAINER_DIR}/conf" \
     -v "${HOST_DIR}/module:${CONTAINER_DIR}/module" \
     -v "${HOST_DIR}/log:${CONTAINER_DIR}/log" \
+    "${system_bus_mount[@]}" \
+    "${host_resolved_dns[@]}" \
     "$@" \
     "${LOCAL_IMAGE_ID}"; then
     die "运行 mskdsp 容器失败"

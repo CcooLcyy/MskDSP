@@ -292,6 +292,76 @@ class UpdateTaskTest(unittest.TestCase):
 
 
 class BackendContractTest(unittest.TestCase):
+    # 唯一允许的新默认 DNS 是共享 host resolved，且必须配合系统总线挂载。
+    def test_host_resolved_dns_requires_system_bus(self):
+        backend = task.Backend()
+        for bus, dns, accepted in ((False, [], True), (True, ["127.0.0.53"], True),
+                                   (False, ["127.0.0.53"], False), (True, ["8.8.8.8"], False),
+                                   (True, ["127.0.0.53", "8.8.8.8"], False)):
+            with self.subTest(bus=bus, dns=dns):
+                snapshot = self.default_snapshot()
+                snapshot["HostConfig"]["Dns"] = dns
+                if bus:
+                    snapshot["HostConfig"]["Binds"].append("/run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro")
+                with patch.object(backend, "command", return_value=json.dumps([{"Config": {"Env": []}}])):
+                    if accepted:
+                        backend.validate_deployment(snapshot)
+                    else:
+                        with self.assertRaisesRegex(ValueError, "Dns"):
+                            backend.validate_deployment(snapshot)
+
+    # 回退新部署恢复 resolved DNS，回退旧部署不增加 DNS 参数。
+    def test_restore_preserves_host_resolved_dns(self):
+        backend = task.Backend()
+        for configured in (False, True):
+            with self.subTest(configured=configured):
+                snapshot = self.default_snapshot()
+                if configured:
+                    snapshot["HostConfig"]["Binds"].append("/run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro")
+                    snapshot["HostConfig"]["Dns"] = ["127.0.0.53"]
+                with patch.object(backend, "command") as command:
+                    backend.restore(snapshot, Path("unused"))
+                args = command.call_args.args
+                self.assertEqual("--dns" in args, configured)
+                if configured:
+                    self.assertEqual(args[args.index("--dns") + 1], "127.0.0.53")
+
+    # 新旧默认部署均可更新，只放行单个只读系统总线挂载，拒绝可写和扩展目录。
+    def test_optional_readonly_system_bus_mount_is_default(self):
+        backend = task.Backend()
+        bus = "/run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro"
+        for binding in (None, bus, bus.removesuffix(":ro"), "/run/dbus:/run/dbus:ro", bus + ",z"):
+            with self.subTest(binding=binding):
+                snapshot = self.default_snapshot()
+                if binding:
+                    snapshot["HostConfig"]["Binds"].append(binding)
+                with patch.object(backend, "command", return_value=json.dumps([{"Config": {"Env": []}}])):
+                    if binding in (None, bus):
+                        backend.validate_deployment(snapshot)
+                    else:
+                        with self.assertRaises(ValueError):
+                            backend.validate_deployment(snapshot)
+
+    # 回退只恢复快照已有的系统总线挂载，不能给旧容器增加新的宿主机访问。
+    def test_restore_preserves_optional_system_bus_only_when_present(self):
+        backend = task.Backend()
+        bus = "/run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro"
+        for mounted in (False, True):
+            with self.subTest(mounted=mounted):
+                snapshot = self.default_snapshot()
+                if mounted:
+                    snapshot["HostConfig"]["Binds"].append(bus)
+                with patch.object(backend, "command") as command:
+                    backend.restore(snapshot, Path("unused"))
+                self.assertEqual(bus in command.call_args.args, mounted)
+
+    # 即使路径完全相同，也不接受重复总线挂载以免预检与回退后的参数不一致。
+    def test_duplicate_system_bus_mount_is_rejected(self):
+        snapshot = self.default_snapshot()
+        snapshot["HostConfig"]["Binds"] += ["/run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro"] * 2
+        with self.assertRaisesRegex(ValueError, "重复"):
+            task.Backend().validate_deployment(snapshot)
+
     def default_snapshot(self):
         return {"Image": "old", "State": {"Running": True, "Pid": 123},
                 "Config": {"Entrypoint": ["./MskDSP"], "Cmd": None, "WorkingDir": "/opt/mskdsp", "User": "", "Env": []},

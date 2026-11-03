@@ -152,7 +152,7 @@ class InstallerIdentityTest(unittest.TestCase):
         # Git Bash 调用 Windows Python 时保留设备挂载参数，不转换为 Windows 路径。
         for name, command in {
             "python3": f"exec {shlex.quote(bash_path(Path(sys.executable)))} \"$@\"\n",
-            "docker": f"MSYS2_ARG_CONV_EXCL='/dev:/dev' exec python3 {shlex.quote(bash_path(mock))} \"$@\"\n",
+            "docker": f"MSYS2_ARG_CONV_EXCL='/dev:/dev;/run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro' exec python3 {shlex.quote(bash_path(mock))} \"$@\"\n",
         }.items():
             script = self.bin / name
             script.write_text("#!/usr/bin/env bash\n" + command, encoding="utf-8", newline="\n")
@@ -166,6 +166,8 @@ class InstallerIdentityTest(unittest.TestCase):
                       compressed_input: str | None = None,
                       build_archive_limit: int | None = None,
                       managed_update: bool = False,
+                      system_bus_socket: bool | None = None,
+                      resolved_stub: bool | None = None,
                       **options: bool) -> subprocess.CompletedProcess[str]:
         archive_options = {key: options.pop(key) for key in list(options)
                            if key in {"corrupt_config", "corrupt_manifest", "wrong_link", "multiple",
@@ -207,6 +209,10 @@ class InstallerIdentityTest(unittest.TestCase):
         # 仅在隔离安装器中替换探测函数，保留真实调用语句以覆盖变量遮蔽等问题。
         host_system = repr(host_os) if not host_probe_fail else '(_ for _ in ()).throw(OSError("模拟探测失败"))'
         patched = package.read_bytes()
+        if system_bus_socket is not None:
+            patched = patched.replace(b"[[ -S /run/dbus/system_bus_socket ]]", b"true" if system_bus_socket else b"false")
+        if resolved_stub is not None:
+            patched = patched.replace(b"[[ -f /run/systemd/resolve/stub-resolv.conf ]]", b"true" if resolved_stub else b"false")
         for module_name, import_line in (("platform", "import platform\n"),
                                          ("host_platform", "import platform as host_platform\n")):
             replacement = (import_line + f"{module_name}.system = lambda: {host_system}\n"
@@ -390,6 +396,27 @@ class InstallerIdentityTest(unittest.TestCase):
                 self.assertIn(["rm", "-f", "mskdsp"], state["calls"])
                 self.assertLess(state["calls"].index(["rm", "-f", "mskdsp"]),
                                 state["calls"].index(run))
+
+    # 只在系统总线套接字存在时只读挂载，缺失时保持旧设备的安装能力。
+    def test_install_optional_system_bus_socket(self) -> None:
+        binding = "/run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro"
+        for present in (False, True):
+            with self.subTest(present=present):
+                result = self.run_installer(system_bus_socket=present)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                run = self.calls("run")[0]
+                self.assertEqual(binding in run, present)
+
+    # host 网络容器仅在总线与 resolved stub 同时存在时使用共享环回 DNS。
+    def test_install_uses_host_resolved_only_with_bus_and_stub(self) -> None:
+        for bus, stub in ((True, True), (True, False), (False, True)):
+            with self.subTest(bus=bus, stub=stub):
+                result = self.run_installer(system_bus_socket=bus, resolved_stub=stub)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                run = self.calls("run")[0]
+                self.assertEqual("--dns" in run, bus and stub)
+                if bus and stub:
+                    self.assertEqual(run[run.index("--dns") + 1], "127.0.0.53")
 
     def assert_platform_access_preserved(self, *, update: bool) -> None:
         token = "factory-installer-regression-device-token"

@@ -10,6 +10,8 @@
 #include <limits>
 #include <stdexcept>
 
+#include "OrdinaryNetworkRuntime.h"
+
 namespace mskdsp::platformagent {
 namespace {
 struct Descriptor {
@@ -57,7 +59,7 @@ std::string ValidatePlatformAccess(const Config &config) {
     return "开启平台接入需要设备ID和设备令牌";
   if (config.sshPort == 0)
     return "SSH端口必须为1至65535";
-  return {};
+  return ValidateOrdinaryNetwork(config.networkConfig);
 }
 
 PlatformAccessStore::PlatformAccessStore(std::filesystem::path path) : path_(std::move(path)) {}
@@ -113,6 +115,13 @@ PlatformAccessLoad PlatformAccessStore::Load() const {
     if (port == 0 || port > 65535 || saved.revision == 0)
       throw FileError();
     saved.config.sshPort = static_cast<uint16_t>(port);
+    if (const auto *networkValue = object.if_contains("network_config")) {
+      const auto &network = networkValue->as_object();
+      saved.config.networkConfig.interfaceName = std::string(network.at("interface_name").as_string());
+      saved.config.networkConfig.gateway = std::string(network.at("gateway").as_string());
+      for (const auto &dns : network.at("dns_servers").as_array())
+        saved.config.networkConfig.dnsServers.emplace_back(std::string(dns.as_string()));
+    }
     if (!ValidatePlatformAccess(saved.config).empty())
       throw FileError();
     result.saved = std::move(saved);
@@ -133,6 +142,10 @@ PlatformAccessSave PlatformAccessStore::Save(const StoredPlatformAccess &saved) 
   CheckDestination(directory.value, destination);
   boost::json::object object{
       {"schema_version", 1}, {"revision", saved.revision}, {"enabled", saved.config.enabled}, {"device_id", saved.config.deviceId}, {"device_token", saved.config.token}, {"ssh_enabled", saved.config.sshEnabled}, {"ssh_port", saved.config.sshPort}};
+  boost::json::array dns;
+  for (const auto &address : saved.config.networkConfig.dnsServers)
+    dns.emplace_back(address);
+  object["network_config"] = boost::json::object{{"interface_name", saved.config.networkConfig.interfaceName}, {"gateway", saved.config.networkConfig.gateway}, {"dns_servers", std::move(dns)}};
   const auto content = boost::json::serialize(object);
   // openat将临时文件和替换固定在同一已打开目录，拒绝跟随目标文件符号链接。
   std::string temporary;

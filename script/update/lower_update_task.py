@@ -526,6 +526,14 @@ class Backend:
         config = data["Config"]
         expected = {"/dev:/dev", "/data/mskdsp/conf:/opt/mskdsp/conf", "/data/mskdsp/module:/opt/mskdsp/module", "/data/mskdsp/log:/opt/mskdsp/log"}
         actual = {binding.removesuffix(":rw") for binding in host.get("Binds", [])}
+        # 新版默认安装可只读连接宿主机 resolved；不放行可写或整个总线目录。
+        system_bus = "/run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro"
+        if host.get("Binds", []).count(system_bus) > 1:
+            raise ValueError("系统总线挂载重复，拒绝无法精确恢复的更新")
+        actual.discard(system_bus)
+        dns = host.get("Dns")
+        if dns not in (None, [], ["127.0.0.53"]) or (dns and system_bus not in host.get("Binds", [])):
+            raise ValueError("容器具有不支持的自定义配置: Dns")
         if (actual != expected or host.get("NetworkMode") != "host" or not host.get("Privileged")
                 or host.get("RestartPolicy", {}).get("Name") != "unless-stopped"
                 or host.get("LogConfig", {}).get("Type") != "none"
@@ -539,7 +547,7 @@ class Backend:
         # Docker 可为默认特权容器补充此 SELinux 标记；其他安全定制仍无法精确恢复。
         if host.get("SecurityOpt") not in (None, [], ["label=disable"]):
             raise ValueError("容器具有不支持的自定义配置: SecurityOpt")
-        for key in ("Devices", "DeviceRequests", "CapAdd", "CapDrop", "Dns", "DnsOptions", "DnsSearch", "ExtraHosts", "VolumesFrom", "Links", "Tmpfs", "PortBindings", "Mounts", "GroupAdd", "Ulimits", "Sysctls", "PidMode", "UTSMode", "DeviceCgroupRules", "StorageOpt", "CgroupParent", "VolumeDriver", "ContainerIDFile"):
+        for key in ("Devices", "DeviceRequests", "CapAdd", "CapDrop", "DnsOptions", "DnsSearch", "ExtraHosts", "VolumesFrom", "Links", "Tmpfs", "PortBindings", "Mounts", "GroupAdd", "Ulimits", "Sysctls", "PidMode", "UTSMode", "DeviceCgroupRules", "StorageOpt", "CgroupParent", "VolumeDriver", "ContainerIDFile"):
             if host.get(key):
                 raise ValueError(f"容器具有不支持的自定义配置: {key}")
         if any(host.get(key) for key in ("ReadonlyRootfs", "Init", "Memory", "NanoCpus", "CpuQuota", "PidsLimit")):
@@ -665,10 +673,13 @@ class Backend:
             self.command("docker", "rm", "-f", "mskdsp")
         except RuntimeError:
             pass
+        system_bus = "/run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro"
+        bus_arguments = ["-v", system_bus] if system_bus in snapshot.get("HostConfig", {}).get("Binds", []) else []
+        dns_arguments = ["--dns", "127.0.0.53"] if snapshot.get("HostConfig", {}).get("Dns") == ["127.0.0.53"] else []
         self.command("docker", "run", "-d", "--name", "mskdsp", "--privileged", "--restart", "unless-stopped",
                      "--log-driver", "none", "--network", "host", "-v", "/dev:/dev",
                      "-v", "/data/mskdsp/conf:/opt/mskdsp/conf", "-v", "/data/mskdsp/module:/opt/mskdsp/module",
-                     "-v", "/data/mskdsp/log:/opt/mskdsp/log", snapshot["Image"])
+                     "-v", "/data/mskdsp/log:/opt/mskdsp/log", *bus_arguments, *dns_arguments, snapshot["Image"])
 
 
 class TaskManager:
