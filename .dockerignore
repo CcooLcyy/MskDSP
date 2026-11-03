@@ -10,3 +10,6 @@
 !package/lib/**
 !package/conf/
 !package/conf/**
+!script/
+!script/network/
+!script/network/ordinary_network.py
