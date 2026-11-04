@@ -76,15 +76,36 @@ void PlatformAgent::Run(std::stop_token stop) {
     auto control = std::make_shared<ControlConnection>();
     control->lastReceived = SteadyMilliseconds();
     control->context.AddMetadata("authorization", "Bearer " + config_.token);
-    std::stop_callback cancelOnStop(stop, [&] { control->Cancel(); });
+    // watchdog 与读取线程可能同时结束连接，离线通知不能被迟到的 Welcome 覆盖。
+    std::mutex statusMutex;
+    bool statusEnded = false;
+    auto reportStatus = [&](bool online, std::string error) {
+      std::lock_guard lock(statusMutex);
+      if (statusEnded)
+        return false;
+      if (!online)
+        statusEnded = true;
+      if (observer_)
+        observer_(online, std::move(error));
+      return true;
+    };
+    auto reportOffline = [&](std::string error) {
+      if (reportStatus(false, std::move(error)))
+        LOG_INFO("平台设备连接已标记离线，设备={}，连接资源将在随后回收", config_.deviceId);
+    };
+    std::stop_callback cancelOnStop(stop, [&] {
+      reportOffline("");
+      control->Cancel();
+    });
     auto watchdog = ModuleManager::StartModuleThread("PlatformAgent", [&](std::stop_token token) {
       while (!token.stop_requested() && control->active.load()) {
         const auto now = SteadyMilliseconds();
         const auto write = control->writeDeadline.load();
-        const auto limit = control->welcomed.load() ? 90000 : 10000;
+        const auto limit = control->welcomed.load() ? 20000 : 10000;
         if (stop.stop_requested() || (write != 0 && now >= write) ||
             now - control->lastReceived.load() >= limit) {
           LOG_WARNING("平台控制连接停止或超时，设备={}，已欢迎={}，最后接收间隔毫秒={}，写入超时={}，请求停止={}", config_.deviceId, control->welcomed.load(), now - control->lastReceived.load(), write != 0 && now >= write, stop.stop_requested());
+          reportOffline(stop.stop_requested() ? "" : "平台控制连接超时，正在自动重试");
           control->Cancel();
           break;
         }
@@ -148,12 +169,11 @@ void PlatformAgent::Run(std::stop_token stop) {
           LOG_WARNING("平台控制首帧不是有效欢迎消息");
           break;
         }
-        control->heartbeatSeconds = std::clamp(message.welcome().heartbeat_interval_seconds(), 1u, 30u);
+        control->heartbeatSeconds = std::clamp(message.welcome().heartbeat_interval_seconds(), 1u, 5u);
         control->welcomed = true;
         failures = 0;
-        if (observer_)
-          observer_(true, "");
-        LOG_INFO("平台设备连接功能已上线，设备={}", config_.deviceId);
+        if (reportStatus(true, ""))
+          LOG_INFO("平台设备连接功能已上线，设备={}", config_.deviceId);
       } else if (message.has_open_tunnel()) {
         std::erase_if(tasks, [](Task &task) { return task.connection->completed.load(); });
         const auto request = message.open_tunnel();
@@ -183,6 +203,8 @@ void PlatformAgent::Run(std::stop_token stop) {
       }
       control->lastReceived = SteadyMilliseconds();
     }
+    // 先对外报告断线，不能让隧道、心跳线程或 Finish 的清理延迟保留在线状态。
+    reportOffline(stop.stop_requested() ? "" : "平台连接中断，正在自动重试");
     control->Cancel();
     for (auto &task : tasks)
       task.connection->Cancel("平台控制连接已关闭");
@@ -193,8 +215,6 @@ void PlatformAgent::Run(std::stop_token stop) {
     watchdog.join();
     const auto status = control->stream->Finish();
     LOG_INFO("平台设备连接已关闭，设备={}，状态码={}", config_.deviceId, static_cast<int>(status.error_code()));
-    if (observer_)
-      observer_(false, stop.stop_requested() ? "" : "平台连接中断，正在自动重试，状态码=" + std::to_string(static_cast<int>(status.error_code())));
     const auto delay = std::min(30u, 1u << std::min(failures++, 5u));
     for (unsigned int count = 0; count < delay * 10 && !stop.stop_requested(); ++count)
       std::this_thread::sleep_for(100ms);

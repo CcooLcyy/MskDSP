@@ -24,7 +24,7 @@ struct ControlConnection {
   std::atomic<int64_t> writeDeadline{0};
   std::atomic<int64_t> lastReceived{0};
   std::atomic<bool> welcomed{false};
-  std::atomic<unsigned int> heartbeatSeconds{30};
+  std::atomic<unsigned int> heartbeatSeconds{5};
   bool Send(const remote::DeviceMessage &message);
   void Cancel();
 };
