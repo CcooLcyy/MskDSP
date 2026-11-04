@@ -7,6 +7,7 @@ from pathlib import Path
 import platform
 import shlex
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -105,12 +106,135 @@ def rule_tokens(raw):
     return result
 
 
+def sanitize_route_snapshot(data):
+    """校验原生路由快照，只在恢复副本中清除内核不允许写入的状态位。"""
+    error = '路由快照格式不合法或不受支持，停止网络准备'
+    if len(data) < 4 or struct.unpack_from('=I', data)[0] != 0x45311224:
+        raise RuntimeError(error)
+    result = bytearray(data)
+
+    def attributes(start, end, multipath=False):
+        while start < end:
+            if end - start < 4:
+                raise RuntimeError(error)
+            length, kind = struct.unpack_from('=HH', result, start)
+            aligned = (length + 3) & ~3
+            if length < 4 or start + aligned > end:
+                raise RuntimeError(error)
+            if multipath and (kind & 0x3fff) == 9:  # RTA_MULTIPATH 的下一跳头与属性。
+                hop, limit = start + 4, start + length
+                if hop == limit:
+                    raise RuntimeError(error)
+                while hop < limit:
+                    if limit - hop < 8:
+                        raise RuntimeError(error)
+                    hop_length = struct.unpack_from('=H', result, hop)[0]
+                    hop_aligned = (hop_length + 3) & ~3
+                    if hop_length < 8 or hop + hop_aligned > limit:
+                        raise RuntimeError(error)
+                    result[hop + 2] &= ~0x11
+                    attributes(hop + 8, hop + hop_length)
+                    hop += hop_aligned
+            start += aligned
+
+    offset = 4
+    while offset < len(result):
+        if len(result) - offset < 28:
+            raise RuntimeError(error)
+        length, kind = struct.unpack_from('=IH', result, offset)
+        aligned = (length + 3) & ~3
+        # nlmsghdr + IPv4 rtmsg；与 iproute2 原生读取器的消息上限一致。
+        if length < 28 or length > 16384 or kind != 24 or offset + aligned > len(result) or result[offset + 16] != 2:
+            raise RuntimeError(error)
+        flags = struct.unpack_from('=I', result, offset + 24)[0]
+        struct.pack_into('=I', result, offset + 24, flags & ~0x11)
+        attributes(offset + 28, offset + length, multipath=True)
+        offset += aligned
+    return bytes(result)
+
+
+def runtime_entries(data, kind):
+    """提取配置语义；不把链路状态、生命周期倒计时当作配置差异。"""
+    label = '地址' if kind == 'address' else '路由'
+    try:
+        entries = json.loads(data)
+    except ValueError as error:
+        raise RuntimeError('运行时 IPv4 ' + label + '快照格式不合法') from error
+    if not isinstance(entries, list) or any(not isinstance(entry, dict) for entry in entries):
+        raise RuntimeError('运行时 IPv4 ' + label + '快照格式不合法')
+
+    def route(value, network_object=False):
+        if isinstance(value, dict):
+            normalized = {}
+            for key, item in value.items():
+                if network_object and key in ('expires', 'cache'):
+                    continue
+                if network_object and key == 'flags':
+                    if not isinstance(item, list) or any(not isinstance(flag, str) for flag in item):
+                        raise RuntimeError('运行时 IPv4 路由标志格式不合法')
+                    item = sorted(flag for flag in item if flag not in
+                                  ('dead', 'linkdown', 'offload', 'trap', 'offload_failed'))
+                    if not item:
+                        continue
+                if network_object and key == 'nexthops':
+                    if not isinstance(item, list) or any(not isinstance(hop, dict) for hop in item):
+                        raise RuntimeError('运行时 IPv4 多路径路由格式不合法')
+                    normalized[key] = sorted((route(hop, True) for hop in item), key=encode)
+                else:
+                    normalized[key] = route(item)
+            return normalized
+        if isinstance(value, list):
+            return [route(item) for item in value]
+        return value
+
+    def encode(value):
+        return json.dumps(value, sort_keys=True, separators=(',', ':'))
+
+    if kind == 'route':
+        if any(not isinstance(entry.get('dst'), str) for entry in entries):
+            raise RuntimeError('运行时 IPv4 路由目标格式不合法')
+        return Counter(encode(route(entry, True)) for entry in entries)
+    result = Counter()
+    for entry in entries:
+        if not isinstance(entry.get('ifname'), str) or not isinstance(entry.get('addr_info'), list):
+            raise RuntimeError('运行时 IPv4 地址快照格式不合法')
+        for address in entry['addr_info']:
+            if not isinstance(address, dict) or address.get('family') != 'inet' or not address.get('local'):
+                raise RuntimeError('运行时 IPv4 地址条目格式不合法')
+            stable = {key: value for key, value in address.items() if key not in
+                      ('valid_life_time', 'preferred_life_time', 'secondary', 'dynamic', 'deprecated', 'tentative', 'dadfailed')}
+            result[(entry['ifname'], encode(stable))] += 1
+    return result
+
+
+def verify_runtime(run, backup):
+    errors = []
+    for kind, filename, label in (('address', 'addresses.json', '地址'), ('route', 'routes.json', '路由')):
+        args = ['ip', '-4', '-j', kind, 'show'] + (['table', 'all'] if kind == 'route' else [])
+        original = runtime_entries((backup / filename).read_bytes(), kind)
+        missing = original - runtime_entries(run(args), kind)
+        if missing:
+            errors.append(label + '缺失：' + str(dict(missing)))
+    original = Counter(rule_tokens((backup / 'rules.txt').read_bytes()))
+    missing = original - Counter(rule_tokens(run(['ip', '-4', 'rule', 'show'])))
+    if missing:
+        errors.append('策略规则缺失：' + str(dict(missing)))
+    if errors:
+        raise RuntimeError('恢复后运行时 IPv4 网络核验失败：' + '；'.join(errors))
+    print('恢复后运行时 IPv4 地址、路由和策略规则核验通过')
+
+
 def restore_runtime(run, backup):
     errors = []
+    original_routes = (backup / 'routes.bin').read_bytes()
+    restored_routes = sanitize_route_snapshot(original_routes)
+    if restored_routes != original_routes:
+        print('路由恢复副本已清除 DEAD/LINKDOWN 状态位，原始备份保持不变')
     # 原生 restore 会保留现有条目，仅补回 networkd 重启清理的运行时地址和路由。
     for kind, filename in (('address', 'addresses.bin'), ('route', 'routes.bin')):
         try:
-            run(['ip', '-4', kind, 'restore'], (backup / filename).read_bytes())
+            data = restored_routes if kind == 'route' else (backup / filename).read_bytes()
+            run(['ip', '-4', kind, 'restore'], data)
         except Exception as error:
             errors.append(str(error))
     try:
@@ -121,6 +245,10 @@ def restore_runtime(run, backup):
                 raise RuntimeError('恢复策略规则时发现优先级冲突：' + rule[1])
             for _ in range(max(0, count - current[rule])):
                 run(['ip', '-4', 'rule', 'add', *rule])
+    except Exception as error:
+        errors.append(str(error))
+    try:
+        verify_runtime(run, backup)
     except Exception as error:
         errors.append(str(error))
     if errors:
@@ -180,10 +308,17 @@ def prepare(root=Path('/'), run=command, *, architecture=None):
     for kind, filename in (('address', 'addresses.bin'), ('route', 'routes.bin')):
         args = ['ip', '-4', kind, 'save'] + (['table', 'all'] if kind == 'route' else [])
         (backup / filename).write_bytes(run(args))
+    # 在改变配置和重启服务前拒绝不能安全恢复的快照；原始证据不改写。
+    sanitize_route_snapshot((backup / 'routes.bin').read_bytes())
     rules = run(['ip', '-4', 'rule', 'show'])
     rule_tokens(rules)
     (backup / 'rules.txt').write_bytes(rules)
-    addresses = json.loads(run(['ip', '-4', '-j', 'address', 'show']))
+    for kind, filename in (('address', 'addresses.json'), ('route', 'routes.json')):
+        args = ['ip', '-4', '-j', kind, 'show'] + (['table', 'all'] if kind == 'route' else [])
+        data = run(args)
+        (backup / filename).write_bytes(data)
+        runtime_entries(data, kind)
+    addresses = json.loads((backup / 'addresses.json').read_bytes())
     original_links = {entry['ifname'] for entry in addresses if entry.get('ifname') != 'lo'
                       and any(address.get('family') == 'inet' for address in entry.get('addr_info', []))}
     (backup / 'ipv4-links.json').write_text(json.dumps(sorted(original_links)), encoding='utf-8')
