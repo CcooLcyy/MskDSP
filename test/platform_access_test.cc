@@ -72,11 +72,13 @@ TEST_F(PlatformAccessTest, ReportsRuntimeDeviceArchitectureInReadAndSaveStatus) 
   EXPECT_EQ(Read(control).device_architecture(), saved.device_architecture());
 }
 
-// 未配置时禁用且读取不创建文件，保存只返回令牌标记并以0600落盘，重建恢复相同修订。
+// 未配置时接入关闭但 SSH 默认开启且端口为10022；读取不落盘，保存脱敏并恢复相同修订。
 TEST_F(PlatformAccessTest, DefaultsAndPersistsRedactedConfiguration) {
   pa::PlatformAccessSupervisor control(path);
   auto initial = Read(control);
   EXPECT_FALSE(initial.enabled());
+  EXPECT_TRUE(initial.ssh_enabled());
+  EXPECT_EQ(initial.ssh_port(), 10022);
   EXPECT_EQ(initial.revision(), 0);
   EXPECT_EQ(initial.platform_target(), "60.208.15.90:50000");
   EXPECT_FALSE(std::filesystem::exists(path));
@@ -84,7 +86,8 @@ TEST_F(PlatformAccessTest, DefaultsAndPersistsRedactedConfiguration) {
   ModuleManagerProto::PlatformAccessStatus saved;
   ASSERT_TRUE(control.Set(request, &saved).ok());
   EXPECT_TRUE(saved.token_configured());
-  EXPECT_EQ(saved.ssh_port(), 22);
+  EXPECT_FALSE(saved.ssh_enabled());
+  EXPECT_EQ(saved.ssh_port(), 10022);
   EXPECT_FALSE(saved.online());
   EXPECT_EQ(saved.revision(), 1);
   EXPECT_EQ(saved.SerializeAsString().find("test-token"), std::string::npos);
@@ -93,6 +96,20 @@ TEST_F(PlatformAccessTest, DefaultsAndPersistsRedactedConfiguration) {
   EXPECT_EQ(info.st_mode & 0777, 0600);
   pa::PlatformAccessSupervisor restored(path);
   EXPECT_EQ(Read(restored).SerializeAsString(), saved.SerializeAsString());
+}
+
+// 已保存的显式关闭与自定义端口不会被新默认值覆盖。
+TEST_F(PlatformAccessTest, PreservesExplicitSshSettingsAcrossReload) {
+  pa::PlatformAccessSupervisor control(path);
+  auto request = Request();
+  request.set_ssh_enabled(false);
+  request.set_ssh_port(22);
+  ModuleManagerProto::PlatformAccessStatus saved;
+  ASSERT_TRUE(control.Set(request, &saved).ok());
+  pa::PlatformAccessSupervisor restored(path);
+  const auto status = Read(restored);
+  EXPECT_FALSE(status.ssh_enabled());
+  EXPECT_EQ(status.ssh_port(), 22);
 }
 
 // 过期修订不能写入，空令牌保留，相同内容幂等，更换身份禁止沿用旧令牌。

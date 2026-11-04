@@ -6,7 +6,7 @@
 
 namespace agent = mskdsp::platformagent;
 
-// 此纯逻辑测试只需标准库，可在本机现有编译器上验证真实配置与目标解析行为。
+// 此纯逻辑测试只需标准库，由 CI 验证真实配置与目标解析行为。
 int main() {
   auto require = [](bool condition) {
     if (!condition)
@@ -16,10 +16,11 @@ int main() {
     std::map<std::string, std::string> values;
     const auto environment = [&](std::string_view name) { return values[std::string(name)]; };
     auto config = agent::LoadConfig(environment);
-    require(!config.enabled && !config.sshEnabled);
+    require(!config.enabled && config.sshEnabled && config.sshPort == 10022);
     values = {{"MSKDSP_PLATFORM_ENABLED", "1"}, {"MSKDSP_PLATFORM_TARGET", "platform.example.org:50051"}, {"MSKDSP_PLATFORM_DEVICE_ID", "device-a"}, {"MSKDSP_PLATFORM_DEVICE_TOKEN", "device-token"}};
     config = agent::LoadConfig(environment);
     require(config.enabled && config.target == "platform.example.org:50051");
+    require(config.sshEnabled && agent::ResolveTarget(config, "ssh", {}) == 10022);
     values["MSKDSP_PLATFORM_TARGET"] = "platform.example.org:0";
     bool rejected = false;
     try {
@@ -30,6 +31,7 @@ int main() {
     require(rejected);
     values["MSKDSP_PLATFORM_TARGET"] = "127.0.0.1:50051";
     values["MSKDSP_PLATFORM_MODULES"] = "DataCenter,IEC104";
+    values["MSKDSP_PLATFORM_SSH_ENABLED"] = "0";
     config = agent::LoadConfig(environment);
     require(config.allowedModules.size() == 2);
     require(agent::ResolveTarget(config, "ModuleManager", {}) == 17000);

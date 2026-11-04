@@ -43,6 +43,8 @@ PlatformAccessSupervisor::PlatformAccessSupervisor(std::filesystem::path path, P
   saved_ = std::move(loaded.saved);
   lastError_ = std::move(loaded.error);
   persisted_ = loaded.exists && lastError_.empty();
+  if (!loaded.exists && lastError_.empty())
+    LOG_INFO("平台接入尚未配置，SSH维护默认开启，本机端口={}", saved_.config.sshPort);
   // 崩溃可能发生在网络已应用但主配置尚未保存之间；存在执行日志时需恢复或清理。
   std::error_code stateError;
   const bool networkStateExists = std::filesystem::exists("./conf/ordinary_network_state.json", stateError);
@@ -154,7 +156,7 @@ grpc::Status PlatformAccessSupervisor::Set(const ModuleManagerProto::SetPlatform
   next.config.enabled = request.enabled();
   next.config.deviceId = request.device_id();
   next.config.sshEnabled = request.ssh_enabled();
-  next.config.sshPort = request.ssh_port() == 0 ? 22 : static_cast<uint16_t>(request.ssh_port());
+  next.config.sshPort = request.ssh_port() == 0 ? Config{}.sshPort : static_cast<uint16_t>(request.ssh_port());
   // 旧客户端省略消息时保留网络设置；显式空消息表示恢复系统现有网络。
   if (request.has_network_config()) {
     next.config.networkConfig.interfaceName = request.network_config().interface_name();

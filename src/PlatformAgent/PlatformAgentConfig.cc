@@ -49,7 +49,8 @@ Config LoadConfig(const std::function<std::string(std::string_view)> &env) {
   if (colon == std::string::npos || colon == 0 || config.target.find_first_of("/\\\r\n\t ") != std::string::npos)
     throw std::invalid_argument("平台目标必须为主机名和端口");
   ParsePort(std::string_view(config.target).substr(colon + 1));
-  config.sshEnabled = Flag(env("MSKDSP_PLATFORM_SSH_ENABLED"));
+  if (const auto value = env("MSKDSP_PLATFORM_SSH_ENABLED"); !value.empty())
+    config.sshEnabled = Flag(value);
   if (const auto value = env("MSKDSP_PLATFORM_MANAGER_PORT"); !value.empty())
     config.managerPort = ParsePort(value);
   if (const auto value = env("MSKDSP_PLATFORM_SSH_PORT"); !value.empty())

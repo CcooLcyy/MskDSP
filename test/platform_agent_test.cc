@@ -23,11 +23,12 @@ namespace agent = mskdsp::platformagent;
 namespace remote = mskdsp::platform::remote::v1;
 using namespace std::chrono_literals;
 
-// 验证默认禁用，不要求未启用连接功能的设备凭据。
+// 验证平台连接默认禁用，但 SSH 维护默认开启且端口为10022，不要求未启用连接功能的设备凭据。
 TEST(PlatformAgentConfig, DisabledByDefault) {
   const auto config = agent::LoadConfig([](std::string_view) { return std::string(); });
   EXPECT_FALSE(config.enabled);
-  EXPECT_FALSE(config.sshEnabled);
+  EXPECT_TRUE(config.sshEnabled);
+  EXPECT_EQ(config.sshPort, 10022);
 }
 
 // 验证启用时缺少设备身份被拒绝，不把无凭据连接送往平台。
@@ -44,6 +45,17 @@ TEST(PlatformAgentConfig, PlaintextAllowsRemoteTarget) {
       {"MSKDSP_PLATFORM_ENABLED", "1"}, {"MSKDSP_PLATFORM_TARGET", "example.org:50051"}, {"MSKDSP_PLATFORM_DEVICE_ID", "device-a"}, {"MSKDSP_PLATFORM_DEVICE_TOKEN", "token"}};
   const auto config = agent::LoadConfig([&](std::string_view name) { return env[std::string(name)]; });
   EXPECT_EQ(config.target, "example.org:50051");
+  EXPECT_TRUE(config.sshEnabled);
+  EXPECT_EQ(config.sshPort, 10022);
+}
+
+// 验证显式环境变量能够关闭 SSH 并保留自定义端口。
+TEST(PlatformAgentConfig, ExplicitSshEnvironmentOverridesDefaults) {
+  std::map<std::string, std::string> env{
+      {"MSKDSP_PLATFORM_ENABLED", "1"}, {"MSKDSP_PLATFORM_TARGET", "example.org:50051"}, {"MSKDSP_PLATFORM_DEVICE_ID", "device-a"}, {"MSKDSP_PLATFORM_DEVICE_TOKEN", "token"}, {"MSKDSP_PLATFORM_SSH_ENABLED", "0"}, {"MSKDSP_PLATFORM_SSH_PORT", "22"}};
+  const auto config = agent::LoadConfig([&](std::string_view name) { return env[std::string(name)]; });
+  EXPECT_FALSE(config.sshEnabled);
+  EXPECT_EQ(config.sshPort, 22);
 }
 
 // 验证明文选择不会绕过平台地址格式或设备身份校验。
@@ -59,6 +71,7 @@ TEST(PlatformAgentConfig, PlaintextStillRequiresValidTargetAndIdentity) {
 // 验证只接受白名单中运行模块，远端不能把 IP 或端口当成服务名称。
 TEST(PlatformAgentTargets, RejectsArbitraryTargetsAndStoppedModules) {
   agent::Config config;
+  config.sshEnabled = false;
   config.allowedModules = {"DataCenter"};
   std::vector<agent::RunningModule> running{{"DataCenter", "0.0.0.0:17321"}, {"IEC104", "0.0.0.0:17322"}};
   EXPECT_EQ(agent::ResolveTarget(config, "DataCenter", running), 17321);
@@ -73,17 +86,19 @@ TEST(PlatformAgentTargets, RejectsArbitraryTargetsAndStoppedModules) {
 // 验证心跳发送完整可用服务集合，卸载模块和禁用 SSH 后不会继续公布旧服务。
 TEST(PlatformAgentTargets, AnnouncesOnlyCurrentAllowedServices) {
   agent::Config config;
+  config.sshEnabled = false;
   config.allowedModules = {"DataCenter"};
   EXPECT_EQ(agent::AvailableServices(config, {{"DataCenter", "0.0.0.0:17321"}}), (std::vector<std::string>{"ModuleManager", "DataCenter"}));
   EXPECT_EQ(agent::AvailableServices(config, {}), (std::vector<std::string>{"ModuleManager"}));
   config.sshEnabled = true;
-  EXPECT_EQ(agent::ResolveTarget(config, "ssh", {}), 22);
+  EXPECT_EQ(agent::ResolveTarget(config, "ssh", {}), 10022);
   EXPECT_EQ(agent::AvailableServices(config, {}), (std::vector<std::string>{"ModuleManager", "ssh", "vertical-security"}));
 }
 
 // 验证纵密维护能力由 SSH 维护开关控制，且始终解析到固定管理服务。
 TEST(PlatformAgentTargets, VerticalSecurityUsesFixedMaintenanceEndpoint) {
   agent::Config config;
+  config.sshEnabled = false;
   config.allowedModules = {"vertical-security", "DataCenter"};
   const std::vector<agent::RunningModule> running{{"vertical-security", "127.0.0.1:12345"}, {"DataCenter", "0.0.0.0:17123"}};
   EXPECT_FALSE(agent::ResolveEndpoint(config, "vertical-security", running));
