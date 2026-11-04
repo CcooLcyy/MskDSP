@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <thread>
 
@@ -346,7 +347,7 @@ TEST_F(PlatformAccessTest, NetworkConfigurationIsIndependentAndBackwardCompatibl
     applied.push_back(network);
     return pa::OrdinaryNetworkResult{true, "", "192.168.2.219"};
   };
-  pa::PlatformAccessSupervisor control(path, {}, apply);
+  pa::PlatformAccessSupervisor control(path, {}, apply, [](const pa::OrdinaryNetworkConfig &) { return pa::OrdinaryNetworkResult{true, "", "192.168.2.219"}; });
   auto request = Request();
   request.set_enabled(false);
   auto *network = request.mutable_network_config();
@@ -366,7 +367,10 @@ TEST_F(PlatformAccessTest, NetworkConfigurationIsIndependentAndBackwardCompatibl
   EXPECT_EQ(saved.revision(), 1);
   EXPECT_EQ(saved.network_config().gateway(), "192.168.2.1");
   EXPECT_EQ(applied.size(), 1);
-  pa::PlatformAccessSupervisor restored(path, {}, apply);
+  std::atomic_bool restoredReady{false};
+  pa::PlatformAccessSupervisor restored(path, {}, [&](const pa::OrdinaryNetworkConfig &network) {
+    restoredReady = true;
+    return apply(network); }, [&](const pa::OrdinaryNetworkConfig &) { return pa::OrdinaryNetworkResult{restoredReady, restoredReady ? "" : "尚未恢复", "192.168.2.219"}; });
   EXPECT_EQ(Read(restored).network_config().interface_name(), "eth0.102");
   EXPECT_FALSE(Read(restored).network_applied());
   std::jthread background([&](std::stop_token stop) { restored.Run(stop); });
@@ -393,7 +397,7 @@ TEST_F(PlatformAccessTest, NetworkFailureRollsBackAndCanRetry) {
   ModuleManagerProto::PlatformAccessStatus saved;
   EXPECT_EQ(control.Set(request, &saved).error_code(), grpc::StatusCode::FAILED_PRECONDITION);
   EXPECT_EQ(Read(control).revision(), 0);
-  EXPECT_FALSE(Read(control).network_error().empty());
+  EXPECT_FALSE(saved.network_error().empty());
   EXPECT_FALSE(std::filesystem::exists(path));
   ASSERT_TRUE(control.Set(request, &saved).ok());
   EXPECT_TRUE(saved.network_error().empty());
@@ -406,8 +410,7 @@ TEST_F(PlatformAccessTest, FailedNetworkSaveReportsRollbackFailure) {
   pa::PlatformAccessSupervisor control(directory / "missing" / "platform_access.json", {}, [&](const pa::OrdinaryNetworkConfig &) {
     ++calls;
     return calls == 1 ? pa::OrdinaryNetworkResult{true, "", "192.168.2.219"}
-                      : pa::OrdinaryNetworkResult{false, "恢复失败", ""};
-  });
+                      : pa::OrdinaryNetworkResult{false, "恢复失败", ""}; }, [](const pa::OrdinaryNetworkConfig &) { return pa::OrdinaryNetworkResult{false, "恢复失败", ""}; });
   auto request = Request();
   request.mutable_network_config()->set_interface_name("eth0.102");
   request.mutable_network_config()->set_gateway("192.168.2.1");
@@ -486,10 +489,10 @@ TEST_F(PlatformAccessTest, StartupNetworkFailureDoesNotStartPlatform) {
   std::atomic_int attempts{0}, starts{0};
   pa::PlatformAccessSupervisor control(path, [&](const pa::Config &, std::stop_token, pa::PlatformStatusObserver) { ++starts; }, [&](const pa::OrdinaryNetworkConfig &) {
         ++attempts;
-        return pa::OrdinaryNetworkResult{false, "宿主机网络服务不可用", ""}; });
+        return pa::OrdinaryNetworkResult{false, "宿主机网络服务不可用", ""}; }, [](const pa::OrdinaryNetworkConfig &) { return pa::OrdinaryNetworkResult{false, "宿主机网络服务不可用", ""}; });
   std::jthread background([&](std::stop_token stop) { control.Run(stop); });
   const auto deadline = std::chrono::steady_clock::now() + 5s;
-  while (Read(control).network_error().empty() && std::chrono::steady_clock::now() < deadline)
+  while ((attempts.load() == 0 || Read(control).network_error() != "宿主机网络服务不可用") && std::chrono::steady_clock::now() < deadline)
     std::this_thread::sleep_for(10ms);
   EXPECT_EQ(attempts.load(), 1);
   EXPECT_EQ(starts.load(), 0);
@@ -511,8 +514,7 @@ TEST_F(PlatformAccessTest, RetriesStartupNetworkUntilInterfaceReady) {
   pa::PlatformAccessSupervisor control(path, {}, [&](const pa::OrdinaryNetworkConfig &) {
     if (++attempts == 1)
       return pa::OrdinaryNetworkResult{false, "网口尚未就绪", ""};
-    return pa::OrdinaryNetworkResult{true, "", "192.168.2.219"};
-  });
+    return pa::OrdinaryNetworkResult{true, "", "192.168.2.219"}; }, [&](const pa::OrdinaryNetworkConfig &) { return pa::OrdinaryNetworkResult{attempts.load() >= 2, attempts.load() >= 2 ? "" : "网口尚未就绪", "192.168.2.219"}; });
   std::jthread background([&](std::stop_token stop) { control.Run(stop); });
   const auto deadline = std::chrono::steady_clock::now() + 8s;
   while (!Read(control).network_applied() && std::chrono::steady_clock::now() < deadline)
@@ -523,5 +525,137 @@ TEST_F(PlatformAccessTest, RetriesStartupNetworkUntilInterfaceReady) {
   EXPECT_FALSE(Read(control).enabled());
   background.request_stop();
   background.join();
+}
+// 实际规则被清理后，读取必须报告失效；相同保存补齐后不增加修订。
+TEST_F(PlatformAccessTest, DetectsMissingPolicyAndRepairsSameConfiguration) {
+  bool healthy = false;
+  int applies = 0;
+  auto check = [&](const pa::OrdinaryNetworkConfig &) {
+    return pa::OrdinaryNetworkResult{healthy, healthy ? "" : "策略规则缺失", healthy ? "192.168.2.219" : ""};
+  };
+  pa::PlatformAccessSupervisor control(path, {}, [&](const pa::OrdinaryNetworkConfig &) {
+    ++applies;
+    healthy = true;
+    return check({}); }, check);
+  auto request = Request();
+  request.set_enabled(false);
+  request.mutable_network_config()->set_interface_name("eth0.102");
+  request.mutable_network_config()->set_gateway("192.168.2.1");
+  ModuleManagerProto::PlatformAccessStatus status;
+  ASSERT_TRUE(control.Set(request, &status).ok());
+  healthy = false;
+  EXPECT_FALSE(Read(control).network_applied());
+  request.set_expected_revision(1);
+  ASSERT_TRUE(control.Set(request, &status).ok());
+  EXPECT_EQ(status.revision(), 1);
+  EXPECT_TRUE(status.network_applied());
+  EXPECT_EQ(applies, 2);
+  ASSERT_TRUE(control.Set(request, &status).ok());
+  EXPECT_EQ(applies, 2);
+}
+
+// 保存执行器繁忙时读取快速返回明确未核验状态，不能等待慢网络命令。
+TEST_F(PlatformAccessTest, ReadDoesNotWaitForSlowNetworkApply) {
+  std::mutex mutex;
+  std::condition_variable condition;
+  bool entered = false, release = false;
+  pa::PlatformAccessSupervisor control(path, {}, [&](const pa::OrdinaryNetworkConfig &) {
+    std::unique_lock lock(mutex);
+    entered = true;
+    condition.notify_all();
+    condition.wait(lock, [&] { return release; });
+    return pa::OrdinaryNetworkResult{true, "", "192.168.2.219"}; }, [](const pa::OrdinaryNetworkConfig &) { return pa::OrdinaryNetworkResult{true, "", ""}; });
+  auto request = Request();
+  request.mutable_network_config()->set_interface_name("eth0.102");
+  request.mutable_network_config()->set_gateway("192.168.2.1");
+  std::jthread writer([&] { ModuleManagerProto::PlatformAccessStatus status; EXPECT_TRUE(control.Set(request, &status).ok()); });
+  {
+    std::unique_lock lock(mutex);
+    EXPECT_TRUE(condition.wait_for(lock, 2s, [&] { return entered; }));
+  }
+  const auto started = std::chrono::steady_clock::now();
+  const auto status = Read(control);
+  EXPECT_LT(std::chrono::steady_clock::now() - started, 500ms);
+  EXPECT_FALSE(status.network_applied());
+  EXPECT_FALSE(status.network_error().empty());
+  {
+    std::lock_guard lock(mutex);
+    release = true;
+  }
+  condition.notify_all();
+}
+
+// 周期核验修复规则丢失且不重启正在工作的健康平台连接任务。
+TEST_F(PlatformAccessTest, PeriodicRepairKeepsPlatformWorkerAndRevision) {
+  std::atomic_bool healthy{false};
+  std::atomic_int applies{0}, starts{0};
+  auto check = [&](const pa::OrdinaryNetworkConfig &) {
+    return pa::OrdinaryNetworkResult{healthy.load(), healthy ? "" : "策略规则缺失", "192.168.2.219"};
+  };
+  pa::PlatformAccessSupervisor control(path, [&](const pa::Config &, std::stop_token stop, pa::PlatformStatusObserver observer) {
+    ++starts;
+    observer(true, "");
+    while (!stop.stop_requested()) std::this_thread::sleep_for(5ms); }, [&](const pa::OrdinaryNetworkConfig &) { ++applies; healthy = true; return check({}); }, check);
+  auto request = Request();
+  request.mutable_network_config()->set_interface_name("eth0.102");
+  request.mutable_network_config()->set_gateway("192.168.2.1");
+  ModuleManagerProto::PlatformAccessStatus status;
+  ASSERT_TRUE(control.Set(request, &status).ok());
+  std::jthread background([&](std::stop_token stop) { control.Run(stop); });
+  auto deadline = std::chrono::steady_clock::now() + 2s;
+  while (!starts && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(5ms);
+  healthy = false;
+  deadline = std::chrono::steady_clock::now() + 7s;
+  while (applies < 2 && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(5ms);
+  EXPECT_EQ(applies.load(), 2);
+  EXPECT_EQ(starts.load(), 1);
+  EXPECT_EQ(Read(control).revision(), 1);
+  EXPECT_TRUE(Read(control).online());
+  background.request_stop();
+}
+// 后台恢复占用执行器时，保存限时返回忙碌，不写配置修订或执行第二次网络应用。
+TEST_F(PlatformAccessTest, SaveDoesNotQueueBehindSlowBackgroundRepair) {
+  pa::StoredPlatformAccess stored;
+  stored.revision = 1;
+  stored.config.networkConfig.interfaceName = "eth0.102";
+  stored.config.networkConfig.gateway = "192.168.2.1";
+  ASSERT_EQ(pa::PlatformAccessStore(path).Save(stored), pa::PlatformAccessSave::Durable);
+  const auto original = [&] {
+    std::ifstream input(path);
+    return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+  }();
+  std::mutex mutex;
+  std::condition_variable condition;
+  bool entered = false, release = false;
+  std::atomic_int applies{0};
+  pa::PlatformAccessSupervisor control(path, {}, [&](const pa::OrdinaryNetworkConfig &) {
+    ++applies;
+    std::unique_lock lock(mutex);
+    entered = true;
+    condition.notify_all();
+    condition.wait(lock, [&] { return release; });
+    return pa::OrdinaryNetworkResult{true, "", "192.168.2.219"}; }, [](const pa::OrdinaryNetworkConfig &) { return pa::OrdinaryNetworkResult{false, "规则缺失", ""}; });
+  std::jthread background([&](std::stop_token stop) { control.Run(stop); });
+  {
+    std::unique_lock lock(mutex);
+    EXPECT_TRUE(condition.wait_for(lock, 2s, [&] { return entered; }));
+  }
+  ModuleManagerProto::PlatformAccessStatus status;
+  const auto started = std::chrono::steady_clock::now();
+  const auto result = control.Set(Request(1), &status);
+  EXPECT_EQ(result.error_code(), grpc::StatusCode::UNAVAILABLE);
+  EXPECT_LT(std::chrono::steady_clock::now() - started, 2s);
+  EXPECT_EQ(Read(control).revision(), 1);
+  EXPECT_EQ(applies.load(), 1);
+  std::ifstream input(path);
+  EXPECT_EQ(std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()), original);
+  {
+    std::lock_guard lock(mutex);
+    release = true;
+  }
+  background.request_stop();
+  condition.notify_all();
 }
 }  // namespace

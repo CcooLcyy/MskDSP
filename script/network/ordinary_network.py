@@ -139,6 +139,27 @@ def state_lock(path):
         os.close(fd)
 
 
+@contextlib.contextmanager
+def readonly_state_lock(path):
+    # 检查不能创建持久文件；现有应用锁不存在时由后续应用重新建立。
+    try:
+        fd = os.open(str(path) + '.lock', os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    except FileNotFoundError:
+        raise NetworkError('普通外网事务锁缺失，请重新应用配置') from None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise NetworkError('普通外网事务锁类型不合法')
+        if os.name == 'posix':
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        yield
+    except BlockingIOError:
+        raise NetworkError('普通外网配置正在应用，暂不能检查实际状态') from None
+    finally:
+        os.close(fd)
+
+
 def resources(run):
     rules = json.loads(run(['ip', '-N', '-4', '-j', 'rule', 'show']))
     routes = json.loads(run(['ip', '-N', '-4', '-j', 'route', 'show', 'table', TABLE], missing=True) or '[]')
@@ -146,15 +167,25 @@ def resources(run):
     for rule in rules:
         if rule.get('priority') not in PRIORITIES:
             continue
+        # iproute2 实际 JSON 使用 suppress_prefixlen，兼容旧适配器的长字段名。
+        rule = dict(rule)
+        if 'suppress_prefixlen' in rule:
+            value = rule.pop('suppress_prefixlen')
+            if 'suppress_prefixlength' in rule and rule['suppress_prefixlength'] != value:
+                raise NetworkError('普通外网策略抑制前缀字段冲突，未覆盖规则')
+            rule['suppress_prefixlength'] = value
         first = rule['priority'] == PRIORITIES[0]
         if (str(rule.get('protocol')) != PROTOCOL or str(rule.get('table')) not in (['main', '254'] if first else [TABLE])
                 or first and rule.get('suppress_prefixlength') != 0
                 or rule.get('src', 'all') != 'all' or rule.get('dst', 'all') != 'all'
-                or any(k in rule for k in ['iif', 'oif', 'fwmark', 'uidrange', 'not'])):
+                or set(rule) - {'priority', 'protocol', 'table', 'src', 'dst', 'suppress_prefixlength', 'flags'}
+                or rule.get('flags') or not first and 'suppress_prefixlength' in rule):
             raise NetworkError('普通外网策略优先级与现有规则冲突，未覆盖规则')
         ours.append(rule)
     if any(str(route.get('protocol')) != PROTOCOL for route in routes):
         raise NetworkError('普通外网专用路由表与现有配置冲突，未覆盖路由')
+    if len({r['priority'] for r in ours}) != len(ours):
+        raise NetworkError('普通外网策略优先级存在重复规则，未覆盖规则')
     return ours, routes
 
 
@@ -199,6 +230,8 @@ def source_address(run, config):
     interface, gateway = config['interface_name'], ipaddress.IPv4Address(config['gateway'])
     entries = json.loads(run(['ip', '-4', '-j', 'addr', 'show', 'dev', interface]))
     for entry in entries:
+        if 'flags' in entry and 'UP' not in entry['flags']:
+            continue
         for info in entry.get('addr_info', []):
             if info.get('family') != 'inet':
                 continue
@@ -225,6 +258,79 @@ def install(run, config, source):
         run(['resolvectl', 'default-route', interface, 'yes'])
 
 
+def repair_plan(run, config, source, rules, routes):
+    # 先完整核验所有资源，再生成增量写操作，禁止为了修复一条规则撤销整个出口。
+    interface, gateway = config['interface_name'], config['gateway']
+    desired = {
+        gateway + '/32': {'dev': interface, 'prefsrc': source, 'scope': 'link'},
+        'default': {'dev': interface, 'prefsrc': source, 'gateway': gateway},
+    }
+    plan = []
+    grouped = {}
+    for route in routes:
+        destination = route.get('dst', 'default')
+        if destination == gateway:
+            destination += '/32'
+        if destination not in desired or destination in grouped:
+            raise NetworkError('普通外网专表存在额外或重复路由，未覆盖配置')
+        if (set(route) - {'dst', 'dev', 'prefsrc', 'gateway', 'scope', 'protocol', 'table', 'type', 'flags'}
+                or route.get('type', 'unicast') not in ('unicast', 1, '1')):
+            raise NetworkError('普通外网专表路由存在非预期属性冲突，未覆盖配置')
+        grouped[destination] = route
+    for destination, fields in desired.items():
+        actual = grouped.get(destination, {})
+        matches = all(actual.get(k) == v or k == 'scope' and actual.get(k) in (253, '253') for k, v in fields.items())
+        matches = matches and actual.get('type', 'unicast') in ('unicast', 1, '1') and not actual.get('flags')
+        if not matches:
+            args = ['ip', '-4', 'route', 'replace', destination]
+            if destination == 'default':
+                args += ['via', gateway]
+            args += ['dev', interface]
+            if destination != 'default':
+                args += ['scope', 'link']
+            plan.append(args + ['src', source, 'table', TABLE, 'proto', PROTOCOL])
+    present = {r['priority'] for r in rules}
+    for priority, table in [(20000, 'main'), (20010, TABLE)]:
+        if priority not in present:
+            args = ['ip', '-4', 'rule', 'add', 'pref', str(priority), 'table', table]
+            if priority == 20000:
+                args += ['suppress_prefixlength', '0']
+            plan.append(args + ['protocol', PROTOCOL])
+    if config['dns_servers']:
+        current = snapshot_dns(run, interface)
+        for kind, old, wanted in [('dns', current['dns'], config['dns_servers']),
+                                  ('domain', current['domains'], ['~.']),
+                                  ('default-route', [current['default_route']], ['yes'])]:
+            if old != wanted:
+                plan.append(['resolvectl', kind, interface] + wanted)
+    return plan
+
+
+def check(config, state_path=Path('./conf/ordinary_network_state.json'), run=command):
+    """只读核验内核与持久记录，不创建锁文件、不修复资源。"""
+    config = validate(config)
+    path = Path(state_path)
+    old = read_state(path)
+    if old is None and not config['interface_name']:
+        return {'applied': True, 'error': '', 'source_address': ''}
+    with readonly_state_lock(path):
+        return check_locked(config, read_state(path), run)
+
+
+def check_locked(config, old, run):
+    # 与应用共用锁后再次读取原子状态，避免将旧事务结果报告为当前状态。
+    if old is None or old.get('pending') or old['config'] != config:
+        return {'applied': False, 'error': '普通外网持久状态不一致或存在待恢复事务', 'source_address': ''}
+    if not config['interface_name']:
+        return {'applied': False, 'error': '普通外网仍有待清理的运行状态', 'source_address': ''}
+    if config['dns_servers'] and config['interface_name'] not in old['backups']:
+        return {'applied': False, 'error': '普通外网原有 DNS 恢复记录缺失', 'source_address': ''}
+    source = source_address(run, config)
+    rules, routes = resources(run)
+    pending = repair_plan(run, config, source, rules, routes)
+    return {'applied': not pending, 'error': '普通外网运行规则、路由或 DNS 不完整，等待恢复' if pending else '', 'source_address': source}
+
+
 def apply(config, state_path=Path('./conf/ordinary_network_state.json'), run=command):
     config = validate(config)
     path = Path(state_path)
@@ -234,8 +340,16 @@ def apply(config, state_path=Path('./conf/ordinary_network_state.json'), run=com
         old = read_state(path)
         if old is None and not config['interface_name']:
             return {'applied': True, 'error': '', 'source_address': ''}
-        resources(run)
+        rules, routes = resources(run)
         source = source_address(run, config) if config['interface_name'] else ''
+        if old and not old.get('pending') and old['config'] == config and config['interface_name']:
+            if config['dns_servers'] and config['interface_name'] not in old['backups']:
+                raise NetworkError('普通外网原有 DNS 恢复记录缺失，未修改配置')
+            for args in repair_plan(run, config, source, rules, routes):
+                run(args)
+            if not check_locked(config, old, run)['applied']:
+                raise NetworkError('普通外网资源恢复后实际状态仍不完整，请重新读取并重试')
+            return {'applied': True, 'error': '', 'source_address': source}
         old_config = old['config'] if old else validate({})
         old_source = ''
         if old_config['interface_name']:
@@ -257,6 +371,9 @@ def apply(config, state_path=Path('./conf/ordinary_network_state.json'), run=com
             install(run, config, source)
             if interface:
                 retained = {interface: backups[interface]} if config['dns_servers'] else {}
+                verified = check_locked(config, {'config': config, 'pending': False, 'backups': retained}, run)
+                if not verified['applied']:
+                    raise NetworkError('普通外网应用后实际状态仍不完整，开始恢复原配置')
                 write_state(path, {'version': 1, 'config': config, 'backups': retained, 'pending': False})
             else:
                 write_state(path, None)
@@ -279,9 +396,10 @@ def apply(config, state_path=Path('./conf/ordinary_network_state.json'), run=com
 def main():
     parser = argparse.ArgumentParser(description='应用普通外网出口配置')
     parser.add_argument('--config', required=True)
+    parser.add_argument('--check', action='store_true', help='只读检查已应用的普通外网配置')
     args = parser.parse_args()
     try:
-        result = apply(json.loads(args.config))
+        result = (check if args.check else apply)(json.loads(args.config))
     except Exception as error:
         message = str(error) if isinstance(error, NetworkError) else '网络配置执行失败，请检查运行环境和状态文件'
         result = {'applied': False, 'error': message, 'source_address': ''}

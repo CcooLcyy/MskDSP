@@ -34,7 +34,7 @@ OrdinaryNetworkResult Failure(std::string message) {
   return {false, std::move(message), {}};
 }
 
-std::string Execute(const std::string &script, const std::string &payload) {
+std::string Execute(const std::string &script, const std::string &payload, bool checkOnly) {
   int descriptors[2];
   if (::pipe2(descriptors, O_CLOEXEC) != 0)
     return {};
@@ -49,7 +49,7 @@ std::string Execute(const std::string &script, const std::string &payload) {
   posix_spawnattr_init(&attributes);
   posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP);
   posix_spawnattr_setpgroup(&attributes, 0);
-  std::array<char *, 5> arguments{const_cast<char *>("/usr/bin/python3"), const_cast<char *>(script.c_str()), const_cast<char *>("--config"), const_cast<char *>(payload.c_str()), nullptr};
+  std::array<char *, 6> arguments{const_cast<char *>("/usr/bin/python3"), const_cast<char *>(script.c_str()), const_cast<char *>("--config"), const_cast<char *>(payload.c_str()), checkOnly ? const_cast<char *>("--check") : nullptr, nullptr};
   std::array<char *, 3> environment{const_cast<char *>("PATH=/usr/sbin:/usr/bin:/sbin:/bin"), const_cast<char *>("LC_ALL=C.UTF-8"), nullptr};
   pid_t pid{};
   const int spawned = ::posix_spawn(&pid, arguments[0], &actions, &attributes, arguments.data(), environment.data());
@@ -62,7 +62,7 @@ std::string Execute(const std::string &script, const std::string &payload) {
   }
   ::fcntl(descriptors[0], F_SETFL, O_NONBLOCK);
   std::string output;
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(18);
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(checkOnly ? 6 : 18);
   bool exited = false;
   bool overflow = false;
   int status{};
@@ -128,11 +128,18 @@ std::string ValidateOrdinaryNetwork(const OrdinaryNetworkConfig &config) {
   return {};
 }
 
-OrdinaryNetworkResult ApplyOrdinaryNetwork(const OrdinaryNetworkConfig &config) {
+namespace {
+OrdinaryNetworkResult RunOrdinaryNetwork(const OrdinaryNetworkConfig &config, bool checkOnly) {
   if (auto error = ValidateOrdinaryNetwork(config); !error.empty())
     return Failure(error);
   static std::mutex executionMutex;
-  std::lock_guard lock(executionMutex);
+  std::unique_lock lock(executionMutex, std::defer_lock);
+  if (checkOnly) {
+    if (!lock.try_lock())
+      return Failure("普通外网配置正在应用，暂不能检查实际状态");
+  } else {
+    lock.lock();
+  }
   try {
     // 未启用且从未管理过网络时，不依赖 Python、系统总线或网络权限。
     if (config.interfaceName.empty() && !std::filesystem::exists("./conf/ordinary_network_state.json"))
@@ -142,25 +149,39 @@ OrdinaryNetworkResult ApplyOrdinaryNetwork(const OrdinaryNetworkConfig &config) 
       script = "./script/network/ordinary_network.py";
     if (!std::filesystem::is_regular_file(script))
       return Failure("缺少普通外网运行适配器，请升级完整下位机镜像");
-    LOG_INFO("开始应用普通外网出口，网卡={}，DNS数量={}", config.interfaceName.empty() ? "系统现有网络" : config.interfaceName, config.dnsServers.size());
+    if (!checkOnly)
+      LOG_INFO("开始应用普通外网出口，网卡={}，DNS数量={}", config.interfaceName.empty() ? "系统现有网络" : config.interfaceName, config.dnsServers.size());
     boost::json::array dns;
     for (const auto &address : config.dnsServers)
       dns.emplace_back(address);
     const auto payload = boost::json::serialize(boost::json::object{{"interface_name", config.interfaceName}, {"gateway", config.gateway}, {"dns_servers", std::move(dns)}});
-    const auto output = Execute(script.string(), payload);
+    const auto output = Execute(script.string(), payload, checkOnly);
     if (output.empty()) {
+      if (checkOnly)
+        return Failure("普通外网实际状态检查失败或超时，请检查运行环境");
       LOG_ERROR("普通外网执行失败或超时，需检查持久恢复记录");
       return Failure("网络执行失败或超时，可能保留待恢复记录，请重新读取并重试");
     }
     const auto object = boost::json::parse(output).as_object();
     OrdinaryNetworkResult result{object.at("applied").as_bool(), std::string(object.at("error").as_string()), std::string(object.at("source_address").as_string())};
-    if (result.applied)
-      LOG_INFO("普通外网出口应用完成，源地址={}", result.sourceAddress);
-    else
-      LOG_ERROR("普通外网出口应用失败，原因={}", result.error);
+    if (!checkOnly) {
+      if (result.applied)
+        LOG_INFO("普通外网出口应用完成，源地址={}", result.sourceAddress);
+      else
+        LOG_ERROR("普通外网出口应用失败，原因={}", result.error);
+    }
     return result;
   } catch (...) {
     return Failure("无法执行或解析普通外网应用结果，请检查下位机运行环境");
   }
+}
+}  // namespace
+
+OrdinaryNetworkResult ApplyOrdinaryNetwork(const OrdinaryNetworkConfig &config) {
+  return RunOrdinaryNetwork(config, false);
+}
+
+OrdinaryNetworkResult CheckOrdinaryNetwork(const OrdinaryNetworkConfig &config) {
+  return RunOrdinaryNetwork(config, true);
 }
 }  // namespace mskdsp::platformagent

@@ -551,12 +551,21 @@ ensure_log_dir() {
   echo "已创建日志目录: ${log_dir}"
 }
 
+prepare_host_network() {
+  echo "镜像身份已验证，开始准备宿主机 networkd 策略兼容"
+  # 构建时嵌入独立准备器，安装时无需依赖源码目录或运行业务镜像。
+  if ! python3 -c "import base64; exec(compile(base64.b64decode('@@MSKDSP_NETWORKD_POLICY@@'), '<mskdsp-networkd-policy>', 'exec'))"; then
+    die "宿主机网络准备失败，未替换既有业务容器"
+  fi
+}
+
 start_container() {
   require_cmd docker
   require_cmd python3
   trap cleanup_payload EXIT
 
   load_image_if_needed
+  prepare_host_network
   cleanup_repo_tags
   ensure_module_dir
   ensure_default_conf
@@ -634,13 +643,24 @@ __ARCHIVE_BELOW__
 EOF
 
 echo "以 gzip 级别 6 封装镜像载荷，不记录文件名和时间戳"
-if ! python3 - "${INPUT_TAR}" "${OUTPUT_PATH}" <<'PY'
+if ! python3 - "${INPUT_TAR}" "${OUTPUT_PATH}" "${SCRIPT_DIR}/network/networkd_policy.py" <<'PY'
+import base64
 import gzip
 import os
 import shutil
 import sys
 
-source_path, output_path = sys.argv[1:]
+source_path, output_path, helper_path = sys.argv[1:]
+with open(helper_path, 'rb') as helper:
+    helper_source = helper.read()
+compile(helper_source, helper_path, 'exec')
+with open(output_path, 'rb') as script:
+    header = script.read()
+placeholder = b'@@MSKDSP_NETWORKD_POLICY@@'
+if header.count(placeholder) != 1:
+    sys.exit('安装器宿主机准备器嵌入位置不唯一')
+with open(output_path, 'wb') as script:
+    script.write(header.replace(placeholder, base64.b64encode(helper_source)))
 MAX_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024
 source_bytes = os.path.getsize(source_path)
 if source_bytes > MAX_ARCHIVE_BYTES:

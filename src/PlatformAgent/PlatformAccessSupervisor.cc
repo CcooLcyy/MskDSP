@@ -14,7 +14,7 @@ bool SameConfiguration(const Config &a, const Config &b) {
 }
 }  // namespace
 
-PlatformAccessSupervisor::PlatformAccessSupervisor(std::filesystem::path path, PlatformAccessRunner runner, OrdinaryNetworkApply networkApply) : store_(std::move(path)), runner_(std::move(runner)), networkApply_(std::move(networkApply)) {
+PlatformAccessSupervisor::PlatformAccessSupervisor(std::filesystem::path path, PlatformAccessRunner runner, OrdinaryNetworkApply networkApply, OrdinaryNetworkApply networkCheck) : store_(std::move(path)), runner_(std::move(runner)), networkApply_(std::move(networkApply)), networkCheck_(std::move(networkCheck)) {
   auto loaded = store_.Load();
   saved_ = std::move(loaded.saved);
   lastError_ = std::move(loaded.error);
@@ -25,12 +25,22 @@ PlatformAccessSupervisor::PlatformAccessSupervisor(std::filesystem::path path, P
   networkApplied_ = saved_.config.networkConfig.interfaceName.empty() && !networkStateExists && !stateError;
   if (!networkApply_)
     networkApply_ = ApplyOrdinaryNetwork;
+  if (!networkCheck_)
+    networkCheck_ = CheckOrdinaryNetwork;
   if (!lastError_.empty())
     LOG_ERROR("{}", lastError_);
   if (!runner_)
     runner_ = [](const Config &config, std::stop_token stop, PlatformStatusObserver observer) {
       PlatformAgent(config, std::move(observer)).Run(stop);
     };
+}
+
+OrdinaryNetworkResult PlatformAccessSupervisor::CheckNetwork(const OrdinaryNetworkConfig &config) const {
+  try {
+    return networkCheck_(config);
+  } catch (...) {
+    return {false, "普通外网状态检查异常，请检查网络运行环境", ""};
+  }
 }
 
 OrdinaryNetworkResult PlatformAccessSupervisor::ApplyNetwork(const OrdinaryNetworkConfig &config) const {
@@ -69,14 +79,34 @@ void PlatformAccessSupervisor::FillStatus(ModuleManagerProto::PlatformAccessStat
 }
 
 grpc::Status PlatformAccessSupervisor::Get(ModuleManagerProto::PlatformAccessStatus *status) const {
-  std::lock_guard lock(mutex_);
-  FillStatus(status);
+  // 慢保存或后台恢复不能阻塞读取；忙碌时明确表示本次未完成核验。
+  std::unique_lock saveLock(saveMutex_, std::try_to_lock);
+  OrdinaryNetworkConfig config;
+  {
+    std::lock_guard lock(mutex_);
+    FillStatus(status);
+    config = saved_.config.networkConfig;
+  }
+  if (!saveLock.owns_lock()) {
+    status->set_network_applied(false);
+    status->set_network_error("网络配置正在应用或核验，请稍后重新读取");
+    status->clear_network_source_address();
+    return grpc::Status::OK;
+  }
+  const auto checked = CheckNetwork(config);
+  status->set_network_applied(checked.applied);
+  status->set_network_error(checked.error);
+  status->set_network_source_address(checked.sourceAddress);
   return grpc::Status::OK;
 }
 
 grpc::Status PlatformAccessSupervisor::Set(const ModuleManagerProto::SetPlatformAccessConfigRequest &request, ModuleManagerProto::PlatformAccessStatus *status) {
-  // 保存串行化与运行状态分开，文件IO不阻塞Get和连接状态回调。
-  std::lock_guard saveLock(saveMutex_);
+  // 不排队等待慢后台恢复，避免累计执行时间超过上位机保存请求期限。
+  std::unique_lock saveLock(saveMutex_, std::defer_lock);
+  if (!saveLock.try_lock_for(std::chrono::seconds(1))) {
+    LOG_INFO("普通外网执行器繁忙，平台配置本次未保存，请恢复后重试");
+    return {grpc::StatusCode::UNAVAILABLE, "普通外网配置正在应用或恢复，本次未保存，请稍后重新读取并重试"};
+  }
   StoredPlatformAccess previous;
   bool persisted, paused, networkReady;
   {
@@ -112,8 +142,26 @@ grpc::Status PlatformAccessSupervisor::Set(const ModuleManagerProto::SetPlatform
     next.config.token = request.device_token();
   if (auto error = ValidatePlatformAccess(next.config); !error.empty())
     return {grpc::StatusCode::INVALID_ARGUMENT, error};
-  if (persisted && !paused && networkReady && SameConfiguration(previous.config, next.config))
-    return Get(status);
+  if (previous.config.networkConfig == next.config.networkConfig) {
+    auto checked = CheckNetwork(next.config.networkConfig);
+    networkReady = checked.applied && checked.error.empty();
+    if (persisted && !paused && SameConfiguration(previous.config, next.config)) {
+      if (!networkReady) {
+        LOG_INFO("相同配置重新保存时发现普通外网失效，开始补齐自有网络资源");
+        checked = ApplyNetwork(next.config.networkConfig);
+        if (checked.applied && checked.error.empty())
+          LOG_INFO("相同配置的普通外网资源已恢复，源地址={}", checked.sourceAddress);
+        else
+          LOG_ERROR("相同配置的普通外网资源恢复失败：{}", checked.error);
+      }
+      std::lock_guard lock(mutex_);
+      RecordNetworkResult(checked);
+      FillStatus(status);
+      return checked.applied && checked.error.empty() ? grpc::Status::OK : grpc::Status{grpc::StatusCode::FAILED_PRECONDITION, "普通外网出口恢复失败，请读取网络状态后重试"};
+    }
+    std::lock_guard lock(mutex_);
+    RecordNetworkResult(checked);
+  }
   if (previous.revision == std::numeric_limits<uint64_t>::max())
     return {grpc::StatusCode::FAILED_PRECONDITION, "平台接入配置修订已耗尽"};
   next.revision = previous.revision + 1;
@@ -178,50 +226,58 @@ void PlatformAccessSupervisor::Run(std::stop_token stop) {
       event_.wait_for(lock, stop, std::chrono::seconds(5), [&] { return applied != generation_; });
       if (stop.stop_requested())
         break;
-      if (applied == generation_ && networkApplied_)
-        continue;
       generation = generation_;
       config = saved_.config;
       if (paused_)
         config.enabled = false;
-      online_ = false;
     }
-    // 回收时不持有状态锁，旧任务回调和RPC均可继续完成。
-    if (worker.joinable()) {
-      worker.request_stop();
-      worker.join();
-    }
-    applied = generation;
-    // 启动恢复与保存共用串行化锁；关闭平台连接功能仍恢复普通外网出口。
+    bool networkReady = false;
+    // 检查、补齐与保存串行化，防止旧配置的恢复覆盖刚保存的新配置。
     {
       std::lock_guard saveLock(saveMutex_);
-      bool restoreNetwork;
       {
         std::lock_guard lock(mutex_);
         if (generation != generation_)
           continue;
-        restoreNetwork = !networkApplied_ || !networkError_.empty();
       }
-      if (restoreNetwork) {
+      auto checked = CheckNetwork(config.networkConfig);
+      bool previouslyApplied;
+      std::string previousError;
+      {
+        std::lock_guard lock(mutex_);
+        previouslyApplied = networkApplied_;
+        previousError = networkError_;
+        RecordNetworkResult(checked);
+      }
+      if (!checked.applied) {
         auto restored = ApplyNetwork(config.networkConfig);
         {
           std::lock_guard lock(mutex_);
+          if (restored.applied)
+            LOG_INFO("普通外网自有网络资源已恢复，源地址={}", restored.sourceAddress);
+          else if (previouslyApplied || restored.error != previousError)
+            LOG_ERROR("普通外网资源恢复失败：{}", restored.error);
           RecordNetworkResult(restored);
         }
-        if (!restored.applied) {
-          LOG_ERROR("启动恢复普通外网出口失败：{}", restored.error);
-          config.enabled = false;
-        } else {
-          LOG_INFO("启动恢复普通外网出口完成");
-        }
+        checked = std::move(restored);
       }
+      networkReady = checked.applied && checked.error.empty();
     }
-    if (!config.enabled)
+    // 仅网络维护不能重启平台连接任务或改变修订；新配置才回收旧任务。
+    if (applied == generation && worker.joinable())
+      continue;
+    if (applied != generation && worker.joinable()) {
+      worker.request_stop();
+      worker.join();
+    }
+    applied = generation;
+    if (!config.enabled || !networkReady)
       continue;
     {
       std::lock_guard lock(mutex_);
       if (generation != generation_ || stop.stop_requested())
         continue;
+      online_ = false;
     }
     worker = std::jthread([this, config, generation](std::stop_token token) {
       ModuleManager::LogModuleScope logScope("PlatformAgent");

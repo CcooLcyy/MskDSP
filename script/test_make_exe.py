@@ -142,6 +142,16 @@ class InstallerIdentityTest(unittest.TestCase):
         scripts = self.root / "script"
         scripts.mkdir()
         shutil.copyfile(Path(__file__).with_name("make_exe.sh"), scripts / "make_exe.sh")
+        # 安装器内嵌准备步骤也只运行隔离桩，严禁测试接触真实宿主机网络。
+        (scripts / 'network').mkdir()
+        (scripts / 'network/networkd_policy.py').write_text('''import json, os, sys
+from pathlib import Path
+p = Path(os.environ["MOCK_DOCKER_STATE"])
+s = json.loads(p.read_text())
+s["calls"].append(["host-network-prepare"])
+p.write_text(json.dumps(s))
+sys.exit(31 if s.get("host_prepare_fail") else 0)
+''', encoding='utf-8')
         self.payload = self.root / "payload.tar"
         self.installed = self.root / "installed.tar"
         self.state_path = self.root / "state.json"
@@ -253,6 +263,23 @@ class InstallerIdentityTest(unittest.TestCase):
     def calls(self, command: str) -> list[list[str]]:
         state = json.loads(self.state_path.read_text(encoding="utf-8"))
         return [args for args in state["calls"] if args[0] == command]
+
+    # 宿主机准备失败必须发生在替换旧业务容器与现场模块之前。
+    def test_host_prepare_failure_preserves_old_container(self):
+        result = self.run_installer(host_prepare_fail=True)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.calls('host-network-prepare'), [['host-network-prepare']])
+        self.assertEqual(self.calls('rm'), [])
+        self.assertEqual(self.calls('run'), [])
+
+    # 完整镜像身份校验后先准备宿主机，再进入任何现场目录或容器替换。
+    def test_host_prepare_runs_after_identity_before_container_replacement(self):
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = json.loads(self.state_path.read_text())['calls']
+        prepared = state.index(['host-network-prepare'])
+        self.assertLess(next(i for i, call in enumerate(state) if call[0] == 'load'), prepared)
+        self.assertLess(prepared, state.index(['rm', '-f', 'mskdsp']))
 
     # 匹配平台与常见别名均允许安装，避免安装行为依赖当前测试机平台。
     def test_matching_host_and_payload_platforms_are_allowed(self) -> None:

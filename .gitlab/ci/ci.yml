@@ -90,6 +90,22 @@ build-x64:
       - build-x64/**/*.o
       - package/debug/**
 
+test-network-runtime:
+  stage: test
+  image:
+    name: mskdsp-ci-tools:ubuntu24.04-x64
+    docker:
+      platform: linux/amd64
+    pull_policy: if-not-present
+  variables:
+    ARCH: network-runtime
+  timeout: 15m
+  needs: []
+  script:
+    - python3 -m unittest discover -s script/network -p 'test_*.py'
+    - python3 script/test_make_exe.py
+    - python3 script/update/test_lower_update_task.py
+
 test-x64:
   stage: test
   image:
@@ -145,6 +161,8 @@ package-arm64:
   variables:
     ARCH: arm64
   needs:
+    - job: test-network-runtime
+      artifacts: false
     - job: build-arm64
       artifacts: true
     - job: test-x64
@@ -155,6 +173,8 @@ package-x64:
   variables:
     ARCH: x64
   needs:
+    - job: test-network-runtime
+      artifacts: false
     - job: test-x64
       artifacts: true
 
