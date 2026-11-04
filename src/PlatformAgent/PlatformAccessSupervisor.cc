@@ -1,5 +1,9 @@
 #include "PlatformAccessSupervisor.h"
 
+#include <sys/utsname.h>
+
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <limits>
 #include <thread>
@@ -7,14 +11,34 @@
 #include "Logger.h"
 
 namespace mskdsp::platformagent {
+std::string NormalizePlatformDeviceArchitecture(std::string_view machine) {
+  std::string normalized(machine);
+  std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+  if (normalized == "aarch64" || normalized == "arm64")
+    return "arm64";
+  if (normalized == "x86_64" || normalized == "amd64" || normalized == "x64")
+    return "x64";
+  return machine.empty() ? "unknown" : std::string(machine);
+}
+
 namespace {
+std::string RuntimeDeviceArchitecture() {
+  struct utsname runtime{};
+  if (::uname(&runtime) != 0) {
+    LOG_WARNING("无法读取下位机运行架构，平台接入状态将报告 unknown");
+    return "unknown";
+  }
+  return NormalizePlatformDeviceArchitecture(runtime.machine);
+}
+
 bool SameConfiguration(const Config &a, const Config &b) {
   return a.enabled == b.enabled && a.deviceId == b.deviceId && a.token == b.token &&
       a.sshEnabled == b.sshEnabled && a.sshPort == b.sshPort && a.networkConfig == b.networkConfig;
 }
 }  // namespace
 
-PlatformAccessSupervisor::PlatformAccessSupervisor(std::filesystem::path path, PlatformAccessRunner runner, OrdinaryNetworkApply networkApply, OrdinaryNetworkApply networkCheck) : store_(std::move(path)), runner_(std::move(runner)), networkApply_(std::move(networkApply)), networkCheck_(std::move(networkCheck)) {
+PlatformAccessSupervisor::PlatformAccessSupervisor(std::filesystem::path path, PlatformAccessRunner runner, OrdinaryNetworkApply networkApply, OrdinaryNetworkApply networkCheck) : store_(std::move(path)), runner_(std::move(runner)), networkApply_(std::move(networkApply)), networkCheck_(std::move(networkCheck)), deviceArchitecture_(RuntimeDeviceArchitecture()) {
+  LOG_INFO("平台接入状态使用下位机运行架构={}", deviceArchitecture_);
   auto loaded = store_.Load();
   saved_ = std::move(loaded.saved);
   lastError_ = std::move(loaded.error);
@@ -76,6 +100,7 @@ void PlatformAccessSupervisor::FillStatus(ModuleManagerProto::PlatformAccessStat
   status->set_network_applied(networkApplied_);
   status->set_network_error(networkError_);
   status->set_network_source_address(networkSourceAddress_);
+  status->set_device_architecture(deviceArchitecture_);
 }
 
 grpc::Status PlatformAccessSupervisor::Get(ModuleManagerProto::PlatformAccessStatus *status) const {

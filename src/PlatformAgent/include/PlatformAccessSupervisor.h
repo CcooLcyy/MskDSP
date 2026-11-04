@@ -3,12 +3,15 @@
 #include <condition_variable>
 #include <functional>
 #include <mutex>
+#include <string_view>
 
 #include "OrdinaryNetworkRuntime.h"
 #include "PlatformAccessControl.h"
 #include "PlatformAccessStore.h"
 
 namespace mskdsp::platformagent {
+// 仅归一化已知架构别名；未知探测值原样保留，空值返回 unknown。
+std::string NormalizePlatformDeviceArchitecture(std::string_view machine);
 using PlatformAccessRunner = std::function<void(const Config &, std::stop_token, PlatformStatusObserver)>;
 // 单个控制线程拥有连接任务；RPC仅在持久化成功后通知，不持锁回收线程。
 class PlatformAccessSupervisor : public ModuleManager::PlatformAccessControl {
@@ -24,6 +27,7 @@ private:
   PlatformAccessRunner runner_;
   OrdinaryNetworkApply networkApply_;
   OrdinaryNetworkApply networkCheck_;
+  const std::string deviceArchitecture_;
   OrdinaryNetworkResult ApplyNetwork(const OrdinaryNetworkConfig &config) const;
   OrdinaryNetworkResult CheckNetwork(const OrdinaryNetworkConfig &config) const;
   void RecordNetworkResult(const OrdinaryNetworkResult &result);

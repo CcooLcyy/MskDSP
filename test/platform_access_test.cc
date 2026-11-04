@@ -1,6 +1,7 @@
 #include <grpcpp/grpcpp.h>
 #include <gtest/gtest.h>
 #include <sys/stat.h>
+#include <sys/utsname.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -45,6 +46,31 @@ protected:
   }
   std::filesystem::path directory, path;
 };
+
+// 架构别名统一为协议值，未知架构保留原值，空探测结果不得猜测为 ARM64。
+TEST_F(PlatformAccessTest, NormalizesDeviceArchitectureWithoutGuessingUnknownValues) {
+  for (const auto &alias : {"aarch64", "arm64", "AARCH64"})
+    EXPECT_EQ(pa::NormalizePlatformDeviceArchitecture(alias), "arm64");
+  for (const auto &alias : {"x86_64", "amd64", "x64", "AMD64"})
+    EXPECT_EQ(pa::NormalizePlatformDeviceArchitecture(alias), "x64");
+  EXPECT_EQ(pa::NormalizePlatformDeviceArchitecture("riscv64"), "riscv64");
+  EXPECT_EQ(pa::NormalizePlatformDeviceArchitecture("CustomCPU"), "CustomCPU");
+  EXPECT_EQ(pa::NormalizePlatformDeviceArchitecture(""), "unknown");
+}
+
+// Get 和 Set 均报告下位机运行环境 uname 架构，不依赖保存配置或其他模块。
+TEST_F(PlatformAccessTest, ReportsRuntimeDeviceArchitectureInReadAndSaveStatus) {
+  struct utsname runtime{};
+  ASSERT_EQ(::uname(&runtime), 0);
+  const auto expected = pa::NormalizePlatformDeviceArchitecture(runtime.machine);
+  pa::PlatformAccessSupervisor control(path);
+  EXPECT_EQ(Read(control).device_architecture(), expected);
+  EXPECT_FALSE(std::filesystem::exists(path));
+  ModuleManagerProto::PlatformAccessStatus saved;
+  ASSERT_TRUE(control.Set(Request(), &saved).ok());
+  EXPECT_EQ(saved.device_architecture(), expected);
+  EXPECT_EQ(Read(control).device_architecture(), saved.device_architecture());
+}
 
 // 未配置时禁用且读取不创建文件，保存只返回令牌标记并以0600落盘，重建恢复相同修订。
 TEST_F(PlatformAccessTest, DefaultsAndPersistsRedactedConfiguration) {

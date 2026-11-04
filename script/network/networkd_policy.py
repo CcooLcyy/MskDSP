@@ -4,6 +4,7 @@ from collections import Counter
 import json
 import os
 from pathlib import Path
+import platform
 import shlex
 import stat
 import subprocess
@@ -146,7 +147,11 @@ def restart_networkd(run, original_links):
         time.sleep(0.5)
 
 
-def prepare(root=Path('/'), run=command):
+def prepare(root=Path('/'), run=command, *, architecture=None):
+    architecture = (platform.machine() if architecture is None else architecture).strip().lower()
+    if architecture not in ('aarch64', 'arm64'):
+        print('宿主机架构为 ' + (architecture or '未知') + '，沿用系统网络，跳过 networkd 兼容准备')
+        return
     root = Path(root)
     identity = process_identity(root, run)
     if identity is None:
