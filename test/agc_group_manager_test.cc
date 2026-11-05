@@ -2099,6 +2099,7 @@ TEST(AgcGroupManagerTest, DirectSynchronousDeltaKeepsAcceptedTargetAcrossFeedbac
   ASSERT_TRUE(manager.StartGroup("g-health-direct-delta").ok());
   PublishCommunication(&state, info.conn_id(), "HEALTH1", 1);
   PublishDoublePoint(&state, info.conn_id(), "INV2_P_MEAS", 10);
+  PublishDoublePoint(&state, info.conn_id(), "P_CMD", 0);
   ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "P_TOTAL", 10));
   const auto result = ExecuteDoubleCommand(&manager, "g-health-direct-delta", info.conn_id(), "P_CMD", 80);
   ASSERT_EQ(result.status(), DataCenterProto::COMMAND_ACCEPTED);
