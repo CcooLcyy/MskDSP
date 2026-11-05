@@ -253,7 +253,7 @@ class GrpcContractTests(unittest.TestCase):
                 port = server.add_insecure_port("127.0.0.1:0")
                 server.start()
                 try:
-                    with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+                    with grpc.insecure_channel(f"127.0.0.1:{port}") as rpc_channel:
                         heads = []
                         def before():
                             heads.append(True)
@@ -261,8 +261,8 @@ class GrpcContractTests(unittest.TestCase):
                                 raise client.ClientError("远端分支已变化")
 
                         def transfer():
-                            return client.transfer(services.SoftwarePublishServiceStub(channel),
-                                                   services.SoftwareCatalogServiceStub(channel), messages,
+                            return client.transfer(services.SoftwarePublishServiceStub(rpc_channel),
+                                                   services.SoftwareCatalogServiceStub(rpc_channel), messages,
                                                    archive, metadata, "test-token", before_publish=before,
                                                    retry_delay=0, chunk_size=3)
 
