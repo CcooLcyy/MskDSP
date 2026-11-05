@@ -3,6 +3,7 @@ workflow:
     on_new_commit: interruptible
   rules:
     - if: '$CI_COMMIT_TAG == null && ($CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH =~ /^beta\/(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/) && ($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web")'
+    - if: '$CI_COMMIT_REF_PROTECTED == "true" && $CI_COMMIT_TAG =~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/ && ($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web")'
     - when: never
 
 stages: [build, test, package, publish]
@@ -257,6 +258,25 @@ publish-beta-arm64:
   resource_group: mskdsp-lower-beta-arm64
   rules:
     - if: '$CI_COMMIT_BRANCH =~ /^beta\/(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/'
+    - when: never
+  needs:
+    - job: test-publish-contract
+      artifacts: false
+    - job: package-arm64
+      artifacts: true
+    - job: package-x64
+      artifacts: false
+
+# 正式标签重新构建冻结产物，发布前核对标签和同版本 Beta 指向同一提交。
+publish-stable-arm64:
+  extends: .publish
+  variables:
+    ARCH: arm64
+  environment:
+    name: ci
+  resource_group: mskdsp-lower-stable-arm64
+  rules:
+    - if: '$CI_COMMIT_REF_PROTECTED == "true" && $CI_COMMIT_TAG =~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/'
     - when: never
   needs:
     - job: test-publish-contract

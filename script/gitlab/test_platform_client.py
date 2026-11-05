@@ -122,12 +122,73 @@ class IdentityTests(unittest.TestCase):
             with self.assertRaises(client.ClientError):
                 client.confirm_manifest("http://192.168.1.2:8082", self.data)
 
+    # Stable 冻结纯版本与受保护标签，禁止 x64 和跨通道冒充。
+    def test_stable_identity_requires_protected_arm64_tag(self):
+        self.data.update(platform="linux-arm64", channel="stable", source_ref="v0.4.0",
+                         version="0.4.0", package_version="0.4.0-linux-arm64")
+        env = self.env | {"CI_COMMIT_BRANCH": "", "CI_COMMIT_TAG": "v0.4.0", "CI_COMMIT_REF_PROTECTED": "true"}
+        self.write()
+        _, metadata = client.load_metadata(self.path, env)
+        self.assertEqual(metadata["channel"], "stable")
+        for changes in ({"platform": "linux-x64"}, {"channel": "beta"},
+                        {"version": "0.4.0-beta-p7-b42"}, {"package_version": "0.4.0-ci-linux-arm64"}):
+            original = dict(self.data)
+            self.data.update(changes)
+            self.write()
+            with self.subTest(changes=changes), self.assertRaises(client.ClientError):
+                client.load_metadata(self.path, env)
+            self.data = original
+        self.write()
+        with self.assertRaises(client.ClientError):
+            client.load_metadata(self.path, env | {"CI_COMMIT_REF_PROTECTED": "false"})
+
+    # 附注标签取 peeled commit，同时要求 Beta 分支仍指向该提交。
+    def test_stable_tag_and_beta_head_must_match(self):
+        metadata = self.data | {"channel": "stable", "source_ref": "v0.4.0", "version": "0.4.0"}
+        env = self.env | {"CI_COMMIT_REF_PROTECTED": "true"}
+        tag, beta, sha = "refs/tags/v0.4.0", "refs/heads/beta/0.4.0", metadata["source_sha"]
+        for annotated in (False, True):
+            lines = [f"{sha}\t{beta}", f"{'a' * 40 if annotated else sha}\t{tag}"]
+            if annotated:
+                lines.append(f"{sha}\t{tag}^{{}}")
+            with self.subTest(annotated=annotated), patch.object(client.subprocess, "run") as run:
+                run.return_value.returncode = 0
+                run.return_value.stdout = "\n".join(lines) + "\n"
+                client.check_current_head(metadata, env)
+                self.assertIn(beta, run.call_args.args[0])
+                self.assertIn(tag + "^{}", run.call_args.args[0])
+                for invalid in (f"{sha}\t{tag}\n", f"{sha}\t{tag}\n{'c' * 40}\t{beta}\n",
+                                f"{'c' * 40}\t{tag}\n{sha}\t{beta}\n",
+                                f"{'a' * 40}\t{tag}\n{'c' * 40}\t{tag}^{{}}\n{sha}\t{beta}\n"):
+                    run.return_value.stdout = invalid
+                    with self.assertRaises(client.ClientError):
+                        client.check_current_head(metadata, env)
+
     def test_cli_hides_sensitive_exception(self):
         import io
         with patch.object(client, "upload", side_effect=ValueError("Authorization: Bearer sensitive-token")), \
                 patch.object(client.sys, "stderr", new_callable=io.StringIO) as output:
             self.assertEqual(client.main(["--metadata", str(self.path)]), 1)
             self.assertNotIn("sensitive-token", output.getvalue())
+
+    # Stable 公开清单走正式路径并核对冻结的纯版本、标签和完整性字段。
+    def test_stable_manifest_uses_stable_path(self):
+        self.data.update(platform="linux-arm64", channel="stable", source_ref="v0.4.0",
+                         version="0.4.0", package_version="0.4.0-linux-arm64")
+        manifest = {name: self.data[name] for name in ("product", "version", "package_version", "platform", "image_id", "channel")}
+        manifest.update(schema_version=1, source=dict(repository=self.data["source_repository"],
+                                                     ref=self.data["source_ref"], sha=self.data["source_sha"]),
+                        asset=dict(name=self.data["file_name"], size=self.data["size"], sha256=self.data["sha256"]))
+        with patch.object(client, "urlopen") as opening:
+            opening.return_value.__enter__.return_value.read.return_value = json.dumps(manifest).encode()
+            client.confirm_manifest("http://192.168.1.2:8082", self.data)
+            request = opening.call_args.args[0]
+            self.assertEqual(request.full_url, "http://192.168.1.2:8082/mskdsp-lower/stable/latest.json")
+            self.assertIsNone(request.get_header("Authorization"))
+            manifest["asset"]["size"] += 1
+            opening.return_value.__enter__.return_value.read.return_value = json.dumps(manifest).encode()
+            with self.assertRaises(client.ClientError):
+                client.confirm_manifest("http://192.168.1.2:8082", self.data)
 
     # Beta 公开清单从独立路径读取，并核对冻结来源、大小及摘要。
     def test_beta_public_manifest_uses_beta_path(self):
@@ -167,6 +228,12 @@ class GrpcContractTests(unittest.TestCase):
             with self.subTest(scenario=scenario):
                 self.exercise(scenario, channel="beta")
 
+    # Stable 保留原成功、续传、完整性失败、过期拒绝及响应丢失断言。
+    def test_real_stable_channel_contract(self):
+        for scenario in ("success", "interrupt", "invalid", "stale"):
+            with self.subTest(scenario=scenario):
+                self.exercise(scenario, channel="stable")
+
     def exercise(self, scenario, channel="ci"):
         import grpc
         from concurrent.futures import ThreadPoolExecutor
@@ -175,6 +242,10 @@ class GrpcContractTests(unittest.TestCase):
                              version="0.4.0-beta-p7-b42-j50-bbbbbbb",
                              package_version="0.4.0-beta-p7-b42-j50-bbbbbbb-linux-arm64")
             self.env["CI_COMMIT_BRANCH"] = "beta/0.4.0"
+        elif channel == "stable":
+            self.data.update(platform="linux-arm64", channel="stable", source_ref="v0.4.0",
+                             version="0.4.0", package_version="0.4.0-linux-arm64")
+            self.env.update(CI_COMMIT_BRANCH="", CI_COMMIT_TAG="v0.4.0", CI_COMMIT_REF_PROTECTED="true")
         self.write()
         archive, metadata = client.load_metadata(self.path, self.env)
         protocol = Path(os.environ.get("PLATFORM_PROTO_TEST_ROOT", Path(__file__).resolve().parents[3] /

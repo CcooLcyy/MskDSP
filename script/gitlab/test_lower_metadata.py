@@ -79,6 +79,26 @@ class MetadataTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 target.freeze_metadata(identity, artifact.with_name("missing"), archive)
 
+    # Stable 只能来自同版本受保护标签，重建和打包保留正式纯版本。
+    def test_stable_identity_requires_protected_matching_tag(self):
+        env = self.environment | {"CI_COMMIT_BRANCH": "", "CI_COMMIT_TAG": "v0.4.0",
+                                  "CI_COMMIT_REF_PROTECTED": "true"}
+        for arch in ("arm64", "x64"):
+            identity = target.create_identity("0.4.0", arch, env)
+            self.assertEqual(identity["version"], "0.4.0")
+            self.assertEqual(identity["channel"], "stable")
+            self.assertEqual(identity["source_ref"], "v0.4.0")
+            packaged = target.package_identity(identity, env | {"CI_JOB_ID": "50"})
+            self.assertEqual(packaged["version"], "0.4.0")
+            self.assertEqual(packaged["package_version"], "0.4.0-linux-" + arch)
+            with self.assertRaises(ValueError):
+                target.package_identity(identity | {"version": "0.4.0-beta-p7-b42"}, env)
+        for changes in ({"CI_COMMIT_REF_PROTECTED": "false"}, {"CI_COMMIT_TAG": "v0.4.1"},
+                        {"CI_COMMIT_TAG": "v00.4.0"}, {"CI_COMMIT_TAG": "v0.4.0-beta"},
+                        {"CI_COMMIT_BRANCH": "master"}, {"CI_PIPELINE_SOURCE": "schedule"}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                target.create_identity("0.4.0", "arm64", env | changes)
+
 
 if __name__ == "__main__":
     unittest.main()

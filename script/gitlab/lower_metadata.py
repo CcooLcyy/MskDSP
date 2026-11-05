@@ -31,9 +31,8 @@ def release_context(branch):
 
 
 def validate_environment(environment):
-    release_context(environment.get("CI_COMMIT_BRANCH"))
-    require(environment.get("CI_PIPELINE_SOURCE") in ("push", "web")
-            and not environment.get("CI_COMMIT_TAG"), "仅允许受控分支 push 或手动流水线")
+    release_environment(environment)
+    require(environment.get("CI_PIPELINE_SOURCE") in ("push", "web"), "仅允许受控引用 push 或手动流水线")
     for field in ("CI_PIPELINE_ID", "CI_PIPELINE_IID", "CI_JOB_ID"):
         require(re.fullmatch(r"[1-9][0-9]*", environment.get(field, "")), "流水线或作业编号不合法")
     require(re.fullmatch(r"[a-f0-9]{40}", environment.get("CI_COMMIT_SHA", "")), "来源提交不合法")
@@ -42,18 +41,31 @@ def validate_environment(environment):
             and not url.query and not url.fragment, "来源仓库地址不合法")
 
 
+def release_environment(environment):
+    """正式版只允许无分支名的受保护标签，返回通道、版本和真实来源引用。"""
+    tag = environment.get("CI_COMMIT_TAG")
+    if tag:
+        require(not environment.get("CI_COMMIT_BRANCH") and environment.get("CI_COMMIT_REF_PROTECTED") == "true",
+                "正式发布必须来自受保护标签")
+        match = re.fullmatch(r"v((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))", tag)
+        require(match is not None, "正式标签必须为 v主版本.次版本.修订版本")
+        return "stable", match.group(1), tag
+    channel, version = release_context(environment.get("CI_COMMIT_BRANCH"))
+    return channel, version, environment["CI_COMMIT_BRANCH"]
+
+
 def create_identity(base_version, arch, environment):
     validate_environment(environment)
     require(arch in ("arm64", "x64"), "构建架构不合法")
     base_version = base_version.strip()
     require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,60}", base_version), "基础版本不合法")
-    channel, branch_version = release_context(environment.get("CI_COMMIT_BRANCH"))
-    require(branch_version is None or branch_version == base_version, "Beta 分支版本与 VERSION 不一致")
+    channel, branch_version, source_ref = release_environment(environment)
+    require(branch_version is None or branch_version == base_version, "发布引用版本与 VERSION 不一致")
     return {
         "product": "mskdsp-lower", "channel": channel, "platform": "linux-" + arch,
-        "version": f"{base_version}-{channel}-p{environment['CI_PIPELINE_IID']}-b{environment['CI_JOB_ID']}",
+        "version": base_version if channel == "stable" else f"{base_version}-{channel}-p{environment['CI_PIPELINE_IID']}-b{environment['CI_JOB_ID']}",
         "source_repository": environment["CI_PROJECT_URL"].rstrip("/"),
-        "source_ref": environment["CI_COMMIT_BRANCH"], "source_sha": environment["CI_COMMIT_SHA"],
+        "source_ref": source_ref, "source_sha": environment["CI_COMMIT_SHA"],
         "pipeline_id": environment["CI_PIPELINE_ID"], "pipeline_iid": environment["CI_PIPELINE_IID"],
         "build_job_id": environment["CI_JOB_ID"],
         "build_time": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
@@ -62,17 +74,19 @@ def create_identity(base_version, arch, environment):
 
 def package_identity(identity, environment):
     validate_environment(environment)
-    channel, branch_version = release_context(environment.get("CI_COMMIT_BRANCH"))
+    channel, branch_version, source_ref = release_environment(environment)
     for key, variable in (("pipeline_id", "CI_PIPELINE_ID"), ("pipeline_iid", "CI_PIPELINE_IID"),
-                          ("source_sha", "CI_COMMIT_SHA"), ("source_ref", "CI_COMMIT_BRANCH"),
+                          ("source_sha", "CI_COMMIT_SHA"),
                           ("source_repository", "CI_PROJECT_URL")):
         require(str(identity[key]) == environment[variable].rstrip("/"), "打包作业与构建来源不一致")
+    require(identity.get("source_ref") == source_ref, "打包作业与构建来源引用不一致")
     require(identity.get("product") == "mskdsp-lower" and identity.get("channel") == channel
             and identity.get("platform") in ("linux-arm64", "linux-x64")
             and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]+", identity.get("version", "")), "构建身份不合法")
-    require(branch_version is None or re.fullmatch(
+    require(channel != "beta" or re.fullmatch(
         re.escape(branch_version) + r"-beta-p[1-9][0-9]*-b[1-9][0-9]*", identity["version"]), "Beta 构建版本与来源不一致")
-    version = f"{identity['version']}-j{environment['CI_JOB_ID']}-{identity['source_sha'][:7]}"
+    require(channel != "stable" or identity["version"] == branch_version, "正式版本与标签不一致")
+    version = identity["version"] if channel == "stable" else f"{identity['version']}-j{environment['CI_JOB_ID']}-{identity['source_sha'][:7]}"
     return identity | {"version": version, "package_version": version + "-" + identity["platform"],
                        "package_job_id": environment["CI_JOB_ID"]}
 

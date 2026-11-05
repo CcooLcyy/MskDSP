@@ -82,6 +82,22 @@ class LowerCiTest(unittest.TestCase):
         self.assertNotIn("docker.sock", script)
         self.assertNotIn("check_iec61850_package", script)
 
+    # Stable 仅保护标签可触发 ARM64 发布，完整测试与双架构门禁保留。
+    def test_stable_tag_job_is_protected_and_waits_for_all_gates(self):
+        rule = self.config["workflow"]["rules"][1]["if"]
+        self.assertIn('CI_COMMIT_REF_PROTECTED == "true"', rule)
+        self.assertIn("CI_COMMIT_TAG =~", rule)
+        self.assertIn('"push"', rule)
+        self.assertIn('"web"', rule)
+        stable = self.config["publish-stable-arm64"]
+        self.assertEqual(stable["variables"]["ARCH"], "arm64")
+        self.assertEqual(stable["environment"]["name"], "ci")
+        self.assertEqual(stable["resource_group"], "mskdsp-lower-stable-arm64")
+        self.assertIn('CI_COMMIT_REF_PROTECTED == "true"', stable["rules"][0]["if"])
+        self.assertEqual({item["job"] for item in stable["needs"]},
+                         {"package-arm64", "package-x64", "test-publish-contract"})
+        self.assertNotIn("publish-stable-x64", self.config)
+
     def test_shared_ram_workspace_preserves_cross_job_path_and_cleanup_after_artifacts(self):
         # 同流水线同架构路径一致，不同流水线及架构隔离，清理由 Runner 在上传后执行。
         variables = self.config["variables"]

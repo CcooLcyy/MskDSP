@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from init_platform_proto import auth_environment
-from lower_metadata import release_context
+from lower_metadata import release_environment
 
 
 class ClientError(ValueError):
@@ -56,7 +56,7 @@ def load_metadata(metadata_path, environ=None):
               "source_repository", "source_ref", "source_sha", "build_time", "channel", "pipeline_id")
     if not isinstance(data, dict) or any(name not in data for name in fields):
         raise ClientError("冻结元数据字段不完整")
-    if (data["product"] != "mskdsp-lower" or data["channel"] not in ("ci", "beta")
+    if (data["product"] != "mskdsp-lower" or data["channel"] not in ("ci", "beta", "stable")
             or data["platform"] not in ("linux-arm64", "linux-x64")
             or any(not safe_component(data[name]) for name in ("version", "package_version", "file_name"))
             or data["file_name"] == "SHA256SUMS"
@@ -68,21 +68,23 @@ def load_metadata(metadata_path, environ=None):
             or not repository_url(str(data["source_repository"]))):
         raise ClientError("下位机冻结身份、文件或摘要不合法")
     try:
-        channel, branch_version = release_context(environment.get("CI_COMMIT_BRANCH"))
+        channel, branch_version, source_ref = release_environment(environment)
     except ValueError:
         raise ClientError("发布来源分支不合法") from None
     if (data["channel"] != channel
+            or channel in ("beta", "stable") and data["platform"] != "linux-arm64"
+            or channel == "stable" and (data["version"] != branch_version
+                or data["package_version"] != branch_version + "-linux-arm64")
             or channel == "beta" and (data["platform"] != "linux-arm64" or not re.fullmatch(
                 re.escape(branch_version) + r"-beta-p[1-9][0-9]*-b[1-9][0-9]*-j[1-9][0-9]*-" + data["source_sha"][:7],
                 data["version"]))
             or environment.get("CI_PIPELINE_SOURCE") not in ("push", "web")
-            or environment.get("CI_COMMIT_TAG")
-            or data["source_ref"] != environment.get("CI_COMMIT_BRANCH")
+            or data["source_ref"] != source_ref
             or data["source_sha"] != environment.get("CI_COMMIT_SHA")
             or str(data["pipeline_id"]) != environment.get("CI_PIPELINE_ID")
             or not re.fullmatch(r"[1-9][0-9]*", str(data["pipeline_id"]))
             or data["source_repository"].rstrip("/") != environment.get("CI_PROJECT_URL", "").rstrip("/")):
-        raise ClientError("仅允许受控分支发布自身冻结产物，Beta 仅支持 ARM64")
+        raise ClientError("仅允许受控引用发布自身冻结产物，Beta/Stable 仅支持 ARM64")
     try:
         moment = datetime.fromisoformat(data["build_time"].replace("Z", "+00:00"))
         if moment.tzinfo is None or moment.utcoffset() != timezone.utc.utcoffset(moment):
@@ -102,6 +104,26 @@ def check_current_head(metadata, environ=None):
     repository = metadata["source_repository"].rstrip("/")
     if not repository.endswith(".git"):
         repository += ".git"
+    if metadata["channel"] == "stable":
+        if (environment.get("CI_COMMIT_REF_PROTECTED") != "true"
+                or metadata["source_ref"] != "v" + metadata["version"]
+                or not re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", metadata["version"])):
+            raise ClientError("正式发布来源标签或保护状态不合法")
+        tag = "refs/tags/" + metadata["source_ref"]
+        beta = "refs/heads/beta/" + metadata["version"]
+        result = subprocess.run(["git", "ls-remote", "--exit-code", repository, tag, tag + "^{}", beta],
+                                env=git_environment, capture_output=True, text=True, timeout=60, check=False)
+        refs = {}
+        for line in result.stdout.splitlines():
+            parts = line.split("\t")
+            if (len(parts) != 2 or parts[1] not in (tag, tag + "^{}", beta) or parts[1] in refs
+                    or not re.fullmatch(r"[a-f0-9]{40}", parts[0])):
+                raise ClientError("远端标签及 Beta 来源响应不合法")
+            refs[parts[1]] = parts[0]
+        commit = refs.get(tag + "^{}", refs.get(tag))
+        if result.returncode or tag not in refs or commit != metadata["source_sha"] or refs.get(beta) != metadata["source_sha"]:
+            raise ClientError("远端正式标签或 Beta 分支与冻结提交不一致，拒绝发布")
+        return
     result = subprocess.run(["git", "ls-remote", "--exit-code", repository,
                              "refs/heads/" + metadata["source_ref"]], env=git_environment,
                             capture_output=True, text=True, timeout=60, check=False)
@@ -187,8 +209,8 @@ def transfer(publisher, catalog, messages, archive, metadata, token, *, before_p
              attempts=4, retry_delay=1, timeout=60, chunk_size=1024 * 1024, after_publish=None):
     import grpc
     channel = metadata["channel"]
-    if channel not in ("ci", "beta") or channel == "beta" and metadata["platform"] != "linux-arm64":
-        raise ClientError("发布通道不合法，Beta 仅支持 ARM64")
+    if channel not in ("ci", "beta", "stable") or channel in ("beta", "stable") and metadata["platform"] != "linux-arm64":
+        raise ClientError("发布通道不合法，Beta/Stable 仅支持 ARM64")
     if (not 1 <= attempts <= 10 or not 0 < timeout <= 1800 or not 1 <= chunk_size <= 1024 * 1024
             or not token or not token.isascii() or any(ord(char) < 33 or ord(char) > 126 for char in token)):
         raise ClientError("上传配置或发布令牌不合法")
