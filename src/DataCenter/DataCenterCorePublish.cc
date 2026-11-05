@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "DataCenterQuality.hpp"
 #include "mskdsp/Decimal20.hpp"
 
 namespace DataCenter {
@@ -56,6 +57,11 @@ grpc::Status DataCenterCore::Publish(const DataCenterProto::PublishRequest &requ
   }
 
   outUpdates->clear();
+  DataCenterProto::Quality quality;
+  status = detail::NormalizeQuality(request, &quality);
+  if (!status.ok()) {
+    return status;
+  }
   auto connIt = connections_.find(request.conn_id());
   if (connIt == connections_.end()) {
     return grpc::Status(grpc::StatusCode::NOT_FOUND, "conn_id 未在连接注册表中找到，无法匹配稳定路由");
@@ -78,7 +84,7 @@ grpc::Status DataCenterCore::Publish(const DataCenterProto::PublishRequest &requ
   sourceUpdate.set_tag(request.tag());
   sourceUpdate.mutable_value()->CopyFrom(request.value());
   sourceUpdate.set_ts_ms(tsMs);
-  sourceUpdate.set_quality(request.quality());
+  detail::CopyQuality(request, quality, &sourceUpdate);
   sourceUpdate.set_sequence(++sourceUpdateSequence_);
   latestBySrc_[EndpointKey{request.conn_id(), request.tag()}] = std::move(sourceUpdate);
 
@@ -97,7 +103,7 @@ grpc::Status DataCenterCore::Publish(const DataCenterProto::PublishRequest &requ
     update.set_dst_tag(dst.tag);
     update.mutable_value()->CopyFrom(request.value());
     update.set_ts_ms(tsMs);
-    update.set_quality(request.quality());
+    detail::CopyQuality(request, quality, &update);
 
     latestByDst_[EndpointKey{dstConnId, dst.tag}] = update;
     outUpdates->emplace_back(std::move(update));
@@ -112,7 +118,15 @@ grpc::Status DataCenterCore::BatchPublish(const DataCenterProto::BatchPublishReq
   }
   outUpdates->clear();
 
+  std::vector<DataCenterProto::Quality> qualities;
+  qualities.reserve(static_cast<size_t>(request.points_size()));
   for (const auto &point : request.points()) {
+    DataCenterProto::Quality quality;
+    auto qualityStatus = detail::NormalizeQuality(point, &quality);
+    if (!qualityStatus.ok()) {
+      return qualityStatus;
+    }
+    qualities.push_back(quality);
     auto status = validateEndpoint(point.conn_id(), point.tag());
     if (!status.ok()) {
       return status;
@@ -151,8 +165,10 @@ grpc::Status DataCenterCore::BatchPublish(const DataCenterProto::BatchPublishReq
   outUpdates->reserve(estimatedUpdates);
 
   uint64_t nextSourceSequence = sourceUpdateSequence_;
+  size_t pointIndex = 0;
 
   for (const auto &point : request.points()) {
+    const auto quality = qualities[pointIndex++];
     auto connIt = connections_.find(point.conn_id());
     if (connIt == connections_.end()) {
       return grpc::Status(grpc::StatusCode::NOT_FOUND, "conn_id 未在连接注册表中找到，无法匹配稳定路由");
@@ -167,7 +183,7 @@ grpc::Status DataCenterCore::BatchPublish(const DataCenterProto::BatchPublishReq
     sourceUpdate.set_tag(point.tag());
     sourceUpdate.mutable_value()->CopyFrom(point.value());
     sourceUpdate.set_ts_ms(tsMs);
-    sourceUpdate.set_quality(point.quality());
+    detail::CopyQuality(point, quality, &sourceUpdate);
     sourceUpdate.set_sequence(++nextSourceSequence);
     sourceUpdates.emplace_back(std::move(sourceUpdate));
 
@@ -189,7 +205,7 @@ grpc::Status DataCenterCore::BatchPublish(const DataCenterProto::BatchPublishReq
       update.set_dst_tag(dst.tag);
       update.mutable_value()->CopyFrom(point.value());
       update.set_ts_ms(tsMs);
-      update.set_quality(point.quality());
+      detail::CopyQuality(point, quality, &update);
       outUpdates->emplace_back(std::move(update));
     }
   }
@@ -221,9 +237,14 @@ grpc::Status DataCenterCore::ResolveCommandRoute(
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "value 不能为空");
   }
 
+  DataCenterProto::Quality quality;
+  auto status = detail::NormalizeQuality(request, &quality);
+  if (!status.ok()) {
+    return status;
+  }
   StableEndpointKey src;
   uint32_t srcConnId = 0;
-  auto status = resolveEndpoint(request.src(), &src, &srcConnId);
+  status = resolveEndpoint(request.src(), &src, &srcConnId);
   if (!status.ok()) {
     return status;
   }
@@ -318,9 +339,14 @@ grpc::Status DataCenterCore::StoreAcceptedCommand(
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "dst 不能为空");
   }
 
+  DataCenterProto::Quality quality;
+  auto status = detail::NormalizeQuality(request, &quality);
+  if (!status.ok()) {
+    return status;
+  }
   StableEndpointKey src;
   uint32_t srcConnId = 0;
-  auto status = resolveEndpoint(request.src(), &src, &srcConnId);
+  status = resolveEndpoint(request.src(), &src, &srcConnId);
   if (!status.ok()) {
     return status;
   }
@@ -336,7 +362,7 @@ grpc::Status DataCenterCore::StoreAcceptedCommand(
   update.set_dst_tag(dst.tag());
   update.mutable_value()->CopyFrom(request.value());
   update.set_ts_ms(tsMs);
-  update.set_quality(request.quality());
+  detail::CopyQuality(request, quality, &update);
   latestByDst_[EndpointKey{dst.conn_id(), dst.tag()}] = std::move(update);
   return grpc::Status::OK;
 }

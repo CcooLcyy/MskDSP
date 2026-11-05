@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <initializer_list>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -67,6 +68,152 @@ void InstallRouteConnections(DataCenterCore &core, std::initializer_list<uint32_
   ASSERT_TRUE(core.ReplaceConnectionsConfig(cfg).ok());
 }
 }  // 命名空间结束
+
+// 验证：四种消息序列化区分品质位缺席和显式零，并完整保留组合位及未知高位。
+TEST(DataCenterQualityProtocolTest, OptionalFlagsSurviveSerialization) {
+  const auto verify = [](auto message) {
+    using Message = decltype(message);
+    Message restored;
+    ASSERT_TRUE(restored.ParseFromString(message.SerializeAsString()));
+    EXPECT_FALSE(restored.has_quality_flags());
+    for (const uint32_t flags : {0u, 0xF1u, 0x80000000u, 0x80000080u}) {
+      message.set_quality_flags(flags);
+      ASSERT_TRUE(restored.ParseFromString(message.SerializeAsString()));
+      EXPECT_TRUE(restored.has_quality_flags());
+      EXPECT_EQ(restored.quality_flags(), flags);
+    }
+  };
+  verify(DataCenterProto::PublishRequest{});
+  verify(DataCenterProto::PointUpdate{});
+  verify(DataCenterProto::SourcePointUpdate{});
+  verify(DataCenterProto::ExecuteCommandRequest{});
+  EXPECT_EQ(DataCenterProto::QUALITY_FLAG_NONE, 0);
+  EXPECT_EQ(DataCenterProto::QUALITY_FLAG_OVERFLOW, 1);
+  EXPECT_EQ(DataCenterProto::QUALITY_FLAG_BLOCKED, 16);
+  EXPECT_EQ(DataCenterProto::QUALITY_FLAG_SUBSTITUTED, 32);
+  EXPECT_EQ(DataCenterProto::QUALITY_FLAG_NOT_TOPICAL, 64);
+  EXPECT_EQ(DataCenterProto::QUALITY_FLAG_INVALID, 128);
+}
+
+// 验证：单点发布推导摘要，源目的缓存保真；零和缺席完整替换前次品质且兼容旧摘要。
+TEST(DataCenterCoreTest, QualityFlagsNormalizeAndReplaceSourceAndDestinationLatest) {
+  DataCenterCore core;
+  InstallRouteConnections(core, {1, 2});
+  DataCenterProto::UpsertRoutesRequest routes;
+  *routes.add_routes() = MakeRoute(1, "A", 2, "B");
+  ASSERT_TRUE(core.UpsertRoutes(routes).ok());
+  struct QualityCase {
+    std::optional<uint32_t> flags;
+    DataCenterProto::Quality supplied;
+    DataCenterProto::Quality expected;
+  };
+  const std::vector<QualityCase> cases{
+      {0x80u, DataCenterProto::QUALITY_UNSPECIFIED, DataCenterProto::QUALITY_BAD},
+      {0x01u, DataCenterProto::QUALITY_UNSPECIFIED, DataCenterProto::QUALITY_UNCERTAIN},
+      {0x10u, DataCenterProto::QUALITY_UNCERTAIN, DataCenterProto::QUALITY_UNCERTAIN},
+      {0x20u, DataCenterProto::QUALITY_UNSPECIFIED, DataCenterProto::QUALITY_UNCERTAIN},
+      {0x40u, DataCenterProto::QUALITY_UNSPECIFIED, DataCenterProto::QUALITY_UNCERTAIN},
+      {0x71u, DataCenterProto::QUALITY_UNSPECIFIED, DataCenterProto::QUALITY_UNCERTAIN},
+      {0xF1u, DataCenterProto::QUALITY_BAD, DataCenterProto::QUALITY_BAD},
+      {0x80000000u, DataCenterProto::QUALITY_UNSPECIFIED, DataCenterProto::QUALITY_UNCERTAIN},
+      {0x80000080u, DataCenterProto::QUALITY_UNSPECIFIED, DataCenterProto::QUALITY_BAD},
+      {0u, DataCenterProto::QUALITY_UNSPECIFIED, DataCenterProto::QUALITY_GOOD},
+      {0u, DataCenterProto::QUALITY_GOOD, DataCenterProto::QUALITY_GOOD},
+      {std::nullopt, DataCenterProto::QUALITY_UNSPECIFIED, DataCenterProto::QUALITY_UNSPECIFIED},
+      {std::nullopt, DataCenterProto::QUALITY_GOOD, DataCenterProto::QUALITY_GOOD},
+      {std::nullopt, DataCenterProto::QUALITY_BAD, DataCenterProto::QUALITY_BAD},
+      {std::nullopt, DataCenterProto::QUALITY_UNCERTAIN, DataCenterProto::QUALITY_UNCERTAIN},
+  };
+  int64_t value = 0;
+  for (const auto &entry : cases) {
+    SCOPED_TRACE(++value);
+    DataCenterProto::PublishRequest request;
+    request.set_conn_id(1);
+    request.set_tag("A");
+    request.mutable_value()->set_int_value(value);
+    request.set_quality(entry.supplied);
+    if (entry.flags) request.set_quality_flags(*entry.flags);
+    std::vector<DataCenterProto::PointUpdate> updates;
+    ASSERT_TRUE(core.Publish(request, &updates).ok());
+    ASSERT_EQ(updates.size(), 1u);
+    DataCenterProto::GetLatestRequest destination;
+    destination.set_conn_id(2);
+    DataCenterProto::GetLatestResponse latest;
+    ASSERT_TRUE(core.GetLatest(destination, &latest).ok());
+    ASSERT_EQ(latest.updates_size(), 1);
+    DataCenterProto::GetSourceLatestRequest source;
+    source.set_conn_id(1);
+    DataCenterProto::GetSourceLatestResponse sourceLatest;
+    ASSERT_TRUE(core.GetSourceLatest(source, &sourceLatest).ok());
+    ASSERT_EQ(sourceLatest.updates_size(), 1);
+    const auto verify = [&](const auto &update) {
+      EXPECT_EQ(update.quality(), entry.expected);
+      EXPECT_EQ(update.has_quality_flags(), entry.flags.has_value());
+      if (entry.flags) EXPECT_EQ(update.quality_flags(), *entry.flags);
+      EXPECT_EQ(update.value().int_value(), value);
+    };
+    verify(updates.front());
+    verify(latest.updates(0));
+    verify(sourceLatest.updates(0));
+  }
+}
+
+// 验证：单点和批量品质冲突均不写缓存、不产生更新，也不推进源端序号。
+TEST(DataCenterCoreTest, QualityConflictsAreAtomicForSingleAndBatchPublish) {
+  DataCenterCore core;
+  InstallRouteConnections(core, {1, 2});
+  DataCenterProto::UpsertRoutesRequest routes;
+  *routes.add_routes() = MakeRoute(1, "A", 2, "B");
+  *routes.add_routes() = MakeRoute(1, "C", 2, "D");
+  ASSERT_TRUE(core.UpsertRoutes(routes).ok());
+  DataCenterProto::PublishRequest initial;
+  initial.set_conn_id(1);
+  initial.set_tag("A");
+  initial.mutable_value()->set_int_value(10);
+  initial.set_quality_flags(0x80);
+  std::vector<DataCenterProto::PointUpdate> updates;
+  ASSERT_TRUE(core.Publish(initial, &updates).ok());
+  DataCenterProto::GetSourceLatestRequest source;
+  source.set_conn_id(1);
+  DataCenterProto::GetSourceLatestResponse before;
+  ASSERT_TRUE(core.GetSourceLatest(source, &before).ok());
+  ASSERT_EQ(before.updates_size(), 1);
+  const auto initialSequence = before.updates(0).sequence();
+  DataCenterProto::GetLatestRequest destination;
+  destination.set_conn_id(2);
+  DataCenterProto::GetLatestResponse destinationBefore;
+  ASSERT_TRUE(core.GetLatest(destination, &destinationBefore).ok());
+  for (const auto quality : {DataCenterProto::QUALITY_GOOD, DataCenterProto::QUALITY_BAD,
+                             DataCenterProto::QUALITY_UNCERTAIN}) {
+    DataCenterProto::PublishRequest conflict = initial;
+    conflict.set_quality(quality);
+    conflict.set_quality_flags(quality == DataCenterProto::QUALITY_GOOD ? 0x80 : 0);
+    updates.clear();
+    EXPECT_EQ(core.Publish(conflict, &updates).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_TRUE(updates.empty());
+    DataCenterProto::BatchPublishRequest batch;
+    auto *valid = batch.add_points();
+    *valid = initial;
+    valid->mutable_value()->set_int_value(20);
+    valid->set_quality_flags(0x10);
+    *batch.add_points() = conflict;
+    batch.mutable_points(1)->set_tag("C");
+    EXPECT_EQ(core.BatchPublish(batch, &updates).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_TRUE(updates.empty());
+    DataCenterProto::GetSourceLatestResponse after;
+    ASSERT_TRUE(core.GetSourceLatest(source, &after).ok());
+    EXPECT_EQ(after.SerializeAsString(), before.SerializeAsString());
+    DataCenterProto::GetLatestResponse destinationAfter;
+    ASSERT_TRUE(core.GetLatest(destination, &destinationAfter).ok());
+    EXPECT_EQ(destinationAfter.SerializeAsString(), destinationBefore.SerializeAsString());
+  }
+  initial.set_quality_flags(0);
+  ASSERT_TRUE(core.Publish(initial, &updates).ok());
+  DataCenterProto::GetSourceLatestResponse after;
+  ASSERT_TRUE(core.GetSourceLatest(source, &after).ok());
+  ASSERT_EQ(after.updates_size(), 1);
+  EXPECT_EQ(after.updates(0).sequence(), initialSequence + 1);
+}
 
 // 验证：GetOrCreateConnection 对相同 (module_name, conn_name) 返回稳定的 conn_id。
 TEST(DataCenterCoreTest, GetOrCreateConnectionReturnsStableConnIdByKey) {

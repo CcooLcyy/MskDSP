@@ -25,6 +25,7 @@
 #include <grpcpp/security/credentials.h>
 
 #include "DataCenterCore.h"
+#include "DataCenterQuality.hpp"
 #include "DataCenterStateStore.h"
 #include "Logger.h"
 
@@ -64,6 +65,13 @@ const char* qualityToString(DataCenterProto::Quality quality) {
     default:
       return "未指定";
   }
+}
+
+// 将明细位是否提供及完整数值附加到既有品质日志，便于追踪兼容摘要。
+template <typename Message>
+std::string formatQualityWithFlags(const Message& message) {
+  return std::string(qualityToString(message.quality())) +
+         ", 品质位=" + detail::FormatQualityFlags(message);
 }
 
 std::string formatPointValue(const DataCenterProto::PointValue& value) {
@@ -923,7 +931,7 @@ grpc::Status DataCenterGrpcServiceImpl::Publish(grpc::ServerContext*, const Data
 
   LOG_DEBUG("DataCenter 收到点值发布: src_conn_id={}, src_tag={}, {}, 质量={}({}), 请求时间戳={}",
            request->conn_id(), request->tag(), formatPointValue(request->value()),
-           static_cast<int>(request->quality()), qualityToString(request->quality()), request->ts_ms());
+           static_cast<int>(request->quality()), formatQualityWithFlags(*request), request->ts_ms());
 
   std::vector<DataCenterProto::PointUpdate> updates;
   std::vector<Impl::Delivery> deliveries;
@@ -934,7 +942,7 @@ grpc::Status DataCenterGrpcServiceImpl::Publish(grpc::ServerContext*, const Data
     if (!status.ok()) {
       LOG_ERROR("DataCenter 点值发布失败: src_conn_id={}, src_tag={}, {}, 质量={}({}), 请求时间戳={}, 原因={}",
                 request->conn_id(), request->tag(), formatPointValue(request->value()),
-                static_cast<int>(request->quality()), qualityToString(request->quality()), request->ts_ms(),
+                static_cast<int>(request->quality()), formatQualityWithFlags(*request), request->ts_ms(),
                 status.error_message());
       return status;
     }
@@ -942,7 +950,7 @@ grpc::Status DataCenterGrpcServiceImpl::Publish(grpc::ServerContext*, const Data
     if (updateCount == 0) {
       LOG_DEBUG("DataCenter 点值发布未匹配路由: src_conn_id={}, src_tag={}, {}, 质量={}({}), 请求时间戳={}",
                request->conn_id(), request->tag(), formatPointValue(request->value()),
-               static_cast<int>(request->quality()), qualityToString(request->quality()), request->ts_ms());
+               static_cast<int>(request->quality()), formatQualityWithFlags(*request), request->ts_ms());
     }
     deliveries.reserve(updates.size());
     for (const auto& update : updates) {
@@ -951,13 +959,13 @@ grpc::Status DataCenterGrpcServiceImpl::Publish(grpc::ServerContext*, const Data
         LOG_DEBUG("DataCenter 点值已路由但无订阅者: src_conn_id={}, src_tag={}, dst_conn_id={}, dst_tag={}, {}, 质量={}({}), 时间戳={}",
                  update.src_conn_id(), update.src_tag(), update.dst_conn_id(), update.dst_tag(),
                  formatPointValue(update.value()), static_cast<int>(update.quality()),
-                 qualityToString(update.quality()), update.ts_ms());
+                 formatQualityWithFlags(update), update.ts_ms());
         continue;
       }
       LOG_DEBUG("DataCenter 点值转发: src_conn_id={}, src_tag={}, dst_conn_id={}, dst_tag={}, {}, 质量={}({}), 时间戳={}, 订阅者数={}",
                update.src_conn_id(), update.src_tag(), update.dst_conn_id(), update.dst_tag(),
                formatPointValue(update.value()), static_cast<int>(update.quality()),
-               qualityToString(update.quality()), update.ts_ms(), subs.size());
+               formatQualityWithFlags(update), update.ts_ms(), subs.size());
       deliveries.emplace_back(Impl::Delivery{.update = &update, .subscribers = std::move(subs)});
     }
 
@@ -1002,7 +1010,7 @@ grpc::Status DataCenterGrpcServiceImpl::ExecuteCommand(
            formatEndpointForLog(request->src()),
            formatPointValue(request->value()),
            static_cast<int>(request->quality()),
-           qualityToString(request->quality()),
+           formatQualityWithFlags(*request),
            request->ts_ms(),
            request->request_id(),
            request->timeout_ms());
@@ -1079,6 +1087,14 @@ grpc::Status DataCenterGrpcServiceImpl::ExecuteCommand(
   }
 
   auto targetReq = *request;
+  DataCenterProto::Quality quality;
+  auto qualityStatus = detail::NormalizeQuality(targetReq, &quality);
+  if (!qualityStatus.ok()) {
+    return qualityStatus;
+  }
+  targetReq.set_quality(quality);
+  LOG_DEBUG("DataCenter 同步命令品质已归一并保留明细: 摘要={}({})",
+            static_cast<int>(targetReq.quality()), formatQualityWithFlags(targetReq));
   DataCenterProto::Endpoint resolvedSrc;
   {
     std::lock_guard<std::mutex> lock(impl_->mu);
@@ -1242,13 +1258,13 @@ grpc::Status DataCenterGrpcServiceImpl::BatchPublish(grpc::ServerContext*, const
         LOG_DEBUG("DataCenter 点值已路由但无订阅者: src_conn_id={}, src_tag={}, dst_conn_id={}, dst_tag={}, {}, 质量={}({}), 时间戳={}",
                  update.src_conn_id(), update.src_tag(), update.dst_conn_id(), update.dst_tag(),
                  formatPointValue(update.value()), static_cast<int>(update.quality()),
-                 qualityToString(update.quality()), update.ts_ms());
+                 formatQualityWithFlags(update), update.ts_ms());
         continue;
       }
       LOG_DEBUG("DataCenter 点值转发: src_conn_id={}, src_tag={}, dst_conn_id={}, dst_tag={}, {}, 质量={}({}), 时间戳={}, 订阅者数={}",
                update.src_conn_id(), update.src_tag(), update.dst_conn_id(), update.dst_tag(),
                formatPointValue(update.value()), static_cast<int>(update.quality()),
-               qualityToString(update.quality()), update.ts_ms(), subs.size());
+               formatQualityWithFlags(update), update.ts_ms(), subs.size());
       deliveries.emplace_back(Impl::Delivery{.update = &update, .subscribers = std::move(subs)});
     }
 
@@ -1267,7 +1283,7 @@ grpc::Status DataCenterGrpcServiceImpl::BatchPublish(grpc::ServerContext*, const
       ++noRouteCount;
       LOG_DEBUG("DataCenter 点值发布未匹配路由: src_conn_id={}, src_tag={}, {}, 质量={}({}), 请求时间戳={}",
                point.conn_id(), point.tag(), formatPointValue(point.value()),
-               static_cast<int>(point.quality()), qualityToString(point.quality()), point.ts_ms());
+               static_cast<int>(point.quality()), formatQualityWithFlags(point), point.ts_ms());
     }
   }
 

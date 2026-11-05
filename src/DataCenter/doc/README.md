@@ -11,6 +11,7 @@ DataCenter 是进程内的“数据总线/转发枢纽”，用于在不同协�
 - 同步命令执行：按唯一路由把协议控制命令转交目标模块，用于 IEC104 等协议形成正/负确认
 - 最新值缓存：支持 `GetLatest` / `Subscribe(snapshot=true)` 获取目的连接内的最新值（best-effort）
 - 源端实时监视：支持 `GetSourceLatest` 获取协议模块已发布的源端最新值，不依赖业务路由
+- 组合品质位：通过可选 `quality_flags` 保留 IV、NT、SB、BL、OV 及扩展位，兼容现有四级 `quality`
 - 完整状态持久化：将连接注册表、连接标签注册表、路由配置合并落盘到 `./conf/config.db`，重启后按同一份快照恢复
 
 ## 暂未实现功能
@@ -36,13 +37,31 @@ DataCenter 是进程内的“数据总线/转发枢纽”，用于在不同协�
 - Protobuf：`protobuf/DataCenter.proto`
 - gRPC Service：`DataCenterProto::DataCenterService`
 
+### 品质位与兼容摘要
+
+完整契约和验收标准见 [品质位扩展设计](品质位扩展设计.md)。发布请求、路由更新、源端最新值及同步命令均增加可选 `quality_flags`：
+
+| 标志 | 掩码 | 含义 |
+| --- | --- | --- |
+| `QUALITY_FLAG_INVALID` | `0x80` | 无效 |
+| `QUALITY_FLAG_NOT_TOPICAL` | `0x40` | 非当前值 |
+| `QUALITY_FLAG_SUBSTITUTED` | `0x20` | 被取代 |
+| `QUALITY_FLAG_BLOCKED` | `0x10` | 被封锁 |
+| `QUALITY_FLAG_OVERFLOW` | `0x01` | 溢出 |
+
+多个标志通过按位或组合。字段未提供时完全沿用旧 `quality`；显式提供零时保留其存在性，表示所有明细位清零。字段存在时，DataCenter 为旧消费者生成四级摘要：含 `INVALID` 为 `BAD`，其余非零为 `UNCERTAIN`，零为 `GOOD`。生产者可省略旧 `quality`；若填写了明确且矛盾的摘要，则返回 `INVALID_ARGUMENT`，不写入缓存、不发送更新或调用命令执行器。批量发布仍保持整批校验后写入。
+
+例如 `quality_flags=0x60` 表示同时“非当前值、被取代”，省略 `quality` 后，查询/订阅中会得到 `quality=UNCERTAIN` 和完整的 `quality_flags=0x60`。后续发布不带 `quality_flags` 时会完整替换旧品质，返回字段重新变为缺席，避免继承过期标志。
+
+上位机对接应使用可空整数保留“未提供”与“零”的区别，并按位展示标志；旧四级品质可以继续展示。未知位不截断，必须由消费方按支持的协议映射，不能把任意 uint32 直接写入 IEC104 品质字节。本次仅增加 DataCenter 承载能力，不改变协议采集、计算、104 发送或上位机页面，也不自动设置通信断线或数据过期品质。
+
 ## gRPC 接口说明（当前实现）
 DataCenter 对外提供一组面向“连接/连接标签注册表/路由/转发”的 gRPC 接口，用于支撑跨协议数据转发闭环。
 
 ### 术语
 - `Endpoint`：路由配置端点优先使用 `(module_name, conn_name, tag)`；请求只传 `(conn_id, tag)` 时会按当前连接注册表转换为稳定端点。
 - `Route`：有向绑定 `src Endpoint -> dst Endpoint`；允许 `srcTag != dstTag`，转发时会按目的端点重写为 `dstTag`。
-- `PointUpdate`：路由后的更新，包含 `src/dst` 端点信息与 `value/ts_ms/quality`。
+- `PointUpdate`：路由后的更新，包含 `src/dst` 端点信息与 `value/ts_ms/quality` 以及可选 `quality_flags`。
 
 ### 连接/连接标签注册表（用于展示与校验，可选）
 - `GetOrCreateConnection(GetOrCreateConnectionRequest) -> ConnectionInfo`

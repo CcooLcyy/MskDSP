@@ -8,6 +8,7 @@
 #include <initializer_list>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <thread>
@@ -315,6 +316,204 @@ protected:
   std::unique_ptr<DataCenterProto::DataCenterService::Stub> stub_;
 };
 }  // 命名空间结束
+
+namespace {
+class QualityRecordingCommandExecutor final : public DataCenterProto::CommandExecutor::Service {
+public:
+  grpc::Status ExecuteCommand(grpc::ServerContext *,
+                              const DataCenterProto::ExecuteCommandRequest *request,
+                              DataCenterProto::ExecuteCommandResponse *response) override {
+    std::lock_guard<std::mutex> lock(mu_);
+    requests_.push_back(*request);
+    response->set_status(DataCenterProto::COMMAND_ACCEPTED);
+    *response->mutable_dst() = request->dst();
+    return grpc::Status::OK;
+  }
+
+  std::vector<DataCenterProto::ExecuteCommandRequest> Requests() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return requests_;
+  }
+
+private:
+  mutable std::mutex mu_;
+  std::vector<DataCenterProto::ExecuteCommandRequest> requests_;
+};
+}  // 命名空间结束
+
+// 验证：订阅快照及实时批量更新保留组合位、未知高位和零/缺席，冲突请求不广播。
+TEST_F(DataCenterGrpcServiceTest, QualityFlagsSurviveSnapshotAndRealtimeSubscription) {
+  const auto source = GetOrCreateConnection("ModbusRTU", "quality-source");
+  const auto destination = GetOrCreateConnection("IEC104", "quality-destination");
+  UpsertConnTags(source.conn_id(), {"A"});
+  UpsertConnTags(destination.conn_id(), {"B"});
+  UpsertRoutes({{source.conn_id(), "A", destination.conn_id(), "B"}});
+  DataCenterProto::PublishRequest initial;
+  initial.set_conn_id(source.conn_id());
+  initial.set_tag("A");
+  initial.mutable_value()->set_int_value(1);
+  initial.set_quality_flags(0xF1);
+  DataCenterProto::Empty empty;
+  grpc::ClientContext publishContext;
+  ASSERT_TRUE(stub_->Publish(&publishContext, initial, &empty).ok());
+  grpc::ClientContext subscriptionContext;
+  subscriptionContext.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+  DataCenterProto::SubscribeRequest subscription;
+  subscription.set_conn_id(destination.conn_id());
+  subscription.set_snapshot(true);
+  auto reader = stub_->Subscribe(&subscriptionContext, subscription);
+  DataCenterProto::PointUpdate update;
+  ASSERT_TRUE(reader->Read(&update));
+  EXPECT_TRUE(update.has_quality_flags());
+  EXPECT_EQ(update.quality_flags(), 0xF1u);
+  EXPECT_EQ(update.quality(), DataCenterProto::QUALITY_BAD);
+
+  DataCenterProto::PublishRequest conflict = initial;
+  conflict.mutable_value()->set_int_value(-1);
+  conflict.set_quality(DataCenterProto::QUALITY_GOOD);
+  grpc::ClientContext conflictContext;
+  EXPECT_EQ(stub_->Publish(&conflictContext, conflict, &empty).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  DataCenterProto::BatchPublishRequest conflictingBatch;
+  *conflictingBatch.add_points() = initial;
+  conflictingBatch.mutable_points(0)->mutable_value()->set_int_value(-2);
+  *conflictingBatch.add_points() = conflict;
+  grpc::ClientContext batchConflictContext;
+  EXPECT_EQ(stub_->BatchPublish(&batchConflictContext, conflictingBatch, &empty).error_code(),
+            grpc::StatusCode::INVALID_ARGUMENT);
+
+  const std::vector<std::optional<uint32_t>> flags{0x71u, 0x80000000u, 0x80000080u, 0u, std::nullopt};
+  int64_t value = 1;
+  for (const auto &flag : flags) {
+    DataCenterProto::BatchPublishRequest batch;
+    auto *point = batch.add_points();
+    point->set_conn_id(source.conn_id());
+    point->set_tag("A");
+    point->mutable_value()->set_int_value(++value);
+    if (flag) point->set_quality_flags(*flag);
+    else point->set_quality(DataCenterProto::QUALITY_BAD);
+    grpc::ClientContext context;
+    ASSERT_TRUE(stub_->BatchPublish(&context, batch, &empty).ok());
+    ASSERT_TRUE(reader->Read(&update));
+    EXPECT_EQ(update.value().int_value(), value);
+    EXPECT_EQ(update.has_quality_flags(), flag.has_value());
+    if (flag) EXPECT_EQ(update.quality_flags(), *flag);
+    const auto expected = !flag || (*flag & 0x80) != 0 ? DataCenterProto::QUALITY_BAD
+        : *flag == 0 ? DataCenterProto::QUALITY_GOOD : DataCenterProto::QUALITY_UNCERTAIN;
+    EXPECT_EQ(update.quality(), expected);
+    DataCenterProto::GetSourceLatestRequest sourceQuery;
+    sourceQuery.set_conn_id(source.conn_id());
+    DataCenterProto::GetSourceLatestResponse sourceLatest;
+    grpc::ClientContext queryContext;
+    ASSERT_TRUE(stub_->GetSourceLatest(&queryContext, sourceQuery, &sourceLatest).ok());
+    ASSERT_EQ(sourceLatest.updates_size(), 1);
+    EXPECT_EQ(sourceLatest.updates(0).quality(), expected);
+    EXPECT_EQ(sourceLatest.updates(0).has_quality_flags(), flag.has_value());
+    if (flag) EXPECT_EQ(sourceLatest.updates(0).quality_flags(), *flag);
+  }
+  subscriptionContext.TryCancel();
+  reader->Finish();
+}
+
+// 验证：命令品质在执行前归一并透传，接受后仅保存目的缓存；冲突不调用目标或更改缓存。
+TEST_F(DataCenterGrpcServiceTest, ExecuteCommandNormalizesQualityFlagsBeforeForwardingAndCaching) {
+  std::filesystem::create_directories("socket");
+  const auto targetSocket = std::filesystem::absolute("socket/IEC61850.sock").string();
+  QualityRecordingCommandExecutor executor;
+  grpc::ServerBuilder builder;
+  builder.RegisterService(&executor);
+  builder.AddListeningPort("unix:" + targetSocket, grpc::InsecureServerCredentials());
+  auto targetServer = builder.BuildAndStart();
+  ASSERT_NE(targetServer, nullptr);
+  const auto source = GetOrCreateConnection("IEC104", "quality-command-source");
+  const auto destination = GetOrCreateConnection("IEC61850", "quality-command-target");
+  UpsertConnTags(source.conn_id(), {"Command"});
+  UpsertConnTags(destination.conn_id(), {"Command"});
+  UpsertStableRoutes({{"IEC104", "quality-command-source", "Command",
+                       "IEC61850", "quality-command-target", "Command"}});
+  const std::vector<std::optional<uint32_t>> flags{0xF1u, 0x80000000u, 0u, std::nullopt};
+  grpc::ClientContext subscriptionContext;
+  subscriptionContext.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+  std::unique_ptr<grpc::ClientReader<DataCenterProto::PointUpdate>> reader;
+  int64_t value = 0;
+  for (const auto &flag : flags) {
+    DataCenterProto::ExecuteCommandRequest request;
+    request.mutable_src()->set_conn_id(source.conn_id());
+    request.mutable_src()->set_tag("Command");
+    request.mutable_value()->set_int_value(++value);
+    request.set_timeout_ms(1000);
+    if (flag) request.set_quality_flags(*flag);
+    else request.set_quality(DataCenterProto::QUALITY_BAD);
+    const auto expected = !flag || (*flag & 0x80) != 0 ? DataCenterProto::QUALITY_BAD
+        : *flag == 0 ? DataCenterProto::QUALITY_GOOD : DataCenterProto::QUALITY_UNCERTAIN;
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+    DataCenterProto::ExecuteCommandResponse response;
+    ASSERT_TRUE(stub_->ExecuteCommand(&context, request, &response).ok());
+    ASSERT_EQ(response.status(), DataCenterProto::COMMAND_ACCEPTED);
+    const auto received = executor.Requests();
+    ASSERT_EQ(received.size(), static_cast<size_t>(value));
+    EXPECT_EQ(received.back().quality(), expected);
+    EXPECT_EQ(received.back().has_quality_flags(), flag.has_value());
+    if (flag) EXPECT_EQ(received.back().quality_flags(), *flag);
+    DataCenterProto::GetLatestRequest query;
+    query.set_conn_id(destination.conn_id());
+    DataCenterProto::GetLatestResponse latest;
+    grpc::ClientContext queryContext;
+    ASSERT_TRUE(stub_->GetLatest(&queryContext, query, &latest).ok());
+    ASSERT_EQ(latest.updates_size(), 1);
+    EXPECT_EQ(latest.updates(0).quality(), expected);
+    EXPECT_EQ(latest.updates(0).has_quality_flags(), flag.has_value());
+    if (flag) EXPECT_EQ(latest.updates(0).quality_flags(), *flag);
+    EXPECT_EQ(latest.updates(0).value().int_value(), value);
+    if (!reader) {
+      DataCenterProto::SubscribeRequest subscription;
+      subscription.set_conn_id(destination.conn_id());
+      subscription.set_snapshot(true);
+      reader = stub_->Subscribe(&subscriptionContext, subscription);
+      DataCenterProto::PointUpdate snapshot;
+      ASSERT_TRUE(reader->Read(&snapshot));
+      EXPECT_EQ(snapshot.value().int_value(), value);
+      EXPECT_EQ(snapshot.quality_flags(), *flag);
+    }
+    for (const auto conflictingQuality : {DataCenterProto::QUALITY_BAD, DataCenterProto::QUALITY_UNCERTAIN}) {
+      auto conflict = request;
+      conflict.set_quality_flags(0);
+      conflict.set_quality(conflictingQuality);
+      conflict.mutable_value()->set_int_value(-1);
+      grpc::ClientContext conflictContext;
+      EXPECT_EQ(stub_->ExecuteCommand(&conflictContext, conflict, &response).error_code(),
+                grpc::StatusCode::INVALID_ARGUMENT);
+    }
+    EXPECT_EQ(executor.Requests().size(), received.size());
+    grpc::ClientContext afterContext;
+    DataCenterProto::GetLatestResponse after;
+    ASSERT_TRUE(stub_->GetLatest(&afterContext, query, &after).ok());
+    EXPECT_EQ(after.SerializeAsString(), latest.SerializeAsString());
+  }
+  DataCenterProto::GetSourceLatestRequest sourceQuery;
+  sourceQuery.set_conn_id(source.conn_id());
+  DataCenterProto::GetSourceLatestResponse sourceLatest;
+  grpc::ClientContext sourceContext;
+  ASSERT_TRUE(stub_->GetSourceLatest(&sourceContext, sourceQuery, &sourceLatest).ok());
+  EXPECT_EQ(sourceLatest.updates_size(), 0);
+  // 用随后明确发布的标记结束等待；若命令错误广播，读到的第一条会是命令而非标记。
+  DataCenterProto::PublishRequest marker;
+  marker.set_conn_id(source.conn_id());
+  marker.set_tag("Command");
+  marker.mutable_value()->set_int_value(100);
+  marker.set_quality_flags(0);
+  DataCenterProto::Empty empty;
+  grpc::ClientContext markerContext;
+  ASSERT_TRUE(stub_->Publish(&markerContext, marker, &empty).ok());
+  DataCenterProto::PointUpdate published;
+  ASSERT_TRUE(reader->Read(&published));
+  EXPECT_EQ(published.value().int_value(), 100);
+  EXPECT_TRUE(published.has_quality_flags());
+  EXPECT_EQ(published.quality_flags(), 0u);
+  subscriptionContext.TryCancel();
+  reader->Finish();
+  targetServer->Shutdown();
+}
 
 // 验证：首次落盘前可阻断数据库路径，解除阻断后仍保持数据库及备份不存在。
 TEST_F(DataCenterGrpcServiceTest, DatabaseBlockerRestoresMissingDatabasePath) {
