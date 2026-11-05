@@ -22,6 +22,21 @@
 #include "DataCenter_mock.grpc.pb.h"
 #include "support/FakeDataCenter.hpp"
 
+// 通信输入使用源采集时间，不能把旧快照当成新心跳。
+static void PublishCommunication(FakeDataCenterState *state, uint32_t connId,
+                                 const char *tag, int value,
+                                 DataCenterProto::Quality quality = DataCenterProto::QUALITY_GOOD,
+                                 int64_t ageMs = 0) {
+  DataCenterProto::PublishRequest request;
+  request.set_conn_id(connId);
+  request.set_tag(tag);
+  request.mutable_value()->set_int_value(value);
+  request.set_quality(quality);
+  request.set_ts_ms(std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count() - ageMs);
+  ASSERT_TRUE(state->Publish(request).ok());
+}
+
 namespace {
 using AGC::GroupManager;
 
@@ -1863,4 +1878,234 @@ TEST(AgcGroupManagerTest, ConfirmedControlProfilePersistsAcrossManagerRestart) {
   EXPECT_DOUBLE_EQ(restored.members(0).up_p_gain(), 0.4);
   EXPECT_DOUBLE_EQ(restored.members(1).down_p_gain(), 0.7);
   ASSERT_TRUE(reader.StopGroup("g-profile").ok());
+}
+
+// 验证：通信异常不改变可控配置，剩余在线成员按原目标重分配，恢复无需新命令。
+TEST(AgcGroupManagerTest, CommunicationChangesRedistributeAndRestoreWithoutNewCommand) {
+  FakeDataCenterState state;
+  GroupManager manager("AGC");
+  manager.setDataCenterStub(MakeStub(&state));
+  auto request = MakeGroupReq("g-health-redistribute");
+  for (int i = 0; i < 2; ++i) {
+    auto *member = request.mutable_config()->mutable_members(i);
+    member->set_capacity_kw(200);
+    member->set_weight(1);
+    member->mutable_communication_state()->set_tag(i == 0 ? "HEALTH1" : "HEALTH2");
+  }
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(manager.UpsertGroup(request, &info).ok());
+  ASSERT_TRUE(manager.StartGroup("g-health-redistribute").ok());
+  PublishDoublePoint(&state, info.conn_id(), "P_CMD", 100);
+  PublishCommunication(&state, info.conn_id(), "HEALTH1", 1);
+  PublishCommunication(&state, info.conn_id(), "HEALTH2", 1);
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV1_P_SET", 50));
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV2_P_SET", 50));
+  PublishCommunication(&state, info.conn_id(), "HEALTH1", 2);
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV2_P_SET", 100));
+  const auto offlineCount = state.GetPublishCount(info.conn_id(), "INV1_P_SET");
+  PublishDoublePoint(&state, info.conn_id(), "INV2_P_MEAS", 40);
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "P_TOTAL", 40));
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV1_P_SET"), offlineCount);
+  PublishCommunication(&state, info.conn_id(), "HEALTH1", 1);
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV2_P_SET", 50));
+  EXPECT_TRUE(state.WaitForPublishCount(info.conn_id(), "INV1_P_SET", offlineCount + 1, std::chrono::seconds(5)));
+  ASSERT_TRUE(manager.StopGroup("g-health-redistribute").ok());
+}
+
+// 验证：坏质量、未知、停止和过期快照都不能允许成员参与控制。
+TEST(AgcGroupManagerTest, InvalidCommunicationInputsExcludeMember) {
+  for (const auto &scenario : std::vector<std::pair<int, DataCenterProto::Quality>>{
+      {0, DataCenterProto::QUALITY_GOOD}, {2, DataCenterProto::QUALITY_GOOD},
+      {3, DataCenterProto::QUALITY_GOOD}, {1, DataCenterProto::QUALITY_BAD}}) {
+    FakeDataCenterState state;
+    GroupManager manager("AGC");
+    manager.setDataCenterStub(MakeStub(&state));
+    auto request = MakeGroupReq("g-health-invalid");
+    request.mutable_config()->mutable_members(0)->mutable_communication_state()->set_tag("HEALTH1");
+    AGCProto::GroupInfo info;
+    ASSERT_TRUE(manager.UpsertGroup(request, &info).ok());
+    ASSERT_TRUE(manager.StartGroup("g-health-invalid").ok());
+    PublishCommunication(&state, info.conn_id(), "HEALTH1", scenario.first, scenario.second);
+    PublishDoublePoint(&state, info.conn_id(), "P_CMD", 90);
+    EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV2_P_SET", 90));
+    EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV1_P_SET"), 0u);
+    PublishCommunication(&state, info.conn_id(), "HEALTH1", 1, DataCenterProto::QUALITY_GOOD, 60000);
+    PublishDoublePoint(&state, info.conn_id(), "INV2_P_MEAS", 40);
+    EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "P_TOTAL", 40));
+    EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV1_P_SET"), 0u);
+    ASSERT_TRUE(manager.StopGroup("g-health-invalid").ok());
+  }
+}
+
+// 验证：PI 事件模式在心跳静默超时后也重新分配，无需新输入通知。
+TEST(AgcGroupManagerTest, CommunicationTimeoutRecalculatesInEventMode) {
+  FakeDataCenterState state;
+  GroupManager manager("AGC");
+  manager.setDataCenterStub(MakeStub(&state));
+  auto request = MakeGroupReq("g-health-timeout");
+  request.mutable_config()->mutable_members(0)->mutable_communication_state()->set_tag("HEALTH1");
+  request.mutable_config()->mutable_members(0)->set_communication_timeout_ms(1000);
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(manager.UpsertGroup(request, &info).ok());
+  ASSERT_TRUE(manager.StartGroup("g-health-timeout").ok());
+  PublishCommunication(&state, info.conn_id(), "HEALTH1", 1);
+  PublishDoublePoint(&state, info.conn_id(), "P_CMD", 90);
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV1_P_SET", 30));
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV2_P_SET", 90));
+  ASSERT_TRUE(manager.StopGroup("g-health-timeout").ok());
+}
+
+// 验证：通信恢复和量测更新只重分配已解析总目标，不重复叠加同一增量命令。
+TEST(AgcGroupManagerTest, CommunicationRedistributionDoesNotRepeatDeltaCommand) {
+  for (const auto base : {AGCProto::DELTA_BASE_LAST_TARGET, AGCProto::DELTA_BASE_CURRENT_MEAS}) {
+    FakeDataCenterState state;
+    GroupManager manager("AGC");
+    manager.setDataCenterStub(MakeStub(&state));
+    auto request = MakeGroupReq("g-health-delta");
+    request.mutable_config()->mutable_p_cmd()->set_mode(AGCProto::VALUE_MODE_DELTA);
+    request.mutable_config()->mutable_p_cmd()->set_delta_base(base);
+    request.mutable_config()->mutable_members(0)->mutable_communication_state()->set_tag("HEALTH1");
+    AGCProto::GroupInfo info;
+    ASSERT_TRUE(manager.UpsertGroup(request, &info).ok());
+    ASSERT_TRUE(manager.StartGroup("g-health-delta").ok());
+    PublishCommunication(&state, info.conn_id(), "HEALTH1", 1);
+    PublishDoublePoint(&state, info.conn_id(), "P_CMD", 90);
+    ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV1_P_SET", 30));
+    PublishCommunication(&state, info.conn_id(), "HEALTH1", 2);
+    ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV2_P_SET", 90));
+    PublishDoublePoint(&state, info.conn_id(), "INV2_P_MEAS", 40);
+    ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "P_TOTAL", 40));
+    EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV2_P_SET", 90));
+    PublishCommunication(&state, info.conn_id(), "HEALTH1", 1);
+    EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV1_P_SET", 30));
+    EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV2_P_SET", 60));
+    ASSERT_TRUE(manager.StopGroup("g-health-delta").ok());
+  }
+}
+
+// 验证：源心跳虽写正常但有品质位时仍退出；全部退出后后续输入不继续发布设点。
+TEST(AgcGroupManagerTest, CommunicationQualityFlagsAndAllOfflineSuppressSetpoints) {
+  FakeDataCenterState state;
+  GroupManager manager("AGC");
+  manager.setDataCenterStub(MakeStub(&state));
+  auto request = MakeGroupReq("g-health-all-offline");
+  request.mutable_config()->mutable_members(0)->mutable_communication_state()->set_tag("HEALTH1");
+  request.mutable_config()->mutable_members(1)->mutable_communication_state()->set_tag("HEALTH2");
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(manager.UpsertGroup(request, &info).ok());
+  ASSERT_TRUE(manager.StartGroup("g-health-all-offline").ok());
+  PublishCommunication(&state, info.conn_id(), "HEALTH1", 1);
+  PublishCommunication(&state, info.conn_id(), "HEALTH2", 1);
+  PublishDoublePoint(&state, info.conn_id(), "P_CMD", 90);
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV1_P_SET", 30));
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV2_P_SET", 60));
+  DataCenterProto::PublishRequest invalid;
+  invalid.set_conn_id(info.conn_id());
+  invalid.set_tag("HEALTH1");
+  invalid.mutable_value()->set_int_value(1);
+  invalid.set_quality(DataCenterProto::QUALITY_GOOD);
+  invalid.set_quality_flags(DataCenterProto::QUALITY_FLAG_NOT_TOPICAL);
+  invalid.set_ts_ms(std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count());
+  ASSERT_TRUE(state.Publish(invalid).ok());
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV2_P_SET", 90));
+  PublishCommunication(&state, info.conn_id(), "HEALTH2", 3);
+  PublishDoublePoint(&state, info.conn_id(), "INV2_P_MEAS", 40);
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "P_TOTAL", 0));
+  const auto first = state.GetPublishCount(info.conn_id(), "INV1_P_SET");
+  const auto second = state.GetPublishCount(info.conn_id(), "INV2_P_SET");
+  PublishDoublePoint(&state, info.conn_id(), "P_CMD", 80);
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV1_P_SET"), first);
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV2_P_SET"), second);
+  ASSERT_TRUE(manager.StopGroup("g-health-all-offline").ok());
+}
+
+// 验证：通信输入不得占用任意成员的量测/设点或组命令标签，有效期边界被校验。
+TEST(AgcGroupManagerTest, CommunicationConfigurationRejectsConflictingTagsAndTimeouts) {
+  FakeDataCenterState state;
+  GroupManager manager("AGC");
+  manager.setDataCenterStub(MakeStub(&state));
+  for (const auto *tag : {"P_CMD", "INV1_P_MEAS", "INV2_P_SET", "P_TOTAL", "AGC增闭锁"}) {
+    auto request = MakeGroupReq("g-health-conflict");
+    request.mutable_config()->mutable_members(0)->mutable_communication_state()->set_tag(tag);
+    AGCProto::GroupInfo info;
+    EXPECT_EQ(manager.UpsertGroup(request, &info).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  }
+  for (const auto timeout : {999u, 3600001u}) {
+    auto request = MakeGroupReq("g-health-timeout-invalid");
+    request.mutable_config()->mutable_members(0)->mutable_communication_state()->set_tag("HEALTH1");
+    request.mutable_config()->mutable_members(0)->set_communication_timeout_ms(timeout);
+    AGCProto::GroupInfo info;
+    EXPECT_EQ(manager.UpsertGroup(request, &info).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  }
+}
+
+// 验证：自动调试拒绝未知通信成员，已在线成员掉线后任务失败且不能完成候选参数。
+TEST(AgcGroupManagerTest, CommunicationInterlocksAutomaticTuning) {
+  FakeDataCenterState state;
+  GroupManager manager("AGC");
+  manager.setDataCenterStub(MakeStub(&state));
+  auto request = MakeGroupReq("g-health-tuning");
+  request.mutable_config()->mutable_members(0)->mutable_communication_state()->set_tag("HEALTH1");
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(manager.UpsertGroup(request, &info).ok());
+  ASSERT_TRUE(manager.StopGroup("g-health-tuning").ok());
+  AGCProto::StartTuningRequest tuning;
+  tuning.set_group_name("g-health-tuning");
+  auto *config = tuning.mutable_config();
+  config->set_target_lower_kw(10);
+  config->set_target_upper_kw(90);
+  config->set_total_time_minutes(6);
+  config->set_attempt_max_time_minutes(1);
+  config->set_target_entry_time_seconds(1);
+  config->set_stable_hold_time_seconds(1);
+  config->set_min_up_tests(3);
+  config->set_min_down_tests(3);
+  config->set_total_tolerance_kw(0.1);
+  AGCProto::TuningStatus status;
+  EXPECT_EQ(manager.StartTuning(tuning, &status).error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+  PublishCommunication(&state, info.conn_id(), "HEALTH1", 1);
+  ASSERT_TRUE(manager.StartTuning(tuning, &status).ok());
+  ASSERT_EQ(status.state(), AGCProto::TUNING_STATE_RUNNING);
+  PublishCommunication(&state, info.conn_id(), "HEALTH1", 2);
+  for (int i = 0; i < kAsyncWaitIterations; ++i) {
+    ASSERT_TRUE(manager.GetTuningStatus("g-health-tuning", &status).ok());
+    if (status.state() == AGCProto::TUNING_STATE_FAILED) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_EQ(status.state(), AGCProto::TUNING_STATE_FAILED);
+  EXPECT_THAT(status.last_error(), ::testing::HasSubstr("通信"));
+  EXPECT_FALSE(status.has_candidate_profile());
+  ASSERT_TRUE(manager.StopTuning("g-health-tuning", &status).ok());
+}
+
+// 验证：周期模式同步增量命令接受后，反馈变化和通信重分配复用已接受目标。
+TEST(AgcGroupManagerTest, DirectSynchronousDeltaKeepsAcceptedTargetAcrossFeedbackChanges) {
+  FakeDataCenterState state;
+  GroupManager manager("AGC");
+  manager.setDataCenterStub(MakeStub(&state));
+  auto request = MakeGroupReq("g-health-direct-delta");
+  auto *config = request.mutable_config();
+  config->set_control_mode(AGCProto::CONTROL_MODE_DIRECT_CYCLIC);
+  config->set_calculation_execution_period_seconds(1);
+  config->set_command_control_period_seconds(4);
+  config->mutable_p_cmd()->set_mode(AGCProto::VALUE_MODE_DELTA);
+  config->mutable_p_cmd()->set_delta_base(AGCProto::DELTA_BASE_CURRENT_MEAS);
+  config->mutable_outputs()->mutable_p_total_target()->set_tag("TOTAL_TARGET");
+  config->mutable_members(0)->mutable_communication_state()->set_tag("HEALTH1");
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(manager.UpsertGroup(request, &info).ok());
+  ASSERT_TRUE(manager.StartGroup("g-health-direct-delta").ok());
+  PublishCommunication(&state, info.conn_id(), "HEALTH1", 1);
+  PublishDoublePoint(&state, info.conn_id(), "INV2_P_MEAS", 10);
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "P_TOTAL", 10));
+  const auto result = ExecuteDoubleCommand(&manager, "g-health-direct-delta", info.conn_id(), "P_CMD", 80);
+  ASSERT_EQ(result.status(), DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "TOTAL_TARGET", 90));
+  PublishDoublePoint(&state, info.conn_id(), "INV2_P_MEAS", 40);
+  PublishCommunication(&state, info.conn_id(), "HEALTH1", 2);
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "P_TOTAL", 40));
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "TOTAL_TARGET", 90));
+  ASSERT_TRUE(manager.StopGroup("g-health-direct-delta").ok());
 }

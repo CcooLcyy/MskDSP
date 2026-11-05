@@ -644,10 +644,12 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
 
         if (!directCyclic) {
           while (true) {
-            trigger->signal.acquire();
+            const bool signaled = trigger->signal.try_acquire_for(std::chrono::milliseconds(250));
             if (st.stop_requested()) {
               break;
             }
+            checkCommunicationTimeouts(groupName);
+            if (!signaled && !trigger->pending.load()) continue;
             if (!trigger->pending.exchange(false)) {
               continue;
             }
@@ -674,10 +676,13 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
             nextTick = std::chrono::steady_clock::now() + period;
             continue;
           }
-          if (trigger->signal.try_acquire_until(nextTick)) {
+          checkCommunicationTimeouts(groupName);
+          const auto wakeAt = std::min(nextTick, std::chrono::steady_clock::now() + std::chrono::milliseconds(250));
+          if (trigger->signal.try_acquire_until(wakeAt)) {
             trigger->pending.store(false);
             continue;
           }
+          if (std::chrono::steady_clock::now() < nextTick) continue;
           controlTick(groupName);
           nextTick = std::chrono::steady_clock::now() + period;
         }
@@ -711,7 +716,8 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
             }
             const bool affectsControlTarget =
                 (!it->second.cmdTag.empty() && update.dst_tag() == it->second.cmdTag) ||
-                it->second.baseTags.contains(update.dst_tag());
+                it->second.baseTags.contains(update.dst_tag()) ||
+                it->second.memberIndexesByCommunicationTag.contains(update.dst_tag());
             if (affectsControlTarget) {
               outputMutex = it->second.outputMutex;
             }
@@ -1116,6 +1122,8 @@ grpc::Status GroupManager::ExecuteCommand(
     input.hasCmdRaw = true;
     input.cmdRaw = raw;
     input.baseRawByTag = it->second.baseRawByTag;
+    refreshCommunicationAvailabilityLocked(&it->second);
+    input.memberAvailable = it->second.memberAvailable;
     input.hasMemberMeasRaw = it->second.hasMemberMeasRaw;
     input.memberMeasRaw = it->second.memberMeasRaw;
     input.hasLastMemberTargetKw = it->second.hasLastMemberTargetKw;
@@ -1188,7 +1196,9 @@ grpc::Status GroupManager::ExecuteCommand(
       it->second.cmdRaw = raw;
       it->second.hasCmdRaw = true;
       ++it->second.commandRevision;
-      it->second.hasDirectResolvedDesiredTotalKw = false;
+      it->second.hasDirectResolvedDesiredTotalKw = !input.memberAvailable.empty();
+      it->second.directResolvedCommandRevision = it->second.commandRevision;
+      it->second.directResolvedDesiredTotalKw = output.desiredTotalKw;
       ++it->second.controlRevision;
       requestControlLocked(groupName, &it->second, "周期直分配同步命令", request.dst().tag());
     }
@@ -1217,6 +1227,10 @@ grpc::Status GroupManager::ExecuteCommand(
     }
     it->second.cmdRaw = raw;
     it->second.hasCmdRaw = true;
+    ++it->second.commandRevision;
+    it->second.directResolvedCommandRevision = it->second.commandRevision;
+    it->second.directResolvedDesiredTotalKw = output.desiredTotalKw;
+    it->second.hasDirectResolvedDesiredTotalKw = !input.memberAvailable.empty();
     ++it->second.controlRevision;
     controlRevision = it->second.controlRevision;
     it->second.hasLastDesiredTotalKw = output.hasLastDesiredTotalKw;
@@ -1333,6 +1347,7 @@ std::unordered_set<std::string> GroupManager::collectAllTags(const AGCProto::Gro
   }
 
   for (const auto &m : config.members()) {
+    if (m.has_communication_state()) tags.emplace(m.communication_state().tag());
     if (m.has_p_meas() && !m.p_meas().tag().empty()) {
       tags.emplace(m.p_meas().tag());
     }
@@ -1353,6 +1368,8 @@ void GroupManager::rebuildTagCache(GroupRuntime *g, bool resetPublishedTargets) 
   }
   g->cmdTag.clear();
   g->memberIndexByMeasTag.clear();
+  g->memberIndexesByCommunicationTag.clear();
+  g->memberAvailable.clear();
   g->baseTags.clear();
   g->subscribeTags.clear();
 
@@ -1364,6 +1381,9 @@ void GroupManager::rebuildTagCache(GroupRuntime *g, bool resetPublishedTargets) 
   const auto memberCount = static_cast<size_t>(g->config.members_size());
   g->hasMemberMeasRaw.assign(memberCount, false);
   g->memberMeasRaw.assign(memberCount, Decimal{});
+  g->memberCommunicationHealthy.assign(memberCount, false);
+  g->memberCommunicationSourceTs.assign(memberCount, 0);
+  g->memberCommunicationReceivedAt.assign(memberCount, {});
   g->commandRevision = 0;
   g->directResolvedCommandRevision = 0;
   g->hasDirectResolvedDesiredTotalKw = false;
@@ -1397,6 +1417,10 @@ void GroupManager::rebuildTagCache(GroupRuntime *g, bool resetPublishedTargets) 
 
   for (int i = 0; i < g->config.members_size(); ++i) {
     const auto &m = g->config.members(i);
+    if (m.has_communication_state() && !m.communication_state().tag().empty()) {
+      g->memberIndexesByCommunicationTag[m.communication_state().tag()].push_back(static_cast<size_t>(i));
+      g->subscribeTags.push_back(m.communication_state().tag());
+    }
     if (m.has_p_meas() && !m.p_meas().tag().empty()) {
       g->memberIndexByMeasTag.emplace(m.p_meas().tag(), static_cast<size_t>(i));
       g->subscribeTags.emplace_back(m.p_meas().tag());
@@ -1404,6 +1428,14 @@ void GroupManager::rebuildTagCache(GroupRuntime *g, bool resetPublishedTargets) 
     if (m.has_p_set() && m.p_set().mode() == AGCProto::VALUE_MODE_DELTA && m.p_set().delta_base() == AGCProto::DELTA_BASE_BASE_TAG &&
         !m.p_set().base_tag().empty()) {
       g->baseTags.emplace(m.p_set().base_tag());
+    }
+  }
+
+  if (!g->memberIndexesByCommunicationTag.empty()) {
+    g->memberAvailable.assign(memberCount, false);
+    for (size_t i = 0; i < memberCount; ++i) {
+      const auto &member = g->config.members(static_cast<int>(i));
+      g->memberAvailable[i] = member.controllable() && !member.has_communication_state();
     }
   }
 
@@ -1502,11 +1534,85 @@ void GroupManager::publishControlStatePoints(const std::string &groupName, std::
   }
 }
 
+bool GroupManager::refreshCommunicationAvailabilityLocked(GroupRuntime *g) {
+  if (g == nullptr || g->memberAvailable.empty()) return false;
+  const auto steadyNow = std::chrono::steady_clock::now();
+  const auto systemNowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+  bool changed = false;
+  for (size_t index = 0; index < g->memberAvailable.size(); ++index) {
+    const auto &member = g->config.members(static_cast<int>(index));
+    bool available = member.controllable();
+    if (member.has_communication_state()) {
+      const int64_t timeoutMs = member.communication_timeout_ms() == 0 ? 30000 : member.communication_timeout_ms();
+      const auto sourceTs = g->memberCommunicationSourceTs[index];
+      available = available && g->memberCommunicationHealthy[index] && sourceTs > 0 &&
+                  sourceTs <= systemNowMs && systemNowMs - sourceTs < timeoutMs &&
+                  steadyNow - g->memberCommunicationReceivedAt[index] < std::chrono::milliseconds(timeoutMs);
+    }
+    if (g->memberAvailable[index] == available) continue;
+    g->memberAvailable[index] = available;
+    changed = true;
+    g->hasLastMemberTargetKw[index] = false;
+    g->hasLastPublishedMemberSetpoint[index] = false;
+    g->hasPublishedMemberTargetKw[index] = false;
+    LOG_INFO("AGC 成员通信参与资格变化: group_name={}, member_name={}, 参与调节={}",
+             g->config.group_name(), member.member_name(), available);
+  }
+  if (changed) {
+    ++g->controlRevision;
+    std::fill(g->integralMemoryKw.begin(), g->integralMemoryKw.end(), Decimal{});
+    if (g->tuningStatus.state() == AGCProto::TUNING_STATE_RUNNING) {
+      g->tuningStatus.set_state(AGCProto::TUNING_STATE_FAILED);
+      g->tuningStatus.set_last_error("成员通信参与资格变化，自动调试已中止，请恢复通信后重新调试");
+      g->tuningStatus.clear_candidate_profile();
+      g->state = AGCProto::GROUP_STATE_STOPPED;
+      if (g->controlThread.joinable()) g->controlThread.request_stop();
+      if (g->dcSubscribeThread.joinable()) g->dcSubscribeThread.request_stop();
+      if (g->controlTrigger) g->controlTrigger->signal.release();
+      LOG_WARNING("AGC 通信联锁中止自动调试: group_name={}", g->config.group_name());
+    }
+    requestControlLocked(g->config.group_name(), g, "通信参与资格变化", "");
+  }
+  return changed;
+}
+
+void GroupManager::checkCommunicationTimeouts(const std::string &groupName) {
+  std::shared_ptr<std::mutex> outputMutex;
+  {
+    std::lock_guard lock(mu_);
+    const auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end() || it->second.memberAvailable.empty()) return;
+    outputMutex = it->second.outputMutex;
+  }
+  std::lock_guard outputLock(*outputMutex);
+  std::lock_guard lock(mu_);
+  const auto it = groupsByName_.find(groupName);
+  if (it != groupsByName_.end() && refreshCommunicationAvailabilityLocked(&it->second)) {
+    requestControlLocked(groupName, &it->second, "通信状态心跳超时", "");
+  }
+}
+
 bool GroupManager::handleUpdateLocked(GroupRuntime *g, const DataCenterProto::PointUpdate &update) {
   if (g == nullptr) {
     return false;
   }
   const auto &tag = update.dst_tag();
+  if (const auto health = g->memberIndexesByCommunicationTag.find(tag);
+      health != g->memberIndexesByCommunicationTag.end()) {
+    Decimal value;
+    const bool healthy = pointValueToDecimal(update.value(), &value) && value == numeric::One() &&
+                         update.quality() == DataCenterProto::QUALITY_GOOD &&
+                         (!update.has_quality_flags() || update.quality_flags() == 0);
+    for (const size_t index : health->second) {
+      // 旧正常快照不得延长心跳；旧异常仍按保守原则撤销可用性。
+      if (healthy && update.ts_ms() <= g->memberCommunicationSourceTs[index]) continue;
+      g->memberCommunicationHealthy[index] = healthy;
+      g->memberCommunicationSourceTs[index] = std::max(g->memberCommunicationSourceTs[index], update.ts_ms());
+      g->memberCommunicationReceivedAt[index] = std::chrono::steady_clock::now();
+    }
+    return refreshCommunicationAvailabilityLocked(g);
+  }
   Decimal raw;
   if (!pointValueToDecimal(update.value(), &raw)) {
     return false;
@@ -1562,6 +1668,10 @@ void GroupManager::publishDefaultLimitPoints(const std::string &groupName, std::
     }
     config = it->second.config;
     connId = it->second.connId;
+    if (refreshCommunicationAvailabilityLocked(&it->second)) {
+      requestControlLocked(groupName, &it->second, "通信状态过期", "");
+    }
+    input.memberAvailable = it->second.memberAvailable;
     input.hasMemberMeasRaw = it->second.hasMemberMeasRaw;
     input.memberMeasRaw = it->second.memberMeasRaw;
   }
@@ -1644,7 +1754,13 @@ void GroupManager::publishDirectionBlockPoints(const std::string &groupName, std
       return;
     }
     connId = it->second.connId;
-    output = ComputeDirectionBlockOutput(it->second.config,
+    auto effectiveConfig = it->second.config;
+    if (!it->second.memberAvailable.empty()) {
+      for (int i = 0; i < effectiveConfig.members_size(); ++i) {
+        if (!it->second.memberAvailable[static_cast<size_t>(i)]) effectiveConfig.mutable_members(i)->set_controllable(false);
+      }
+    }
+    output = ComputeDirectionBlockOutput(effectiveConfig,
                                         it->second.hasPublishedMemberTargetKw,
                                         it->second.publishedMemberTargetKw);
   }
@@ -1760,6 +1876,11 @@ bool GroupManager::publishMemberSetpoints(const std::string &groupName,
       }
 
       auto &runtime = it->second;
+      if (refreshCommunicationAvailabilityLocked(&runtime)) {
+        requestControlLocked(groupName, &runtime, "发布前通信状态过期", "");
+        return false;
+      }
+      if (!runtime.memberAvailable.empty() && !runtime.memberAvailable[i]) continue;
       if (i >= runtime.hasLastPublishedMemberSetpoint.size() ||
           i >= runtime.lastPublishedMemberSetpointKw.size() ||
           i >= runtime.lastMemberSetpointPublishedAt.size() ||
@@ -1873,11 +1994,13 @@ void GroupManager::controlTick(const std::string &groupName) {
     config = it->second.config;
     connId = it->second.connId;
     functionEnabled = it->second.functionEnabled;
+    refreshCommunicationAvailabilityLocked(&it->second);
     controlRevision = it->second.controlRevision;
     commandRevision = it->second.commandRevision;
     input.hasCmdRaw = it->second.hasCmdRaw;
     input.cmdRaw = it->second.cmdRaw;
     input.baseRawByTag = it->second.baseRawByTag;
+    input.memberAvailable = it->second.memberAvailable;
     input.hasMemberMeasRaw = it->second.hasMemberMeasRaw;
     input.memberMeasRaw = it->second.memberMeasRaw;
     input.hasLastMemberTargetKw = it->second.hasLastMemberTargetKw;
@@ -1887,8 +2010,9 @@ void GroupManager::controlTick(const std::string &groupName) {
     input.controlProfile = it->second.controlProfile;
     input.integralMemoryKw = it->second.integralMemoryKw;
     input.enablePi = !isDirectCyclicMode(config);
-    const bool stableDeltaTarget = isDirectCyclicMode(config) && config.p_cmd().mode() == AGCProto::VALUE_MODE_DELTA &&
-                                   config.p_cmd().delta_base() == AGCProto::DELTA_BASE_LAST_TARGET;
+    const bool stableDeltaTarget = config.p_cmd().mode() == AGCProto::VALUE_MODE_DELTA &&
+                                   (!input.memberAvailable.empty() || (isDirectCyclicMode(config) &&
+                                    config.p_cmd().delta_base() == AGCProto::DELTA_BASE_LAST_TARGET));
     if (stableDeltaTarget && it->second.hasDirectResolvedDesiredTotalKw &&
         it->second.directResolvedCommandRevision == it->second.commandRevision) {
       input.hasDesiredTotalOverride = true;
@@ -1906,7 +2030,8 @@ void GroupManager::controlTick(const std::string &groupName) {
     bool allMembersNearZero = true;
     for (int i = 0; i < config.members_size(); ++i) {
       const auto &member = config.members(i);
-      if (!member.controllable() || static_cast<size_t>(i) >= it->second.memberMeasRaw.size() ||
+      if (!member.controllable() || (!input.memberAvailable.empty() && !input.memberAvailable[static_cast<size_t>(i)]) ||
+          static_cast<size_t>(i) >= it->second.memberMeasRaw.size() ||
           static_cast<size_t>(i) >= it->second.hasMemberMeasRaw.size() || !it->second.hasMemberMeasRaw[static_cast<size_t>(i)]) {
         continue;
       }
@@ -2006,8 +2131,9 @@ void GroupManager::controlTick(const std::string &groupName) {
   }
   const auto &output = *outputOpt;
 
-  const bool stableDeltaTarget = isDirectCyclicMode(config) && config.p_cmd().mode() == AGCProto::VALUE_MODE_DELTA &&
-                                 config.p_cmd().delta_base() == AGCProto::DELTA_BASE_LAST_TARGET;
+  const bool stableDeltaTarget = config.p_cmd().mode() == AGCProto::VALUE_MODE_DELTA &&
+                                 (!input.memberAvailable.empty() || (isDirectCyclicMode(config) &&
+                                  config.p_cmd().delta_base() == AGCProto::DELTA_BASE_LAST_TARGET));
   if (stableDeltaTarget && !input.hasDesiredTotalOverride) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = groupsByName_.find(groupName);
@@ -2233,6 +2359,31 @@ grpc::Status GroupManager::StartTuning(
   if (!status.ok()) {
     return status;
   }
+  if (!it->second.memberIndexesByCommunicationTag.empty()) {
+    // 停止态没有实时订阅，启动调试前读取带源时间戳的最新通信快照。
+    const auto connId = it->second.connId;
+    const auto configSnapshot = it->second.config.SerializeAsString();
+    const auto revision = it->second.controlRevision;
+    std::vector<std::string> healthTags;
+    for (const auto &[tag, indexes] : it->second.memberIndexesByCommunicationTag) healthTags.push_back(tag);
+    lock.unlock();
+    DataCenterProto::GetLatestResponse snapshot;
+    status = dataCenter_.GetLatest(connId, healthTags, &snapshot);
+    lock.lock();
+    it = groupsByName_.find(request.group_name());
+    if (it == groupsByName_.end()) return makeNotFound(request.group_name());
+    if (!status.ok() || it->second.state != AGCProto::GROUP_STATE_STOPPED ||
+        it->second.controlRevision != revision || it->second.config.SerializeAsString() != configSnapshot) {
+      return makePreconditionFailed("通信状态读取失败或控制组已变化，请重新开始调试");
+    }
+    for (const auto &update : snapshot.updates()) handleUpdateLocked(&it->second, update);
+    refreshCommunicationAvailabilityLocked(&it->second);
+    for (int index = 0; index < it->second.config.members_size(); ++index) {
+      if (it->second.config.members(index).controllable() && !it->second.memberAvailable[static_cast<size_t>(index)]) {
+        return makePreconditionFailed("存在通信未知、异常或心跳过期的可控成员，不能开始自动调试");
+      }
+    }
+  }
   const auto installedCapacityKw = ComputeInstalledCapacityKw(it->second.config);
   auto targetLower = numeric::TuningLower(request.config());
   auto targetUpper = numeric::TuningUpper(request.config());
@@ -2280,7 +2431,15 @@ grpc::Status GroupManager::StartTuning(
   it->second.tuningTaskStartedAt = it->second.tuningPhaseStartedAt;
   it->second.tuningEnteredRangeAt = {};
   it->second.tuningInRange = false;
+  const auto availableBeforeStart = it->second.memberAvailable;
+  const auto healthyBeforeStart = it->second.memberCommunicationHealthy;
+  const auto sourceTsBeforeStart = it->second.memberCommunicationSourceTs;
+  const auto receivedBeforeStart = it->second.memberCommunicationReceivedAt;
   startThreadsLocked(groupName, &it->second);
+  it->second.memberAvailable = availableBeforeStart;
+  it->second.memberCommunicationHealthy = healthyBeforeStart;
+  it->second.memberCommunicationSourceTs = sourceTsBeforeStart;
+  it->second.memberCommunicationReceivedAt = receivedBeforeStart;
   auto tuningOutputMutex = it->second.outputMutex;
   it->second.tuningThread = ModuleManager::StartModuleThread(
       AGCLibInfo.LIB_NAME,

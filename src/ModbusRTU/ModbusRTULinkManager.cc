@@ -22,6 +22,13 @@
 
 namespace ModbusRTU {
 namespace {
+using CommunicationState = mskdsp::communication::State;
+
+std::vector<std::string> WithCommunicationTag(std::vector<std::string> tags) {
+  tags.emplace_back(mskdsp::communication::kStateTag);
+  return tags;
+}
+
 constexpr uint32_t kDefaultBaudRate = 9600;
 constexpr uint32_t kDefaultDataBits = 8;
 constexpr uint32_t kDefaultReadTimeoutMs = 1000;
@@ -457,6 +464,12 @@ void LinkManager::LoadPersistedConfig() {
     if (tableIt != pointTablesByConn.end()) {
       PointTable pointTable;
       status = pointTable.Upsert(tableIt->second.points(), true);
+      for (const auto& point : tableIt->second.points()) {
+        if (point.tag() == mskdsp::communication::kStateTag) {
+          status = {grpc::StatusCode::INVALID_ARGUMENT, "普通点表禁止占用通信状态系统标签"};
+          break;
+        }
+      }
       if (!status.ok()) {
         LOG_ERROR("ModbusRTU 恢复点表失败，已跳过该点表: conn_name={}, 原因={}",
                   normalized.conn_name(),
@@ -479,7 +492,7 @@ void LinkManager::LoadPersistedConfig() {
                   normalized.conn_name());
     }
 
-    auto syncStatus = dataCenter_.UpsertConnTags(runtime.connId, runtime.pointTable.Tags(), true);
+    auto syncStatus = dataCenter_.UpsertConnTags(runtime.connId, WithCommunicationTag(runtime.pointTable.Tags()), true);
     if (!syncStatus.ok()) {
       LOG_ERROR("ModbusRTU 恢复链路时同步 DataCenter 连接标签注册表失败: conn_name={}, conn_id={}, 原因={}",
                 normalized.conn_name(),
@@ -495,6 +508,7 @@ void LinkManager::LoadPersistedConfig() {
       needResaveLinks = true;
     }
 
+    publishCommunicationState(runtime.connId, CommunicationState::Stopped);
     restoredLinks[normalized.conn_name()] = std::move(runtime);
     LOG_INFO("ModbusRTU 已恢复链路配置: conn_name={}, conn_id={}, 点数={}, 状态={}",
              normalized.conn_name(),
@@ -842,21 +856,49 @@ grpc::Status LinkManager::fillLinkInfoLocked(const LinkRuntime& link, ModbusRTUP
   return grpc::Status::OK;
 }
 
+void LinkManager::publishCommunicationState(uint32_t connId, CommunicationState state) {
+  const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+  const auto status = dataCenter_.PublishUInt16(connId, mskdsp::communication::kStateTag,
+      static_cast<uint16_t>(state), DataCenterProto::QUALITY_GOOD, nowMs);
+  if (!status.ok()) {
+    LOG_WARNING("ModbusRTU 发布通信状态失败，后续轮询继续重试: conn_id={}, 状态={}, 原因={}",
+                connId, static_cast<uint16_t>(state), status.error_message());
+  }
+}
+
 void LinkManager::setCommunicationState(
-    const std::string& connName,
-    ModbusRTUProto::CommunicationState state) {
-  std::lock_guard<std::mutex> lock(mu_);
-  auto it = linksByName_.find(connName);
-  if (it == linksByName_.end() || it->second.state != ModbusRTUProto::LINK_STATE_RUNNING) {
-    return;
+    const std::string& connName, uint64_t generation, CommunicationState state) {
+  std::shared_ptr<std::mutex> publishMutex;
+  {
+    std::lock_guard lock(mu_);
+    const auto it = linksByName_.find(connName);
+    if (it == linksByName_.end()) return;
+    publishMutex = it->second.communicationPublishMutex;
   }
-  if (it->second.communicationState == state) {
-    return;
+  std::lock_guard publishLock(*publishMutex);
+  uint32_t connId = 0;
+  {
+    std::lock_guard lock(mu_);
+    auto it = linksByName_.find(connName);
+    if (it == linksByName_.end() || it->second.communicationGeneration != generation) return;
+    const bool running = it->second.state == ModbusRTUProto::LINK_STATE_RUNNING;
+    if ((state == CommunicationState::Stopped && running) ||
+        (state != CommunicationState::Stopped && !running)) return;
+    auto& link = it->second;
+    connId = link.connId;
+    const auto localState = state == CommunicationState::Healthy
+        ? ModbusRTUProto::COMMUNICATION_STATE_HEALTHY
+        : state == CommunicationState::Unhealthy ? ModbusRTUProto::COMMUNICATION_STATE_UNHEALTHY
+                                                : ModbusRTUProto::COMMUNICATION_STATE_UNSPECIFIED;
+    if (link.communicationState != localState) {
+      link.communicationState = localState;
+      LOG_INFO("ModbusRTU 通信健康状态更新: conn_name={}, 状态={}", connName,
+               ModbusRTUProto::CommunicationState_Name(localState));
+    }
   }
-  it->second.communicationState = state;
-  LOG_INFO("ModbusRTU 通信健康状态更新: conn_name={}, 状态={}",
-           connName,
-           ModbusRTUProto::CommunicationState_Name(state));
+  // 相同状态也发布，作为独立于普通遥测死区的通信心跳。
+  publishCommunicationState(connId, state);
 }
 
 ModbusRTUProto::LinksConfig LinkManager::dumpLinksConfigLocked() const {
@@ -1736,6 +1778,14 @@ grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& re
     return grpc::Status(grpc::StatusCode::INTERNAL, "DataCenter 返回 conn_id=0");
   }
 
+  status = dataCenter_.UpsertConnTags(connInfo.conn_id(), WithCommunicationTag({}), false);
+  if (!status.ok()) {
+    rollbackPendingCreate();
+    LOG_ERROR("ModbusRTU 创建连接时注册通信状态标签失败: conn_name={}, 原因={}", connName, status.error_message());
+    return status;
+  }
+  publishCommunicationState(connInfo.conn_id(), CommunicationState::Stopped);
+
   {
     std::lock_guard<std::mutex> lock(mu_);
     pendingCreateByName_.erase(connName);
@@ -1980,6 +2030,7 @@ grpc::Status LinkManager::ListLinks(ModbusRTUProto::ListLinksResponse* out) cons
 
 grpc::Status LinkManager::StartLink(const std::string& connName) {
   std::lock_guard mutationLock(pointTableMutationMu_);
+  std::lock_guard lifecycleLock(lifecycleMu_);
   auto status = validateConnName(connName);
   if (!status.ok()) {
     return status;
@@ -2090,6 +2141,7 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
     }
     link.bus = bus;
     link.state = ModbusRTUProto::LINK_STATE_RUNNING;
+    const auto generation = ++link.communicationGeneration;
     link.communicationState = ModbusRTUProto::COMMUNICATION_STATE_UNSPECIFIED;
     clearLastErrorLocked(&link, LastErrorSource::kLifecycle);
     clearLastErrorLocked(&link, LastErrorSource::kCommand);
@@ -2097,8 +2149,8 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
     clearLastErrorLocked(&link, LastErrorSource::kPolling);
     link.pollThread = ModuleManager::StartModuleThread(
         ModbusRTULibInfo.LIB_NAME,
-        [this, connName, connId, config, pointTable, bus](std::stop_token stopToken) {
-          pollLoop(connName, connId, config, pointTable, bus, stopToken);
+        [this, connName, connId, generation, config, pointTable, bus](std::stop_token stopToken) {
+          pollLoop(connName, connId, generation, config, pointTable, bus, stopToken);
         });
     startCommandSubscribeLocked(connName, &link);
   }
@@ -2118,6 +2170,8 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
 }
 
 grpc::Status LinkManager::StopLink(const std::string& connName) {
+  std::lock_guard lifecycleLock(lifecycleMu_);
+  uint64_t generation = 0;
   auto status = validateConnName(connName);
   if (!status.ok()) {
     return status;
@@ -2157,6 +2211,7 @@ grpc::Status LinkManager::StopLink(const std::string& connName) {
       commandGate->accepting = false;
     }
     it->second.bus.reset();
+    generation = ++it->second.communicationGeneration;
     it->second.state = pendingDelete ? ModbusRTUProto::LINK_STATE_PENDING_DELETE : ModbusRTUProto::LINK_STATE_STOPPED;
     it->second.communicationState = ModbusRTUProto::COMMUNICATION_STATE_UNSPECIFIED;
   }
@@ -2185,6 +2240,8 @@ grpc::Status LinkManager::StopLink(const std::string& connName) {
     pollThread.request_stop();
     pollThread.join();
   }
+
+  setCommunicationState(connName, generation, CommunicationState::Stopped);
 
   if (commandGate) {
     std::unique_lock<std::mutex> gateLock(commandGate->mu);
@@ -2275,7 +2332,13 @@ grpc::Status LinkManager::UpsertPointTable(const ModbusRTUProto::UpsertPointTabl
       return {grpc::StatusCode::INVALID_ARGUMENT, "更新模板来源必须完整替换并提供非零预期版本"};
     }
   }
-  std::lock_guard lock(mu_);
+  for (const auto& point : request.points()) {
+    if (point.tag() == mskdsp::communication::kStateTag) {
+      LOG_WARNING("ModbusRTU 拒绝普通点占用通信状态系统标签: conn_name={}", request.conn_name());
+      return {grpc::StatusCode::INVALID_ARGUMENT, "普通点表禁止占用通信状态系统标签"};
+    }
+  }
+  std::unique_lock lock(mu_);
   auto it = linksByName_.find(request.conn_name());
   if (it == linksByName_.end()) return makeNotFound(request.conn_name());
   auto& link = it->second;
@@ -2318,7 +2381,10 @@ grpc::Status LinkManager::UpsertPointTable(const ModbusRTUProto::UpsertPointTabl
     LOG_ERROR("ModbusRTU 点表落盘失败，未改动标签和路由并保留原版本: conn_name={}, 版本={}, 原因={}", request.conn_name(), link.pointTableRevision, status.error_message());
     return status;
   }
-  status = dataCenter_.UpsertConnTags(link.connId, next.Tags(), true);
+  const auto connId = link.connId;
+  lock.unlock();
+  status = dataCenter_.UpsertConnTags(connId, WithCommunicationTag(next.Tags()), true);
+  lock.lock();
   if (!status.ok()) {
     const auto rollback = pointTableStore_.Save(previousPointTablesConfig);
     LOG_ERROR("ModbusRTU 标签同步失败，已尝试恢复磁盘点表: conn_name={}, 版本={}, 磁盘恢复成功={}, 同步原因={}, 恢复原因={}", request.conn_name(), link.pointTableRevision, rollback.ok(), status.error_message(), rollback.error_message());
@@ -2354,11 +2420,12 @@ grpc::Status LinkManager::GetPointTable(const std::string& connName, ModbusRTUPr
 }
 
 void LinkManager::pollLoop(std::string connName,
-                           uint32_t connId,
+                           uint32_t connId, uint64_t communicationGeneration,
                            ModbusRTUProto::LinkConfig config,
                            PointTable pointTable,
                            std::shared_ptr<Bus> bus,
                            std::stop_token stopToken) {
+  setCommunicationState(connName, communicationGeneration, CommunicationState::Unknown);
   const auto interval = std::chrono::milliseconds(config.poll_interval_ms());
   const auto points = pointTable.Points();
   std::unordered_map<std::string, Decimal20> lastReportedByTag;
@@ -2621,9 +2688,8 @@ void LinkManager::pollLoop(std::string connName,
         clearLastError(connName, LastErrorSource::kPolling);
       }
       setCommunicationState(
-          connName,
-          roundSuccessCount > 0 ? ModbusRTUProto::COMMUNICATION_STATE_HEALTHY
-                                : ModbusRTUProto::COMMUNICATION_STATE_UNHEALTHY);
+          connName, communicationGeneration,
+          roundSuccessCount > 0 ? CommunicationState::Healthy : CommunicationState::Unhealthy);
       std::this_thread::sleep_for(interval);
     }
 
@@ -3057,9 +3123,8 @@ void LinkManager::pollLoop(std::string connName,
       clearLastError(connName, LastErrorSource::kPolling);
     }
     setCommunicationState(
-        connName,
-        roundSuccessCount > 0 ? ModbusRTUProto::COMMUNICATION_STATE_HEALTHY
-                              : ModbusRTUProto::COMMUNICATION_STATE_UNHEALTHY);
+        connName, communicationGeneration,
+        roundSuccessCount > 0 ? CommunicationState::Healthy : CommunicationState::Unhealthy);
     std::this_thread::sleep_for(interval);
   }
 

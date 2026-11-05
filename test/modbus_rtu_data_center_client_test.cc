@@ -1,6 +1,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -160,4 +161,24 @@ TEST(ModbusRtuDataCenterClientTest, PublishDecimalBuildsRequest) {
       12, "decimal-reg", "0.30000000000000000000",
       DataCenterProto::QUALITY_GOOD, 901);
   EXPECT_TRUE(status.ok());
+}
+
+
+// 验证：通信状态发布设置一秒截止时间，超时原样返回，避免状态 RPC 无限阻塞轮询和停止。
+TEST(ModbusRtuDataCenterClientTest, PublishUInt16HasBoundedDeadline) {
+  auto stub = std::make_shared<DataCenterProto::MockDataCenterServiceStub>();
+  DataCenterClient client("ModbusRTU");
+  client.setStub(stub);
+  const auto before = std::chrono::system_clock::now();
+  EXPECT_CALL(*stub, Publish(_, _, _))
+      .WillOnce(Invoke([&](grpc::ClientContext* context,
+                          const DataCenterProto::PublishRequest& request,
+                          DataCenterProto::Empty*) {
+        EXPECT_EQ(request.tag(), "__communication_state");
+        EXPECT_GE(context->deadline(), before + std::chrono::seconds(1));
+        EXPECT_LE(context->deadline(), std::chrono::system_clock::now() + std::chrono::seconds(1));
+        return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "通信状态发布超时");
+      }));
+  EXPECT_EQ(client.PublishUInt16(10, "__communication_state", 1, DataCenterProto::QUALITY_GOOD, 123).error_code(),
+            grpc::StatusCode::DEADLINE_EXCEEDED);
 }

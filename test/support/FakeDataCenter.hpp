@@ -522,6 +522,8 @@ public:
     update.mutable_value()->CopyFrom(request.value());
     update.set_ts_ms(request.ts_ms());
     update.set_quality(request.quality());
+    // Mock 与已发布协议保持一致，保留品质位的存在性及完整数值。
+    if (request.has_quality_flags()) update.set_quality_flags(request.quality_flags());
 
     std::vector<std::shared_ptr<SubscriptionState>> subscriptions;
     {
@@ -715,6 +717,7 @@ public:
       output->mutable_value()->CopyFrom(update.value());
       output->set_ts_ms(update.ts_ms());
       output->set_quality(update.quality());
+      if (update.has_quality_flags()) output->set_quality_flags(update.quality_flags());
       output->set_sequence(1);
     };
     if (request.tags().empty()) {

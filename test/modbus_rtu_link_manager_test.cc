@@ -27,6 +27,16 @@ class ModbusRTULinkManagerTestPeer {
 public:
   using LastErrorSource = LinkManager::LastErrorSource;
 
+  static uint64_t CommunicationGeneration(const LinkManager& mgr, const std::string& name) {
+    std::lock_guard lock(mgr.mu_);
+    return mgr.linksByName_.at(name).communicationGeneration;
+  }
+
+  static void PublishCommunication(LinkManager& mgr, const std::string& name, uint64_t generation,
+                                   mskdsp::communication::State state) {
+    mgr.setCommunicationState(name, generation, state);
+  }
+
   static void SetError(LinkManager& mgr,
                        const std::string& connName,
                        const std::string& error,
@@ -1743,6 +1753,7 @@ TEST(ModbusRtuLinkManagerTest, UpsertPointTableKeepsLocalOnDataCenterFailure) {
   auto stub = MakeStub(&state);
 
   EXPECT_CALL(*stub, UpsertConnTags(_, _, _))
+      .WillOnce(Return(grpc::Status::OK))  // 创建连接时先注册系统状态点。
       .WillOnce(Return(grpc::Status(grpc::StatusCode::INTERNAL, "dc failure")));
 
   LinkManagerTestEnv env;
@@ -1953,4 +1964,168 @@ TEST(ModbusRtuLinkManagerTest, LoadsPendingDeleteStateAfterRestart) {
     auto status = mgr.StartLink("conn-pending-persist");
     EXPECT_EQ(status.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
   }
+}
+
+
+// 验证：连接创建即注册并发布系统状态，替换普通点表仍保留系统标签且拒绝用户占用。
+TEST(ModbusRtuLinkManagerTest, CommunicationStateRegistrationSurvivesPointTableReplacement) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  LinkManagerTestEnv env;
+  auto& mgr = env.mgr;
+  mgr.setDataCenterStub(stub);
+  std::vector<std::string> registered;
+  std::vector<bool> replaceFlags;
+  EXPECT_CALL(*stub, UpsertConnTags(_, _, _))
+      .WillRepeatedly(::testing::Invoke([&](grpc::ClientContext*, const DataCenterProto::UpsertConnTagsRequest& request, DataCenterProto::Empty*) {
+        registered.assign(request.tags().begin(), request.tags().end());
+        replaceFlags.push_back(request.replace());
+        return grpc::Status::OK;
+      }));
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("communication-tags", "/dev/unused", 1), &info).ok());
+  EXPECT_EQ(registered, (std::vector<std::string>{"__communication_state"}));
+  ASSERT_EQ(replaceFlags.size(), 1);
+  EXPECT_FALSE(replaceFlags.front());
+  const auto created = state.GetPublishedUpdates(info.conn_id(), "__communication_state");
+  ASSERT_EQ(created.size(), 1);
+  EXPECT_EQ(created.back().value().int_value(), 3);
+  EXPECT_GT(created.back().ts_ms(), 0);
+  ModbusRTUProto::UpsertPointTableRequest points;
+  points.set_conn_name("communication-tags");
+  points.set_replace(true);
+  *points.add_points() = MakeHoldingRegisterPoint("ordinary", 10);
+  ASSERT_TRUE(mgr.UpsertPointTable(points).ok());
+  EXPECT_THAT(registered, ::testing::UnorderedElementsAre("ordinary", "__communication_state"));
+  ASSERT_EQ(replaceFlags.size(), 2);
+  EXPECT_TRUE(replaceFlags.back());
+  points.mutable_points(0)->set_tag("__communication_state");
+  EXPECT_EQ(mgr.UpsertPointTable(points).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  ModbusRTUProto::PointTable saved;
+  ASSERT_TRUE(mgr.GetPointTable("communication-tags", &saved).ok());
+  ASSERT_EQ(saved.points_size(), 1);
+  EXPECT_EQ(saved.points(0).tag(), "ordinary");
+}
+
+// 验证：点读与显式块读均发布未知、失败、恢复及停止，死区过滤期间同值健康心跳仍持续。
+TEST(ModbusRtuLinkManagerTest, CommunicationStateHeartbeatRecoversInBothReadModes) {
+  for (auto mode : {ModbusRTUProto::READ_PLAN_MODE_POINT, ModbusRTUProto::READ_PLAN_MODE_EXPLICIT}) {
+    ScopedPseudoTty pty;
+    ASSERT_TRUE(pty.ok()) << pty.error();
+    FakeDataCenterState state;
+    LinkManagerTestEnv env;
+    auto& mgr = env.mgr;
+    mgr.setDataCenterStub(MakeStub(&state));
+    auto request = MakeMinimalLinkReq("communication-heartbeat", pty.slavePath().c_str(), 1);
+    request.mutable_config()->set_poll_interval_ms(5);
+    request.mutable_config()->mutable_serial()->set_read_timeout_ms(30);
+    request.mutable_config()->mutable_read_plan()->set_mode(mode);
+    if (mode == ModbusRTUProto::READ_PLAN_MODE_EXPLICIT) {
+      auto* block = request.mutable_config()->mutable_read_plan()->add_blocks();
+      block->set_function(ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS);
+      block->set_start(10);
+      block->set_quantity(1);
+    }
+    ModbusRTUProto::LinkInfo info;
+    ASSERT_TRUE(mgr.UpsertLink(request, &info).ok());
+    ModbusRTUProto::UpsertPointTableRequest points;
+    points.set_conn_name("communication-heartbeat");
+    points.set_replace(true);
+    *points.add_points() = MakeHoldingRegisterPoint("constant-value", 10);
+    points.mutable_points(0)->set_deadband(1);
+    ASSERT_TRUE(mgr.UpsertPointTable(points).ok());
+    ASSERT_TRUE(mgr.StartLink("communication-heartbeat").ok());
+    ASSERT_TRUE(state.WaitForPublishCount(info.conn_id(), "__communication_state", 3, std::chrono::seconds(2)));
+    auto failed = state.GetPublishedUpdates(info.conn_id(), "__communication_state");
+    ASSERT_GE(failed.size(), 3);
+    EXPECT_EQ(failed[1].value().int_value(), 0);
+    EXPECT_EQ(failed[2].value().int_value(), 2);
+    state.FailPublishForTag("__communication_state");
+    std::jthread responder([&](std::stop_token stop) {
+      while (!stop.stop_requested()) {
+        std::vector<uint8_t> frame;
+        if (!pty.readExact(&frame, 8, 100)) continue;
+        std::vector<uint8_t> response{1, 3, 2, 0, 42};
+        ModbusRTU::SerialBus::appendCrc(&response);
+        if (!pty.writeAll(response)) return;
+      }
+    });
+    ASSERT_TRUE(state.WaitForPublishCount(info.conn_id(), "constant-value", 1, std::chrono::seconds(2)));
+    const auto retryDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (state.GetFailedPublishCount(info.conn_id(), "__communication_state") == 0 &&
+           std::chrono::steady_clock::now() < retryDeadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    EXPECT_GT(state.GetFailedPublishCount(info.conn_id(), "__communication_state"), 0);
+    state.AllowPublishForTag("__communication_state");
+    const auto baseline = state.GetPublishCount(info.conn_id(), "__communication_state");
+    ASSERT_TRUE(state.WaitForPublishCount(info.conn_id(), "__communication_state", baseline + 3, std::chrono::seconds(2)));
+    ASSERT_TRUE(mgr.StopLink("communication-heartbeat").ok());
+    responder.request_stop();
+    const auto updates = state.GetPublishedUpdates(info.conn_id(), "__communication_state");
+    ASSERT_GE(updates.size(), baseline + 4);
+    EXPECT_EQ(updates.back().value().int_value(), 3);
+    size_t healthy = 0;
+    for (const auto& update : updates) {
+      EXPECT_EQ(update.quality(), DataCenterProto::QUALITY_GOOD);
+      EXPECT_GT(update.ts_ms(), 0);
+      if (update.value().int_value() == 1) ++healthy;
+    }
+    EXPECT_GE(healthy, 3);
+    EXPECT_EQ(state.GetPublishCount(info.conn_id(), "constant-value"), 1);
+  }
+}
+
+
+// 验证：停止后的旧轮询代次和非运行态正常值均不能覆盖最终停止状态。
+TEST(ModbusRtuLinkManagerTest, CommunicationStateRejectsOldGenerationAfterStop) {
+  FakeDataCenterState state;
+  LinkManagerTestEnv env;
+  auto& mgr = env.mgr;
+  mgr.setDataCenterStub(MakeStub(&state));
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("communication-generation", "/dev/unused", 1), &info).ok());
+  const auto oldGeneration = ModbusRTULinkManagerTestPeer::CommunicationGeneration(mgr, "communication-generation");
+  ASSERT_TRUE(mgr.StopLink("communication-generation").ok());
+  const auto stoppedCount = state.GetPublishCount(info.conn_id(), "__communication_state");
+  ModbusRTULinkManagerTestPeer::PublishCommunication(mgr, "communication-generation", oldGeneration,
+                                                    mskdsp::communication::State::Healthy);
+  const auto currentGeneration = ModbusRTULinkManagerTestPeer::CommunicationGeneration(mgr, "communication-generation");
+  ModbusRTULinkManagerTestPeer::PublishCommunication(mgr, "communication-generation", currentGeneration,
+                                                    mskdsp::communication::State::Healthy);
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "__communication_state"), stoppedCount);
+  const auto updates = state.GetPublishedUpdates(info.conn_id(), "__communication_state");
+  ASSERT_FALSE(updates.empty());
+  EXPECT_EQ(updates.back().value().int_value(), 3);
+}
+
+// 验证：恢复尚未配置点表的连接也会重新注册系统标签并刷新停止状态。
+TEST(ModbusRtuLinkManagerTest, CommunicationStateRestoresStoppedConnection) {
+  ScopedTempDir dir;
+  const auto db = dir.path() / "config.db";
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  uint32_t connId = 0;
+  {
+    LinkManager mgr("ModbusRTU", db);
+    mgr.setDataCenterStub(stub);
+    ModbusRTUProto::LinkInfo info;
+    ASSERT_TRUE(mgr.UpsertLink(MakeMinimalLinkReq("communication-restore", "/dev/unused", 1), &info).ok());
+    connId = info.conn_id();
+  }
+  const auto baseline = state.GetPublishCount(connId, "__communication_state");
+  std::vector<std::string> registered;
+  EXPECT_CALL(*stub, UpsertConnTags(_, _, _))
+      .WillOnce(::testing::Invoke([&](grpc::ClientContext*, const DataCenterProto::UpsertConnTagsRequest& request, DataCenterProto::Empty*) {
+        registered.assign(request.tags().begin(), request.tags().end());
+        return grpc::Status::OK;
+      }));
+  LinkManager restored("ModbusRTU", db);
+  restored.setDataCenterStub(stub);
+  restored.LoadPersistedConfig();
+  EXPECT_EQ(registered, (std::vector<std::string>{"__communication_state"}));
+  EXPECT_EQ(state.GetPublishCount(connId, "__communication_state"), baseline + 1);
+  const auto updates = state.GetPublishedUpdates(connId, "__communication_state");
+  ASSERT_FALSE(updates.empty());
+  EXPECT_EQ(updates.back().value().int_value(), 3);
 }

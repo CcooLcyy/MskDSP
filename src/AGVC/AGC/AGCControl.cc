@@ -11,6 +11,13 @@ namespace {
 
 using Error = numeric::DecimalError;
 
+bool memberParticipates(const AGCProto::GroupConfig &config,
+                        const ControlInput &input, size_t index) {
+  return config.members(static_cast<int>(index)).controllable() &&
+         (input.memberAvailable.empty() ||
+          (index < input.memberAvailable.size() && input.memberAvailable[index]));
+}
+
 std::expected<Decimal, Error> toPhysicalAbs(
     const AGCProto::SignalSpec &signal, const Decimal &raw) {
   auto scale = numeric::Scale(signal);
@@ -88,6 +95,9 @@ std::expected<Decimal, Error> computeTotalMeasKw(
   Decimal total;
   const auto memberCount = static_cast<size_t>(config.members_size());
   for (size_t index = 0; index < memberCount; ++index) {
+    if (!input.memberAvailable.empty() && !memberParticipates(config, input, index)) {
+      continue;
+    }
     if (index >= input.memberMeasRaw.size() ||
         index >= input.hasMemberMeasRaw.size() ||
         !input.hasMemberMeasRaw[index]) {
@@ -194,9 +204,22 @@ DefaultPointOutput ComputeDefaultPointOutput(
       }
       out.theoreticalLowerKw = *lower;
       out.theoreticalUpperKw = *upper;
+      if (!input.memberAvailable.empty() && memberParticipates(config, input, index)) {
+        auto dynamicLower = out.dynamicLowerKw.Add(*minimum);
+        auto dynamicUpper = out.dynamicUpperKw.Add(*maximum);
+        if (dynamicLower.has_value() && dynamicUpper.has_value()) {
+          out.dynamicLowerKw = *dynamicLower;
+          out.dynamicUpperKw = *dynamicUpper;
+        } else {
+          out.dynamicQuality = DataCenterProto::QUALITY_BAD;
+        }
+      }
       continue;
     }
 
+    if (!input.memberAvailable.empty()) {
+      continue;
+    }
     ++out.uncontrollableMemberCount;
     if (index < input.memberMeasRaw.size() &&
         index < input.hasMemberMeasRaw.size() &&
@@ -216,8 +239,9 @@ DefaultPointOutput ComputeDefaultPointOutput(
     ++out.missingUncontrollableMemberCount;
   }
 
-  auto lower = out.dynamicLowerKw.Add(out.theoreticalLowerKw);
-  auto upper = out.dynamicUpperKw.Add(out.theoreticalUpperKw);
+  // 旧组叠加固定可控容量；通信组已经逐成员汇总当前可用容量。
+  auto lower = out.dynamicLowerKw.Add(input.memberAvailable.empty() ? out.theoreticalLowerKw : Decimal{});
+  auto upper = out.dynamicUpperKw.Add(input.memberAvailable.empty() ? out.theoreticalUpperKw : Decimal{});
   if (lower.has_value() && upper.has_value()) {
     out.dynamicLowerKw = *lower;
     out.dynamicUpperKw = *upper;
@@ -260,6 +284,9 @@ std::optional<ControlOutput> ComputeControlOutput(
 
   std::vector<Decimal> measuredKw(memberCount);
   for (size_t index = 0; index < memberCount; ++index) {
+    if (!input.memberAvailable.empty() && !memberParticipates(config, input, index)) {
+      continue;
+    }
     if (index >= input.memberMeasRaw.size() ||
         index >= input.hasMemberMeasRaw.size() ||
         !input.hasMemberMeasRaw[index]) {
@@ -341,7 +368,7 @@ std::optional<ControlOutput> ComputeControlOutput(
   }
 
   for (size_t index = 0; index < memberCount; ++index) {
-    if (config.members(static_cast<int>(index)).controllable()) {
+    if (!input.memberAvailable.empty() || config.members(static_cast<int>(index)).controllable()) {
       continue;
     }
     auto next = out.passiveKw.Add(measuredKw[index]);
@@ -364,7 +391,7 @@ std::optional<ControlOutput> ComputeControlOutput(
   allocationMembers.reserve(memberCount);
   for (size_t index = 0; index < memberCount; ++index) {
     const auto &member = config.members(static_cast<int>(index));
-    if (!member.controllable()) {
+    if (!memberParticipates(config, input, index)) {
       continue;
     }
     auto weight = numeric::Weight(member);
@@ -393,6 +420,11 @@ std::optional<ControlOutput> ComputeControlOutput(
 
   auto allocation =
       strategy.AllocateDecimal(out.targetControllableKw, allocationMembers);
+  if (!input.memberAvailable.empty()) {
+    LOG_DEBUG("AGC 按通信状态分配: group_name={}, 参与成员数={}, 配置成员数={}, 可控目标_kw={}",
+              config.group_name(), controllableIndexes.size(), memberCount,
+              out.targetControllableKw.ToFixedString());
+  }
   if (!allocation.has_value()) {
     logCalculationError(config, "执行加权分配", allocation.error());
     return std::nullopt;
@@ -417,7 +449,7 @@ std::optional<ControlOutput> ComputeControlOutput(
   }
   for (size_t index = 0; index < memberCount; ++index) {
     const auto &member = config.members(static_cast<int>(index));
-    if (!member.controllable()) {
+    if (!memberParticipates(config, input, index)) {
       continue;
     }
     const auto *profile =
@@ -559,7 +591,7 @@ std::optional<ControlOutput> ComputeControlOutput(
 
   out.actualTargetKw = out.passiveKw;
   for (size_t index = 0; index < memberCount; ++index) {
-    if (!config.members(static_cast<int>(index)).controllable()) {
+    if (!memberParticipates(config, input, index)) {
       continue;
     }
     auto next = out.actualTargetKw.Add(out.memberTargetKw[index]);
@@ -587,7 +619,7 @@ std::optional<ControlOutput> ComputeControlOutput(
 
   for (size_t index = 0; index < memberCount; ++index) {
     const auto &member = config.members(static_cast<int>(index));
-    if (!member.controllable() || !member.has_p_set() ||
+    if (!memberParticipates(config, input, index) || !member.has_p_set() ||
         !member.p_set().has_signal() ||
         member.p_set().signal().tag().empty()) {
       continue;
@@ -643,7 +675,7 @@ std::optional<ControlOutput> ComputeControlOutput(
   out.hasLastMemberTargetKw.assign(memberCount, false);
   out.nextLastMemberTargetKw.assign(memberCount, Decimal{});
   for (size_t index = 0; index < memberCount; ++index) {
-    if (config.members(static_cast<int>(index)).controllable()) {
+    if (memberParticipates(config, input, index)) {
       out.hasLastMemberTargetKw[index] = true;
       out.nextLastMemberTargetKw[index] = out.memberTargetKw[index];
     }

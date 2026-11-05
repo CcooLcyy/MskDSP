@@ -80,6 +80,11 @@ private:
     // 由配置派生的缓存 tags（供订阅线程使用）。
     std::string cmdTag;
     std::unordered_map<std::string, size_t> memberIndexByMeasTag;
+    std::unordered_map<std::string, std::vector<size_t>> memberIndexesByCommunicationTag;
+    std::vector<bool> memberAvailable;
+    std::vector<bool> memberCommunicationHealthy;
+    std::vector<int64_t> memberCommunicationSourceTs;
+    std::vector<std::chrono::steady_clock::time_point> memberCommunicationReceivedAt;
     std::unordered_set<std::string> baseTags;
     std::vector<std::string> subscribeTags;
 
@@ -157,6 +162,8 @@ private:
                               bool *publishedAny = nullptr);
 
   bool handleUpdateLocked(GroupRuntime *g, const DataCenterProto::PointUpdate &update);
+  bool refreshCommunicationAvailabilityLocked(GroupRuntime *g);
+  void checkCommunicationTimeouts(const std::string &groupName);
   void controlTick(const std::string &groupName);
 
   static bool pointValueToDecimal(const DataCenterProto::PointValue &v, Decimal *out);

@@ -1,5 +1,6 @@
 #include "ModbusRTUDataCenterClient.h"
 
+#include <chrono>
 #include <filesystem>
 #include <format>
 #include <utility>
@@ -211,6 +212,8 @@ grpc::Status DataCenterClient::PublishUInt16(
   req.set_quality(quality);
 
   grpc::ClientContext ctx;
+  // 当前用于连接通信状态；限制等待时间，避免健康发布阻塞轮询和停止。
+  ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(1));
   DataCenterProto::Empty resp;
   return stub->Publish(&ctx, req, &resp);
 }

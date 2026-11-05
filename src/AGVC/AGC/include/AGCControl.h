@@ -21,6 +21,9 @@ struct ControlInput {
   std::unordered_map<std::string, Decimal> baseRawByTag;
   std::vector<bool> hasMemberMeasRaw;
   std::vector<Decimal> memberMeasRaw;
+  // 空向量兼容未关联通信状态的旧组；非空时仅 true 的可控成员参与计算。
+  // 缺少索引按不可用处理，不能把掉线成员的最后量测当作被动出力。
+  std::vector<bool> memberAvailable;
 
   bool hasLastDesiredTotalKw{false};
   Decimal lastDesiredTotalKw;

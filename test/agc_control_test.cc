@@ -642,7 +642,125 @@ TEST(AgcControlTest, TotalMeasurementPublishesEngineeringValueWithoutReverseScal
   EXPECT_NEAR(Legacy(*publishValue), 30.0, 1e-6);
 }
 
-// 验证：不可控成员作为被动出力，从总目标中扣除后再分配。
+// 验证：启用通信参与规则后，掉线成员退出，剩余成员按原目标重分配，恢复后重新加入。
+TEST(AgcControlTest, CommunicationMaskReallocatesOriginalTargetAndRecovers) {
+  auto cfg = MakeBaseConfig();
+  *cfg.add_members() = cfg.members(0);
+  cfg.mutable_members(2)->set_member_name("m3");
+  cfg.mutable_members(2)->mutable_p_set()->mutable_signal()->set_tag("M3_SET");
+  for (auto &member : *cfg.mutable_members()) {
+    member.set_capacity_kw(200);
+    member.set_weight(1);
+  }
+  auto input = MakeBaseInput(300, {80, 90, 100});
+  input.enablePi = false;
+  input.memberAvailable = {true, true, true};
+  AGVC::WeightedStrategy strategy;
+  auto out = AGC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(out.has_value());
+  for (const auto &target : out->memberTargetKw) EXPECT_EQ(target, Decimal(100));
+  input.memberAvailable[0] = false;
+  out = AGC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(out.has_value());
+  EXPECT_FALSE(out->memberPublish[0]);
+  EXPECT_FALSE(out->hasLastMemberTargetKw[0]);
+  EXPECT_EQ(out->memberTargetKw[1], Decimal(150));
+  EXPECT_EQ(out->memberTargetKw[2], Decimal(150));
+  EXPECT_EQ(out->passiveKw, Decimal(0));
+  EXPECT_EQ(out->totalMeasKw, Decimal(190));
+  input.memberAvailable[0] = true;
+  out = AGC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(out.has_value());
+  for (const auto &target : out->memberTargetKw) EXPECT_EQ(target, Decimal(100));
+}
+
+// 验证：通信规则启用时，不可控成员即使在线也不参与计算或扣减总目标。
+TEST(AgcControlTest, CommunicationModeExcludesUncontrollableMemberPower) {
+  auto cfg = MakeBaseConfig();
+  cfg.mutable_members(0)->set_controllable(false);
+  auto input = MakeBaseInput(60, {20, 10});
+  input.memberAvailable = {true, true};
+  AGVC::WeightedStrategy strategy;
+  const auto out = AGC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(out.has_value());
+  EXPECT_FALSE(out->memberPublish[0]);
+  EXPECT_EQ(out->passiveKw, Decimal(0));
+  EXPECT_EQ(out->totalMeasKw, Decimal(10));
+  EXPECT_EQ(out->targetControllableKw, Decimal(60));
+  EXPECT_EQ(out->memberTargetKw[1], Decimal(60));
+}
+
+// 验证：全部掉线不产生任何成员设点，目标作为未分配量报告。
+TEST(AgcControlTest, AllMembersOfflinePublishNoSetpoints) {
+  const auto cfg = MakeBaseConfig();
+  auto input = MakeBaseInput(150, {50, 50});
+  input.memberAvailable = {false, false};
+  AGVC::WeightedStrategy strategy;
+  const auto out = AGC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(out.has_value());
+  EXPECT_EQ(out->memberPublish, (std::vector<bool>{false, false}));
+  EXPECT_EQ(out->actualTargetKw, Decimal(0));
+  EXPECT_EQ(out->unallocatedKw, Decimal(150));
+}
+
+// 验证：剩余容量不足时保留约束并报告差额，不给掉线成员分配。
+TEST(AgcControlTest, OfflineCapacityCannotAbsorbUnallocatedTarget) {
+  const auto cfg = MakeBaseConfig();
+  auto input = MakeBaseInput(150, {50, 50});
+  input.memberAvailable = {false, true};
+  AGVC::WeightedStrategy strategy;
+  const auto out = AGC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(out.has_value());
+  EXPECT_FALSE(out->memberPublish[0]);
+  EXPECT_EQ(out->memberTargetKw[1], Decimal(100));
+  EXPECT_EQ(out->unallocatedKw, Decimal(50));
+}
+
+// 验证：失联成员不继续积累 PI 积分，恢复前不保留可发布目标。
+TEST(AgcControlTest, OfflineMemberClearsIntegralMemoryAndTarget) {
+  const auto cfg = MakeBaseConfig();
+  auto input = MakeBaseInput(100, {0, 0});
+  input.memberAvailable = {false, true};
+  input.integralMemoryKw = {Decimal(80), Decimal(0)};
+  input.hasLastMemberTargetKw = {true, true};
+  input.lastMemberTargetKw = {Decimal(80), Decimal(20)};
+  AGVC::WeightedStrategy strategy;
+  const auto out = AGC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(out.has_value());
+  EXPECT_EQ(out->nextIntegralMemoryKw[0], Decimal(0));
+  EXPECT_FALSE(out->hasLastMemberTargetKw[0]);
+  EXPECT_FALSE(out->memberPublish[0]);
+}
+
+// 验证：参与掩码缺少成员时按不可用处理，不能默认加入分配。
+TEST(AgcControlTest, TruncatedCommunicationMaskFailsClosed) {
+  const auto cfg = MakeBaseConfig();
+  auto input = MakeBaseInput(80, {0, 0});
+  input.memberAvailable = {true};
+  AGVC::WeightedStrategy strategy;
+  const auto out = AGC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(out.has_value());
+  EXPECT_TRUE(out->memberPublish[0]);
+  EXPECT_FALSE(out->memberPublish[1]);
+  EXPECT_EQ(out->memberTargetKw[0], Decimal(80));
+}
+
+// 验证：理论容量保留配置总量，动态上下限仅统计在线可控成员。
+TEST(AgcControlTest, DynamicLimitsUseOnlyAvailableControllableCapacity) {
+  auto cfg = MakeBaseConfig();
+  cfg.mutable_members(0)->set_min_kw(10);
+  cfg.mutable_members(1)->set_min_kw(20);
+  AGC::ControlInput input;
+  input.memberAvailable = {false, true};
+  const auto out = AGC::ComputeDefaultPointOutput(cfg, input);
+  EXPECT_EQ(out.theoreticalLowerKw, Decimal(30));
+  EXPECT_EQ(out.theoreticalUpperKw, Decimal(200));
+  EXPECT_EQ(out.dynamicLowerKw, Decimal(20));
+  EXPECT_EQ(out.dynamicUpperKw, Decimal(100));
+  EXPECT_EQ(out.dynamicQuality, DataCenterProto::QUALITY_GOOD);
+}
+
+// 验证：未关联通信输入的旧配置继续沿用原被动出力口径。
 TEST(AgcControlTest, UncontrollableMemberIsPassiveOutput) {
   auto cfg = MakeBaseConfig();
   cfg.mutable_members(0)->set_controllable(false);

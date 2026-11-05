@@ -124,6 +124,25 @@ grpc::Status ValidateGroupConfig(const AGCProto::GroupConfig& config) {
     }
   }
 
+  // 通信输入只允许独立标签，共用任意业务输入输出会混淆健康语义。
+  std::unordered_set<std::string> businessTags{config.p_cmd().signal().tag()};
+  if (!config.p_cmd().base_tag().empty()) businessTags.emplace(config.p_cmd().base_tag());
+  for (const auto &member : config.members()) {
+    businessTags.emplace(member.p_meas().tag());
+    businessTags.emplace(member.p_set().signal().tag());
+    if (!member.p_set().base_tag().empty()) businessTags.emplace(member.p_set().base_tag());
+  }
+  if (config.has_outputs()) {
+    businessTags.emplace(config.outputs().p_total_meas().tag());
+    businessTags.emplace(config.outputs().p_total_target().tag());
+    businessTags.emplace(config.outputs().p_total_error().tag());
+  }
+  for (const auto &member : config.members()) {
+    if (member.has_communication_state() && businessTags.contains(member.communication_state().tag())) {
+      return makeInvalid("通信状态输入不能与业务输入输出共用标签");
+    }
+  }
+
   std::unordered_set<std::string> memberNames;
   memberNames.reserve(static_cast<size_t>(config.members_size()));
   numeric::Decimal installedCapacityKw;
@@ -168,6 +187,22 @@ grpc::Status ValidateGroupConfig(const AGCProto::GroupConfig& config) {
         return makeInvalid("可控成员的有效分配权重之和超出 Decimal20 范围");
       }
       allocationWeightTotal = *nextWeight;
+    }
+    if (m.has_communication_state()) {
+      if (m.communication_state().tag().empty()) {
+        return makeInvalid("通信状态输入 tag 不能为空");
+      }
+      status = validateNoReservedDefaultTag(m.communication_state().tag(), "成员通信状态");
+      if (!status.ok()) return status;
+      if (m.communication_state().tag() == m.p_meas().tag() ||
+          m.communication_state().tag() == m.p_set().signal().tag() ||
+          m.communication_state().tag() == config.p_cmd().signal().tag()) {
+        return makeInvalid("通信状态输入不能与量测、设点或总命令共用标签");
+      }
+    }
+    if (m.communication_timeout_ms() != 0 &&
+        (m.communication_timeout_ms() < 1000 || m.communication_timeout_ms() > 3600000)) {
+      return makeInvalid("通信状态有效期必须为 0 或 1000..3600000 毫秒");
     }
     status = validateNoReservedDefaultTag(m.p_meas().tag(), std::format("members[{}].p_meas.tag", m.member_name()));
     if (!status.ok()) {

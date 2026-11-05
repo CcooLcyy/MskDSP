@@ -27,6 +27,7 @@
 #include "ModbusRTUPointTable.h"
 #include "ModbusRTUPointTableStore.h"
 #include "ModbusRTUSerialBus.h"
+#include "mskdsp/CommunicationState.hpp"
 
 namespace ModbusRTU {
 
@@ -159,6 +160,9 @@ private:
     SerialKey serialKey;
     MqttKey mqttKey;
     uint32_t connId = 0;
+    uint64_t communicationGeneration = 0;
+    // 按连接串行发布，避免一个连接等待 DataCenter 时阻塞其他连接心跳。
+    std::shared_ptr<std::mutex> communicationPublishMutex = std::make_shared<std::mutex>();
     ModbusRTUProto::LinkState state = ModbusRTUProto::LINK_STATE_STOPPED;
     ModbusRTUProto::CommunicationState communicationState =
         ModbusRTUProto::COMMUNICATION_STATE_UNSPECIFIED;
@@ -187,8 +191,9 @@ private:
   static MqttKey makeMqttKey(const ModbusRTUProto::LinkConfig& config);
 
   grpc::Status fillLinkInfoLocked(const LinkRuntime& link, ModbusRTUProto::LinkInfo* out) const;
-  void setCommunicationState(const std::string& connName,
-                              ModbusRTUProto::CommunicationState state);
+  void setCommunicationState(const std::string& connName, uint64_t generation,
+                             mskdsp::communication::State state);
+  void publishCommunicationState(uint32_t connId, mskdsp::communication::State state);
   ModbusRTUProto::LinksConfig dumpLinksConfigLocked() const;
   ModbusRTUProto::PointTablesConfig dumpPointTablesConfigLocked() const;
   grpc::Status saveLinksConfig(const ModbusRTUProto::LinksConfig& config);
@@ -210,7 +215,7 @@ private:
                                    const DataCenterProto::PointUpdate& update);
 
   void pollLoop(std::string connName,
-                uint32_t connId,
+                uint32_t connId, uint64_t communicationGeneration,
                 ModbusRTUProto::LinkConfig config,
                 PointTable pointTable,
                 std::shared_ptr<Bus> bus,
@@ -225,6 +230,8 @@ private:
   static void clearLastErrorLocked(LinkRuntime* link, LastErrorSource source);
 
   mutable std::mutex mu_;
+  // 生命周期串行化；通信发布锁内仅短暂读取 mu_，RPC 不持有 mu_。
+  std::mutex lifecycleMu_;
   // 整表快照的生成到落盘需要串行化，避免链路修改的旧快照覆盖 CAS 保存结果。
   std::mutex pointTableMutationMu_;
   std::unordered_map<std::string, LinkRuntime> linksByName_;
