@@ -117,6 +117,9 @@ test-publish-contract:
   timeout: 15m
   needs: []
   script:
+    # 仅补齐本作业临时容器的 YAML 依赖，不更新共享工具镜像。
+    - apt-get update
+    - apt-get install -y --no-install-recommends python3-yaml
     - python3 script/gitlab/init_platform_proto.py
     - python3 -c 'import grpc, grpc_tools.protoc, yaml'
     - python3 -m unittest discover -s script/gitlab -p test_lower_metadata.py -v
