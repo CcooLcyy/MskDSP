@@ -22,11 +22,13 @@ def require(condition, message):
 
 
 def release_context(branch):
-    """由受控分支推导通道，Beta 的版本只能取自分支名。"""
+    """由主干或维护分支推导 CI 通道，保留历史 Beta 身份解析。"""
     if branch in ("master", "main"):
         return "ci", None
+    if re.fullmatch(r"release/(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", branch or ""):
+        return "ci", None
     match = re.fullmatch(r"beta/((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))", branch or "")
-    require(match is not None, "仅允许主分支或 beta/主版本.次版本.修订版本")
+    require(match is not None, "仅允许主干、release/主版本.次版本或历史 Beta 引用")
     return "beta", match.group(1)
 
 
@@ -54,12 +56,21 @@ def release_environment(environment):
     return channel, version, environment["CI_COMMIT_BRANCH"]
 
 
+def validate_maintenance_version(source_ref, version):
+    """维护线只允许同一主次版本，防止把新开发线产物混入旧维护线。"""
+    if source_ref.startswith("release/"):
+        series = source_ref.removeprefix("release/")
+        require(re.fullmatch(re.escape(series) + r"\.(?:0|[1-9][0-9]*)", version) is not None,
+                "维护分支主次版本与 VERSION 不一致")
+
+
 def create_identity(base_version, arch, environment):
     validate_environment(environment)
     require(arch in ("arm64", "x64"), "构建架构不合法")
     base_version = base_version.strip()
     require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,60}", base_version), "基础版本不合法")
     channel, branch_version, source_ref = release_environment(environment)
+    validate_maintenance_version(source_ref, base_version)
     require(branch_version is None or branch_version == base_version, "发布引用版本与 VERSION 不一致")
     return {
         "product": "mskdsp-lower", "channel": channel, "platform": "linux-" + arch,
@@ -83,6 +94,10 @@ def package_identity(identity, environment):
     require(identity.get("product") == "mskdsp-lower" and identity.get("channel") == channel
             and identity.get("platform") in ("linux-arm64", "linux-x64")
             and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]+", identity.get("version", "")), "构建身份不合法")
+    if source_ref.startswith("release/"):
+        require(re.fullmatch(re.escape(source_ref.removeprefix("release/"))
+                             + r"\.(?:0|[1-9][0-9]*)-ci-p[1-9][0-9]*-b[1-9][0-9]*",
+                             identity["version"]) is not None, "维护线打包身份与版本不一致")
     require(channel != "beta" or re.fullmatch(
         re.escape(branch_version) + r"-beta-p[1-9][0-9]*-b[1-9][0-9]*", identity["version"]), "Beta 构建版本与来源不一致")
     require(channel != "stable" or identity["version"] == branch_version, "正式版本与标签不一致")

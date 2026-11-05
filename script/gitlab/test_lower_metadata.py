@@ -37,7 +37,27 @@ class MetadataTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             target.package_identity(first, self.environment | {"CI_PIPELINE_ID": "101"})
 
-    # Beta 必须从同版本分支构建，架构产物保留真实来源且不可篡改通道。
+    # 维护线使用 CI 身份且只能构建同一主次版本，打包保留真实引用与提交。
+    def test_maintenance_identity_matches_version_series(self):
+        env = self.environment | {"CI_COMMIT_BRANCH": "release/0.8"}
+        for arch in ("arm64", "x64"):
+            identity = target.create_identity("0.8.1", arch, env)
+            self.assertEqual(identity["channel"], "ci")
+            self.assertEqual(identity["source_ref"], "release/0.8")
+            self.assertTrue(identity["version"].startswith("0.8.1-ci-p7-b42"))
+            packaged = target.package_identity(identity, env | {"CI_JOB_ID": "50"})
+            self.assertEqual(packaged["source_sha"], env["CI_COMMIT_SHA"])
+            self.assertIn("-j50-", packaged["version"])
+        for version in ("0.9.0", "1.8.1", "0.8.1-beta", "0.8.01"):
+            with self.subTest(version=version), self.assertRaises(ValueError):
+                target.create_identity(version, "arm64", env)
+        for branch in ("release/0", "release/00.8", "release/0.8.1", "release/0.8/extra"):
+            with self.subTest(branch=branch), self.assertRaises(ValueError):
+                target.create_identity("0.8.1", "arm64", env | {"CI_COMMIT_BRANCH": branch})
+        with self.assertRaises(ValueError):
+            target.package_identity(identity | {"version": "0.9.0-ci-p7-b42"}, env)
+
+    # 历史 Beta 身份解析兼容保留，不代表存在 Beta 生产流水线。
     def test_beta_identity_freezes_branch_version_and_channel(self):
         env = self.environment | {"CI_COMMIT_BRANCH": "beta/0.4.0"}
         for arch in ("arm64", "x64"):

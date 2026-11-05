@@ -72,7 +72,7 @@ curl --fail --location "${SHA_URL}" --output "${SHA_FILE}"
 
 文件名由平台清单提供，包含版本、GitLab 流水线及作业身份、提交短哈希和目标架构。
 
-Beta/Stable 由平台将已经通过 CI 的 ARM64 安装包晋升产生，不重复构建。需要这些通道时将 `CHANNEL` 改为 `beta` 或 `stable`；具体构建发布规则见 [GitLab CI 接入方案](./GitLab-CI接入方案.md)。设备安装仍需按后文单独执行，下载不会自动升级设备。
+新版本只发布 CI 与 Stable：主干更新 CI，受保护版本标签完成自身完整 CI 后重建发布 ARM64 Stable；维护分支只保留 GitLab 产物，不覆盖主干 CI。下载正式版时将 `CHANNEL` 改为 `stable`；Beta 仅保留历史包。具体规则见 [Stable 标签发布方案](./GitLab-Stable标签发布方案.md)。设备安装仍需按后文单独执行，下载不会自动升级设备。
 
 ## 5. 上传安装包到工作机
 

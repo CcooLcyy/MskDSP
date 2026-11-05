@@ -1,5 +1,6 @@
 """验证下位机流水线的触发、双架构门禁及隔离约束。"""
 from pathlib import Path
+import re
 import unittest
 import tomllib
 import yaml
@@ -23,13 +24,21 @@ class LowerCiTest(unittest.TestCase):
         job = self.config[name]
         return merge_job(self.job(job["extends"]), job) if "extends" in job else job
 
-    def test_only_main_push_or_web_is_admitted(self):
+    # 主干和维护分支进入完整流水线，Beta 与 MR 不触发。
+    def test_main_and_maintenance_push_or_web_are_admitted(self):
         rules = self.config["workflow"]["rules"]
         self.assertEqual(rules[-1], {"when": "never"})
         condition = rules[0]["if"]
-        for token in ("CI_COMMIT_TAG", "master", "main", "push", "web"):
+        for token in ("CI_COMMIT_TAG", "master", "main", "release", "push", "web"):
             self.assertIn(token, condition)
         self.assertNotIn("merge_request_event", condition)
+        maintenance = re.search(r"=~ /(.+?)/\)", condition).group(1).replace(r"\/", "/")
+        for branch, expected in (("release/0.8", True), ("release/12.10", True),
+                                 ("release/00.8", False), ("release/0.08", False),
+                                 ("release/0.8.1", False), ("release/0.8/extra", False),
+                                 ("beta/0.8.1", False), ("feature/release/0.8", False)):
+            with self.subTest(branch=branch):
+                self.assertEqual(bool(re.fullmatch(maintenance, branch)), expected)
 
     def test_publish_waits_for_both_packages_without_rebuilding(self):
         for arch in ("arm64", "x64"):
@@ -44,19 +53,13 @@ class LowerCiTest(unittest.TestCase):
         self.assertIn("platform_client.py", scripts)
         self.assertNotIn("build_lower.sh", scripts)
 
-    # Beta 只能发布 ARM64，仍等待双架构打包和发布契约测试。
-    def test_beta_branch_has_isolated_arm64_publication_and_full_gates(self):
-        self.assertIn("beta", self.config["workflow"]["rules"][0]["if"])
-        beta = self.config["publish-beta-arm64"]
-        self.assertEqual(beta["variables"]["ARCH"], "arm64")
-        self.assertEqual(beta["resource_group"], "mskdsp-lower-beta-arm64")
-        self.assertEqual(beta["environment"]["name"], "ci")
-        self.assertIn("beta", beta["rules"][0]["if"])
-        self.assertEqual({item["job"] for item in beta["needs"]},
-                         {"package-arm64", "package-x64", "test-publish-contract"})
+    # 维护线只有验证和产物，不能更新全局 CI，Beta 无生产发布入口。
+    def test_maintenance_has_no_publication_and_beta_is_disabled(self):
+        self.assertNotIn("beta", self.config["workflow"]["rules"][0]["if"])
+        self.assertNotIn("publish-beta-arm64", self.config)
         for arch in ("arm64", "x64"):
-            self.assertIn('"master"', self.config["publish-" + arch]["rules"][0]["if"])
-            self.assertNotIn("beta", self.config["publish-" + arch]["rules"][0]["if"])
+            self.assertEqual(self.config["publish-" + arch]["rules"], [
+                {"if": '$CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "main"'}, {"when": "never"}])
         self.assertIn("test-x64", {item["job"] for item in self.config["package-arm64"]["needs"]})
         contract = self.job("test-publish-contract")
         self.assertIn("test_platform_client.py", "\n".join(contract["script"]))

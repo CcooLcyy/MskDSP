@@ -2,7 +2,7 @@ workflow:
   auto_cancel:
     on_new_commit: interruptible
   rules:
-    - if: '$CI_COMMIT_TAG == null && ($CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH =~ /^beta\/(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/) && ($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web")'
+    - if: '$CI_COMMIT_TAG == null && ($CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH =~ /^release\/(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/) && ($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web")'
     - if: '$CI_COMMIT_REF_PROTECTED == "true" && $CI_COMMIT_TAG =~ /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/ && ($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web")'
     - when: never
 
@@ -248,26 +248,7 @@ publish-x64:
     - job: package-x64
       artifacts: true
 
-# 复用现有 ci 环境的通用 publisher 凭据，实际通道由冻结 Beta 来源决定。
-publish-beta-arm64:
-  extends: .publish
-  variables:
-    ARCH: arm64
-  environment:
-    name: ci
-  resource_group: mskdsp-lower-beta-arm64
-  rules:
-    - if: '$CI_COMMIT_BRANCH =~ /^beta\/(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/'
-    - when: never
-  needs:
-    - job: test-publish-contract
-      artifacts: false
-    - job: package-arm64
-      artifacts: true
-    - job: package-x64
-      artifacts: false
-
-# 正式标签重新构建冻结产物，发布前核对标签和同版本 Beta 指向同一提交。
+# 维护分支仅保留完整验证产物；正式标签自身完整验证后发布 ARM64。
 publish-stable-arm64:
   extends: .publish
   variables:

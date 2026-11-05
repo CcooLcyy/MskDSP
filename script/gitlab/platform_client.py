@@ -110,20 +110,55 @@ def check_current_head(metadata, environ=None):
                 or not re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", metadata["version"])):
             raise ClientError("正式发布来源标签或保护状态不合法")
         tag = "refs/tags/" + metadata["source_ref"]
-        beta = "refs/heads/beta/" + metadata["version"]
-        result = subprocess.run(["git", "ls-remote", "--exit-code", repository, tag, tag + "^{}", beta],
+        series = ".".join(metadata["version"].split(".")[:2])
+        branches = ("refs/heads/master", "refs/heads/main", "refs/heads/release/" + series)
+        allowed = (tag, tag + "^{}", *branches)
+        result = subprocess.run(["git", "ls-remote", "--exit-code", repository, *allowed],
                                 env=git_environment, capture_output=True, text=True, timeout=60, check=False)
         refs = {}
         for line in result.stdout.splitlines():
             parts = line.split("\t")
-            if (len(parts) != 2 or parts[1] not in (tag, tag + "^{}", beta) or parts[1] in refs
+            if (len(parts) != 2 or parts[1] not in allowed or parts[1] in refs
                     or not re.fullmatch(r"[a-f0-9]{40}", parts[0])):
-                raise ClientError("远端标签及 Beta 来源响应不合法")
+                raise ClientError("远端标签及来源分支响应不合法")
             refs[parts[1]] = parts[0]
         commit = refs.get(tag + "^{}", refs.get(tag))
-        if result.returncode or tag not in refs or commit != metadata["source_sha"] or refs.get(beta) != metadata["source_sha"]:
-            raise ClientError("远端正式标签或 Beta 分支与冻结提交不一致，拒绝发布")
-        return
+        if result.returncode or tag not in refs or commit != metadata["source_sha"]:
+            raise ClientError("远端正式标签与冻结提交不一致，拒绝发布")
+        # 发布作业浅克隆，使用独立临时仓库获取完整远端历史，不改源码工作区。
+        with tempfile.TemporaryDirectory(prefix="lower-release-source-") as temporary:
+            def git(*arguments):
+                return subprocess.run(["git", *arguments], cwd=temporary, env=git_environment,
+                                      capture_output=True, text=True, timeout=180, check=False)
+
+            if git("init", "--bare").returncode:
+                raise ClientError("无法初始化正式来源校验仓库")
+            for branch in branches:
+                if branch not in refs:
+                    continue
+                if git("fetch", "--no-tags", repository, branch).returncode:
+                    raise ClientError("无法获取正式来源分支历史，拒绝发布")
+                head = git("rev-parse", "FETCH_HEAD")
+                if head.returncode or head.stdout.strip() != refs[branch]:
+                    raise ClientError("来源分支在查询期间变化，拒绝本次发布")
+                # 不可达提交可能未被 fetch；不存在即不属于此分支历史。
+                if git("cat-file", "-e", commit + "^{commit}").returncode:
+                    continue
+                ancestor = git("merge-base", "--is-ancestor", commit, "FETCH_HEAD")
+                if ancestor.returncode == 0:
+                    # 获取完整历史可能耗时，再次核对标签防止查询期间被移动。
+                    current = subprocess.run(["git", "ls-remote", "--exit-code", repository, tag, tag + "^{}"],
+                                             env=git_environment, capture_output=True, text=True,
+                                             timeout=60, check=False)
+                    expected_tag = {key: value for key, value in refs.items() if key in (tag, tag + "^{}")}
+                    expected_lines = {value + "\t" + key for key, value in expected_tag.items()}
+                    if current.returncode or set(current.stdout.splitlines()) != expected_lines:
+                        raise ClientError("正式标签在历史校验期间变化，拒绝发布")
+                    print("正式来源历史校验通过：" + branch)
+                    return
+                if ancestor.returncode != 1:
+                    raise ClientError("无法确认正式提交的历史归属，拒绝发布")
+        raise ClientError("正式提交不属于主干或同版本维护分支历史，拒绝发布")
     result = subprocess.run(["git", "ls-remote", "--exit-code", repository,
                              "refs/heads/" + metadata["source_ref"]], env=git_environment,
                             capture_output=True, text=True, timeout=60, check=False)

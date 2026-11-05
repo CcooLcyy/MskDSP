@@ -4,14 +4,14 @@
 
 - GitLab 为下位机代码与 CI 的唯一维护入口，移除旧 GitHub Actions、专用 Runner 部署模板和 R2/静态发布脚本；GitHub 仓库停用 Actions，历史提交仍可追溯。
 - 本地仅保留 `gitlab` 远端，`master` 跟踪 `gitlab/master`，普通 `git push` 仅推送 GitLab。协议子模块固定提交保持不变，源地址改为 GitLab。
-- 仅主分支 master/main 的 push 或手动流水线执行；MR、beta 分支和版本标签不重复构建。
+- master/main 与 `release/X.Y` 的 push 或手动流水线执行完整验证；Beta 分支和 MR 不触发。受保护 `vX.Y.Z` 标签独立运行完整验证后发布 Stable，见《GitLab-Stable标签发布方案》。
 - ARM64、x64 均完成 GCC14 RelWithDebInfo 编译；2026-10-24 起 x64 编译与测试拆成独立作业，只有 `test-x64` 执行现有完整 CTest。ARM64 在 x64 上交叉编译，不编译或执行 ARM64 测试程序，不再创建 ARM64 测试作业。
 - 下位机与通用 Linux Runner 共用容量上限为 24 GiB 的内存工作区，标签、工程目录和持久缓存分开；下位机接单并发为 2、通用 Linux 接单并发为 1，单作业 4 CPU、24 GiB 内存且禁止交换。Windows Runner 不接入。
 - CMake 主工程及 vcpkg 默认并行度为 4，可分别通过 `CMAKE_BUILD_PARALLEL_LEVEL`、`VCPKG_MAX_CONCURRENCY` 设置正整数。两个 Linux Runner 的主脚本通过共享编译槽最多并行执行两个，CTest 并行度仍为 2；实际 I/O 改善以真实流水线测量为准。
 - 保留 Docker 镜像、自解压 gzip 安装包、SHA256SUMS；ARM64、x64 均生成独立调试符号包，随各自构建归档保留 30 天。
 - 不执行独立的 check_iec61850_package.sh；不减少已有协议单测。
 - 安装包经 gRPC 上传平台软件库，校验完成后自动发布对应架构 CI 通道；不安装设备，不触发 R2 或 GitHub 发布。
-- Beta/Stable 从同一已通过 CI 的安装包晋升，文件及 SHA256 不改变。此次不创建 Beta/Stable 重构建流水线。
+- 主干发布 CI；维护分支仅保留 GitLab 产物，不覆盖平台全局 CI。停止新 Beta 发布；Stable 从受保护标签重新构建，不使用 CI 包改通道晋升。
 
 ## 作业与身份
 

@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -142,27 +143,66 @@ class IdentityTests(unittest.TestCase):
         with self.assertRaises(client.ClientError):
             client.load_metadata(self.path, env | {"CI_COMMIT_REF_PROTECTED": "false"})
 
-    # 附注标签取 peeled commit，同时要求 Beta 分支仍指向该提交。
-    def test_stable_tag_and_beta_head_must_match(self):
-        metadata = self.data | {"channel": "stable", "source_ref": "v0.4.0", "version": "0.4.0"}
+    # 使用真实 Git 图验证历史祖先关系，避免用 HEAD 相等误拒维护分支前进。
+    def test_stable_source_ancestry_tag_integrity_and_version_series(self):
+        repository = self.root / "source.git"
+        repository.mkdir()
+
+        def git(*arguments):
+            return subprocess.run(["git", *arguments], cwd=repository, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+
+        git("init", "--initial-branch=unrelated")
+        git("config", "user.name", "发布门禁测试")
+        git("config", "user.email", "release-test@example.invalid")
+        git("commit", "--allow-empty", "-m", "维护修复")
+        sha = git("rev-parse", "HEAD")
+        metadata = self.data | {"channel": "stable", "source_ref": "v0.8.1", "version": "0.8.1",
+                               "source_sha": sha, "source_repository": str(repository)}
         env = self.env | {"CI_COMMIT_REF_PROTECTED": "true"}
-        tag, beta, sha = "refs/tags/v0.4.0", "refs/heads/beta/0.4.0", metadata["source_sha"]
-        for annotated in (False, True):
-            lines = [f"{sha}\t{beta}", f"{'a' * 40 if annotated else sha}\t{tag}"]
-            if annotated:
-                lines.append(f"{sha}\t{tag}^{{}}")
-            with self.subTest(annotated=annotated), patch.object(client.subprocess, "run") as run:
-                run.return_value.returncode = 0
-                run.return_value.stdout = "\n".join(lines) + "\n"
-                client.check_current_head(metadata, env)
-                self.assertIn(beta, run.call_args.args[0])
-                self.assertIn(tag + "^{}", run.call_args.args[0])
-                for invalid in (f"{sha}\t{tag}\n", f"{sha}\t{tag}\n{'c' * 40}\t{beta}\n",
-                                f"{'c' * 40}\t{tag}\n{sha}\t{beta}\n",
-                                f"{'a' * 40}\t{tag}\n{'c' * 40}\t{tag}^{{}}\n{sha}\t{beta}\n"):
-                    run.return_value.stdout = invalid
-                    with self.assertRaises(client.ClientError):
-                        client.check_current_head(metadata, env)
+        git("tag", "v0.8.1")
+        git("branch", "beta/0.8.1")
+        git("branch", "release/0.9")
+        # 只有 Beta 或错误版本维护线可达时拒绝，即使标签精确匹配。
+        with self.assertRaises(client.ClientError):
+            client.check_current_head(metadata, env)
+        git("branch", "release/0.8")
+        client.check_current_head(metadata, env)
+        git("checkout", "release/0.8")
+        git("commit", "--allow-empty", "-m", "维护线继续前进")
+        client.check_current_head(metadata, env)
+        # 附注标签同样接受 peeled commit，标签移动或删除必须拒绝。
+        git("tag", "-d", "v0.8.1")
+        git("tag", "-a", "v0.8.1", sha, "-m", "正式版本")
+        client.check_current_head(metadata, env)
+        git("tag", "-f", "v0.8.1", "HEAD")
+        with self.assertRaises(client.ClientError):
+            client.check_current_head(metadata, env)
+        git("tag", "-d", "v0.8.1")
+        with self.assertRaises(client.ClientError):
+            client.check_current_head(metadata, env)
+        git("tag", "v0.8.1", sha)
+        git("branch", "-D", "beta/0.8.1", "release/0.9")
+        git("checkout", "unrelated")
+        git("branch", "-D", "release/0.8")
+        for branch in ("master", "main"):
+            git("branch", branch, sha)
+            client.check_current_head(metadata, env)
+            git("branch", "-D", branch)
+        # 允许分支存在但历史不包含标签提交时拒绝。
+        git("checkout", "--orphan", "master")
+        git("commit", "--allow-empty", "-m", "不相关主干")
+        with self.assertRaises(client.ClientError):
+            client.check_current_head(metadata, env)
+
+    # 来源查询失败不可继续上传，不传播底层认证错误。
+    def test_stable_source_query_failure_is_closed(self):
+        metadata = self.data | {"channel": "stable", "source_ref": "v0.8.1", "version": "0.8.1"}
+        with patch.object(client.subprocess, "run") as run:
+            run.return_value.returncode = 1
+            run.return_value.stdout = ""
+            with self.assertRaises(client.ClientError):
+                client.check_current_head(metadata, self.env | {"CI_COMMIT_REF_PROTECTED": "true"})
 
     def test_cli_hides_sensitive_exception(self):
         import io

@@ -2,24 +2,24 @@
 
 ## 目标与边界
 
-主干保留 CI、`beta/x.y.z` 保留 Beta。正式 `vX.Y.Z` 标签只允许受保护引用的 push / web 流水线：完整双架构构建、x64 全量 CTest、网络与安装器测试、发布契约测试和两个架构打包全部通过后，只发布 ARM64 Stable。x64 正式构建和包仅作 GitLab 产物，不上传 Stable 或改写 x64 CI。
+仅保留 CI 与 Stable 两个新发布通道。主干发布 CI；`release/X.Y` 维护分支运行完整 CI 并保存产物，不发布平台全局 CI，避免覆盖主干开发版本。停止 Beta 分支触发和 Beta 发布作业，历史 Beta 身份读取兼容保留。正式 `vX.Y.Z` 标签只允许受保护引用的 push / web 流水线：该标签自身的完整双架构构建、x64 全量 CTest、网络与安装器测试、发布契约测试和两个架构打包全部通过后，只发布 ARM64 Stable。x64 正式包仅作 GitLab 产物。
 
-本次目标标签 `v0.4.0`。标签版本必须等于 `VERSION`；冻结 `channel=stable`、`version=0.4.0`、`package_version=0.4.0-linux-arm64`、`source_ref=v0.4.0` 和实际提交 SHA。不能把 Beta 包改通道冒充正式包。
+标签版本必须等于 `VERSION`；例如 `v0.8.1` 冻结 `channel=stable`、`version=0.8.1`、`package_version=0.8.1-linux-arm64`、`source_ref=v0.8.1` 和实际提交 SHA。维护分支 `release/0.8` 只接受 `VERSION=0.8.Z`，CI 产物仍使用带流水线/作业/SHA 的版本。不能把其他通道的包改身份冒充正式包。
 
-主 agent 先将发布配置提交同步到 `beta/0.4.0`，等待该 SHA 的完整 Beta 流水线成功，再给同一 SHA 创建受保护标签。发布客户端每次发布前核对远端标签（兼容轻量与附注标签，附注标签取 peeled commit）以及 `refs/heads/beta/0.4.0` 都等于冻结 SHA。标签移动、Beta 前进、来源不明或查询失败均拒绝；Beta CI 成功证据由主 agent 在打标签前核对。
+维护线示例：在 `release/0.8` 修复并将 VERSION 更新为 `0.8.1`，分支完整 CI 成功后，给该提交创建 `v0.8.1`。标签自身再次运行完整 CI，发布依赖这些作业成功，不新增查询另一条流水线的 GitLab API 依赖。每次上传开始及发布前均核对远端标签（兼容轻量与附注标签，附注标签取 peeled commit）仍等于冻结 SHA，并通过独立临时 Git 仓库获取远端历史，要求该 SHA 是 `master`、`main` 或匹配版本的 `release/0.8` 的祖先（含该分支 HEAD）。分支正常前进不阻断发布；错误版本维护线、仅 Beta 历史、无关提交、标签移动、来源不明或查询失败均拒绝。临时仓库不改 CI 源码工作区，完成后清理。
 
 ## 验收与测试
 
 先补测试，再实现身份和工作流：
 
-- 正式身份两架构版本均为纯 `0.4.0`，打包不附流水线序号；原构建/打包作业号仍保留为来源字段。
+- 正式身份两架构版本均为纯 `X.Y.Z`，打包不附流水线序号；原构建/打包作业号仍保留为来源字段。
 - 非法标签、未保护标签、同时携带分支、标签版本与 VERSION 不符、MR/schedule 来源、来源或通道篡改均拒绝。
-- 发布端只接受 ARM64 Stable；标签与 Beta 的同 SHA 门禁覆盖轻量、附注、移动及缺失情况。
+- 发布端只接受 ARM64 Stable；标签同 SHA 与允许分支历史门禁覆盖轻量、附注、移动、缺失、分支前进及错误维护版本。
 - Stable gRPC 契约覆盖成功、续传、完整性失败、过期拒绝和响应丢失；公开 Stable 清单核对真实身份、文件大小与 SHA256。
-- 新 Stable 作业独立资源锁，继承现有完整门禁；CI/Beta 发布规则互斥。
+- Stable 作业独立资源锁，继承标签自身完整门禁；主干 CI、维护分支仅产物与 Stable 标签发布互斥，Beta 不再触发生产流水线。
 
 仅修改发布配置、脚本、测试及文档，不修改业务、平台或设备。使用既有工具镜像，契约作业保留临时容器安装 python3-yaml。所有测试通过对应提交 CI 执行，本地不运行构建、测试或语法检查。
 
 ## 环境前提
 
-GitLab 保护 `v*` 标签并使 `CI_COMMIT_REF_PROTECTED=true`；`ci-build` 与 `ci` 环境变量及权限沿用 Beta，无需复制密钥。Stable 发布仍使用现有通用 publisher 令牌、gRPC/TLS、公开清单地址和平台签名配置。签名与安装包完整性既有链路保持原状；Stable 清单路径为 `/mskdsp-lower/stable/latest.json`。
+GitLab 保护 `v*` 标签并使 `CI_COMMIT_REF_PROTECTED=true`；维护分支 `release/*` 也应受保护，允许既有 Runner 和 `ci-build` 变量参与构建打包。Stable 使用现有 `ci` 环境的通用 publisher 令牌、gRPC/TLS、公开清单地址和平台签名配置；CI_JOB_TOKEN 需有读取本项目标签及完整分支历史的权限。不新增凭据或平台 API。签名与安装包完整性既有链路保持原状；Stable 清单路径为 `/mskdsp-lower/stable/latest.json`。本次不创建维护分支或标签，不部署设备，不删除历史 Beta 包或修改平台协议。
