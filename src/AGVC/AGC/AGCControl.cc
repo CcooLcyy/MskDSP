@@ -117,6 +117,38 @@ void logCalculationError(const AGCProto::GroupConfig &config,
 
 }  // namespace
 
+DirectionBlockOutput ComputeDirectionBlockOutput(
+    const AGCProto::GroupConfig &config,
+    const std::vector<bool> &hasPublishedTarget,
+    const std::vector<Decimal> &publishedTargetKw) {
+  DirectionBlockOutput out;
+  bool increaseBlocked = true;
+  bool decreaseBlocked = true;
+  for (size_t index = 0; index < static_cast<size_t>(config.members_size()); ++index) {
+    const auto &member = config.members(static_cast<int>(index));
+    if (!member.controllable()) {
+      continue;
+    }
+    if (index >= hasPublishedTarget.size() || !hasPublishedTarget[index] ||
+        index >= publishedTargetKw.size()) {
+      return out;
+    }
+    auto minimum = numeric::Minimum(member);
+    auto maximum = effectiveMemberMaxKw(member);
+    if (!minimum.has_value() || !maximum.has_value()) {
+      logCalculationError(config, "计算增减闭锁",
+                          !minimum.has_value() ? minimum.error() : maximum.error());
+      return out;
+    }
+    increaseBlocked = increaseBlocked && publishedTargetKw[index] >= *maximum;
+    decreaseBlocked = decreaseBlocked && publishedTargetKw[index] <= *minimum;
+  }
+  out.increaseBlocked = increaseBlocked;
+  out.decreaseBlocked = decreaseBlocked;
+  out.quality = DataCenterProto::QUALITY_GOOD;
+  return out;
+}
+
 std::optional<Decimal> ComputeTotalMeasKw(
     const AGCProto::GroupConfig &config, const ControlInput &input,
     Decimal *totalMeasKwOut) {

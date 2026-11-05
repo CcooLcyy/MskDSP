@@ -76,6 +76,18 @@ struct DefaultPointOutput {
   size_t missingUncontrollableMemberCount{0};
 };
 
+// 基于当前成功发布的绝对设定值判断方向空间；缺少任一可控成员值时状态未知。
+struct DirectionBlockOutput {
+  bool increaseBlocked{false};
+  bool decreaseBlocked{false};
+  DataCenterProto::Quality quality{DataCenterProto::QUALITY_BAD};
+};
+
+DirectionBlockOutput ComputeDirectionBlockOutput(
+    const AGCProto::GroupConfig &config,
+    const std::vector<bool> &hasPublishedTarget,
+    const std::vector<Decimal> &publishedTargetKw);
+
 std::optional<Decimal> ComputeTotalMeasKw(
     const AGCProto::GroupConfig& config,
     const ControlInput& input,

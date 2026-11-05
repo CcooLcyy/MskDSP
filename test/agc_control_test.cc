@@ -100,6 +100,120 @@ AGC::ControlInput MakeBaseInput(double cmdRaw, const std::vector<double>& measRa
 }
 }  // 命名空间结束
 
+// 验证：方向闭锁依据当前绝对下发设定值，到上限、下限和返回区间时分别置位与解除。
+TEST(AgcControlTest, DirectionBlocksFollowCurrentPublishedTargetWithoutLatching) {
+  auto cfg = MakeBaseConfig();
+  cfg.mutable_members()->RemoveLast();
+  cfg.mutable_members(0)->set_min_kw(10);
+  auto output = AGC::ComputeDirectionBlockOutput(cfg, {true}, {Decimal(100)});
+  EXPECT_TRUE(output.increaseBlocked);
+  EXPECT_FALSE(output.decreaseBlocked);
+  EXPECT_EQ(output.quality, DataCenterProto::QUALITY_GOOD);
+  output = AGC::ComputeDirectionBlockOutput(cfg, {true}, {Decimal(50)});
+  EXPECT_FALSE(output.increaseBlocked);
+  EXPECT_FALSE(output.decreaseBlocked);
+  output = AGC::ComputeDirectionBlockOutput(cfg, {true}, {Decimal(10)});
+  EXPECT_FALSE(output.increaseBlocked);
+  EXPECT_TRUE(output.decreaseBlocked);
+  output = AGC::ComputeDirectionBlockOutput(cfg, {true}, {Decimal(50)});
+  EXPECT_FALSE(output.decreaseBlocked);
+}
+
+// 验证：所有可控成员都达到对应边界才置组闭锁，不可控成员不参与判定。
+TEST(AgcControlTest, DirectionBlocksRequireAllControllableMembersAtLimit) {
+  auto cfg = MakeBaseConfig();
+  auto output = AGC::ComputeDirectionBlockOutput(cfg, {true, true}, {Decimal(100), Decimal(50)});
+  EXPECT_FALSE(output.increaseBlocked);
+  EXPECT_FALSE(output.decreaseBlocked);
+  output = AGC::ComputeDirectionBlockOutput(cfg, {true, true}, {Decimal(100), Decimal(100)});
+  EXPECT_TRUE(output.increaseBlocked);
+  output = AGC::ComputeDirectionBlockOutput(cfg, {true, true}, {Decimal(0), Decimal(50)});
+  EXPECT_FALSE(output.decreaseBlocked);
+  cfg.mutable_members(1)->set_controllable(false);
+  output = AGC::ComputeDirectionBlockOutput(cfg, {true, false}, {Decimal(100)});
+  EXPECT_TRUE(output.increaseBlocked);
+  EXPECT_EQ(output.quality, DataCenterProto::QUALITY_GOOD);
+}
+
+// 验证：未知下发缓存或缓存长度不足时返回未知质量，不把默认零值当成减闭锁。
+TEST(AgcControlTest, DirectionBlocksAreUnknownUntilEveryControllableTargetIsKnown) {
+  const auto cfg = MakeBaseConfig();
+  for (const auto &known : std::vector<std::vector<bool>>{{}, {true}, {true, false}}) {
+    const auto output = AGC::ComputeDirectionBlockOutput(cfg, known, {Decimal(100), Decimal(100)});
+    EXPECT_FALSE(output.increaseBlocked);
+    EXPECT_FALSE(output.decreaseBlocked);
+    EXPECT_EQ(output.quality, DataCenterProto::QUALITY_BAD);
+  }
+  const auto output = AGC::ComputeDirectionBlockOutput(cfg, {true, true}, {Decimal(100)});
+  EXPECT_FALSE(output.increaseBlocked);
+  EXPECT_FALSE(output.decreaseBlocked);
+  EXPECT_EQ(output.quality, DataCenterProto::QUALITY_BAD);
+}
+
+// 验证：无可控成员时两个方向均无调节能力，不需要存在下发缓存。
+TEST(AgcControlTest, NoControllableMembersBlockBothDirections) {
+  auto cfg = MakeBaseConfig();
+  for (auto &member : *cfg.mutable_members()) {
+    member.set_controllable(false);
+  }
+  const auto output = AGC::ComputeDirectionBlockOutput(cfg, {}, {});
+  EXPECT_TRUE(output.increaseBlocked);
+  EXPECT_TRUE(output.decreaseBlocked);
+  EXPECT_EQ(output.quality, DataCenterProto::QUALITY_GOOD);
+}
+
+// 验证：有效上限同时受容量和非零最大出力约束，固定出力成员可同时增减闭锁。
+TEST(AgcControlTest, DirectionBlocksUseEffectiveCapacityAndConfiguredMaximum) {
+  auto cfg = MakeBaseConfig();
+  cfg.mutable_members()->RemoveLast();
+  cfg.mutable_members(0)->set_max_kw(150);
+  EXPECT_TRUE(AGC::ComputeDirectionBlockOutput(cfg, {true}, {Decimal(100)}).increaseBlocked);
+  cfg.mutable_members(0)->set_max_kw(80);
+  EXPECT_FALSE(AGC::ComputeDirectionBlockOutput(cfg, {true}, {Decimal(79)}).increaseBlocked);
+  EXPECT_TRUE(AGC::ComputeDirectionBlockOutput(cfg, {true}, {Decimal(80)}).increaseBlocked);
+  cfg.mutable_members(0)->set_min_kw(80);
+  const auto output = AGC::ComputeDirectionBlockOutput(cfg, {true}, {Decimal(80)});
+  EXPECT_TRUE(output.increaseBlocked);
+  EXPECT_TRUE(output.decreaseBlocked);
+  EXPECT_EQ(output.quality, DataCenterProto::QUALITY_GOOD);
+}
+
+// 验证：Decimal20 上下限文本优先，精确区分边界两侧一个最小小数位，支持负下限。
+TEST(AgcControlTest, DirectionBlocksPreserveDecimalBoundariesAndNegativeMinimum) {
+  auto cfg = MakeBaseConfig();
+  cfg.mutable_members()->RemoveLast();
+  auto *member = cfg.mutable_members(0);
+  member->set_capacity_kw_decimal("0.30000000000000000001");
+  member->set_min_kw_decimal("-0.10000000000000000001");
+  EXPECT_FALSE(AGC::ComputeDirectionBlockOutput(
+      cfg, {true}, {Decimal("0.30000000000000000000")}).increaseBlocked);
+  EXPECT_TRUE(AGC::ComputeDirectionBlockOutput(
+      cfg, {true}, {Decimal("0.30000000000000000001")}).increaseBlocked);
+  EXPECT_FALSE(AGC::ComputeDirectionBlockOutput(
+      cfg, {true}, {Decimal("-0.10000000000000000000")}).decreaseBlocked);
+  EXPECT_TRUE(AGC::ComputeDirectionBlockOutput(
+      cfg, {true}, {Decimal("-0.10000000000000000001")}).decreaseBlocked);
+}
+
+// 验证：DELTA 输出为零时仍按解析后的绝对目标判定闭锁，不把零增量误认为下限。
+TEST(AgcControlTest, DirectionBlocksUseAbsoluteTargetForDeltaOutputs) {
+  auto cfg = MakeBaseConfig();
+  cfg.mutable_members()->RemoveLast();
+  auto *set = cfg.mutable_members(0)->mutable_p_set();
+  set->set_mode(AGCProto::VALUE_MODE_DELTA);
+  set->set_delta_base(AGCProto::DELTA_BASE_CURRENT_MEAS);
+  auto input = MakeBaseInput(100, {100});
+  input.enablePi = false;
+  AGVC::WeightedStrategy strategy;
+  const auto control = AGC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(control.has_value());
+  ASSERT_EQ(control->memberTargetKw.size(), 1u);
+  EXPECT_TRUE(control->memberPublishKw[0].IsZero());
+  const auto output = AGC::ComputeDirectionBlockOutput(cfg, {true}, control->memberTargetKw);
+  EXPECT_TRUE(output.increaseBlocked);
+  EXPECT_FALSE(output.decreaseBlocked);
+}
+
 // 验证：AGC 从十进制文本读取倍率、偏移、容量和权重，并在真实控制计算中保持 20 位小数语义。
 TEST(AgcControlTest, DecimalConfigurationAndInputsRemainExactThroughAllocation) {
   auto cfg = MakeBaseConfig();

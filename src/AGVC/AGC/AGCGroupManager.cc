@@ -611,7 +611,7 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
   if (g == nullptr) {
     return;
   }
-  rebuildTagCache(g);
+  rebuildTagCache(g, false);
 
   const auto connId = g->connId;
   auto tags = g->subscribeTags;
@@ -792,10 +792,12 @@ grpc::Status GroupManager::StartGroup(const std::string &groupName) {
   }
   if (alreadyRunning) {
     publishControlStatePoints(groupName, "控制组启动幂等请求");
+    publishDirectionBlockPoints(groupName, "控制组启动幂等请求");
     LOG_INFO("AGC 启动控制组请求幂等成功: group_name={}, 原因=控制组已在运行", groupName);
     return grpc::Status::OK;
   }
   publishControlStatePoints(groupName, "控制组启动");
+  publishDirectionBlockPoints(groupName, "控制组启动");
   LOG_INFO("AGC 控制组已启动控制功能: group_name={}, 控制方式={}",
            groupName,
            controlMode == AGCProto::CONTROL_MODE_DIRECT_CYCLIC ? "周期直分配" : "PI 事件触发");
@@ -1248,6 +1250,7 @@ grpc::Status GroupManager::ExecuteCommand(
                                config,
                                output.memberPublish,
                                output.memberPublishKw,
+                               output.memberTargetKw,
                                quality,
                                controlRevision,
                                "同步总有功命令");
@@ -1344,7 +1347,7 @@ std::unordered_set<std::string> GroupManager::collectAllTags(const AGCProto::Gro
   return tags;
 }
 
-void GroupManager::rebuildTagCache(GroupRuntime *g) {
+void GroupManager::rebuildTagCache(GroupRuntime *g, bool resetPublishedTargets) {
   if (g == nullptr) {
     return;
   }
@@ -1369,6 +1372,10 @@ void GroupManager::rebuildTagCache(GroupRuntime *g) {
   g->lastMemberTargetKw.assign(memberCount, Decimal{});
   g->hasLastPublishedMemberSetpoint.assign(memberCount, false);
   g->lastPublishedMemberSetpointKw.assign(memberCount, Decimal{});
+  if (resetPublishedTargets) {
+    g->hasPublishedMemberTargetKw.assign(memberCount, false);
+    g->publishedMemberTargetKw.assign(memberCount, Decimal{});
+  }
   g->lastMemberSetpointPublishedAt.assign(memberCount, std::chrono::steady_clock::time_point{});
   g->hasLastControlMemberMeasKw.assign(memberCount, false);
   g->lastControlMemberMeasKw.assign(memberCount, Decimal{});
@@ -1614,6 +1621,52 @@ void GroupManager::publishDefaultLimitPoints(const std::string &groupName, std::
       static_cast<int>(defaultOutput.dynamicQuality),
       defaultOutput.uncontrollableMemberCount,
       defaultOutput.missingUncontrollableMemberCount);
+  publishDirectionBlockPoints(groupName, trigger);
+}
+
+void GroupManager::publishDirectionBlockPoints(const std::string &groupName, std::string_view trigger) {
+  std::shared_ptr<std::mutex> publishMutex;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    const auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end()) {
+      return;
+    }
+    publishMutex = it->second.directionBlockPublishMutex;
+  }
+  std::lock_guard<std::mutex> publishLock(*publishMutex);
+  uint32_t connId = 0;
+  DirectionBlockOutput output;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    const auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end() || it->second.directionBlockPublishMutex != publishMutex) {
+      return;
+    }
+    connId = it->second.connId;
+    output = ComputeDirectionBlockOutput(it->second.config,
+                                        it->second.hasPublishedMemberTargetKw,
+                                        it->second.publishedMemberTargetKw);
+  }
+  if (connId == 0) {
+    return;
+  }
+  for (const auto kind : {AGCProto::DEFAULT_POINT_KIND_INCREASE_BLOCK,
+                         AGCProto::DEFAULT_POINT_KIND_DECREASE_BLOCK}) {
+    const auto tag = defaultPointTag(kind);
+    const bool blocked = kind == AGCProto::DEFAULT_POINT_KIND_INCREASE_BLOCK
+                             ? output.increaseBlocked : output.decreaseBlocked;
+    DataCenterProto::PointValue value;
+    value.set_bool_value(blocked);
+    const auto status = dataCenter_.PublishValue(connId, std::string(tag), value, output.quality, 0);
+    if (!status.ok()) {
+      LOG_ERROR("AGC 发布增减闭锁遥信失败: group_name={}, tag={}, 闭锁={}, 质量={}, 触发来源={}, 原因={}",
+                groupName, tag, blocked, static_cast<int>(output.quality), trigger, status.error_message());
+    } else {
+      LOG_DEBUG("AGC 已发布增减闭锁遥信: group_name={}, tag={}, 闭锁={}, 质量={}, 触发来源={}",
+                groupName, tag, blocked, static_cast<int>(output.quality), trigger);
+    }
+  }
 }
 
 void GroupManager::publishCommandEchoPoint(
@@ -1652,6 +1705,7 @@ bool GroupManager::publishMemberSetpoints(const std::string &groupName,
                                           const AGCProto::GroupConfig &config,
                                           const std::vector<bool> &memberPublish,
                                           const std::vector<Decimal> &memberPublishKw,
+                                          const std::vector<Decimal> &memberTargetKw,
                                           DataCenterProto::Quality quality,
                                           uint64_t expectedRevision,
                                           std::string_view trigger,
@@ -1708,7 +1762,9 @@ bool GroupManager::publishMemberSetpoints(const std::string &groupName,
       auto &runtime = it->second;
       if (i >= runtime.hasLastPublishedMemberSetpoint.size() ||
           i >= runtime.lastPublishedMemberSetpointKw.size() ||
-          i >= runtime.lastMemberSetpointPublishedAt.size()) {
+          i >= runtime.lastMemberSetpointPublishedAt.size() ||
+          i >= runtime.hasPublishedMemberTargetKw.size() ||
+          i >= runtime.publishedMemberTargetKw.size() || i >= memberTargetKw.size()) {
         LOG_ERROR("AGC 成员设点发布缓存长度异常: group_name={}, member_index={}, 成员数={}", groupName, i, memberCount);
         allSucceeded = false;
         continue;
@@ -1749,6 +1805,8 @@ bool GroupManager::publishMemberSetpoints(const std::string &groupName,
         it->second.hasLastPublishedMemberSetpoint[i] = true;
         it->second.lastPublishedMemberSetpointKw[i] = memberPublishKw[i];
         it->second.lastMemberSetpointPublishedAt[i] = publishedAt;
+        it->second.hasPublishedMemberTargetKw[i] = true;
+        it->second.publishedMemberTargetKw[i] = memberTargetKw[i];
         if (isDirectCyclicMode(it->second.config)) {
           it->second.hasLastCommandPublishedAt = true;
           it->second.lastCommandPublishedAt = publishedAt;
@@ -1776,6 +1834,7 @@ bool GroupManager::publishMemberSetpoints(const std::string &groupName,
               publishedCount,
               trigger);
   }
+  publishDirectionBlockPoints(groupName, trigger);
   return allSucceeded;
 }
 
@@ -1990,6 +2049,7 @@ void GroupManager::controlTick(const std::string &groupName) {
                                config,
                                output.memberPublish,
                                output.memberPublishKw,
+                               output.memberTargetKw,
                                quality,
                                controlRevision,
                                isDirectCyclicMode(config) ? "周期直分配控制" : "事件触发控制",

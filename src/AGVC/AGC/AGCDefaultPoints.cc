@@ -5,7 +5,7 @@
 namespace AGC {
 namespace {
 
-constexpr std::array<DefaultPointDefinition, 8> kDefaultPoints{{
+constexpr std::array<DefaultPointDefinition, 10> kDefaultPoints{{
     {
         .kind = AGCProto::DEFAULT_POINT_KIND_THEORETICAL_LOWER,
         .tag = "理论可调有功下限",
@@ -53,6 +53,18 @@ constexpr std::array<DefaultPointDefinition, 8> kDefaultPoints{{
         .tag = "AGC远方操作",
         .name = "AGC远方操作",
         .description = "AGC 是否允许远方控制状态；BOOL，true 表示允许",
+    },
+    {
+        .kind = AGCProto::DEFAULT_POINT_KIND_INCREASE_BLOCK,
+        .tag = "AGC增闭锁",
+        .name = "AGC增闭锁",
+        .description = "只读 BOOL 遥信；全部可控成员当前已发布绝对设定值到上限时为 true；未掌握完整下发值时质量为 BAD",
+    },
+    {
+        .kind = AGCProto::DEFAULT_POINT_KIND_DECREASE_BLOCK,
+        .tag = "AGC减闭锁",
+        .name = "AGC减闭锁",
+        .description = "只读 BOOL 遥信；全部可控成员当前已发布绝对设定值到下限时为 true；未掌握完整下发值时质量为 BAD",
     },
 }};
 

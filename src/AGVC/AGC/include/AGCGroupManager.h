@@ -73,6 +73,8 @@ private:
     std::jthread tuningThread;
     std::shared_ptr<ControlTrigger> controlTrigger;
     std::shared_ptr<std::mutex> outputMutex = std::make_shared<std::mutex>();
+    // 串行发布闭锁状态，避免启动快照覆盖更新后的下发状态。
+    std::shared_ptr<std::mutex> directionBlockPublishMutex = std::make_shared<std::mutex>();
     uint64_t controlRevision{0};
 
     // 由配置派生的缓存 tags（供订阅线程使用）。
@@ -98,6 +100,9 @@ private:
     std::vector<Decimal> lastMemberTargetKw;
     std::vector<bool> hasLastPublishedMemberSetpoint;
     std::vector<Decimal> lastPublishedMemberSetpointKw;
+    // 独立于发布去重缓存：只保存成功下发的绝对目标，停止/功能投退时保留。
+    std::vector<bool> hasPublishedMemberTargetKw;
+    std::vector<Decimal> publishedMemberTargetKw;
     std::vector<std::chrono::steady_clock::time_point> lastMemberSetpointPublishedAt;
     bool hasLastCommandPublishedAt{false};
     std::chrono::steady_clock::time_point lastCommandPublishedAt{};
@@ -138,12 +143,14 @@ private:
   void requestControlLocked(const std::string &groupName, GroupRuntime *g, std::string_view reason, std::string_view tag);
   void publishControlStatePoints(const std::string &groupName, std::string_view trigger);
   void publishDefaultLimitPoints(const std::string &groupName, std::string_view trigger);
+  void publishDirectionBlockPoints(const std::string &groupName, std::string_view trigger);
   void publishCommandEchoPoint(uint32_t connId, const AGCProto::ValueSpec &commandSpec, const DataCenterProto::PointUpdate &update);
   bool publishMemberSetpoints(const std::string &groupName,
                               uint32_t connId,
                               const AGCProto::GroupConfig &config,
                               const std::vector<bool> &memberPublish,
                               const std::vector<Decimal> &memberPublishKw,
+                              const std::vector<Decimal> &memberTargetKw,
                               DataCenterProto::Quality quality,
                               uint64_t expectedRevision,
                               std::string_view trigger,
@@ -155,7 +162,7 @@ private:
   static bool pointValueToDecimal(const DataCenterProto::PointValue &v, Decimal *out);
 
   static std::unordered_set<std::string> collectAllTags(const AGCProto::GroupConfig &config);
-  static void rebuildTagCache(GroupRuntime *g);
+  static void rebuildTagCache(GroupRuntime *g, bool resetPublishedTargets = true);
 
   mutable std::mutex mu_;
   std::unordered_map<std::string, GroupRuntime> groupsByName_;

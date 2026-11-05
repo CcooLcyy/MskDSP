@@ -276,6 +276,24 @@ bool WaitForLatestBool(const FakeDataCenterState &state, uint32_t connId, const 
   return false;
 }
 
+bool WaitForLatestBoolWithQuality(const FakeDataCenterState &state, uint32_t connId,
+                                  const char *tag, bool expected, DataCenterProto::Quality quality) {
+  for (int i = 0; i < kAsyncWaitIterations; ++i) {
+    DataCenterProto::GetLatestRequest request;
+    request.set_conn_id(connId);
+    request.add_tags(tag);
+    DataCenterProto::GetLatestResponse response;
+    if (state.GetLatest(request, &response).ok() && response.updates_size() == 1 &&
+        response.updates(0).value().has_bool_value() &&
+        response.updates(0).value().bool_value() == expected &&
+        response.updates(0).quality() == quality) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return false;
+}
+
 DataCenterProto::ExecuteCommandResponse ExecuteBoolCommand(
     GroupManager *manager, const std::string &groupName, uint32_t connId, const char *tag, bool value) {
   DataCenterProto::ExecuteCommandRequest request;
@@ -467,7 +485,7 @@ TEST(AgcGroupManagerTest, UpsertGroupReturnsDefaultPointInfos) {
 
   AGCProto::GroupInfo info;
   ASSERT_TRUE(mgr.UpsertGroup(MakeGroupReq("g-default-points"), &info).ok());
-  ASSERT_EQ(info.default_points_size(), 8);
+  ASSERT_EQ(info.default_points_size(), 10);
 
   std::unordered_map<std::string, AGCProto::DefaultPointKind> defaultPoints;
   for (const auto &point : info.default_points()) {
@@ -481,8 +499,247 @@ TEST(AgcGroupManagerTest, UpsertGroupReturnsDefaultPointInfos) {
   EXPECT_EQ(defaultPoints["AGC装机容量"], AGCProto::DEFAULT_POINT_KIND_INSTALLED_CAPACITY);
   EXPECT_EQ(defaultPoints["AGC功能投入"], AGCProto::DEFAULT_POINT_KIND_FUNCTION_ENABLE);
   EXPECT_EQ(defaultPoints["AGC远方操作"], AGCProto::DEFAULT_POINT_KIND_REMOTE_OPERATION);
+  EXPECT_EQ(defaultPoints["AGC增闭锁"], AGCProto::DEFAULT_POINT_KIND_INCREASE_BLOCK);
+  EXPECT_EQ(defaultPoints["AGC减闭锁"], AGCProto::DEFAULT_POINT_KIND_DECREASE_BLOCK);
 
   ASSERT_TRUE(mgr.StopGroup("g-default-points").ok());
+}
+
+// 验证：新建控制组的闭锁状态为未知，两个闭锁点只读且保留 tag 不能被配置复用。
+TEST(AgcGroupManagerTest, DirectionBlocksStartUnknownAndRejectCommandsAndTagReuse) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  GroupManager manager("AGC");
+  manager.setDataCenterStub(stub);
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(manager.UpsertGroup(MakeGroupReq("g-block-readonly"), &info).ok());
+  for (const char *tag : {"AGC增闭锁", "AGC减闭锁"}) {
+    EXPECT_TRUE(WaitForLatestBoolWithQuality(state, info.conn_id(), tag, false, DataCenterProto::QUALITY_BAD));
+    const auto response = ExecuteBoolCommand(&manager, "g-block-readonly", info.conn_id(), tag, true);
+    EXPECT_EQ(response.status(), DataCenterProto::COMMAND_REJECTED);
+    EXPECT_EQ(response.reject_code(), DataCenterProto::COMMAND_REJECT_UNSUPPORTED_POINT);
+    EXPECT_TRUE(WaitForLatestBoolWithQuality(state, info.conn_id(), tag, false, DataCenterProto::QUALITY_BAD));
+    auto invalid = MakeGroupReq(tag);
+    invalid.mutable_config()->mutable_p_cmd()->mutable_signal()->set_tag(tag);
+    AGCProto::GroupInfo unused;
+    EXPECT_EQ(manager.UpsertGroup(invalid, &unused).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  }
+  ASSERT_TRUE(manager.StopGroup("g-block-readonly").ok());
+}
+
+// 验证：当前已下发设定到限即置闭锁，不等实测；反向下发解除，停止保留，配置替换清为未知。
+TEST(AgcGroupManagerTest, DirectionBlocksTrackPublishedTargetsAndLifecycle) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  GroupManager manager("AGC");
+  manager.setDataCenterStub(stub);
+  auto request = MakeGroupReq("g-block-current");
+  auto *config = request.mutable_config();
+  config->mutable_members()->RemoveLast();
+  config->mutable_members(0)->set_capacity_kw(100);
+  config->mutable_members(0)->set_min_kw(10);
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(manager.UpsertGroup(request, &info).ok());
+  // 不发布任何实测值，验证闭锁不依赖实际出力达到边界。
+  ASSERT_EQ(ExecuteDoubleCommand(&manager, "g-block-current", info.conn_id(), "P_CMD", 100).status(),
+            DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV1_P_SET", 100));
+  EXPECT_TRUE(WaitForLatestBoolWithQuality(state, info.conn_id(), "AGC增闭锁", true, DataCenterProto::QUALITY_GOOD));
+  EXPECT_TRUE(WaitForLatestBoolWithQuality(state, info.conn_id(), "AGC减闭锁", false, DataCenterProto::QUALITY_GOOD));
+  const auto rejected = ExecuteDoubleCommand(&manager, "g-block-current", info.conn_id(), "P_CMD", 101);
+  EXPECT_EQ(rejected.status(), DataCenterProto::COMMAND_REJECTED);
+  EXPECT_TRUE(WaitForLatestBoolWithQuality(state, info.conn_id(), "AGC增闭锁", true, DataCenterProto::QUALITY_GOOD));
+  ASSERT_EQ(ExecuteDoubleCommand(&manager, "g-block-current", info.conn_id(), "P_CMD", 50).status(),
+            DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_TRUE(WaitForLatestBoolWithQuality(state, info.conn_id(), "AGC增闭锁", false, DataCenterProto::QUALITY_GOOD));
+  ASSERT_EQ(ExecuteDoubleCommand(&manager, "g-block-current", info.conn_id(), "P_CMD", 10).status(),
+            DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_TRUE(WaitForLatestBoolWithQuality(state, info.conn_id(), "AGC减闭锁", true, DataCenterProto::QUALITY_GOOD));
+  ASSERT_TRUE(manager.StopGroup("g-block-current").ok());
+  EXPECT_TRUE(WaitForLatestBoolWithQuality(state, info.conn_id(), "AGC减闭锁", true, DataCenterProto::QUALITY_GOOD));
+  ASSERT_TRUE(manager.StartGroup("g-block-current").ok());
+  EXPECT_TRUE(WaitForLatestBoolWithQuality(state, info.conn_id(), "AGC减闭锁", true, DataCenterProto::QUALITY_GOOD));
+  ASSERT_EQ(ExecuteDoubleCommand(&manager, "g-block-current", info.conn_id(), "P_CMD", 50).status(),
+            DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_TRUE(WaitForLatestBoolWithQuality(state, info.conn_id(), "AGC减闭锁", false, DataCenterProto::QUALITY_GOOD));
+  ASSERT_TRUE(manager.StopGroup("g-block-current").ok());
+  request.set_create_only(false);
+  ASSERT_TRUE(manager.UpsertGroup(request, &info).ok());
+  EXPECT_TRUE(WaitForLatestBoolWithQuality(state, info.conn_id(), "AGC增闭锁", false, DataCenterProto::QUALITY_BAD));
+  EXPECT_TRUE(WaitForLatestBoolWithQuality(state, info.conn_id(), "AGC减闭锁", false, DataCenterProto::QUALITY_BAD));
+  ASSERT_TRUE(manager.StopGroup("g-block-current").ok());
+}
+
+// 验证：部分成员设点发布失败时，闭锁保留失败成员的上次成功值，后续成功发布才到限。
+TEST(AgcGroupManagerTest, DirectionBlocksRetainLastSuccessfulTargetOnPartialPublishFailure) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  std::atomic<bool> failSecond{false};
+  ON_CALL(*stub, Publish(_, _, _)).WillByDefault(Invoke(
+      [&state, &failSecond](grpc::ClientContext *, const DataCenterProto::PublishRequest &request,
+                            DataCenterProto::Empty *) {
+        if (request.tag() == "INV2_P_SET" && failSecond.load()) {
+          return grpc::Status(grpc::StatusCode::UNAVAILABLE, "测试模拟成员设点发布失败");
+        }
+        return state.Publish(request);
+      }));
+  GroupManager manager("AGC");
+  manager.setDataCenterStub(stub);
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(manager.UpsertGroup(MakeGroupReq("g-block-partial"), &info).ok());
+  ASSERT_EQ(ExecuteDoubleCommand(&manager, "g-block-partial", info.conn_id(), "P_CMD", 75).status(),
+            DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_TRUE(WaitForLatestBoolWithQuality(state, info.conn_id(), "AGC增闭锁", false, DataCenterProto::QUALITY_GOOD));
+  failSecond.store(true);
+  ASSERT_EQ(ExecuteDoubleCommand(&manager, "g-block-partial", info.conn_id(), "P_CMD", 150).status(),
+            DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV1_P_SET", 50));
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV2_P_SET", 50));
+  EXPECT_TRUE(WaitForLatestBoolWithQuality(state, info.conn_id(), "AGC增闭锁", false, DataCenterProto::QUALITY_GOOD));
+  failSecond.store(false);
+  ASSERT_EQ(ExecuteDoubleCommand(&manager, "g-block-partial", info.conn_id(), "P_CMD", 150).status(),
+            DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_TRUE(WaitForLatestBoolWithQuality(state, info.conn_id(), "AGC增闭锁", true, DataCenterProto::QUALITY_GOOD));
+  ASSERT_TRUE(manager.StopGroup("g-block-partial").ok());
+}
+
+// 验证：首次设点发布失败的成员保持未知，不能用已计算但未下发的上限目标生成 GOOD 闭锁。
+TEST(AgcGroupManagerTest, DirectionBlocksRemainUnknownWhenFirstPublishFails) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  ON_CALL(*stub, Publish(_, _, _)).WillByDefault(Invoke(
+      [&state](grpc::ClientContext *, const DataCenterProto::PublishRequest &request, DataCenterProto::Empty *) {
+        if (request.tag() == "INV2_P_SET") {
+          return grpc::Status(grpc::StatusCode::UNAVAILABLE, "测试模拟首次成员设点发布失败");
+        }
+        return state.Publish(request);
+      }));
+  GroupManager manager("AGC");
+  manager.setDataCenterStub(stub);
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(manager.UpsertGroup(MakeGroupReq("g-block-unknown"), &info).ok());
+  ASSERT_EQ(ExecuteDoubleCommand(&manager, "g-block-unknown", info.conn_id(), "P_CMD", 150).status(),
+            DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV1_P_SET", 50));
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV2_P_SET"), 0u);
+  EXPECT_TRUE(WaitForLatestBoolWithQuality(state, info.conn_id(), "AGC增闭锁", false, DataCenterProto::QUALITY_BAD));
+  EXPECT_TRUE(WaitForLatestBoolWithQuality(state, info.conn_id(), "AGC减闭锁", false, DataCenterProto::QUALITY_BAD));
+  ASSERT_TRUE(manager.StopGroup("g-block-unknown").ok());
+}
+
+// 验证：周期模式新目标虽已缓存并计算，命令限频期间的闭锁仍依据上次实际下发值。
+TEST(AgcGroupManagerTest, DirectionBlocksIgnoreComputedTargetsUntilCommandPeriodAllowsPublish) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  GroupManager manager("AGC");
+  manager.setDataCenterStub(stub);
+  auto request = MakeGroupReq("g-block-period");
+  auto *config = request.mutable_config();
+  config->set_control_mode(AGCProto::CONTROL_MODE_DIRECT_CYCLIC);
+  config->set_calculation_execution_period_seconds(1);
+  config->set_command_control_period_seconds(30);
+  config->mutable_outputs()->mutable_p_total_target()->set_tag("P_TARGET");
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(manager.UpsertGroup(request, &info).ok());
+  ASSERT_EQ(ExecuteDoubleCommand(&manager, "g-block-period", info.conn_id(), "P_CMD", 150).status(),
+            DataCenterProto::COMMAND_ACCEPTED);
+  ASSERT_TRUE(WaitForLatestBoolWithQuality(state, info.conn_id(), "AGC增闭锁", true, DataCenterProto::QUALITY_GOOD));
+  const auto memberOneCount = state.GetPublishCount(info.conn_id(), "INV1_P_SET");
+  const auto memberTwoCount = state.GetPublishCount(info.conn_id(), "INV2_P_SET");
+  ASSERT_EQ(ExecuteDoubleCommand(&manager, "g-block-period", info.conn_id(), "P_CMD", 75).status(),
+            DataCenterProto::COMMAND_ACCEPTED);
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "P_TARGET", 75));
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV1_P_SET"), memberOneCount);
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV2_P_SET"), memberTwoCount);
+  EXPECT_TRUE(WaitForLatestBoolWithQuality(state, info.conn_id(), "AGC增闭锁", true, DataCenterProto::QUALITY_GOOD));
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV1_P_SET", 50));
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV2_P_SET", 100));
+  ASSERT_TRUE(manager.StopGroup("g-block-period").ok());
+}
+
+// 验证：DELTA 成员发布零增量时，遥信仍依据绝对目标到上限，不会误判减闭锁。
+TEST(AgcGroupManagerTest, DirectionBlocksUseAbsoluteTargetWhenPublishedDeltaIsZero) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  GroupManager manager("AGC");
+  manager.setDataCenterStub(stub);
+  auto request = MakeGroupReq("g-block-delta");
+  auto *config = request.mutable_config();
+  config->mutable_members()->RemoveLast();
+  auto *set = config->mutable_members(0)->mutable_p_set();
+  set->set_mode(AGCProto::VALUE_MODE_DELTA);
+  set->set_delta_base(AGCProto::DELTA_BASE_CURRENT_MEAS);
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(manager.UpsertGroup(request, &info).ok());
+  ASSERT_TRUE(WaitForSubscriptionCount(state, info.conn_id(), 1u));
+  PublishDoublePoint(&state, info.conn_id(), "INV1_P_MEAS", 50);
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "P_TOTAL", 50));
+  ASSERT_EQ(ExecuteDoubleCommand(&manager, "g-block-delta", info.conn_id(), "P_CMD", 50).status(),
+            DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV1_P_SET", 0));
+  EXPECT_TRUE(WaitForLatestBoolWithQuality(state, info.conn_id(), "AGC增闭锁", true, DataCenterProto::QUALITY_GOOD));
+  EXPECT_TRUE(WaitForLatestBoolWithQuality(state, info.conn_id(), "AGC减闭锁", false, DataCenterProto::QUALITY_GOOD));
+  ASSERT_TRUE(manager.StopGroup("g-block-delta").ok());
+}
+
+// 验证：闭锁遥信发布失败后，相同设定值重试即使不重发成员设点也能补发闭锁。
+TEST(AgcGroupManagerTest, DirectionBlockPublishFailureRetriesWithoutChangingSetpoint) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  std::atomic<bool> failStatus{true};
+  ON_CALL(*stub, Publish(_, _, _)).WillByDefault(Invoke(
+      [&state, &failStatus](grpc::ClientContext *, const DataCenterProto::PublishRequest &request,
+                           DataCenterProto::Empty *) {
+        if (request.tag() == "AGC增闭锁" && request.value().has_bool_value() &&
+            request.value().bool_value() && failStatus.load()) {
+          return grpc::Status(grpc::StatusCode::UNAVAILABLE, "测试模拟闭锁遥信发布失败");
+        }
+        return state.Publish(request);
+      }));
+  GroupManager manager("AGC");
+  manager.setDataCenterStub(stub);
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(manager.UpsertGroup(MakeGroupReq("g-block-retry"), &info).ok());
+  ASSERT_EQ(ExecuteDoubleCommand(&manager, "g-block-retry", info.conn_id(), "P_CMD", 150).status(),
+            DataCenterProto::COMMAND_ACCEPTED);
+  ASSERT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV2_P_SET", 100));
+  EXPECT_TRUE(WaitForLatestBoolWithQuality(state, info.conn_id(), "AGC增闭锁", false, DataCenterProto::QUALITY_BAD));
+  const auto publishCount = state.GetPublishCount(info.conn_id(), "INV2_P_SET");
+  failStatus.store(false);
+  ASSERT_EQ(ExecuteDoubleCommand(&manager, "g-block-retry", info.conn_id(), "P_CMD", 150).status(),
+            DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "INV2_P_SET"), publishCount);
+  EXPECT_TRUE(WaitForLatestBoolWithQuality(state, info.conn_id(), "AGC增闭锁", true, DataCenterProto::QUALITY_GOOD));
+  ASSERT_TRUE(manager.StopGroup("g-block-retry").ok());
+}
+
+// 验证：新进程恢复持久化配置时不把上次遥信或输入目标当成已发布成员设定，初始质量为 BAD。
+TEST(AgcGroupManagerTest, DirectionBlocksResetToUnknownOnPersistenceRestore) {
+  ScopedTempDir dir;
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  const auto configDbPath = dir.path() / "config.db";
+  uint32_t connId = 0;
+  {
+    GroupManager writer("AGC", configDbPath);
+    writer.setDataCenterStub(stub);
+    AGCProto::GroupInfo info;
+    ASSERT_TRUE(writer.UpsertGroup(MakeGroupReq("g-block-restore"), &info).ok());
+    connId = info.conn_id();
+    ASSERT_EQ(ExecuteDoubleCommand(&writer, "g-block-restore", connId, "P_CMD", 150).status(),
+              DataCenterProto::COMMAND_ACCEPTED);
+    ASSERT_TRUE(WaitForLatestBoolWithQuality(state, connId, "AGC增闭锁", true, DataCenterProto::QUALITY_GOOD));
+    ASSERT_TRUE(writer.StopGroup("g-block-restore").ok());
+  }
+  GroupManager reader("AGC", configDbPath);
+  reader.setDataCenterStub(stub);
+  ASSERT_TRUE(reader.LoadPersistedConfig().ok());
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(reader.GetGroup("g-block-restore", &info).ok());
+  EXPECT_EQ(info.default_points_size(), 10);
+  EXPECT_TRUE(WaitForLatestBoolWithQuality(state, connId, "AGC增闭锁", false, DataCenterProto::QUALITY_BAD));
+  EXPECT_TRUE(WaitForLatestBoolWithQuality(state, connId, "AGC减闭锁", false, DataCenterProto::QUALITY_BAD));
+  ASSERT_TRUE(reader.StopGroup("g-block-restore").ok());
 }
 
 // 验证：控制组创建后两个控制状态默认启用，并以 BOOL 点发布到 DataCenter 供上位机回读。
@@ -970,6 +1227,8 @@ TEST(AgcGroupManagerTest, UpsertGroupRegistersBaseTagToDataCenterConnTags) {
         EXPECT_TRUE(tags.contains("AGC装机容量"));
         EXPECT_TRUE(tags.contains("AGC功能投入"));
         EXPECT_TRUE(tags.contains("AGC远方操作"));
+        EXPECT_TRUE(tags.contains("AGC增闭锁"));
+        EXPECT_TRUE(tags.contains("AGC减闭锁"));
         return grpc::Status::OK;
       }));
 
