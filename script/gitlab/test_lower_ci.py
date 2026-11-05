@@ -35,13 +35,31 @@ class LowerCiTest(unittest.TestCase):
         for arch in ("arm64", "x64"):
             job = self.config["publish-" + arch]
             needs = {item["job"]: item["artifacts"] for item in job["needs"]}
-            self.assertEqual(needs, {"package-arm64": arch == "arm64", "package-x64": arch == "x64"})
+            self.assertEqual(needs, {"package-arm64": arch == "arm64", "package-x64": arch == "x64",
+                                     "test-publish-contract": False})
             self.assertEqual(job["resource_group"], "mskdsp-lower-ci-" + arch)
             self.assertEqual(job["environment"]["name"], "ci")
         scripts = "\n".join(self.config[".publish"]["script"])
         self.assertIn("init_platform_proto.py", scripts)
         self.assertIn("platform_client.py", scripts)
         self.assertNotIn("build_lower.sh", scripts)
+
+    # Beta 只能发布 ARM64，仍等待双架构打包和发布契约测试。
+    def test_beta_branch_has_isolated_arm64_publication_and_full_gates(self):
+        self.assertIn("beta", self.config["workflow"]["rules"][0]["if"])
+        beta = self.config["publish-beta-arm64"]
+        self.assertEqual(beta["variables"]["ARCH"], "arm64")
+        self.assertEqual(beta["resource_group"], "mskdsp-lower-beta-arm64")
+        self.assertEqual(beta["environment"]["name"], "ci")
+        self.assertIn("beta", beta["rules"][0]["if"])
+        self.assertEqual({item["job"] for item in beta["needs"]},
+                         {"package-arm64", "package-x64", "test-publish-contract"})
+        for arch in ("arm64", "x64"):
+            self.assertIn('"master"', self.config["publish-" + arch]["rules"][0]["if"])
+            self.assertNotIn("beta", self.config["publish-" + arch]["rules"][0]["if"])
+        self.assertIn("test-x64", {item["job"] for item in self.config["package-arm64"]["needs"]})
+        contract = self.job("test-publish-contract")
+        self.assertIn("test_platform_client.py", "\n".join(contract["script"]))
 
     def test_build_cache_architectures_and_reports_are_isolated(self):
         job = self.job("build-x64")
@@ -159,10 +177,12 @@ class LowerCiTest(unittest.TestCase):
         self.assertNotIn("test-arm64", self.config)
         self.assertNotIn("test-arm64", self.config["stages"])
         self.assertEqual(self.job("package-arm64")["needs"], [
+            {"job": "test-network-runtime", "artifacts": False},
             {"job": "build-arm64", "artifacts": True},
             {"job": "test-x64", "artifacts": False},
         ])
         self.assertEqual(self.job("package-x64")["needs"], [
+            {"job": "test-network-runtime", "artifacts": False},
             {"job": "test-x64", "artifacts": True},
         ])
         for name in ("build-x64", "build-arm64", "test-x64", "package-arm64", "package-x64"):

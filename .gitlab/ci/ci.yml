@@ -2,7 +2,7 @@ workflow:
   auto_cancel:
     on_new_commit: interruptible
   rules:
-    - if: '$CI_COMMIT_TAG == null && ($CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "main") && ($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web")'
+    - if: '$CI_COMMIT_TAG == null && ($CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH =~ /^beta\/(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/) && ($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web")'
     - when: never
 
 stages: [build, test, package, publish]
@@ -106,6 +106,23 @@ test-network-runtime:
     - python3 script/test_make_exe.py
     - python3 script/update/test_lower_update_task.py
 
+test-publish-contract:
+  stage: test
+  image:
+    name: mskdsp-platform-ci-tools:bookworm-v2
+    pull_policy: if-not-present
+  variables:
+    ARCH: publish-contract
+    PLATFORM_PROTO_TEST_ROOT: .ci/platform-proto
+  timeout: 15m
+  needs: []
+  script:
+    - python3 script/gitlab/init_platform_proto.py
+    - python3 -c 'import grpc, grpc_tools.protoc, yaml'
+    - python3 -m unittest discover -s script/gitlab -p test_lower_metadata.py -v
+    - python3 -m unittest discover -s script/gitlab -p test_platform_client.py -v
+    - python3 -m unittest discover -s script/gitlab -p test_lower_ci.py -v
+
 test-x64:
   stage: test
   image:
@@ -198,7 +215,12 @@ publish-arm64:
   environment:
     name: ci
   resource_group: mskdsp-lower-ci-arm64
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "main"'
+    - when: never
   needs:
+    - job: test-publish-contract
+      artifacts: false
     - job: package-arm64
       artifacts: true
     - job: package-x64
@@ -211,8 +233,32 @@ publish-x64:
   environment:
     name: ci
   resource_group: mskdsp-lower-ci-x64
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master" || $CI_COMMIT_BRANCH == "main"'
+    - when: never
   needs:
+    - job: test-publish-contract
+      artifacts: false
     - job: package-arm64
       artifacts: false
     - job: package-x64
       artifacts: true
+
+# 复用现有 ci 环境的通用 publisher 凭据，实际通道由冻结 Beta 来源决定。
+publish-beta-arm64:
+  extends: .publish
+  variables:
+    ARCH: arm64
+  environment:
+    name: ci
+  resource_group: mskdsp-lower-beta-arm64
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^beta\/(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/'
+    - when: never
+  needs:
+    - job: test-publish-contract
+      artifacts: false
+    - job: package-arm64
+      artifacts: true
+    - job: package-x64
+      artifacts: false

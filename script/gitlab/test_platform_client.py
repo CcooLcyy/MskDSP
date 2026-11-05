@@ -64,6 +64,24 @@ class IdentityTests(unittest.TestCase):
             with self.assertRaises(client.ClientError):
                 client.validate_endpoint(endpoint, plaintext=True)
 
+    # 只允许真实 ARM64 Beta，禁止 x64 Beta 或修改通道冒充发布。
+    def test_beta_publication_requires_arm64_and_matching_branch(self):
+        self.data.update(platform="linux-arm64", channel="beta", source_ref="beta/0.4.0",
+                         version="0.4.0-beta-p7-b42-j50-bbbbbbb",
+                         package_version="0.4.0-beta-p7-b42-j50-bbbbbbb-linux-arm64")
+        env = self.env | {"CI_COMMIT_BRANCH": "beta/0.4.0"}
+        self.write()
+        _, metadata = client.load_metadata(self.path, env)
+        self.assertEqual(metadata["channel"], "beta")
+        for changes in ({"platform": "linux-x64"}, {"channel": "ci"},
+                        {"version": "0.4.0-ci-p7-b42"}, {"source_ref": "beta/0.4.1"}):
+            original = dict(self.data)
+            self.data.update(changes)
+            self.write()
+            with self.subTest(changes=changes), self.assertRaises(client.ClientError):
+                client.load_metadata(self.path, env)
+            self.data = original
+
     def test_branch_head_uses_environment_auth_and_rejects_old_sha(self):
         with patch.object(client.subprocess, "run") as run:
             run.return_value.returncode = 0
@@ -75,6 +93,18 @@ class IdentityTests(unittest.TestCase):
             run.return_value.stdout = "c" * 40 + "\trefs/heads/master\n"
             with self.assertRaises(client.ClientError):
                 client.check_current_head(self.data, self.env)
+
+    # 防过期校验必须查询 Beta 本身，不能错误地比较主分支。
+    def test_beta_head_check_uses_frozen_beta_ref(self):
+        metadata = self.data | {"source_ref": "beta/0.4.0"}
+        with patch.object(client.subprocess, "run") as run:
+            run.return_value.returncode = 0
+            run.return_value.stdout = "b" * 40 + "\trefs/heads/beta/0.4.0\n"
+            client.check_current_head(metadata, self.env)
+            self.assertEqual(run.call_args.args[0][-1], "refs/heads/beta/0.4.0")
+            run.return_value.stdout = "c" * 40 + "\trefs/heads/beta/0.4.0\n"
+            with self.assertRaises(client.ClientError):
+                client.check_current_head(metadata, self.env)
 
     def test_public_manifest_is_unauthenticated_and_validates_identity(self):
         manifest = {name: self.data[name] for name in ("product", "version", "package_version", "platform", "image_id", "channel")}
@@ -99,6 +129,21 @@ class IdentityTests(unittest.TestCase):
             self.assertEqual(client.main(["--metadata", str(self.path)]), 1)
             self.assertNotIn("sensitive-token", output.getvalue())
 
+    # Beta 公开清单从独立路径读取，并核对冻结来源、大小及摘要。
+    def test_beta_public_manifest_uses_beta_path(self):
+        self.data.update(platform="linux-arm64", channel="beta", source_ref="beta/0.4.0",
+                         version="0.4.0-beta-p7-b42-j50-bbbbbbb")
+        manifest = {name: self.data[name] for name in ("product", "version", "package_version", "platform", "image_id", "channel")}
+        manifest.update(schema_version=1, source=dict(repository=self.data["source_repository"],
+                                                     ref=self.data["source_ref"], sha=self.data["source_sha"]),
+                        asset=dict(name=self.data["file_name"], size=self.data["size"], sha256=self.data["sha256"]))
+        with patch.object(client, "urlopen") as opening:
+            opening.return_value.__enter__.return_value.read.return_value = json.dumps(manifest).encode()
+            client.confirm_manifest("http://192.168.1.2:8082", self.data)
+            request = opening.call_args.args[0]
+            self.assertEqual(request.full_url, "http://192.168.1.2:8082/mskdsp-lower/beta/latest.json")
+            self.assertIsNone(request.get_header("Authorization"))
+
 
 @unittest.skipUnless(importlib.util.find_spec("grpc") and importlib.util.find_spec("grpc_tools"), "需要 Python gRPC 工具镜像")
 class GrpcContractTests(unittest.TestCase):
@@ -116,9 +161,20 @@ class GrpcContractTests(unittest.TestCase):
     def test_real_outdated_branch_never_publishes(self):
         self.exercise("stale")
 
-    def exercise(self, scenario):
+    # Beta 契约复用完整性失败、过期分支与丢失发布响应等原始断言。
+    def test_real_beta_channel_contract(self):
+        for scenario in ("success", "interrupt", "invalid", "stale"):
+            with self.subTest(scenario=scenario):
+                self.exercise(scenario, channel="beta")
+
+    def exercise(self, scenario, channel="ci"):
         import grpc
         from concurrent.futures import ThreadPoolExecutor
+        if channel == "beta":
+            self.data.update(platform="linux-arm64", channel="beta", source_ref="beta/0.4.0",
+                             version="0.4.0-beta-p7-b42-j50-bbbbbbb",
+                             package_version="0.4.0-beta-p7-b42-j50-bbbbbbb-linux-arm64")
+            self.env["CI_COMMIT_BRANCH"] = "beta/0.4.0"
         self.write()
         archive, metadata = client.load_metadata(self.path, self.env)
         protocol = Path(os.environ.get("PLATFORM_PROTO_TEST_ROOT", Path(__file__).resolve().parents[3] /
@@ -142,7 +198,7 @@ class GrpcContractTests(unittest.TestCase):
 
                     def package(self):
                         return messages.Package(id="package-1", metadata=expected,
-                                                channels=["ci"] if state["published"] else [],
+                                                channels=[channel] if state["published"] else [],
                                                 ever_published=state["published"])
 
                     def CreateUpload(self, request, context):
@@ -175,7 +231,7 @@ class GrpcContractTests(unittest.TestCase):
 
                     def PublishRelease(self, request, context):
                         self.authorize(context)
-                        assert state["completed"] and request.channel == "ci"
+                        assert state["completed"] and request.channel == channel
                         state["published"] = True
                         state["publish_calls"] += 1
                         if state["publish_calls"] == 1:
@@ -187,6 +243,7 @@ class GrpcContractTests(unittest.TestCase):
                         return messages.GetPackageResponse(package=self.package())
 
                     def ListPackages(self, request, context):
+                        assert request.channel == channel and request.platform == metadata["platform"]
                         return messages.ListPackagesResponse(packages=[self.package()] if state["published"] else [])
 
                 server = grpc.server(ThreadPoolExecutor(max_workers=3))

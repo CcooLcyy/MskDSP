@@ -37,6 +37,23 @@ class MetadataTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             target.package_identity(first, self.environment | {"CI_PIPELINE_ID": "101"})
 
+    # Beta 必须从同版本分支构建，架构产物保留真实来源且不可篡改通道。
+    def test_beta_identity_freezes_branch_version_and_channel(self):
+        env = self.environment | {"CI_COMMIT_BRANCH": "beta/0.4.0"}
+        for arch in ("arm64", "x64"):
+            identity = target.create_identity("0.4.0", arch, env)
+            self.assertEqual(identity["channel"], "beta")
+            self.assertEqual(identity["source_ref"], "beta/0.4.0")
+            self.assertTrue(identity["version"].startswith("0.4.0-beta-p7-b42"))
+            packaged = target.package_identity(identity, env | {"CI_JOB_ID": "50"})
+            self.assertEqual(packaged["channel"], "beta")
+            self.assertIn("-j50-", packaged["version"])
+            with self.assertRaises(ValueError):
+                target.package_identity(identity | {"channel": "ci"}, env)
+        for branch in ("beta/1", "beta/0.4.1", "beta/0.4.0/extra", "beta/00.4.0"):
+            with self.subTest(branch=branch), self.assertRaises(ValueError):
+                target.create_identity("0.4.0", "arm64", env | {"CI_COMMIT_BRANCH": branch})
+
     def test_freeze_validates_image_platform_and_actual_package_bytes(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
