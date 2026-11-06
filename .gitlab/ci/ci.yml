@@ -126,6 +126,8 @@ test-publish-contract:
     - python3 -m unittest discover -s script/gitlab -p test_lower_metadata.py -v
     - python3 -m unittest discover -s script/gitlab -p test_platform_client.py -v
     - python3 -m unittest discover -s script/gitlab -p test_lower_ci.py -v
+    - python3 -m unittest discover -s script/gitlab -p test_init_platform_proto.py -v
+    - python3 -m unittest discover -s script/workflow -p test_write_lower_update_manifest.py -v
 
 test-x64:
   stage: test
