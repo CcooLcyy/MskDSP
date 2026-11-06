@@ -12,6 +12,8 @@ import re
 import sys
 from urllib.parse import urlsplit
 
+from github_environment import normalize_environment
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "workflow"))
 from write_lower_update_manifest import read_image_config_id
 
@@ -33,6 +35,7 @@ def release_context(branch):
 
 
 def validate_environment(environment):
+    environment = normalize_environment(environment)
     release_environment(environment)
     require(environment.get("CI_PIPELINE_SOURCE") in ("push", "web"), "仅允许受控引用 push 或手动流水线")
     for field in ("CI_PIPELINE_ID", "CI_PIPELINE_IID", "CI_JOB_ID"):
@@ -45,6 +48,7 @@ def validate_environment(environment):
 
 def release_environment(environment):
     """正式版只允许无分支名的受保护标签，返回通道、版本和真实来源引用。"""
+    environment = normalize_environment(environment)
     tag = environment.get("CI_COMMIT_TAG")
     if tag:
         require(not environment.get("CI_COMMIT_BRANCH") and environment.get("CI_COMMIT_REF_PROTECTED") == "true",
@@ -66,8 +70,11 @@ def validate_maintenance_version(source_ref, version):
 
 
 def create_identity(base_version, arch, environment):
+    environment = normalize_environment(environment)
     validate_environment(environment)
     require(arch in ("arm64", "x64"), "构建架构不合法")
+    github = environment.get("GITHUB_ACTIONS") == "true"
+    require(not github or arch == environment["LOWER_JOB_ARCH"], "GitHub 作业架构与构建目标不一致")
     base_version = base_version.strip()
     require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,60}", base_version), "基础版本不合法")
     channel, branch_version, source_ref = release_environment(environment)
@@ -82,11 +89,18 @@ def create_identity(base_version, arch, environment):
         "pipeline_id": environment["CI_PIPELINE_ID"], "pipeline_iid": environment["CI_PIPELINE_IID"],
         "build_job_id": environment["CI_JOB_ID"],
         "build_time": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        **({"github_run_attempt": environment["GITHUB_RUN_ATTEMPT"]} if github else {}),
     }
 
 
 def package_identity(identity, environment):
+    environment = normalize_environment(environment)
     validate_environment(environment)
+    if environment.get("GITHUB_ACTIONS") == "true":
+        require(identity.get("github_run_attempt") == environment["GITHUB_RUN_ATTEMPT"],
+                "GitHub 打包不能复用其他重跑的构建产物")
+        require(identity.get("platform") == "linux-" + environment["LOWER_JOB_ARCH"],
+                "GitHub 打包作业与构建架构不一致")
     channel, branch_version, source_ref = release_environment(environment)
     for key, variable in (("pipeline_id", "CI_PIPELINE_ID"), ("pipeline_iid", "CI_PIPELINE_IID"),
                           ("source_sha", "CI_COMMIT_SHA"),

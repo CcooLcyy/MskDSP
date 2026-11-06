@@ -10,9 +10,33 @@ import unittest
 from unittest.mock import patch
 
 import platform_client as client
+import lower_metadata
+from test_github_environment import github_environment
 
 
 class IdentityTests(unittest.TestCase):
+    # GitHub 上传只能消费本次运行、重跑、架构和真实仓库的冻结产物。
+    def test_github_publish_identity_and_public_source_fetch(self):
+        env = github_environment(LOWER_JOB_ARCH="x64")
+        identity = lower_metadata.create_identity("1.0.0", "x64", env)
+        identity = lower_metadata.package_identity(identity, env | {"LOWER_JOB_PHASE": "package"})
+        self.archive = self.root / ("mskdsp-" + identity["package_version"])
+        self.archive.write_bytes(b"installer-bytes")
+        self.data.update(identity, file_name=self.archive.name, size=self.archive.stat().st_size,
+                         sha256=hashlib.sha256(self.archive.read_bytes()).hexdigest())
+        self.write()
+        publish = env | {"LOWER_JOB_PHASE": "publish"}
+        _, metadata = client.load_metadata(self.path, publish)
+        self.assertNotIn("github_run_attempt", metadata)
+        expected = metadata["source_sha"] + "\trefs/heads/master\n"
+        with patch.object(client.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, expected)) as run:
+            client.check_current_head(metadata, publish)
+            self.assertNotIn("CI_JOB_TOKEN", run.call_args.kwargs["env"])
+        for changes in ({"GITHUB_RUN_ATTEMPT": "2"}, {"GITHUB_RUN_ID": "101"},
+                        {"LOWER_JOB_ARCH": "arm64"}, {"GITHUB_REPOSITORY": "other/repo"}):
+            with self.subTest(changes=changes), self.assertRaises(client.ClientError):
+                client.load_metadata(self.path, publish | changes)
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

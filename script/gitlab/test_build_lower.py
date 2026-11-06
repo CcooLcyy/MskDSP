@@ -22,16 +22,17 @@ with open(os.environ["COMMAND_LOG"], "a") as log:
 if name == "uname":
     print(os.environ.get("TOOL_ARCH", "aarch64" if os.environ["ARCH"] == "arm64" else "x86_64"))
 elif name in ("cc", "c++", "gcc-14", "g++-14", "aarch64-linux-gnu-gcc-14", "aarch64-linux-gnu-g++-14"):
-    print("aarch64-linux-gnu" if name.startswith("aarch64") and "-dumpmachine" in args else
-          "x86_64-linux-gnu" if "-dumpmachine" in args else "14.2.0")
+    host = os.environ.get("TOOL_ARCH", "aarch64" if os.environ["ARCH"] == "arm64" else "x86_64")
+    target = "aarch64-linux-gnu" if name.startswith("aarch64") or host in ("aarch64", "arm64") else "x86_64-linux-gnu"
+    print(target if "-dumpmachine" in args else "14.2.0")
 elif name == "git" and "submodule" in args:
-    expected_key = "http." + os.environ["CI_SERVER_URL"].rstrip("/") + "/.extraHeader"
+    expected_key = "http.https://github.com/.extraHeader"
     if (os.environ.get("GIT_CONFIG_COUNT") != "1"
             or os.environ.get("GIT_CONFIG_KEY_0") != expected_key
-            or not os.environ.get("GIT_CONFIG_VALUE_0", "").startswith("Authorization: Basic ")):
-        sys.exit("协议子模块必须直接使用 GitLab 临时认证头，禁止旧地址重写")
+            or os.environ.get("GIT_CONFIG_VALUE_0") != "" or "CI_JOB_TOKEN" in os.environ):
+        sys.exit("公开协议子模块不得携带 GitLab 作业认证")
     if os.environ.get("FAIL_SUBMODULE_STAGE") in args:
-        print(os.environ["CI_JOB_TOKEN"])
+        print("不公开的底层故障信息")
         sys.exit(27)
 elif name == "git" and any(argument.startswith("--batch-check") for argument in args):
     for expression in sys.stdin.read().splitlines():
@@ -81,9 +82,14 @@ elif name == "cmake" and "-B" in args:
 elif name == "ctest":
     Path(args[args.index("--output-junit") + 1]).write_text('<testsuites tests="2"/>')
     sys.exit(int(os.environ.get("TEST_FAILURE", "0")))
-elif name == "buildctl":
-    output = args[args.index("--output") + 1]
-    values = dict(part.split("=", 1) for part in output.split(","))
+elif name == "docker" and args[0] == "build":
+    Path("docker-image-tag").write_text(args[args.index("--tag") + 1])
+elif name == "buildctl" or name == "docker" and args[0] == "save":
+    if name == "buildctl":
+        output = args[args.index("--output") + 1]
+        values = dict(part.split("=", 1) for part in output.split(","))
+    else:
+        values = {"name": args[-1], "dest": args[args.index("--output") + 1]}
     config = json.dumps({"os": "linux", "architecture": "arm64" if os.environ["ARCH"] == "arm64" else "amd64"}).encode()
     filename = hashlib.sha256(config).hexdigest() + ".json"
     manifest = json.dumps([{"Config": filename, "RepoTags": [values["name"]]}]).encode()
@@ -152,7 +158,7 @@ class BuildLowerTest(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
-        for filename in ("script/gitlab/build_lower.sh", "script/gitlab/lower_metadata.py",
+        for filename in ("script/gitlab/build_lower.sh", "script/gitlab/lower_metadata.py", "script/gitlab/github_environment.py",
                          "script/gitlab/download_asset.py", "script/gitlab/init_platform_proto.py", "script/make_exe.sh",
                          "script/workflow/write_lower_update_manifest.py", "Dockerfile", "VERSION", "vcpkg-configuration.json",
                          "cmake/toolchains/aarch64-linux-gcc14.cmake", "cmake/vcpkg-triplets/arm64-linux-dynamic-cross.cmake"):
@@ -161,7 +167,7 @@ class BuildLowerTest(unittest.TestCase):
             shutil.copyfile(ROOT / filename, destination)
         tools = root / "bin"
         tools.mkdir()
-        for name in ("uname", "git", "cmake", "ctest", "ccache", "buildctl", "cc", "c++", "gcc-14", "g++-14",
+        for name in ("uname", "git", "cmake", "ctest", "ccache", "buildctl", "docker", "cc", "c++", "gcc-14", "g++-14",
                      "aarch64-linux-gnu-gcc-14", "aarch64-linux-gnu-g++-14"):
             executable = tools / name
             executable.write_text(MOCK, encoding="utf-8")
@@ -182,7 +188,8 @@ class BuildLowerTest(unittest.TestCase):
         for key in ("BUILDKIT_CA_B64", "BUILDKIT_CERT_B64", "BUILDKIT_KEY_B64"):
             environment[key] = base64.b64encode(b"secret-test-certificate").decode()
         for key in ("LOWER_CACHE_ROOT", "LOWER_CACHE_MOUNT", "EXPECT_CACHE_SENTINEL",
-                    "CMAKE_BUILD_PARALLEL_LEVEL", "VCPKG_MAX_CONCURRENCY", "CCACHE_MAXSIZE", "CFLAGS", "CXXFLAGS"):
+                    "CMAKE_BUILD_PARALLEL_LEVEL", "VCPKG_MAX_CONCURRENCY", "CCACHE_MAXSIZE", "CFLAGS", "CXXFLAGS",
+                    "GITHUB_ACTIONS", "RUNNER_ENVIRONMENT", "LOWER_PACKAGE_BACKEND"):
             environment.pop(key, None)
         return root, environment
 
@@ -389,7 +396,7 @@ class BuildLowerTest(unittest.TestCase):
         self.assertIn("挂载", result.stdout + result.stderr)
         self.assertFalse(any(command[0] == "cmake" for command in self.commands(root)))
 
-    def test_protobuf_auth_uses_gitlab_header_and_hides_job_token(self):
+    def test_public_protobuf_fetch_does_not_inherit_gitlab_credentials(self):
         root, environment = self.prepare("x64")
         result = self.run_phase(root, environment, "build")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -498,7 +505,7 @@ class BuildLowerTest(unittest.TestCase):
         identity = (root / "release/arm64/build_identity.json").read_bytes()
         tested = self.run_phase(root, environment | {"CI_JOB_ID": "49"}, "test")
         self.assertNotEqual(tested.returncode, 0)
-        self.assertIn("仅 x64 执行测试", tested.stdout + tested.stderr)
+        self.assertIn("原生", tested.stdout + tested.stderr)
         self.assertEqual((root / "release/arm64/build_identity.json").read_bytes(), identity)
         all_commands = [json.loads(line) for line in (root / "commands.jsonl").read_text().splitlines()]
         self.assertFalse(any(command[0] == "ctest" for command in all_commands))
@@ -506,13 +513,93 @@ class BuildLowerTest(unittest.TestCase):
         self.assertEqual(sum(command[0] == "git" and "submodule" in command and "update" in command for command in all_commands), 1)
 
     def test_removed_modes_reject_before_running_tools(self):
-        for arch, phase in (("arm64", "build"), ("arm64", "test"), ("x64", "cross-build")):
+        for arch, phase in (("x64", "cross-build"), ("arm64", "unknown")):
             with self.subTest(arch=arch, phase=phase):
                 root, environment = self.prepare(arch)
                 result = self.run_phase(root, environment, phase)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("仅 x64 执行测试", result.stdout + result.stderr)
+                self.assertIn("用法", result.stdout + result.stderr)
                 self.assertEqual(self.commands(root), [])
+
+    # 两个原生架构各自运行完整测试，测试失败保留原始失败证据及构建身份。
+    def test_native_architectures_build_and_run_complete_ctest(self):
+        for arch in ("arm64", "x64"):
+            for failure in ("0", "1"):
+                with self.subTest(arch=arch, failure=failure):
+                    root, environment = self.prepare(arch)
+                    built = self.run_phase(root, environment, "build")
+                    self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+                    configure = next(command for command in self.commands(root) if command[0] == "cmake" and "-B" in command)
+                    self.assertIn("-DMSKDSP_BUILD_TESTS=ON", configure)
+                    triplet = arch + "-linux-dynamic"
+                    self.assertIn("-DVCPKG_HOST_TRIPLET=" + triplet, configure)
+                    self.assertIn("-DVCPKG_TARGET_TRIPLET=" + triplet, configure)
+                    identity = (root / "release" / arch / "build_identity.json").read_bytes()
+                    tested = self.run_phase(root, environment | {"TEST_FAILURE": failure}, "test")
+                    self.assertEqual(tested.returncode == 0, failure == "0", tested.stdout + tested.stderr)
+                    self.assertEqual((root / "release" / arch / "build_identity.json").read_bytes(), identity)
+                    self.assertTrue((root / "logs" / arch / "ctest.xml").is_file())
+                    self.assertEqual((root / "package/temporary_test").exists(), failure != "0")
+                    ctest = next(command for command in self.commands(root) if command[0] == "ctest")
+                    self.assertIn("--no-tests=error", ctest)
+                    self.assertEqual(ctest[ctest.index("--parallel") + 1], "2")
+
+    # 主机与目标不一致、或原生构建上下文被替换时，必须在执行 CTest 前失败。
+    def test_native_arm_rejects_wrong_host_and_modified_context(self):
+        root, environment = self.prepare("arm64")
+        built = self.run_phase(root, environment | {"TOOL_ARCH": "x86_64"}, "build")
+        self.assertNotEqual(built.returncode, 0)
+        self.assertFalse(any(command[0] == "cmake" for command in self.commands(root)))
+        built = self.run_phase(root, environment, "build")
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        for overrides in ({"TOOL_ARCH": "x86_64"}, {}):
+            if not overrides:
+                context_file = root / "release/arm64/build_context.json"
+                context = json.loads(context_file.read_text())
+                context["target_triplet"] = "x64-linux-dynamic"
+                context_file.write_text(json.dumps(context))
+            tested = self.run_phase(root, environment | overrides, "test")
+            self.assertNotEqual(tested.returncode, 0)
+        self.assertFalse(any(command[0] == "ctest" for command in self.commands(root)))
+
+    # 托管执行器使用本架构 Docker 制包，不读取内网 BuildKit 证书。
+    def test_hosted_local_docker_packages_both_native_architectures(self):
+        for arch in ("x64", "arm64"):
+            with self.subTest(arch=arch):
+                root, environment = self.prepare(arch)
+                environment.update(GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted", GITHUB_SERVER_URL="https://github.com",
+                                   GITHUB_REPOSITORY="CcooLcyy/MskDSP", GITHUB_REF="refs/heads/master",
+                                   GITHUB_REF_NAME="master", GITHUB_REF_TYPE="branch", GITHUB_REF_PROTECTED="true",
+                                   GITHUB_SHA="a" * 40, GITHUB_EVENT_NAME="push", GITHUB_RUN_ID="100",
+                                   GITHUB_RUN_NUMBER="7", GITHUB_RUN_ATTEMPT="1", GITHUB_JOB="native-build",
+                                   LOWER_JOB_ARCH=arch, LOWER_JOB_PHASE="build", LOWER_PACKAGE_BACKEND="local-docker")
+                for key in ("BUILDKIT_HOST", "BUILDKIT_CA_B64", "BUILDKIT_CERT_B64", "BUILDKIT_KEY_B64"):
+                    environment.pop(key)
+                built = self.run_phase(root, environment, "build")
+                self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+                tested = self.run_phase(root, environment | {"LOWER_JOB_PHASE": "test"}, "test")
+                self.assertEqual(tested.returncode, 0, tested.stdout + tested.stderr)
+                packaged = self.run_phase(root, environment | {"LOWER_JOB_PHASE": "package"}, "package")
+                self.assertEqual(packaged.returncode, 0, packaged.stdout + packaged.stderr)
+                commands = self.commands(root)
+                self.assertFalse(any(command[0] == "buildctl" for command in commands))
+                docker = [command for command in commands if command[0] == "docker"]
+                self.assertEqual([command[1] for command in docker], ["build", "save"])
+                self.assertEqual(docker[0][docker[0].index("--platform") + 1], "linux/" + ("amd64" if arch == "x64" else "arm64"))
+                metadata = json.loads((root / "release" / arch / "metadata.json").read_text())
+                self.assertEqual(metadata["sha256"], hashlib.sha256((root / "release" / arch / metadata["file_name"]).read_bytes()).hexdigest())
+
+    # 非托管环境、主机架构错配或未知打包后端不能触发 Docker 或 BuildKit。
+    def test_local_docker_rejects_uncontrolled_backend_and_host(self):
+        for changes in ({"LOWER_PACKAGE_BACKEND": "unexpected"},
+                        {"LOWER_PACKAGE_BACKEND": "local-docker"},
+                        {"LOWER_PACKAGE_BACKEND": "local-docker", "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "self-hosted"},
+                        {"LOWER_PACKAGE_BACKEND": "local-docker", "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "TOOL_ARCH": "aarch64"}):
+            with self.subTest(changes=changes):
+                root, environment = self.prepare("x64")
+                result = self.run_phase(root, environment | changes, "package")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(any(command[0] in ("docker", "buildctl") for command in self.commands(root)))
 
     def test_x64_build_and_test_are_separate_and_preserve_original_build_identity(self):
         root, environment = self.prepare("x64")

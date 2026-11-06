@@ -18,12 +18,21 @@ import time
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from init_platform_proto import auth_environment
+from init_platform_proto import auth_environment, public_protocol_environment
+from github_environment import normalize_environment
 from lower_metadata import release_environment
 
 
 class ClientError(ValueError):
     """不包含底层异常和认证信息的可安全诊断。"""
+
+
+def source_environment(environ):
+    """统一发布来源身份，避免将 GitHub 运行误读为继承的 GitLab 环境。"""
+    try:
+        return normalize_environment(environ)
+    except ValueError as error:
+        raise ClientError(str(error)) from None
 
 
 def sha256_file(path):
@@ -59,7 +68,7 @@ def validate_publication_channel(metadata):
 
 
 def load_metadata(metadata_path, environ=None):
-    environment = os.environ if environ is None else environ
+    environment = source_environment(os.environ if environ is None else environ)
     path = Path(metadata_path).absolute()
     if path.is_symlink() or not path.is_file() or path.stat().st_size > 64 * 1024:
         raise ClientError("缺少合法的冻结元数据文件")
@@ -80,6 +89,11 @@ def load_metadata(metadata_path, environ=None):
             or not repository_url(str(data["source_repository"]))):
         raise ClientError("下位机冻结身份、文件或摘要不合法")
     validate_publication_channel(data)
+    if environment.get("GITHUB_ACTIONS") == "true":
+        if (data.get("github_run_attempt") != environment["GITHUB_RUN_ATTEMPT"]
+                or data.get("pipeline_iid") != environment["CI_PIPELINE_IID"]
+                or data["platform"] != "linux-" + environment["LOWER_JOB_ARCH"]):
+            raise ClientError("GitHub 发布作业与构建重跑、运行序号或架构不一致")
     try:
         channel, branch_version, source_ref = release_environment(environment)
     except ValueError:
@@ -110,8 +124,15 @@ def load_metadata(metadata_path, environ=None):
 
 def check_current_head(metadata, environ=None):
     validate_publication_channel(metadata)
-    environment = os.environ if environ is None else environ
-    _, git_environment = auth_environment(environment)
+    environment = source_environment(os.environ if environ is None else environ)
+    if environment.get("GITHUB_ACTIONS") == "true":
+        if (metadata["source_repository"].rstrip("/") != environment["CI_PROJECT_URL"]
+                or metadata["source_sha"] != environment["CI_COMMIT_SHA"]
+                or metadata["source_ref"] != environment.get("CI_COMMIT_TAG", environment.get("CI_COMMIT_BRANCH"))):
+            raise ClientError("GitHub 远端检查来源与本次运行不一致")
+        git_environment = public_protocol_environment(environment)
+    else:
+        _, git_environment = auth_environment(environment)
     repository = metadata["source_repository"].rstrip("/")
     if not repository.endswith(".git"):
         repository += ".git"

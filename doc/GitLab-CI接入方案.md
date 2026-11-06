@@ -1,5 +1,7 @@
 # 下位机 GitLab CI 接入方案
 
+> 当前 GitHub 主仓库入口见 [GitHub Actions 接入方案](./GitHub-Actions接入方案.md)。本文保留旧 GitLab Runner、交叉编译与缓存配置的历史运维说明；托管 Actions 使用原生双架构编译与完整测试。
+
 ## 已确认的目标与边界
 
 - GitLab 为下位机代码与 CI 的唯一维护入口，移除旧 GitHub Actions、专用 Runner 部署模板和 R2/静态发布脚本；GitHub 仓库停用 Actions，历史提交仍可追溯。

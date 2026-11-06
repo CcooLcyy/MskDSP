@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 两种架构共用构建与打包逻辑，仅 x64 执行测试，发布作业仅消费冻结产物。
+# 两种原生架构完整测试，保留 ARM64 交叉编译入口；发布只消费冻结产物。
 set -euo pipefail
 
 log() { printf '[lower-ci] %s\n' "$*"; }
@@ -11,11 +11,11 @@ ARCH="${2:-}"
 case "${ARCH}" in
   arm64) TRIPLET=arm64-linux-dynamic; PLATFORM=linux/arm64; BASE_IMAGE=arm64v8/ubuntu:noble; STRIP_DEBUG=ON ;;
   x64) TRIPLET=x64-linux-dynamic; PLATFORM=linux/amd64; BASE_IMAGE=amd64/ubuntu:noble; STRIP_DEBUG=ON ;;
-  *) fail '用法：build_lower.sh build x64 | test x64 | cross-build arm64 | package arm64|x64' ;;
+  *) fail '用法：build_lower.sh build arm64|x64 | test arm64|x64 | cross-build arm64 | package arm64|x64' ;;
 esac
 case "${MODE}:${ARCH}" in
-  build:x64|test:x64|cross-build:arm64|package:arm64|package:x64) ;;
-  *) fail '用法：build_lower.sh build x64 | test x64 | cross-build arm64 | package arm64|x64；仅 x64 执行测试' ;;
+  build:x64|build:arm64|test:x64|test:arm64|cross-build:arm64|package:arm64|package:x64) ;;
+  *) fail '用法：build_lower.sh build arm64|x64 | test arm64|x64 | cross-build arm64 | package arm64|x64' ;;
 esac
 HOST_TRIPLET="${TRIPLET}"
 CACHE_ARCH="${ARCH}"
@@ -39,7 +39,7 @@ mkdir -p "${RELEASE_DIR}" "${LOG_DIR}"
 exec > >(tee -a "${LOG_DIR}/${MODE}.log") 2>&1
 
 fetch_protobuf() {
-  # 子模块直接指向 GitLab，认证头仅存在于子进程环境，不将凭据写入磁盘。
+  # 协议为公开 GitHub 固定子模块，隔离旧作业认证和进程级地址重定向。
   python3 - <<'PY'
 import os
 from pathlib import Path
@@ -47,17 +47,17 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path("script/gitlab").resolve()))
-from init_platform_proto import auth_environment
+from init_platform_proto import public_protocol_environment
 
-_, environment = auth_environment(os.environ)
+environment = public_protocol_environment(os.environ)
 # Runner可能清除父仓库注册信息但保留子仓库；先注册才能同步已有origin。
 for stage, command in (("初始化", ["git", "submodule", "init", "--", "protobuf"]),
                        ("同步地址", ["git", "submodule", "sync", "--recursive", "--", "protobuf"]),
                        ("更新提交", ["git", "submodule", "update", "--init", "--recursive", "--", "protobuf"])):
     result = subprocess.run(command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if result.returncode:
-        raise SystemExit(f"protobuf 子模块{stage}失败，请检查提交同步与 CI_JOB_TOKEN allowlist；底层输出已隐藏")
-print("已通过临时 CI_JOB_TOKEN 配置获取 protobuf 子模块")
+        raise SystemExit(f"protobuf 子模块{stage}失败，请检查 GitHub 网络与固定提交；底层输出已隐藏")
+print("已从公开 GitHub 获取固定 protobuf 子模块，未携带作业令牌")
 PY
 }
 
@@ -243,6 +243,14 @@ build_package() {
       aarch64:arm64|arm64:arm64|x86_64:x64) ;;
       *) fail '工具镜像架构与构建目标不一致' ;;
     esac
+    local compiler_target=x86_64-linux-gnu
+    [[ "${ARCH}" != arm64 ]] || compiler_target=aarch64-linux-gnu
+    [[ "$("${TARGET_CC}" -dumpmachine)" == "${compiler_target}" \
+       && "$("${TARGET_CXX}" -dumpmachine)" == "${compiler_target}" \
+       && "$("${TARGET_CC}" -dumpfullversion)" == 14.* \
+       && "$("${TARGET_CXX}" -dumpfullversion)" == 14.* ]] || fail '原生编译器架构或 GCC14 版本不一致'
+    # 同时约束 vcpkg 的非 CMake 端口，避免依赖误用 Runner 的默认编译器。
+    export CC="${TARGET_CC}" CXX="${TARGET_CXX}"
   fi
   prepare_build_cache
   log "准备 ${ARCH} 主分支构建与 protobuf 子模块"
@@ -280,6 +288,10 @@ build_package() {
   log "配置 ${ARCH} RelWithDebInfo，测试程序编译=${BUILD_TESTS}，strip=${STRIP_DEBUG}"
   log '启用官方 codeload 归档下载与严格 SHA512 校验'
   local extra_arguments=()
+  if [[ "${GITHUB_ACTIONS:-}" == true && "${RUNNER_ENVIRONMENT:-}" == github-hosted ]]; then
+    # 托管主机空间有限，逐端口清理中间构建树；保留下载、二进制缓存和已安装测试依赖。
+    extra_arguments+=("-DVCPKG_INSTALL_OPTIONS=--clean-buildtrees-after-build;--clean-packages-after-build")
+  fi
   if [[ "${MODE}" == cross-build ]]; then
     extra_arguments+=("-DVCPKG_CHAINLOAD_TOOLCHAIN_FILE=${ROOT}/cmake/toolchains/aarch64-linux-gcc14.cmake")
   fi
@@ -306,21 +318,25 @@ build_package() {
     finish_package
     log 'ARM64 交叉编译、安装及独立调试符号归档完成，打包等待 x64 完整测试通过'
   else
-    python3 - "${ROOT}" "${RELEASE_DIR}/build_context.json" <<'PY'
+    python3 - "${ROOT}" "${RELEASE_DIR}/build_context.json" "${TRIPLET}" "${HOST_TRIPLET}" <<'PY'
 import json
 from pathlib import Path
 import sys
-Path(sys.argv[2]).write_text(json.dumps({"project_dir": sys.argv[1], "target_triplet": "x64-linux-dynamic",
-                                      "host_triplet": "x64-linux-dynamic"}) + "\n", encoding="utf-8")
+Path(sys.argv[2]).write_text(json.dumps({"project_dir": sys.argv[1], "target_triplet": sys.argv[3],
+                                      "host_triplet": sys.argv[4]}) + "\n", encoding="utf-8")
 PY
-    log 'x64 编译、安装及独立符号归档完成，保留完整测试依赖，等待独立 x64 完整 CTest'
+    log "${ARCH} 原生编译、安装及独立符号归档完成，保留依赖等待完整 CTest"
   fi
 }
 
-test_x64() {
-  [[ "$(uname -m)" == x86_64 ]] || fail 'x64 测试必须在原生 x64 工具镜像执行'
-  [[ -f "${BUILD_DIR}/CTestTestfile.cmake" && -f package/MskDSP ]] || fail '缺少完整 x64 构建目录或测试产物'
-  python3 - "${ROOT}" "${RELEASE_DIR}" <<'PY'
+test_native() {
+  case "$(uname -m):${ARCH}" in
+    x86_64:x64|aarch64:arm64|arm64:arm64) ;;
+    *) fail "${ARCH} 测试必须在对应原生主机执行" ;;
+  esac
+  [[ -f "${BUILD_DIR}/CTestTestfile.cmake" && -f package/MskDSP && -f "${RELEASE_DIR}/build_context.json" ]] \
+    || fail '缺少完整原生构建目录或测试产物'
+  python3 - "${ROOT}" "${RELEASE_DIR}" "${ARCH}" "${TRIPLET}" "${HOST_TRIPLET}" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -331,35 +347,51 @@ release = Path(sys.argv[2])
 identity = json.loads((release / "build_identity.json").read_text(encoding="utf-8"))
 # 仅验证原构建来源，不使用测试作业身份覆盖 build_job_id。
 package_identity(identity, os.environ)
-if identity.get("platform") != "linux-x64":
-    raise SystemExit("x64 测试构建产物架构不一致")
+if identity.get("platform") != "linux-" + sys.argv[3]:
+    raise SystemExit("原生测试构建产物架构不一致")
 context = json.loads((release / "build_context.json").read_text(encoding="utf-8"))
-if context != {"project_dir": sys.argv[1], "target_triplet": "x64-linux-dynamic", "host_triplet": "x64-linux-dynamic"}:
-    raise SystemExit("x64 测试路径或构建来源不一致，拒绝执行其他构建的测试")
-print("已核对 x64 原构建身份与测试绝对路径")
+if context != {"project_dir": sys.argv[1], "target_triplet": sys.argv[4], "host_triplet": sys.argv[5]}:
+    raise SystemExit("原生测试路径或构建来源不一致，拒绝执行其他构建的测试")
+print("已核对原生构建身份与测试绝对路径：" + sys.argv[3])
 PY
   fetch_protobuf
   run_complete_ctest
   finish_package
-  log 'x64 完整 CTest 成功，保留原构建身份并完成交付目录清理'
+  log "${ARCH} 完整 CTest 成功，保留原构建身份并完成交付目录清理"
 }
 
 package_release() {
-  : "${BUILDKIT_HOST:?缺少 BuildKit 服务地址}"
-  : "${BUILDKIT_CA_B64:?缺少 BuildKit CA}"
-  : "${BUILDKIT_CERT_B64:?缺少 BuildKit 客户端证书}"
-  : "${BUILDKIT_KEY_B64:?缺少 BuildKit 客户端私钥}"
-  [[ "${BUILDKIT_HOST}" == tcp://* ]] || fail 'BuildKit 必须通过 mTLS TCP 地址访问'
+  local backend="${LOWER_PACKAGE_BACKEND:-remote-buildkit}"
+  case "${backend}" in
+    remote-buildkit)
+      : "${BUILDKIT_HOST:?缺少 BuildKit 服务地址}"
+      : "${BUILDKIT_CA_B64:?缺少 BuildKit CA}"
+      : "${BUILDKIT_CERT_B64:?缺少 BuildKit 客户端证书}"
+      : "${BUILDKIT_KEY_B64:?缺少 BuildKit 客户端私钥}"
+      [[ "${BUILDKIT_HOST}" == tcp://* ]] || fail 'BuildKit 必须通过 mTLS TCP 地址访问'
+      ;;
+    local-docker)
+      [[ "${GITHUB_ACTIONS:-}" == true && "${RUNNER_ENVIRONMENT:-}" == github-hosted ]] \
+        || fail '本机 Docker 打包仅用于 GitHub 托管任务'
+      case "$(uname -m):${ARCH}" in
+        x86_64:x64|aarch64:arm64|arm64:arm64) ;;
+        *) fail '本机 Docker 打包必须在对应原生主机执行' ;;
+      esac
+      ;;
+    *) fail '未知安装包构建后端' ;;
+  esac
   [[ -f package/MskDSP && -f "${RELEASE_DIR}/build_identity.json" ]] || fail '缺少编译产物或原始构建身份'
   local temporary version image_tar
   temporary="$(mktemp -d)"
   trap 'rm -rf "${temporary:-}"' EXIT
   chmod 700 "${temporary}"
-  umask 077
-  printf '%s' "${BUILDKIT_CA_B64}" | base64 -d > "${temporary}/ca.pem"
-  printf '%s' "${BUILDKIT_CERT_B64}" | base64 -d > "${temporary}/cert.pem"
-  printf '%s' "${BUILDKIT_KEY_B64}" | base64 -d > "${temporary}/key.pem"
-  umask 022
+  if [[ "${backend}" == remote-buildkit ]]; then
+    umask 077
+    printf '%s' "${BUILDKIT_CA_B64}" | base64 -d > "${temporary}/ca.pem"
+    printf '%s' "${BUILDKIT_CERT_B64}" | base64 -d > "${temporary}/cert.pem"
+    printf '%s' "${BUILDKIT_KEY_B64}" | base64 -d > "${temporary}/key.pem"
+    umask 022
+  fi
   python3 script/gitlab/lower_metadata.py package --identity "${RELEASE_DIR}/build_identity.json" \
     --output "${RELEASE_DIR}/package_identity.json"
   version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["package_version"])' "${RELEASE_DIR}/package_identity.json")"
@@ -367,11 +399,17 @@ package_release() {
   image_tar="images/mskdsp-${version}.tar"
   sed -e "s#--platform=linux/arm64#--platform=${PLATFORM}#" \
       -e "s#localhost/arm64v8/ubuntu:noble#${BASE_IMAGE}#" Dockerfile > "${temporary}/Dockerfile"
-  log "通过独立 BuildKit 服务生成 ${ARCH} Docker 归档"
-  buildctl --addr "${BUILDKIT_HOST}" \
-    --tlscacert "${temporary}/ca.pem" --tlscert "${temporary}/cert.pem" --tlskey "${temporary}/key.pem" \
-    build --frontend dockerfile.v0 --local context="${ROOT}" --local dockerfile="${temporary}" \
-    --opt "platform=${PLATFORM}" --output "type=docker,name=mskdsp:${version},dest=${image_tar}"
+  if [[ "${backend}" == local-docker ]]; then
+    log "通过本机原生 Docker 生成 ${ARCH} 安装镜像，不使用内网 BuildKit"
+    docker build --platform "${PLATFORM}" --file "${temporary}/Dockerfile" --tag "mskdsp:${version}" "${ROOT}"
+    docker save --output "${image_tar}" "mskdsp:${version}"
+  else
+    log "通过独立 BuildKit 服务生成 ${ARCH} Docker 归档"
+    buildctl --addr "${BUILDKIT_HOST}" \
+      --tlscacert "${temporary}/ca.pem" --tlscert "${temporary}/cert.pem" --tlskey "${temporary}/key.pem" \
+      build --frontend dockerfile.v0 --local context="${ROOT}" --local dockerfile="${temporary}" \
+      --opt "platform=${PLATFORM}" --output "type=docker,name=mskdsp:${version},dest=${image_tar}"
+  fi
   log '封装既有 gzip 自解压安装包'
   bash script/make_exe.sh "${image_tar}"
   mv "images/mskdsp-${version}" "${RELEASE_DIR}/"
@@ -388,7 +426,7 @@ package_release() {
 case "${MODE}" in
   build) build_package ;;
   cross-build) build_package ;;
-  test) test_x64 ;;
+  test) test_native ;;
   package) package_release ;;
-  *) fail '用法：build_lower.sh build x64 | test x64 | cross-build arm64 | package arm64|x64' ;;
+  *) fail '用法：build_lower.sh build arm64|x64 | test arm64|x64 | cross-build arm64 | package arm64|x64' ;;
 esac

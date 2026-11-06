@@ -10,9 +10,38 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).parent))
 import lower_metadata as target
+from test_github_environment import github_environment
 
 
 class MetadataTest(unittest.TestCase):
+    # GitHub 重跑不能复用先前安装包身份，打包阶段不能混用架构或运行。
+    def test_github_native_identity_and_replay_boundary(self):
+        env = github_environment()
+        identity = target.create_identity("1.0.0", "x64", env)
+        self.assertEqual(identity["source_repository"], "https://github.com/CcooLcyy/MskDSP")
+        self.assertEqual(identity["github_run_attempt"], "1")
+        retry = target.create_identity("1.0.0", "x64", env | {"GITHUB_RUN_ATTEMPT": "2"})
+        self.assertNotEqual(identity["version"], retry["version"])
+        # 不同工作流可以有同一 run_number，但运行编号不同仍须形成不同版本。
+        other_run = target.create_identity("1.0.0", "x64", env | {"GITHUB_RUN_ID": "101"})
+        self.assertNotEqual(identity["version"], other_run["version"])
+        packaged = target.package_identity(identity, env | {"LOWER_JOB_PHASE": "package"})
+        self.assertEqual(packaged["github_run_attempt"], "1")
+        for changes in ({"GITHUB_RUN_ATTEMPT": "2"}, {"GITHUB_RUN_ID": "101"},
+                        {"LOWER_JOB_ARCH": "arm64"}, {"GITHUB_REPOSITORY": "other/repo"}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                target.package_identity(identity, env | changes)
+
+    # 原生标签只有真实保护状态与 VERSION 一致时才能生成 Stable 身份。
+    def test_github_stable_requires_real_protection(self):
+        env = github_environment(GITHUB_REF_TYPE="tag", GITHUB_REF="refs/tags/v1.0.0",
+                                 GITHUB_REF_NAME="v1.0.0", LOWER_JOB_ARCH="arm64")
+        with self.assertRaises(ValueError):
+            target.create_identity("1.0.0", "arm64", env)
+        identity = target.create_identity("1.0.0", "arm64", env | {"GITHUB_REF_PROTECTED": "true"})
+        self.assertEqual(identity["version"], "1.0.0")
+        self.assertEqual(identity["channel"], "stable")
+
     def setUp(self):
         self.environment = {
             "CI_PIPELINE_SOURCE": "push", "CI_COMMIT_BRANCH": "master",

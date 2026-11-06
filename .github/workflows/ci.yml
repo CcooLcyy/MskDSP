@@ -1,0 +1,240 @@
+name: 下位机双架构验证与平台发布
+
+on:
+  push:
+    branches: [master, main, 'release/*']
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 不设置工作流级自动取消，防止新提交打断已经开始的平台发布。
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: '4'
+  VCPKG_MAX_CONCURRENCY: '4'
+  CCACHE_MAXSIZE: 2G
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: ${{ matrix.arch }} 原生编译与完整测试
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 350
+    # 两个架构没有相互依赖，失败也继续保留另一架构的真实验证结果。
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: x64, runner: ubuntu-24.04}
+          - {arch: arm64, runner: ubuntu-24.04-arm}
+    concurrency:
+      group: lower-build-${{ github.ref }}-${{ matrix.arch }}
+      cancel-in-progress: true
+    env:
+      ARCH: ${{ matrix.arch }}
+      LOWER_JOB_ARCH: ${{ matrix.arch }}
+      LOWER_JOB_PHASE: build
+    steps:
+      - name: 拉取来源提交
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: 准备原生工具链和磁盘空间
+        run: bash script/github/prepare_hosted.sh
+      - name: 恢复独立架构缓存
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            .cache/vcpkg/${{ matrix.arch }}/downloads
+            .cache/vcpkg/${{ matrix.arch }}/archives
+            .cache/ccache/${{ matrix.arch }}
+          key: lower-native-${{ matrix.arch }}-gcc14-v1-${{ hashFiles('vcpkg*.json', 'cmake/vcpkg-triplets/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            lower-native-${{ matrix.arch }}-gcc14-v1-${{ hashFiles('vcpkg*.json', 'cmake/vcpkg-triplets/**') }}-
+      - name: 编译当前原生架构
+        run: bash script/gitlab/build_lower.sh build "${ARCH}"
+      - name: 在同一工作区执行全部测试
+        run: bash script/gitlab/build_lower.sh test "${ARCH}"
+      - name: 归档已验证交付目录
+        run: |
+          set -euo pipefail
+          tar --exclude=package/debug -cf "${RUNNER_TEMP}/lower-build-${ARCH}.tar" package "release/${ARCH}"
+      - name: 保存已验证二进制及原始构建身份
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lower-build-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lower-build-${{ matrix.arch }}.tar
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
+      - name: 保留成功或失败的日志、JUnit 和独立符号包
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lower-diagnostics-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            logs/${{ matrix.arch }}/
+            build-${{ matrix.arch }}/Testing/
+            symbols/${{ matrix.arch }}/
+          retention-days: 30
+
+  checks:
+    name: 网络、安装器与发布契约检查
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PLATFORM_PROTO_TEST_ROOT: .ci/platform-proto
+      LOWER_JOB_PHASE: test
+      LOWER_JOB_ARCH: x64
+    steps:
+      - name: 拉取来源提交
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: 准备契约测试依赖与固定协议
+        run: |
+          set -euo pipefail
+          python3 -m venv "${RUNNER_TEMP}/lower-python"
+          source "${RUNNER_TEMP}/lower-python/bin/activate"
+          python -m pip install grpcio grpcio-tools PyYAML
+          echo "${RUNNER_TEMP}/lower-python/bin" >> "${GITHUB_PATH}"
+          python script/gitlab/init_platform_proto.py
+      - name: 执行网络、安装器、构建编排和发布契约用例
+        run: |
+          set -euo pipefail
+          mkdir -p logs/contracts
+          exec > >(tee logs/contracts/checks.log) 2>&1
+          python -m unittest discover -s script/network -p 'test_*.py' -v
+          python script/test_make_exe.py
+          python script/update/test_lower_update_task.py
+          python -m unittest discover -s script/gitlab -p 'test_*.py' -v
+          python -m unittest discover -s script/github -p 'test_*.py' -v
+          python -m unittest discover -s script/workflow -p 'test_*.py' -v
+      - name: 保留契约检查日志
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lower-contracts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: logs/contracts/
+          retention-days: 30
+
+  package:
+    name: ${{ matrix.arch }} 原生镜像与安装包
+    needs: [build, checks]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: x64, runner: ubuntu-24.04}
+          - {arch: arm64, runner: ubuntu-24.04-arm}
+    env:
+      ARCH: ${{ matrix.arch }}
+      LOWER_JOB_ARCH: ${{ matrix.arch }}
+      LOWER_JOB_PHASE: package
+      LOWER_PACKAGE_BACKEND: local-docker
+    steps:
+      - name: 拉取相同提交的打包脚本
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: 获取本次运行已验证的交付目录
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: lower-build-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lower-build
+      - name: 恢复权限并原生生成安装包
+        run: |
+          set -euo pipefail
+          tar -xf "${RUNNER_TEMP}/lower-build/lower-build-${ARCH}.tar"
+          bash script/gitlab/build_lower.sh package "${ARCH}"
+          tar -cf "${RUNNER_TEMP}/lower-package-${ARCH}.tar" "release/${ARCH}"
+      - name: 保存冻结安装包与来源元数据
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lower-package-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lower-package-${{ matrix.arch }}.tar
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 30
+      - name: 保留打包失败证据
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lower-package-logs-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: logs/${{ matrix.arch }}/
+          retention-days: 30
+
+  publish-ci:
+    name: 发布 ${{ matrix.arch }} CI 到平台
+    if: github.ref_type == 'branch' && (github.ref_name == 'master' || github.ref_name == 'main')
+    needs: [package, checks]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: ci
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, x64]
+    concurrency:
+      group: lower-publish-ci-${{ matrix.arch }}
+      cancel-in-progress: false
+    env:
+      LOWER_JOB_ARCH: ${{ matrix.arch }}
+      LOWER_JOB_PHASE: publish
+    steps:
+      - name: 拉取相同提交的发布脚本
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: 获取本次冻结安装包
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: lower-package-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lower-package
+      - name: 入库、发布并核对公开清单
+        env:
+          PLATFORM_UPLOAD_TOKEN: ${{ secrets.PLATFORM_UPLOAD_TOKEN }}
+          PLATFORM_GRPC_ENDPOINT: ${{ vars.PLATFORM_GRPC_ENDPOINT }}
+          PLATFORM_GRPC_PLAINTEXT: ${{ vars.PLATFORM_GRPC_PLAINTEXT }}
+          PLATFORM_PUBLIC_BASE_URL: ${{ vars.PLATFORM_PUBLIC_BASE_URL }}
+          PLATFORM_GRPC_CA_B64: ${{ secrets.PLATFORM_GRPC_CA_B64 }}
+        run: bash script/github/publish.sh
+
+  publish-stable:
+    name: 发布 ARM64 Stable 到平台
+    if: github.ref_type == 'tag' && github.ref_protected && startsWith(github.ref_name, 'v')
+    needs: [package, checks]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: ci
+    concurrency:
+      group: lower-publish-stable-arm64
+      cancel-in-progress: false
+    env:
+      LOWER_JOB_ARCH: arm64
+      LOWER_JOB_PHASE: publish
+    steps:
+      - name: 拉取标签自身的发布脚本
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: 获取标签自身验证生成的 ARM64 安装包
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: lower-package-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lower-package
+      - name: 入库、发布并核对正式清单
+        env:
+          PLATFORM_UPLOAD_TOKEN: ${{ secrets.PLATFORM_UPLOAD_TOKEN }}
+          PLATFORM_GRPC_ENDPOINT: ${{ vars.PLATFORM_GRPC_ENDPOINT }}
+          PLATFORM_GRPC_PLAINTEXT: ${{ vars.PLATFORM_GRPC_PLAINTEXT }}
+          PLATFORM_PUBLIC_BASE_URL: ${{ vars.PLATFORM_PUBLIC_BASE_URL }}
+          PLATFORM_GRPC_CA_B64: ${{ secrets.PLATFORM_GRPC_CA_B64 }}
+        run: bash script/github/publish.sh

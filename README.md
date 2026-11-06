@@ -71,17 +71,19 @@ ModuleManager 使用模块 manifest 构建依赖图，并自动处理依赖启�
 
 ### 默认 CI 与软件发布
 
-本仓库默认使用 GitLab CI，入口为 `.gitlab-ci.yml`，作业定义见
-`.gitlab/ci/ci.yml`。`master/main`、`release/X.Y` 及受保护版本标签的 push 或手动流水线运行完整验证：完成双架构编译和
-x64 完整 CTest 后生成 Docker gzip 自解压安装包，主干双架构打包成功后上传平台软件库并发布各自 CI 通道。
-ARM64 使用 x64 GCC14 交叉编译，不编译或运行 ARM64 测试程序；两种架构的打包均以 x64 测试成功为前提。
-流水线按 `build → test → package → publish` 展示：`build-x64` 仅编译和安装，独立 `test-x64` 作业运行全部 CTest。
+本仓库默认使用 GitHub Actions，入口为 `.github/workflows/ci.yml`。
+`master/main`、`release/X.Y` 及受保护版本标签的 push 或手动运行进入完整验证。
+x64 与原生 ARM64 分别使用 `ubuntu-24.04`、`ubuntu-24.04-arm`，独立并行完成 GCC14 编译与完整 CTest；
+任一架构失败不会取消另一架构。网络、安装器、更新及平台发布契约检查独立执行。
+全部验证成功后在对应原生 Runner 制作 Docker gzip 自解压安装包，双架构包成功后才允许发布平台。
+GitLab 配置与交叉编译入口仅保留兼容，不再作为 GitHub 主仓库的触发入口。
 
-安装包、SHA256SUMS、冻结元数据、测试日志和 ARM64 独立调试符号保存在 GitLab artifacts。
+安装包、SHA256SUMS、冻结元数据、测试日志和双架构独立调试符号保存在 GitHub artifacts。
 现场安装包可从平台软件库获取；软件入库、通道发布与设备安装分别执行。
 主干发布 CI；维护分支仅保留验证产物；受保护 `vX.Y.Z` 标签在自身完整 CI 通过后重建发布 ARM64 Stable，x64 正式包仅保留产物。
 Beta 已退役，拒绝生成、打包及上传发布新 Beta 包；历史身份解析与清单读取兼容保留。
-维护步骤见 [GitLab CI 接入方案](./doc/GitLab-CI接入方案.md) 和
+失败重跑须选择 **Re-run all jobs**，不能将上一次重跑的二进制混入新批次。
+维护步骤见 [GitHub Actions 接入方案](./doc/GitHub-Actions接入方案.md) 和
 [脚本说明](./script/doc/README.md)。
 
 旧 GitHub Actions、GitHub Runner 配置及 R2/SSH 静态发布脚本已移除。
