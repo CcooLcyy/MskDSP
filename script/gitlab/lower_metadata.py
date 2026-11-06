@@ -22,7 +22,7 @@ def require(condition, message):
 
 
 def release_context(branch):
-    """由主干或维护分支推导 CI 通道，保留历史 Beta 身份解析。"""
+    """解析来源引用及历史 Beta 身份；新产物入口另外拒绝退役通道。"""
     if branch in ("master", "main"):
         return "ci", None
     if re.fullmatch(r"release/(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", branch or ""):
@@ -53,6 +53,7 @@ def release_environment(environment):
         require(match is not None, "正式标签必须为 v主版本.次版本.修订版本")
         return "stable", match.group(1), tag
     channel, version = release_context(environment.get("CI_COMMIT_BRANCH"))
+    require(channel in ("ci", "stable"), "仅允许 CI/Stable 新包身份，Beta 已退役")
     return channel, version, environment["CI_COMMIT_BRANCH"]
 
 
@@ -70,6 +71,7 @@ def create_identity(base_version, arch, environment):
     base_version = base_version.strip()
     require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,60}", base_version), "基础版本不合法")
     channel, branch_version, source_ref = release_environment(environment)
+    require("-beta" not in base_version.lower(), "不能生成历史 Beta 新包身份")
     validate_maintenance_version(source_ref, base_version)
     require(branch_version is None or branch_version == base_version, "发布引用版本与 VERSION 不一致")
     return {
@@ -98,8 +100,7 @@ def package_identity(identity, environment):
         require(re.fullmatch(re.escape(source_ref.removeprefix("release/"))
                              + r"\.(?:0|[1-9][0-9]*)-ci-p[1-9][0-9]*-b[1-9][0-9]*",
                              identity["version"]) is not None, "维护线打包身份与版本不一致")
-    require(channel != "beta" or re.fullmatch(
-        re.escape(branch_version) + r"-beta-p[1-9][0-9]*-b[1-9][0-9]*", identity["version"]), "Beta 构建版本与来源不一致")
+    require("-beta" not in identity["version"].lower(), "不能将历史 Beta 身份打包为新通道")
     require(channel != "stable" or identity["version"] == branch_version, "正式版本与标签不一致")
     version = identity["version"] if channel == "stable" else f"{identity['version']}-j{environment['CI_JOB_ID']}-{identity['source_sha'][:7]}"
     return identity | {"version": version, "package_version": version + "-" + identity["platform"],
@@ -115,6 +116,9 @@ def sha256_file(path):
 
 
 def freeze_metadata(identity, artifact, image_tar):
+    require(identity.get("channel") in ("ci", "stable")
+            and not identity.get("source_ref", "").startswith("beta/")
+            and "-beta" not in identity.get("version", "").lower(), "仅允许 CI/Stable 冻结新包，Beta 已退役")
     require(artifact.is_file() and not artifact.is_symlink() and artifact.stat().st_size > 0,
             "安装包不存在、为空或为符号链接")
     require(artifact.name == "mskdsp-" + identity["package_version"], "安装包名称与构建身份不一致")

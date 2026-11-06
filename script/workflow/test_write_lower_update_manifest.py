@@ -27,7 +27,7 @@ class WriteLowerUpdateManifestTest(unittest.TestCase):
         checksums.write_text(f"{digest}  {artifact.name}\n", encoding="utf-8")
         return artifact, checksums, digest
 
-    def run_generator(self, root: Path, image_id: str) -> subprocess.CompletedProcess[str]:
+    def run_generator(self, root: Path, image_id: str, channel: str = "ci") -> subprocess.CompletedProcess[str]:
         artifact, checksums, _ = self.make_inputs(root)
         output = root / "latest.json"
         return subprocess.run(
@@ -35,7 +35,7 @@ class WriteLowerUpdateManifestTest(unittest.TestCase):
                 sys.executable,
                 str(SCRIPT),
                 "--channel",
-                "ci",
+                channel,
                 "--platform",
                 "linux-arm64",
                 "--version",
@@ -67,6 +67,15 @@ class WriteLowerUpdateManifestTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             manifest = json.loads((root / "latest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["image_id"], "sha256:" + "a" * 64)
+
+    # 共享镜像校验仍可使用，清单生成入口不能创建退役 Beta 新清单。
+    def test_generator_rejects_retired_beta_channel(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            result = self.run_generator(root, "sha256:" + "a" * 64, channel="beta")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Beta", result.stderr)
+            self.assertFalse((root / "latest.json").exists())
 
     def test_generator_rejects_invalid_image_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

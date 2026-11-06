@@ -93,12 +93,12 @@ MSKDSP_VERSION=<version> bash script/make_image.sh
 ### 用途
 当前发布入口为 `.gitlab-ci.yml` 和 `script/gitlab/`：两种架构完成编译、完整 CTest 与
 独立 BuildKit 打包后，生成 `release/<arch>/` 安装包、`metadata.json` 和 `SHA256SUMS`。
-发布作业消费冻结文件，通过 `platform_client.py` 续传入库，再发布对应 CI 通道，
+发布作业消费冻结文件，通过 `platform_client.py` 续传入库；主干发布 CI，受保护版本标签发布 ARM64 Stable，
 不执行设备安装。完整流程见 [GitLab CI 接入方案](../../doc/GitLab-CI接入方案.md)。
 
 共享文件 `script/workflow/write_lower_update_manifest.py` 保留：GitLab 的
 `lower_metadata.py` 导入其 `read_image_config_id`，校验 Docker/OCI 归档平台与镜像 config 摘要。
-兼容清单生成 CLI 及功能测试继续保留；当前 CI 的公开 `latest.json` 和下载校验文件由平台生成。
+兼容清单生成 CLI 及功能测试继续保留，仅生成 CI/Stable 新清单；当前 CI 的公开 `latest.json` 和下载校验文件由平台生成。
 旧 GitHub Actions、R2 上传与 SSH 静态目录同步入口已移除。
 
 静态发布链路面向上位机使用：下位机不直接访问静态文件服务器，上位机读取 `latest.json` 后下载安装包，再下发到下位机执行安装。
@@ -106,7 +106,7 @@ MSKDSP_VERSION=<version> bash script/make_image.sh
 ### 清单结构
 `latest.json` 使用下位机专用格式，不复用 Tauri updater 格式。核心字段包括：
 - `product`：固定为 `mskdsp-lower`
-- `channel`：发布通道，例如 `stable`、`beta`、`ci`
+- `channel`：当前发布通道为 `stable`、`ci`；`beta` 仅用于历史清单读取兼容
 - `platform`：当前为 `linux-arm64`
 - `version`：界面展示版本
 - `package_version`：完整包版本，通常与镜像 tag 一致
@@ -131,7 +131,8 @@ GitLab 打包阶段从 BuildKit 导出的普通 Docker 归档读取镜像配置�
 ```
 
 实际安装包及 `SHA256SUMS` URL 取自清单，不能再拼接旧 R2 静态目录。
-Beta/Stable 从已通过 CI 的 ARM64 安装包晋升，不重新构建；x64 仅支持 CI 通道。
+Stable 从受保护版本标签重新构建，并通过该标签自身完整 CI 后发布 ARM64 包；维护分支仅保留验证产物。x64 仅发布 CI 通道。
+Beta 不再生成、打包或上传发布新包；共享清单格式与历史清单读取继续兼容。
 
 ## new_module.sh（模块脚手架）
 

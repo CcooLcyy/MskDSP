@@ -42,7 +42,7 @@ class InitTests(unittest.TestCase):
         self.assertEqual(environment["GIT_CONFIG_KEY_0"], "http.https://git.example/.extraHeader")
 
     def test_pin_is_frozen(self):
-        self.assertEqual(init.PIN, "b8938c98525e2226af25e4ee341dfb1833208e5a")
+        self.assertEqual(init.PIN, "a9723c5ebade10a5588da59bdfc0c51123bfdf67")
         self.assertEqual(Path(init.__file__).with_name("platform-proto.ref").read_text().strip(), init.PIN)
 
     def test_existing_unrelated_repository_is_never_overwritten(self):

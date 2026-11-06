@@ -57,22 +57,32 @@ class MetadataTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             target.package_identity(identity | {"version": "0.9.0-ci-p7-b42"}, env)
 
-    # 历史 Beta 身份解析兼容保留，不代表存在 Beta 生产流水线。
-    def test_beta_identity_freezes_branch_version_and_channel(self):
-        env = self.environment | {"CI_COMMIT_BRANCH": "beta/0.4.0"}
+    # 历史引用仍可解析，但不能再用于生成构建身份、打包或冻结新包。
+    def test_historical_beta_parser_does_not_allow_new_artifacts(self):
+        self.assertEqual(target.release_context("beta/0.4.0"), ("beta", "0.4.0"))
+        current = target.create_identity("0.4.0", "arm64", self.environment)
         for arch in ("arm64", "x64"):
-            identity = target.create_identity("0.4.0", arch, env)
-            self.assertEqual(identity["channel"], "beta")
-            self.assertEqual(identity["source_ref"], "beta/0.4.0")
-            self.assertTrue(identity["version"].startswith("0.4.0-beta-p7-b42"))
-            packaged = target.package_identity(identity, env | {"CI_JOB_ID": "50"})
-            self.assertEqual(packaged["channel"], "beta")
-            self.assertIn("-j50-", packaged["version"])
+            env = self.environment | {"CI_COMMIT_BRANCH": "beta/0.4.0"}
+            with self.subTest(arch=arch), self.assertRaises(ValueError):
+                target.create_identity("0.4.0", arch, env)
             with self.assertRaises(ValueError):
-                target.package_identity(identity | {"channel": "ci"}, env)
-        for branch in ("beta/1", "beta/0.4.1", "beta/0.4.0/extra", "beta/00.4.0"):
+                target.package_identity(current, env)
+        historical = current | {"channel": "beta", "source_ref": "beta/0.4.0",
+                                "version": "0.4.0-beta-p7-b42"}
+        for env in (self.environment, self.environment | {"CI_COMMIT_BRANCH": "beta/0.4.0"}):
+            with self.subTest(env=env), self.assertRaises(ValueError):
+                target.package_identity(historical, env)
+        with self.assertRaisesRegex(ValueError, "Beta"):
+            target.create_identity("0.4.0-beta", "arm64", self.environment)
+        with self.assertRaisesRegex(ValueError, "Beta"):
+            target.package_identity(current | {"version": "0.4.0-beta-p7-b42"}, self.environment)
+        for identity in (historical, historical | {"channel": "ci"},
+                         historical | {"channel": "ci", "source_ref": "master"}):
+            with self.subTest(identity=identity), self.assertRaisesRegex(ValueError, "Beta"):
+                target.freeze_metadata(identity, Path("missing-installer"), Path("missing-image"))
+        for branch in ("beta/1", "beta/0.4.0/extra", "beta/00.4.0"):
             with self.subTest(branch=branch), self.assertRaises(ValueError):
-                target.create_identity("0.4.0", "arm64", env | {"CI_COMMIT_BRANCH": branch})
+                target.release_context(branch)
 
     def test_freeze_validates_image_platform_and_actual_package_bytes(self):
         with tempfile.TemporaryDirectory() as temporary:

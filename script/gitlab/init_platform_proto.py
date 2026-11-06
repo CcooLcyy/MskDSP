@@ -9,7 +9,7 @@ import subprocess
 import sys
 from urllib.parse import urlsplit
 
-PIN = "b8938c98525e2226af25e4ee341dfb1833208e5a"
+PIN = "a9723c5ebade10a5588da59bdfc0c51123bfdf67"
 
 
 class InitError(ValueError):

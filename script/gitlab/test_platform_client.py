@@ -65,23 +65,33 @@ class IdentityTests(unittest.TestCase):
             with self.assertRaises(client.ClientError):
                 client.validate_endpoint(endpoint, plaintext=True)
 
-    # 只允许真实 ARM64 Beta，禁止 x64 Beta 或修改通道冒充发布。
-    def test_beta_publication_requires_arm64_and_matching_branch(self):
-        self.data.update(platform="linux-arm64", channel="beta", source_ref="beta/0.4.0",
-                         version="0.4.0-beta-p7-b42-j50-bbbbbbb",
-                         package_version="0.4.0-beta-p7-b42-j50-bbbbbbb-linux-arm64")
-        env = self.env | {"CI_COMMIT_BRANCH": "beta/0.4.0"}
-        self.write()
-        _, metadata = client.load_metadata(self.path, env)
-        self.assertEqual(metadata["channel"], "beta")
-        for changes in ({"platform": "linux-x64"}, {"channel": "ci"},
-                        {"version": "0.4.0-ci-p7-b42"}, {"source_ref": "beta/0.4.1"}):
-            original = dict(self.data)
-            self.data.update(changes)
-            self.write()
-            with self.subTest(changes=changes), self.assertRaises(client.ClientError):
-                client.load_metadata(self.path, env)
-            self.data = original
+    # 退役 Beta 在元数据入口被拒绝，不能更换通道冒充 CI 或 Stable。
+    def test_beta_publication_is_rejected_in_all_contexts(self):
+        historical = self.data | dict(platform="linux-arm64", channel="beta", source_ref="beta/0.4.0",
+                                      version="0.4.0-beta-p7-b42-j50-bbbbbbb",
+                                      package_version="0.4.0-beta-p7-b42-j50-bbbbbbb-linux-arm64")
+        for env in (self.env, self.env | {"CI_COMMIT_BRANCH": "beta/0.4.0"},
+                    self.env | {"CI_COMMIT_BRANCH": "", "CI_COMMIT_TAG": "v0.4.0",
+                                "CI_COMMIT_REF_PROTECTED": "true"}):
+            for channel in ("beta", "ci", "stable"):
+                self.data = historical | {"channel": channel}
+                self.write()
+                with self.subTest(env=env, channel=channel), self.assertRaises(client.ClientError):
+                    client.load_metadata(self.path, env)
+
+    # 绕过元数据加载直接调用上传函数时，Beta 也必须在接触平台 RPC 前拒绝。
+    def test_direct_beta_transfer_never_calls_platform(self):
+        from unittest.mock import Mock
+        publisher, catalog = Mock(), Mock()
+        metadata = self.data | {"channel": "beta", "platform": "linux-arm64", "source_ref": "beta/0.4.0"}
+        with self.assertRaisesRegex(client.ClientError, "仅允许 CI/Stable"):
+            client.transfer(publisher, catalog, None, self.archive, metadata, "test-token", before_publish=lambda: None)
+        self.assertEqual(publisher.mock_calls, [])
+        self.assertEqual(catalog.mock_calls, [])
+        with patch.object(client.subprocess, "run") as run:
+            with self.assertRaises(client.ClientError):
+                client.check_current_head(metadata, self.env)
+            run.assert_not_called()
 
     def test_branch_head_uses_environment_auth_and_rejects_old_sha(self):
         with patch.object(client.subprocess, "run") as run:
@@ -95,15 +105,15 @@ class IdentityTests(unittest.TestCase):
             with self.assertRaises(client.ClientError):
                 client.check_current_head(self.data, self.env)
 
-    # 防过期校验必须查询 Beta 本身，不能错误地比较主分支。
-    def test_beta_head_check_uses_frozen_beta_ref(self):
-        metadata = self.data | {"source_ref": "beta/0.4.0"}
+    # 防过期校验必须查询冻结的实际主干，不能固定使用 master。
+    def test_main_head_check_uses_frozen_source_ref(self):
+        metadata = self.data | {"source_ref": "main"}
         with patch.object(client.subprocess, "run") as run:
             run.return_value.returncode = 0
-            run.return_value.stdout = "b" * 40 + "\trefs/heads/beta/0.4.0\n"
+            run.return_value.stdout = "b" * 40 + "\trefs/heads/main\n"
             client.check_current_head(metadata, self.env)
-            self.assertEqual(run.call_args.args[0][-1], "refs/heads/beta/0.4.0")
-            run.return_value.stdout = "c" * 40 + "\trefs/heads/beta/0.4.0\n"
+            self.assertEqual(run.call_args.args[0][-1], "refs/heads/main")
+            run.return_value.stdout = "c" * 40 + "\trefs/heads/main\n"
             with self.assertRaises(client.ClientError):
                 client.check_current_head(metadata, self.env)
 
@@ -262,11 +272,11 @@ class GrpcContractTests(unittest.TestCase):
     def test_real_outdated_branch_never_publishes(self):
         self.exercise("stale")
 
-    # Beta 契约复用完整性失败、过期分支与丢失发布响应等原始断言。
-    def test_real_beta_channel_contract(self):
+    # 原 Beta 成功发布场景迁至 ARM64 CI，保留原始完整性、过期和响应丢失断言。
+    def test_real_arm64_ci_channel_contract(self):
         for scenario in ("success", "interrupt", "invalid", "stale"):
             with self.subTest(scenario=scenario):
-                self.exercise(scenario, channel="beta")
+                self.exercise(scenario, platform="linux-arm64")
 
     # Stable 保留原成功、续传、完整性失败、过期拒绝及响应丢失断言。
     def test_real_stable_channel_contract(self):
@@ -274,15 +284,12 @@ class GrpcContractTests(unittest.TestCase):
             with self.subTest(scenario=scenario):
                 self.exercise(scenario, channel="stable")
 
-    def exercise(self, scenario, channel="ci"):
+    def exercise(self, scenario, channel="ci", platform="linux-x64"):
         import grpc
         from concurrent.futures import ThreadPoolExecutor
-        if channel == "beta":
-            self.data.update(platform="linux-arm64", channel="beta", source_ref="beta/0.4.0",
-                             version="0.4.0-beta-p7-b42-j50-bbbbbbb",
-                             package_version="0.4.0-beta-p7-b42-j50-bbbbbbb-linux-arm64")
-            self.env["CI_COMMIT_BRANCH"] = "beta/0.4.0"
-        elif channel == "stable":
+        if platform == "linux-arm64":
+            self.data.update(platform=platform, package_version=self.data["version"] + "-" + platform)
+        if channel == "stable":
             self.data.update(platform="linux-arm64", channel="stable", source_ref="v0.4.0",
                              version="0.4.0", package_version="0.4.0-linux-arm64")
             self.env.update(CI_COMMIT_BRANCH="", CI_COMMIT_TAG="v0.4.0", CI_COMMIT_REF_PROTECTED="true")

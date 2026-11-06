@@ -46,6 +46,18 @@ def repository_url(value):
             and not any(char.isspace() or ord(char) < 32 for char in value) and "\\" not in value)
 
 
+def validate_publication_channel(metadata):
+    """新包上传发布拒绝退役通道；历史公开清单读取不调用此门禁。"""
+    channel = metadata.get("channel")
+    source = metadata.get("source_ref", "")
+    if (channel not in ("ci", "stable")
+            or "-beta" in metadata.get("version", "").lower()
+            or (channel == "ci" and source not in ("master", "main")
+                and not re.fullmatch(r"release/(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", source))
+            or (channel == "stable" and source != "v" + metadata.get("version", ""))):
+        raise ClientError("仅允许 CI/Stable 受控来源上传发布，Beta 已退役")
+
+
 def load_metadata(metadata_path, environ=None):
     environment = os.environ if environ is None else environ
     path = Path(metadata_path).absolute()
@@ -56,7 +68,7 @@ def load_metadata(metadata_path, environ=None):
               "source_repository", "source_ref", "source_sha", "build_time", "channel", "pipeline_id")
     if not isinstance(data, dict) or any(name not in data for name in fields):
         raise ClientError("冻结元数据字段不完整")
-    if (data["product"] != "mskdsp-lower" or data["channel"] not in ("ci", "beta", "stable")
+    if (data["product"] != "mskdsp-lower" or data["channel"] not in ("ci", "stable")
             or data["platform"] not in ("linux-arm64", "linux-x64")
             or any(not safe_component(data[name]) for name in ("version", "package_version", "file_name"))
             or data["file_name"] == "SHA256SUMS"
@@ -67,24 +79,22 @@ def load_metadata(metadata_path, environ=None):
             or not re.fullmatch(r"[a-f0-9]{40}", str(data["source_sha"]))
             or not repository_url(str(data["source_repository"]))):
         raise ClientError("下位机冻结身份、文件或摘要不合法")
+    validate_publication_channel(data)
     try:
         channel, branch_version, source_ref = release_environment(environment)
     except ValueError:
         raise ClientError("发布来源分支不合法") from None
     if (data["channel"] != channel
-            or channel in ("beta", "stable") and data["platform"] != "linux-arm64"
+            or channel == "stable" and data["platform"] != "linux-arm64"
             or channel == "stable" and (data["version"] != branch_version
                 or data["package_version"] != branch_version + "-linux-arm64")
-            or channel == "beta" and (data["platform"] != "linux-arm64" or not re.fullmatch(
-                re.escape(branch_version) + r"-beta-p[1-9][0-9]*-b[1-9][0-9]*-j[1-9][0-9]*-" + data["source_sha"][:7],
-                data["version"]))
             or environment.get("CI_PIPELINE_SOURCE") not in ("push", "web")
             or data["source_ref"] != source_ref
             or data["source_sha"] != environment.get("CI_COMMIT_SHA")
             or str(data["pipeline_id"]) != environment.get("CI_PIPELINE_ID")
             or not re.fullmatch(r"[1-9][0-9]*", str(data["pipeline_id"]))
             or data["source_repository"].rstrip("/") != environment.get("CI_PROJECT_URL", "").rstrip("/")):
-        raise ClientError("仅允许受控引用发布自身冻结产物，Beta/Stable 仅支持 ARM64")
+        raise ClientError("仅允许 CI/Stable 受控引用发布自身冻结产物，Stable 仅支持 ARM64")
     try:
         moment = datetime.fromisoformat(data["build_time"].replace("Z", "+00:00"))
         if moment.tzinfo is None or moment.utcoffset() != timezone.utc.utcoffset(moment):
@@ -99,6 +109,7 @@ def load_metadata(metadata_path, environ=None):
 
 
 def check_current_head(metadata, environ=None):
+    validate_publication_channel(metadata)
     environment = os.environ if environ is None else environ
     _, git_environment = auth_environment(environment)
     repository = metadata["source_repository"].rstrip("/")
@@ -242,10 +253,11 @@ def confirm_manifest(base_url, metadata, *, timeout=30):
 
 def transfer(publisher, catalog, messages, archive, metadata, token, *, before_publish,
              attempts=4, retry_delay=1, timeout=60, chunk_size=1024 * 1024, after_publish=None):
+    validate_publication_channel(metadata)
     import grpc
     channel = metadata["channel"]
-    if channel not in ("ci", "beta", "stable") or channel in ("beta", "stable") and metadata["platform"] != "linux-arm64":
-        raise ClientError("发布通道不合法，Beta/Stable 仅支持 ARM64")
+    if channel == "stable" and metadata["platform"] != "linux-arm64":
+        raise ClientError("发布通道不合法，Stable 仅支持 ARM64")
     if (not 1 <= attempts <= 10 or not 0 < timeout <= 1800 or not 1 <= chunk_size <= 1024 * 1024
             or not token or not token.isascii() or any(ord(char) < 33 or ord(char) > 126 for char in token)):
         raise ClientError("上传配置或发布令牌不合法")
