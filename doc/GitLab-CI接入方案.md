@@ -55,7 +55,9 @@ metadata.json 冻结 product、version、package_version、platform、file_name�
 
 ## 协议、授权和镜像
 
-软件仓库协议由单独的 MskDSPPlatformProto GitLab 仓库按固定提交获取到临时目录；下位机 protobuf 子模块也直接指向 GitLab。CI_JOB_TOKEN 通过仅存于子进程环境的认证头只读获取两个协议项目，并配置对应 allowlist，不再使用自有 GitHub 仓库的地址重写。
+软件仓库协议从公开 GitHub 仓库 `https://github.com/CcooLcyy/MskDSPPlatformProto.git` 按固定提交获取到临时目录，固定提交不变；该获取过程无需 GitLab 作业令牌，清除继承的 Git 认证头配置，不向 GitHub 发送 GitLab 凭据。下位机 protobuf 子模块也已指向 GitHub，实际地址以 `.gitmodules` 为准。旧 GitLab 脚本共用的 `auth_environment` 保留，避免改变发布来源校验及历史流程的认证行为。
+
+引用迁移验收：无 `CI_SERVER_URL`、`CI_JOB_TOKEN` 也能获取固定平台协议；继承的认证头不带入 GitHub 请求；固定提交校验、既有目录保护及共用 GitLab 认证工具行为保持不变。对应脚本回归应由 CI 执行，本地不运行构建或测试。
 
 平台上传使用已有通用 publisher 令牌，保存在下位机项目受保护、掩码的 CI 变量中；不复用仅允许平台自身包的 CI 上传令牌。客户端不输出令牌、认证头或底层 RPC 详情。现有平台业务代码不需要修改。
 

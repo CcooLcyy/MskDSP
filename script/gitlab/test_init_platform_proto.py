@@ -8,7 +8,8 @@ import init_platform_proto as init
 
 
 class InitTests(unittest.TestCase):
-    def test_fetch_uses_pinned_commit_and_environment_auth(self):
+    # 公开协议按原固定提交匿名获取，不依赖 GitLab CI 环境。
+    def test_fetch_uses_pinned_commit_without_gitlab_auth(self):
         with tempfile.TemporaryDirectory() as root, patch.object(init.subprocess, "run") as run:
             run.return_value.returncode = 0
             run.return_value.stdout = init.PIN + "\n"
@@ -18,13 +19,29 @@ class InitTests(unittest.TestCase):
                 return run.return_value
             run.side_effect = initialize_git
             with patch.object(init, "validate_protocol"):
-                init.initialize(destination, {"CI_SERVER_URL": "https://git.example", "CI_JOB_TOKEN": "secret-value"})
+                init.initialize(destination, {})
             commands = [call.args[0] for call in run.call_args_list]
-            self.assertTrue(any(init.PIN in command for command in commands))
-            self.assertNotIn("secret-value", str(commands))
+            self.assertIn(["git", "fetch", "--no-tags", "--depth=1",
+                           "https://github.com/CcooLcyy/MskDSPPlatformProto.git", init.PIN], commands)
             for call in run.call_args_list:
                 self.assertEqual(call.kwargs["env"]["GIT_TERMINAL_PROMPT"], "0")
-                self.assertIn("GIT_CONFIG_VALUE_0", call.kwargs["env"])
+                self.assertEqual(call.kwargs["env"]["GIT_CONFIG_VALUE_0"], "")
+
+    # 平台公开协议子进程不继承 GitLab 令牌或注入的 Git 认证头。
+    def test_public_protocol_environment_removes_inherited_auth(self):
+        original = dict(CI_JOB_TOKEN="secret-value", GIT_CONFIG_COUNT="9",
+                        GIT_CONFIG_KEY_8="http.extraHeader", GIT_CONFIG_VALUE_8="旧认证",
+                        GIT_CONFIG_PARAMETERS="旧配置")
+        environment = init.public_protocol_environment(original)
+        self.assertEqual(original["GIT_CONFIG_VALUE_8"], "旧认证")
+        self.assertEqual(original["CI_JOB_TOKEN"], "secret-value")
+        self.assertNotIn("CI_JOB_TOKEN", environment)
+        self.assertNotIn("GIT_CONFIG_KEY_8", environment)
+        self.assertNotIn("GIT_CONFIG_VALUE_8", environment)
+        self.assertNotIn("GIT_CONFIG_PARAMETERS", environment)
+        self.assertEqual(environment["GIT_CONFIG_COUNT"], "1")
+        self.assertEqual(environment["GIT_CONFIG_KEY_0"], "http.https://github.com/.extraHeader")
+        self.assertEqual(environment["GIT_CONFIG_VALUE_0"], "")
 
     def test_rejects_credential_url(self):
         for url in ("https://user:pass@git.example", "https://git.example\n", "https://git.example:bad", "https://git.example/path"):

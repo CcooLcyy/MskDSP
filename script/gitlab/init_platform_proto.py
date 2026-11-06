@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""通过仅存于子进程环境的 CI 认证获取固定平台协议，不修改项目子模块。"""
+"""从公开 GitHub 仓库获取固定平台协议，保留其他 GitLab 来源认证工具。"""
 import argparse
 import base64
 import os
@@ -10,6 +10,7 @@ import sys
 from urllib.parse import urlsplit
 
 PIN = "a9723c5ebade10a5588da59bdfc0c51123bfdf67"
+REPOSITORY = "https://github.com/CcooLcyy/MskDSPPlatformProto.git"
 
 
 class InitError(ValueError):
@@ -46,8 +47,22 @@ def validate_protocol(destination):
         raise InitError("固定协议提交缺少软件仓库协议")
 
 
+def public_protocol_environment(environ):
+    """清除继承的认证头配置，公开协议获取不携带 GitLab 作业令牌。"""
+    environment = dict(environ)
+    environment.pop("CI_JOB_TOKEN", None)
+    environment.pop("GIT_CONFIG_PARAMETERS", None)
+    for name in list(environment):
+        if name.startswith("GIT_CONFIG_KEY_") or name.startswith("GIT_CONFIG_VALUE_"):
+            environment.pop(name)
+    environment.update(GIT_TERMINAL_PROMPT="0", GIT_CONFIG_COUNT="1",
+                       GIT_CONFIG_KEY_0="http.https://github.com/.extraHeader",
+                       GIT_CONFIG_VALUE_0="")
+    return environment
+
+
 def initialize(destination, environ=None):
-    server, environment = auth_environment(os.environ if environ is None else environ)
+    environment = public_protocol_environment(os.environ if environ is None else environ)
     pin_file = Path(__file__).with_name("platform-proto.ref")
     if pin_file.read_text(encoding="utf-8").strip() != PIN or not re.fullmatch(r"[a-f0-9]{40}", PIN):
         raise InitError("平台协议固定提交不一致")
@@ -64,14 +79,13 @@ def initialize(destination, environ=None):
         result = subprocess.run(["git", *arguments], cwd=destination, env=environment,
                                 text=True, capture_output=True, timeout=180, check=False)
         if result.returncode:
-            raise InitError("获取平台固定协议失败，请检查网络、作业令牌及 allowlist")
+            raise InitError("获取 GitHub 平台固定协议失败，请检查网络及固定提交")
         return result.stdout.strip()
 
     if not (destination / ".git").exists():
         run(["init"])
         marker.write_text(PIN + "\n", encoding="utf-8")
-    repository = server + "/mskdsp/mskdspplatformproto.git"
-    run(["fetch", "--no-tags", "--depth=1", repository, PIN])
+    run(["fetch", "--no-tags", "--depth=1", REPOSITORY, PIN])
     run(["checkout", "--detach", "--force", PIN])
     if run(["rev-parse", "HEAD"]) != PIN:
         raise InitError("平台协议检出提交与固定提交不一致")
@@ -81,7 +95,7 @@ def initialize(destination, environ=None):
 
 class SafeArgumentParser(argparse.ArgumentParser):
     def error(self, message):
-        raise SystemExit("协议初始化参数不合法；认证仅从 CI 环境读取")
+        raise SystemExit("协议初始化参数不合法；公开 GitHub 协议无需认证参数")
 
 
 def main(argv=None):
@@ -91,9 +105,9 @@ def main(argv=None):
     try:
         initialize(args.destination)
     except Exception:
-        print("平台协议初始化失败，请检查固定提交、网络及 CI 作业访问授权；底层输出已隐藏", file=sys.stderr)
+        print("平台协议初始化失败，请检查 GitHub 网络及固定提交；底层输出已隐藏", file=sys.stderr)
         return 1
-    print("平台固定协议已准备完成：" + PIN)
+    print("GitHub 平台固定协议已准备完成：" + PIN)
     return 0
 
 
