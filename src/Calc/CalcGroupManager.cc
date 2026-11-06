@@ -13,6 +13,7 @@
 
 #include "CalcLibInfo.h"
 #include "CalcValidation.h"
+#include "CalcLogicExpression.h"
 #include "Logger.h"
 #include "ThreadUtil.hpp"
 #include "mskdsp/Decimal20.hpp"
@@ -57,10 +58,18 @@ bool isAggregateOperator(CalcProto::OperatorKind op) {
   return op == CalcProto::OPERATOR_KIND_SUM || op == CalcProto::OPERATOR_KIND_AVERAGE;
 }
 
+bool usesOperandList(const CalcProto::CalcItemConfig &item) {
+  return isAggregateOperator(item.operator_kind()) ||
+      item.operator_kind() == CalcProto::OPERATOR_KIND_LOGICAL_EXPRESSION ||
+      ((item.operator_kind() == CalcProto::OPERATOR_KIND_AND ||
+        item.operator_kind() == CalcProto::OPERATOR_KIND_OR ||
+        item.operator_kind() == CalcProto::OPERATOR_KIND_XOR) && item.operands_size() > 0);
+}
+
 ItemTags makeItemTags(const CalcProto::CalcItemConfig &item) {
   ItemTags tags;
   tags.resultTag = item.item_name() + "/result";
-  if (isAggregateOperator(item.operator_kind())) {
+  if (usesOperandList(item)) {
     tags.inputTags.reserve(static_cast<size_t>(item.operands_size()));
     for (int index = 0; index < item.operands_size(); ++index) {
       tags.inputTags.emplace_back(std::format("{}/input_{}", item.item_name(), index + 1));
@@ -118,6 +127,7 @@ bool isLogicOperator(CalcProto::OperatorKind op) {
   case CalcProto::OPERATOR_KIND_AND:
   case CalcProto::OPERATOR_KIND_OR:
   case CalcProto::OPERATOR_KIND_XOR:
+  case CalcProto::OPERATOR_KIND_LOGICAL_EXPRESSION:
     return true;
   default:
     return false;
@@ -135,7 +145,7 @@ bool operandUsesLegacyDoubleConstant(const CalcProto::OperandSpec &operand) {
 
 bool configUsesLegacyDoubleConstant(const CalcProto::CalcGroupConfig &config) {
   for (const auto &item : config.items()) {
-    if (isAggregateOperator(item.operator_kind())) {
+    if (usesOperandList(item)) {
       for (const auto &operand : item.operands()) {
         if (operandUsesLegacyDoubleConstant(operand)) {
           return true;
@@ -377,8 +387,8 @@ std::string joinTags(const std::vector<std::string> &tags) {
 std::optional<PublishAction> evaluateItem(const CalcProto::CalcItemConfig &item, const std::unordered_map<std::string, DataCenterProto::PointUpdate> &latestByTag, std::string *error) {
   const auto tags = makeItemTags(item);
   std::vector<const CalcProto::OperandSpec *> operands;
-  operands.reserve(static_cast<size_t>(isAggregateOperator(item.operator_kind()) ? item.operands_size() : 2));
-  if (isAggregateOperator(item.operator_kind())) {
+  operands.reserve(static_cast<size_t>(usesOperandList(item) ? item.operands_size() : 2));
+  if (usesOperandList(item)) {
     for (const auto &operand : item.operands()) {
       operands.push_back(&operand);
     }
@@ -569,39 +579,31 @@ std::optional<PublishAction> evaluateItem(const CalcProto::CalcItemConfig &item,
   }
 
   if (isLogicOperator(item.operator_kind())) {
-    if (left.type != RuntimeValue::Type::kBool) {
-      if (error != nullptr) {
-        *error = std::format("item_name={} 逻辑运算仅接受 bool", item.item_name());
+    std::vector<bool> boolInputs;
+    for (const auto &value : values) {
+      if (value.type != RuntimeValue::Type::kBool) {
+        if (error != nullptr) *error = std::format("item_name={} 逻辑运算仅接受 bool", item.item_name());
+        return std::nullopt;
       }
-      return std::nullopt;
+      action.quality = boolInputs.empty() ? value.quality : combineQuality(action.quality, value.quality);
+      boolInputs.push_back(value.boolValue);
+      action.tsMs = std::max(action.tsMs, value.tsMs);
     }
-    action.quality = left.quality;
-    action.tsMs = left.tsMs;
-    if (item.operator_kind() == CalcProto::OPERATOR_KIND_NOT) {
-      action.value.set_bool_value(!left.boolValue);
+    if (item.operator_kind() == CalcProto::OPERATOR_KIND_LOGICAL_EXPRESSION) {
+      auto result = EvaluateLogicExpression(item.expression(), boolInputs, error);
+      if (!result.has_value()) return std::nullopt;
+      action.value.set_bool_value(*result);
       return action;
     }
-    if (right.type != RuntimeValue::Type::kBool) {
-      if (error != nullptr) {
-        *error = std::format("item_name={} 逻辑运算仅接受 bool", item.item_name());
-      }
-      return std::nullopt;
+    bool result = boolInputs[0];
+    if (item.operator_kind() == CalcProto::OPERATOR_KIND_NOT) result = !result;
+    for (size_t index = 1; index < boolInputs.size(); ++index) {
+      if (item.operator_kind() == CalcProto::OPERATOR_KIND_AND) result = result && boolInputs[index];
+      else if (item.operator_kind() == CalcProto::OPERATOR_KIND_OR) result = result || boolInputs[index];
+      else if (item.operator_kind() == CalcProto::OPERATOR_KIND_XOR) result = result != boolInputs[index];
     }
-    action.quality = combineQuality(left.quality, right.quality);
-    action.tsMs = std::max(left.tsMs, right.tsMs);
-    switch (item.operator_kind()) {
-    case CalcProto::OPERATOR_KIND_AND:
-      action.value.set_bool_value(left.boolValue && right.boolValue);
-      return action;
-    case CalcProto::OPERATOR_KIND_OR:
-      action.value.set_bool_value(left.boolValue || right.boolValue);
-      return action;
-    case CalcProto::OPERATOR_KIND_XOR:
-      action.value.set_bool_value(left.boolValue != right.boolValue);
-      return action;
-    default:
-      break;
-    }
+    action.value.set_bool_value(result);
+    return action;
   }
 
   if (error != nullptr) {
@@ -641,7 +643,7 @@ void recordFirstTriggerTimestamp(const CalcProto::CalcGroupConfig &config,
     bool isTriggerInput = false;
     for (size_t index = 0; index < tags.inputTags.size(); ++index) {
       const CalcProto::OperandSpec *operand = nullptr;
-      if (isAggregateOperator(item.operator_kind())) {
+      if (usesOperandList(item)) {
         if (index < static_cast<size_t>(item.operands_size())) {
           operand = &item.operands(static_cast<int>(index));
         }
@@ -739,7 +741,7 @@ void fillOperandStatuses(const CalcProto::CalcItemConfig &item,
     }
   };
 
-  if (isAggregateOperator(item.operator_kind())) {
+  if (usesOperandList(item)) {
     for (int index = 0; index < item.operands_size(); ++index) {
       addStatus(index, item.operands(index));
     }
@@ -819,7 +821,7 @@ grpc::Status GroupManager::fillGroupInfoLocked(const GroupRuntime &group, CalcPr
     auto *itemInfo = out->add_items();
     *itemInfo->mutable_config() = item;
     const auto tags = makeItemTags(item);
-    if (!isAggregateOperator(item.operator_kind())) {
+    if (!usesOperandList(item)) {
       itemInfo->set_left_input_tag(tags.leftInputTag);
       itemInfo->set_right_input_tag(tags.rightInputTag);
     }
@@ -1015,6 +1017,13 @@ grpc::Status GroupManager::UpsertGroup(const CalcProto::UpsertGroupRequest &requ
     return status;
   }
   const auto groupName = request.config().group_name();
+  for (const auto &item : request.config().items()) {
+    if (isLogicOperator(item.operator_kind())) {
+      LOG_INFO("Calc 已校验逻辑计算配置: 分组={}, 计算项={}, 运算类型={}, 输入数={}, 表达式={}",
+               groupName, item.item_name(), static_cast<int>(item.operator_kind()),
+               usesOperandList(item) ? item.operands_size() : (item.has_right_operand() ? 2 : 1), item.expression());
+    }
+  }
   uint32_t connId = 0;
 
   {
@@ -1626,7 +1635,7 @@ void GroupManager::rebuildTagCache(GroupRuntime *group) {
   group->subscribeTags.clear();
   for (const auto &item : group->config.items()) {
     const auto itemTags = makeItemTags(item);
-    if (isAggregateOperator(item.operator_kind())) {
+    if (usesOperandList(item)) {
       for (int index = 0; index < item.operands_size(); ++index) {
         if (item.operands(index).source_kind() == CalcProto::OPERAND_SOURCE_ROUTED_INPUT) {
           group->subscribeTags.emplace(itemTags.inputTags[static_cast<size_t>(index)]);

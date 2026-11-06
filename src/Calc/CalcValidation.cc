@@ -1,4 +1,5 @@
 #include "CalcValidation.h"
+#include "CalcLogicExpression.h"
 
 #include <format>
 #include <string>
@@ -66,6 +67,7 @@ grpc::Status validateOperand(const CalcProto::OperandSpec &operand, CalcProto::O
   case CalcProto::OPERATOR_KIND_AND:
   case CalcProto::OPERATOR_KIND_OR:
   case CalcProto::OPERATOR_KIND_XOR:
+  case CalcProto::OPERATOR_KIND_LOGICAL_EXPRESSION:
     if (!operand.constant().has_bool_value()) {
       return makeInvalid(std::format("{} 的 constant 必须为 bool", fieldName));
     }
@@ -102,6 +104,33 @@ grpc::Status ValidateGroupConfig(const CalcProto::CalcGroupConfig &config) {
     }
     if (!itemNames.emplace(item.item_name()).second) {
       return makeInvalid(std::format("item_name 重复: {}", item.item_name()));
+    }
+    const bool expression = item.operator_kind() == CalcProto::OPERATOR_KIND_LOGICAL_EXPRESSION;
+    const bool logicalList = item.operands_size() > 0 &&
+        (item.operator_kind() == CalcProto::OPERATOR_KIND_AND ||
+         item.operator_kind() == CalcProto::OPERATOR_KIND_OR ||
+         item.operator_kind() == CalcProto::OPERATOR_KIND_XOR);
+    if (!expression && !item.expression().empty()) {
+      return makeInvalid("expression 仅适用于逻辑表达式运算");
+    }
+    if (expression || logicalList) {
+      if (item.operands_size() < (expression ? 1 : 2) || item.operands_size() > 256) {
+        return makeInvalid("逻辑表达式输入需为1至256个，多输入逻辑需为2至256个");
+      }
+      if (item.has_left_operand() || item.has_right_operand() || item.has_decimal_places()) {
+        return makeInvalid("多输入逻辑与表达式不能携带左右操作数或小数位数");
+      }
+      for (const auto &operand : item.operands()) {
+        auto status = validateOperand(operand, item.operator_kind(), item.item_name());
+        if (!status.ok()) return status;
+      }
+      if (expression) {
+        std::string error;
+        if (!EvaluateLogicExpression(item.expression(), std::vector<bool>(item.operands_size(), false), &error).has_value()) {
+          return makeInvalid(std::format("items[{}] 表达式非法: {}", item.item_name(), error));
+        }
+      }
+      continue;
     }
     switch (item.operator_kind()) {
     case CalcProto::OPERATOR_KIND_ADD:

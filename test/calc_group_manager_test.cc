@@ -8,12 +8,41 @@
 #include <limits>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "CalcGroupManager.h"
+#include "CalcLogicExpression.h"
+#include "CalcValidation.h"
 #include "support/FakeDataCenter.hpp"
 
 namespace {
 using Calc::GroupManager;
+
+// 验证：混合逻辑的括号、优先级、大小写及符号别名保持一致。
+TEST(CalcLogicExpressionTest, MixedLogicAndPrecedence) {
+  std::string error;
+  EXPECT_EQ(Calc::EvaluateLogicExpression("(a AND B) OR (NOT c)", {true, false, false}, &error), true);
+  EXPECT_EQ(Calc::EvaluateLogicExpression("!A || B && C ^ D", {true, true, false, true}, &error), true);
+  EXPECT_EQ(Calc::EvaluateLogicExpression("NOT NOT A", {true}, &error), true);
+  EXPECT_EQ(Calc::EvaluateLogicExpression(std::string(64, '!') + "A", {true}, &error), true);
+  std::string aliases;
+  for (int index = 0; index < 27; ++index) {
+    if (index > 0) aliases += " OR ";
+    aliases += index < 26 ? std::string(1, static_cast<char>('A' + index)) : "AA";
+  }
+  EXPECT_EQ(Calc::EvaluateLogicExpression(aliases, std::vector<bool>(27, false), &error), false);
+}
+
+// 验证：非法表达式、越界别名、未引用输入及资源超限必须拒绝。
+TEST(CalcLogicExpressionTest, RejectsInvalidAndExcessiveExpressions) {
+  std::string error;
+  for (const auto &expression : {"A AND", "(A", "A B", "C", "A", "A | B", "A AND ()"}) {
+    EXPECT_FALSE(Calc::EvaluateLogicExpression(expression, {true, false}, &error).has_value()) << expression;
+  }
+  EXPECT_FALSE(Calc::EvaluateLogicExpression(std::string(4097, ' '), {true}, &error).has_value());
+  EXPECT_FALSE(Calc::EvaluateLogicExpression(std::string(65, '!') + "A", {true}, &error).has_value());
+  EXPECT_FALSE(Calc::EvaluateLogicExpression("A", std::vector<bool>(257), &error).has_value());
+}
 
 // 异步等待预算：CI 上 ctest 会并行执行多个测试，被等待的工作线程可能被延迟调度，
 // 因此给出较宽的轮询预算（500 次 × 10ms = 5s）来容忍调度延迟；它只影响"等多久"，
@@ -191,13 +220,15 @@ void PublishDecimalPoint(FakeDataCenterState *state,
   ASSERT_TRUE(state->Publish(req).ok());
 }
 
-void PublishBoolPoint(FakeDataCenterState *state, uint32_t connId, const std::string &tag, bool value) {
+void PublishBoolPoint(FakeDataCenterState *state, uint32_t connId, const std::string &tag, bool value,
+                      int64_t tsMs = 0, DataCenterProto::Quality quality = DataCenterProto::QUALITY_GOOD) {
   ASSERT_NE(state, nullptr);
   DataCenterProto::PublishRequest req;
   req.set_conn_id(connId);
   req.set_tag(tag);
   req.mutable_value()->set_bool_value(value);
-  req.set_quality(DataCenterProto::QUALITY_GOOD);
+  req.set_quality(quality);
+  req.set_ts_ms(tsMs);
   ASSERT_TRUE(state->Publish(req).ok());
 }
 
@@ -756,6 +787,163 @@ TEST(CalcGroupManagerTest, IntOverflowPromotesToDouble) {
   EXPECT_TRUE(WaitForDoubleLatest(
       state, info.conn_id(), "sum/result", static_cast<double>(std::numeric_limits<int64_t>::max()) + 1.0));
   ASSERT_TRUE(mgr.StopGroup("calc-overflow").ok());
+}
+
+// 验证：逻辑多输入与表达式可订阅第三个输入并正确发布，配置形态错误时拒绝。
+TEST(CalcGroupManagerTest, MultiInputAndExpressionPublishBool) {
+  for (auto kind : {CalcProto::OPERATOR_KIND_AND, CalcProto::OPERATOR_KIND_OR,
+                    CalcProto::OPERATOR_KIND_XOR, CalcProto::OPERATOR_KIND_LOGICAL_EXPRESSION}) {
+    ScopedTempDir tempDir;
+    FakeDataCenterState state;
+    GroupManager mgr("Calc", tempDir.path() / "conf/config.db");
+    mgr.setDataCenterStub(MakeStub(&state));
+    auto req = MakeSumGroupReq("mixed-logic");
+    auto *item = req.mutable_config()->mutable_items(0);
+    item->set_operator_kind(kind);
+    if (kind == CalcProto::OPERATOR_KIND_LOGICAL_EXPRESSION) item->set_expression("(A AND B) OR NOT C");
+    CalcProto::CalcGroupInfo info;
+    ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+    ASSERT_EQ(info.items(0).input_tags_size(), 3);
+    PublishBoolPoint(&state, info.conn_id(), "aggregate/input_1", true);
+    PublishBoolPoint(&state, info.conn_id(), "aggregate/input_2", false);
+    PublishBoolPoint(&state, info.conn_id(), "aggregate/input_3", false);
+    EXPECT_TRUE(WaitForBoolLatest(state, info.conn_id(), "aggregate/result", kind != CalcProto::OPERATOR_KIND_AND));
+    ASSERT_TRUE(mgr.StopGroup("mixed-logic").ok());
+    item->mutable_left_operand()->set_source_kind(CalcProto::OPERAND_SOURCE_ROUTED_INPUT);
+    EXPECT_FALSE(Calc::ValidateGroupConfig(req.config()).ok());
+  }
+}
+
+// 验证：三输入异或按奇偶性发布，三个真为真，两个真为假。
+TEST(CalcGroupManagerTest, MultiInputXorPublishesParity) {
+  ScopedTempDir tempDir;
+  FakeDataCenterState state;
+  GroupManager mgr("Calc", tempDir.path() / "conf/config.db");
+  mgr.setDataCenterStub(MakeStub(&state));
+  auto req = MakeSumGroupReq("xor-parity");
+  req.mutable_config()->mutable_items(0)->set_operator_kind(CalcProto::OPERATOR_KIND_XOR);
+  CalcProto::CalcGroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+  PublishBoolPoint(&state, info.conn_id(), "aggregate/input_1", true);
+  PublishBoolPoint(&state, info.conn_id(), "aggregate/input_2", true);
+  PublishBoolPoint(&state, info.conn_id(), "aggregate/input_3", true);
+  ASSERT_TRUE(WaitForBoolLatest(state, info.conn_id(), "aggregate/result", true));
+  PublishBoolPoint(&state, info.conn_id(), "aggregate/input_3", false);
+  ASSERT_TRUE(WaitForBoolLatest(state, info.conn_id(), "aggregate/result", false));
+  ASSERT_TRUE(mgr.StopGroup("xor-parity").ok());
+}
+
+// 验证：第三输入参与结果质量合并，结果保留首触发时标，不取第三输入的更大时标。
+TEST(CalcGroupManagerTest, MultiInputLogicMergesThirdInputQualityAndKeepsTriggerTimestamp) {
+  for (auto kind : {CalcProto::OPERATOR_KIND_AND, CalcProto::OPERATOR_KIND_LOGICAL_EXPRESSION}) {
+    ScopedTempDir tempDir;
+    FakeDataCenterState state;
+    GroupManager mgr("Calc", tempDir.path() / "conf/config.db");
+    mgr.setDataCenterStub(MakeStub(&state));
+    auto req = MakeSumGroupReq("logic-metadata");
+    auto *item = req.mutable_config()->mutable_items(0);
+    item->set_operator_kind(kind);
+    if (kind == CalcProto::OPERATOR_KIND_LOGICAL_EXPRESSION) item->set_expression("A AND B AND C");
+    CalcProto::CalcGroupInfo info;
+    ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+    const auto connId = info.conn_id();
+    const auto thirdQuality = kind == CalcProto::OPERATOR_KIND_AND
+        ? DataCenterProto::QUALITY_BAD : DataCenterProto::QUALITY_UNCERTAIN;
+    PublishBoolPoint(&state, connId, "aggregate/input_1", true, 100);
+    PublishBoolPoint(&state, connId, "aggregate/input_2", true, 110);
+    PublishBoolPoint(&state, connId, "aggregate/input_3", true, 900, thirdQuality);
+    ASSERT_TRUE(state.WaitForPublishCount(connId, "aggregate/result", 1, std::chrono::seconds(5)));
+    auto published = state.GetPublishedUpdates(connId, "aggregate/result");
+    ASSERT_EQ(published.size(), 1u);
+    ASSERT_TRUE(published[0].value().has_bool_value());
+    EXPECT_TRUE(published[0].value().bool_value());
+    EXPECT_EQ(published[0].quality(), thirdQuality);
+    EXPECT_EQ(published[0].ts_ms(), 100);
+    ASSERT_TRUE(mgr.StopGroup("logic-metadata").ok());
+  }
+}
+
+// 验证：表达式必须等全部输入到达且类型正确，即使 A 已为真也不跳过 B。
+TEST(CalcGroupManagerTest, ExpressionWaitsForAllBooleanInputs) {
+  ScopedTempDir tempDir;
+  FakeDataCenterState state;
+  GroupManager mgr("Calc", tempDir.path() / "conf/config.db");
+  mgr.setDataCenterStub(MakeStub(&state));
+  auto req = MakeSumGroupReq("expression-ready", 2);
+  auto *item = req.mutable_config()->mutable_items(0);
+  item->set_operator_kind(CalcProto::OPERATOR_KIND_LOGICAL_EXPRESSION);
+  item->set_expression("A OR B");
+  CalcProto::CalcGroupInfo info;
+  ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+  PublishBoolPoint(&state, info.conn_id(), "aggregate/input_1", true);
+  PublishIntPoint(&state, info.conn_id(), "aggregate/input_2", 1);
+  bool diagnosed = false;
+  for (int index = 0; index < kAsyncWaitIterations; ++index) {
+    ASSERT_TRUE(mgr.GetGroup("expression-ready", &info).ok());
+    if (info.items(0).operand_status(0).ready() &&
+        !info.items(0).operand_status(1).ready() &&
+        info.items(0).operand_status(1).reason().find("类型") != std::string::npos) {
+      diagnosed = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_TRUE(diagnosed);
+  EXPECT_EQ(state.GetPublishCount(info.conn_id(), "aggregate/result"), 0u);
+  PublishBoolPoint(&state, info.conn_id(), "aggregate/input_2", false);
+  EXPECT_TRUE(WaitForBoolLatest(state, info.conn_id(), "aggregate/result", true));
+  ASSERT_TRUE(mgr.StopGroup("expression-ready").ok());
+}
+
+// 验证：表达式类型和多输入字段边界拒绝数值常量、空表达式及混入小数位数。
+TEST(CalcGroupManagerTest, RejectsInvalidLogicalListConfiguration) {
+  auto req = MakeSumGroupReq("invalid-expression", 1);
+  auto *item = req.mutable_config()->mutable_items(0);
+  item->set_operator_kind(CalcProto::OPERATOR_KIND_LOGICAL_EXPRESSION);
+  EXPECT_FALSE(Calc::ValidateGroupConfig(req.config()).ok());
+  item->set_expression("A");
+  EXPECT_TRUE(Calc::ValidateGroupConfig(req.config()).ok());
+  item->set_decimal_places(0);
+  EXPECT_FALSE(Calc::ValidateGroupConfig(req.config()).ok());
+  item->clear_decimal_places();
+  item->mutable_operands(0)->set_source_kind(CalcProto::OPERAND_SOURCE_CONSTANT);
+  item->mutable_operands(0)->mutable_constant()->set_int_value(1);
+  EXPECT_FALSE(Calc::ValidateGroupConfig(req.config()).ok());
+  item->mutable_operands(0)->mutable_constant()->set_bool_value(true);
+  EXPECT_TRUE(Calc::ValidateGroupConfig(req.config()).ok());
+  item->set_operator_kind(CalcProto::OPERATOR_KIND_AND);
+  item->clear_expression();
+  EXPECT_FALSE(Calc::ValidateGroupConfig(req.config()).ok());
+}
+
+
+// 验证：混合逻辑配置重启后保留表达式、输入顺序及结果计算。
+TEST(CalcGroupManagerTest, ExpressionPersistsAndRestores) {
+  ScopedTempDir tempDir;
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  {
+    GroupManager mgr("Calc", tempDir.path() / "conf/config.db");
+    mgr.setDataCenterStub(stub);
+    auto req = MakeSumGroupReq("expression-restore", 2);
+    auto *item = req.mutable_config()->mutable_items(0);
+    item->set_operator_kind(CalcProto::OPERATOR_KIND_LOGICAL_EXPRESSION);
+    item->set_expression("A AND NOT B");
+    CalcProto::CalcGroupInfo info;
+    ASSERT_TRUE(mgr.UpsertGroup(req, &info).ok());
+    ASSERT_TRUE(mgr.StopGroup("expression-restore").ok());
+  }
+  GroupManager restored("Calc", tempDir.path() / "conf/config.db");
+  restored.setDataCenterStub(stub);
+  ASSERT_TRUE(restored.LoadPersistedConfig().ok());
+  CalcProto::CalcGroupInfo info;
+  ASSERT_TRUE(restored.GetGroup("expression-restore", &info).ok());
+  EXPECT_EQ(info.config().items(0).expression(), "A AND NOT B");
+  EXPECT_EQ(info.items(0).input_tags(1), "aggregate/input_2");
+  PublishBoolPoint(&state, info.conn_id(), "aggregate/input_1", true);
+  PublishBoolPoint(&state, info.conn_id(), "aggregate/input_2", false);
+  EXPECT_TRUE(WaitForBoolLatest(state, info.conn_id(), "aggregate/result", true));
+  ASSERT_TRUE(restored.StopGroup("expression-restore").ok());
 }
 
 // 验证：NOT 对 bool 输入可正确输出 bool 结果。

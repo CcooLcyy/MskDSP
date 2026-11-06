@@ -6,12 +6,13 @@ Calc 类型化运算模块：从 DataCenter 订阅同一计算分组 `conn_id` �
 ## 能力清单
 - 按分组管理计算：一个 `group_name` 对应 DataCenter 的一条连接 `(module_name="Calc", conn_name=group_name) -> conn_id`
 - 分组内多 item：同一个 group 可包含多条计算项
-- 类型化运算：支持二元数值运算 `ADD/SUB/MUL/DIV`、多项聚合 `SUM/AVERAGE` 与逻辑运算 `NOT/AND/OR/XOR`
+- 类型化运算：支持二元数值运算 `ADD/SUB/MUL/DIV`、多项聚合 `SUM/AVERAGE`、单输入 `NOT`、多输入 `AND/OR/XOR` 与混合逻辑表达式
 - 类型化常量：支持 `bool/int64/double/decimal` 常量；精确十进制以文本传入
-- 自动内建点：二元/逻辑 item 自动生成 `left_input/right_input/result`；SUM/AVERAGE 按操作数顺序生成 `input_1/input_2/.../result`，并同步到 DataCenter 连接标签注册表
+- 自动内建点：旧二元/逻辑 item 自动生成 `left_input/right_input/result`；多输入和表达式按操作数顺序生成 `input_1/input_2/.../result`，并同步到 DataCenter 连接标签注册表
 - 自动启动：分组配置达到当前最小可运行条件后，会自动尝试启动分组内运算功能
 
 ## 接口与协议
+- 混合逻辑采用 `operator_kind=11`、`operands` 和 `expression`，如 `(A AND B) OR NOT C`；详细语法、边界及验收见 [逻辑表达式设计](逻辑表达式设计.md)。上位机直接通过 CalcService 保存，无需创建中间计算项。
 - Protobuf：`protobuf/Calc.proto`
 - gRPC Service：`CalcProto::CalcService`
 - ConfigPusher 初始化模板：`./conf/configPusher/calc.jsonc`
