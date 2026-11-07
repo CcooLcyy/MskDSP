@@ -20,7 +20,9 @@ GitHub 运行身份包含 run_id、run_number、run_attempt、阶段与架构，
 
 仓库 `ci` 环境仅允许 master/main 分支和 v* 标签部署；v* 标签使用真实 GitHub ruleset 保护更新与删除，身份校验继续拒绝不合法版本和未保护正式引用。构建、检查与打包任务仅有仓库只读权限，不接收平台上传令牌。
 
-`ci` 环境保存 `PLATFORM_UPLOAD_TOKEN` secret。公网发布将 `PLATFORM_GRPC_ENDPOINT` 配置为 Runner 可达的 TLS `host:port`，`PLATFORM_GRPC_PLAINTEXT` 留空或设为 `0`。私有 CA 使用 `PLATFORM_GRPC_CA_B64` secret，在发布临时主机写为受限文件后清理。
+`ci` 环境保存 `PLATFORM_UPLOAD_TOKEN` secret，`PLATFORM_GRPC_ENDPOINT` 填写 Runner 可达的 `host:port`。使用 TLS 时，`PLATFORM_GRPC_PLAINTEXT` 留空或设为 `0`。私有 CA 使用 `PLATFORM_GRPC_CA_B64` secret，在发布临时主机写为受限文件后清理。
+
+公网入口采用明文 gRPC 时，须显式设置 `PLATFORM_GRPC_PLAINTEXT=1` 和 `PLATFORM_GRPC_ALLOW_PUBLIC_PLAINTEXT=1`，并清空 CA 配置。此时发布令牌和安装包传输均不加密。
 
 GitHub Actions 的发布任务仅访问 gRPC 发布接口。HTTP 清单可由使用该更新链路的客户端在内网读取。
 

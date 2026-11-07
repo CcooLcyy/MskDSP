@@ -89,6 +89,12 @@ class IdentityTests(unittest.TestCase):
             with self.assertRaises(client.ClientError):
                 client.validate_endpoint(endpoint, plaintext=True)
 
+    def test_public_plaintext_requires_opt_in_and_a_valid_endpoint(self):
+        endpoint = "8.8.8.8:50000"
+        self.assertEqual(client.validate_endpoint(endpoint, plaintext=True, allow_public_plaintext=True), endpoint)
+        with self.assertRaises(client.ClientError):
+            client.validate_endpoint("user:secret@8.8.8.8:50000", plaintext=True, allow_public_plaintext=True)
+
     # 退役 Beta 在元数据入口被拒绝，不能更换通道冒充 CI 或 Stable。
     def test_beta_publication_is_rejected_in_all_contexts(self):
         historical = self.data | dict(platform="linux-arm64", channel="beta", source_ref="beta/0.4.0",

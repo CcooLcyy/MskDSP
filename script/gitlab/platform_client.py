@@ -199,7 +199,7 @@ def check_current_head(metadata, environ=None):
         raise ClientError("远端来源分支已变化或无法确认，拒绝发布旧构建")
 
 
-def validate_endpoint(endpoint, *, plaintext=False):
+def validate_endpoint(endpoint, *, plaintext=False, allow_public_plaintext=False):
     try:
         parsed = urlsplit("//" + endpoint)
         valid_port = parsed.port and 0 < parsed.port <= 65535
@@ -209,7 +209,7 @@ def validate_endpoint(endpoint, *, plaintext=False):
             or parsed.path or parsed.query or parsed.fragment or "\\" in endpoint
             or any(char.isspace() or ord(char) < 32 for char in endpoint)):
         raise ClientError("gRPC 地址必须为无凭据的 host:port")
-    if plaintext:
+    if plaintext and not allow_public_plaintext:
         try:
             address = ipaddress.ip_address(parsed.hostname)
             networks = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "::1/128", "fc00::/7")
@@ -390,10 +390,14 @@ def upload(metadata, proto_root=Path(".ci/platform-proto"), timeout=60, publish_
     archive, identity = load_metadata(metadata)
     check_current_head(identity)
     plaintext = os.environ.get("PLATFORM_GRPC_PLAINTEXT", "0") == "1"
-    endpoint = validate_endpoint(os.environ.get("PLATFORM_GRPC_ENDPOINT", ""), plaintext=plaintext)
+    allow_public_plaintext = os.environ.get("PLATFORM_GRPC_ALLOW_PUBLIC_PLAINTEXT") == "1"
+    endpoint = validate_endpoint(os.environ.get("PLATFORM_GRPC_ENDPOINT", ""), plaintext=plaintext,
+                                 allow_public_plaintext=allow_public_plaintext)
     ca_file = os.environ.get("PLATFORM_GRPC_CA_FILE")
     if plaintext and ca_file:
         raise ClientError("明文连接不能配置 TLS CA 文件")
+    if plaintext and allow_public_plaintext:
+        print("已显式允许公网明文 gRPC 发布")
     public_base = "" if publish_response_only else os.environ.get("PLATFORM_PUBLIC_BASE_URL", "")
     if public_base and not repository_url(public_base):
         raise ClientError("平台公开地址必须为无凭据 HTTP(S) 地址")
