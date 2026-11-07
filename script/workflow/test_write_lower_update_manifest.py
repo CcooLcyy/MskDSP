@@ -163,12 +163,16 @@ class WriteLowerUpdateManifestTest(unittest.TestCase):
         self.assertIn("from write_lower_update_manifest import read_image_config_id", metadata)
         self.assertIn('read_image_config_id(image_tar, identity["platform"])', metadata)
 
-    # 验证当前 CI 仅通过 GitLab 与平台软件库发布，不残留旧 Actions 或静态上传入口。
-    def test_gitlab_replaces_old_actions_and_static_publishers(self) -> None:
+    # GitHub Actions 与 GitLab 使用平台软件库发布，旧 R2 和静态发布入口继续退役。
+    def test_ci_uses_platform_without_legacy_static_publishers(self) -> None:
         root = SCRIPT.parents[2]
         self.assertTrue((root / ".gitlab-ci.yml").is_file())
         workflow_dir = root / ".github/workflows"
-        self.assertEqual(list(workflow_dir.glob("*.yml")) + list(workflow_dir.glob("*.yaml")), [])
+        workflows = list(workflow_dir.glob("*.yml")) + list(workflow_dir.glob("*.yaml"))
+        self.assertEqual(sorted(path.name for path in workflows), ["ci.yml"])
+        self.assertIn("bash script/github/publish.sh", (workflow_dir / "ci.yml").read_text(encoding="utf-8"))
+        publish_script = (root / "script/github/publish.sh").read_text(encoding="utf-8")
+        self.assertIn("python script/gitlab/platform_client.py", publish_script)
         for name in ("upload_r2.sh", "sync_static_lower_update.sh", "sync_static_lower_update_if_configured.sh"):
             with self.subTest(script=name):
                 self.assertFalse(SCRIPT.with_name(name).exists())
