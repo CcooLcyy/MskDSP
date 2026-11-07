@@ -198,12 +198,11 @@ jobs:
         with:
           name: lower-package-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/lower-package
-      - name: 入库、发布并核对公开清单
+      - name: 通过 gRPC 入库和发布
         env:
           PLATFORM_UPLOAD_TOKEN: ${{ secrets.PLATFORM_UPLOAD_TOKEN }}
           PLATFORM_GRPC_ENDPOINT: ${{ vars.PLATFORM_GRPC_ENDPOINT }}
           PLATFORM_GRPC_PLAINTEXT: ${{ vars.PLATFORM_GRPC_PLAINTEXT }}
-          PLATFORM_PUBLIC_BASE_URL: ${{ vars.PLATFORM_PUBLIC_BASE_URL }}
           PLATFORM_GRPC_CA_B64: ${{ secrets.PLATFORM_GRPC_CA_B64 }}
         run: bash script/github/publish.sh
 
@@ -230,11 +229,10 @@ jobs:
         with:
           name: lower-package-arm64-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/lower-package
-      - name: 入库、发布并核对正式清单
+      - name: 通过 gRPC 入库和发布正式版
         env:
           PLATFORM_UPLOAD_TOKEN: ${{ secrets.PLATFORM_UPLOAD_TOKEN }}
           PLATFORM_GRPC_ENDPOINT: ${{ vars.PLATFORM_GRPC_ENDPOINT }}
           PLATFORM_GRPC_PLAINTEXT: ${{ vars.PLATFORM_GRPC_PLAINTEXT }}
-          PLATFORM_PUBLIC_BASE_URL: ${{ vars.PLATFORM_PUBLIC_BASE_URL }}
           PLATFORM_GRPC_CA_B64: ${{ secrets.PLATFORM_GRPC_CA_B64 }}
         run: bash script/github/publish.sh

@@ -363,26 +363,30 @@ def transfer(publisher, catalog, messages, archive, metadata, token, *, before_p
                                                metadata=authorization, timeout=timeout).package
             if package.id != package_id or package.metadata != expected or channel not in package.channels:
                 raise ClientError("平台发布响应与安装包身份不一致")
-            confirm_public()
+            if catalog is not None:
+                confirm_public()
             if after_publish:
                 after_publish()
             return dict(state="published", package_id=package_id, upload_id=upload_id)
         except grpc.RpcError as error:
             if error.code() not in retryable:
                 raise ClientError("平台发布失败：" + error.code().name) from None
-            try:
-                confirm_public()
-                if after_publish:
-                    after_publish()
-                return dict(state="published", package_id=package_id, upload_id=upload_id)
-            except ClientError:
-                if attempt == attempts - 1:
-                    raise ClientError("无法确认平台来源通道发布结果") from None
+            # 仅凭发布响应时，重试须收到成功响应才能确认发布。
+            if catalog is not None:
+                try:
+                    confirm_public()
+                    if after_publish:
+                        after_publish()
+                    return dict(state="published", package_id=package_id, upload_id=upload_id)
+                except ClientError:
+                    pass
+            if attempt == attempts - 1:
+                raise ClientError("无法确认平台来源通道发布结果") from None
             time.sleep(retry_delay)
     raise ClientError("平台来源通道发布未完成")
 
 
-def upload(metadata, proto_root=Path(".ci/platform-proto"), timeout=60):
+def upload(metadata, proto_root=Path(".ci/platform-proto"), timeout=60, publish_response_only=False):
     archive, identity = load_metadata(metadata)
     check_current_head(identity)
     plaintext = os.environ.get("PLATFORM_GRPC_PLAINTEXT", "0") == "1"
@@ -390,7 +394,7 @@ def upload(metadata, proto_root=Path(".ci/platform-proto"), timeout=60):
     ca_file = os.environ.get("PLATFORM_GRPC_CA_FILE")
     if plaintext and ca_file:
         raise ClientError("明文连接不能配置 TLS CA 文件")
-    public_base = os.environ.get("PLATFORM_PUBLIC_BASE_URL", "")
+    public_base = "" if publish_response_only else os.environ.get("PLATFORM_PUBLIC_BASE_URL", "")
     if public_base and not repository_url(public_base):
         raise ClientError("平台公开地址必须为无凭据 HTTP(S) 地址")
     with tempfile.TemporaryDirectory(prefix="lower-platform-grpc-") as temporary:
@@ -403,7 +407,8 @@ def upload(metadata, proto_root=Path(".ci/platform-proto"), timeout=60):
                 roots = Path(ca_file).read_bytes() if ca_file else None
                 channel = grpc.secure_channel(endpoint, grpc.ssl_channel_credentials(roots))
             with channel:
-                return transfer(services.SoftwarePublishServiceStub(channel), services.SoftwareCatalogServiceStub(channel),
+                catalog = None if publish_response_only else services.SoftwareCatalogServiceStub(channel)
+                return transfer(services.SoftwarePublishServiceStub(channel), catalog,
                                 messages, archive, identity, os.environ.get("PLATFORM_UPLOAD_TOKEN", ""),
                                 before_publish=lambda: check_current_head(identity), timeout=timeout,
                                 after_publish=(lambda: confirm_manifest(public_base, identity, timeout=timeout)) if public_base else None)
@@ -419,9 +424,13 @@ def main(argv=None):
     parser.add_argument("--metadata", type=Path, required=True)
     parser.add_argument("--proto-root", type=Path, default=Path(".ci/platform-proto"))
     parser.add_argument("--timeout", type=float, default=60)
+    parser.add_argument("--publish-response-only", action="store_true", help="以 gRPC 发布成功响应为准")
     args = parser.parse_args(argv)
     try:
         result = upload(**vars(args))
+    except ClientError as error:
+        print("下位机平台上传发布失败：" + str(error), file=sys.stderr)
+        return 1
     except Exception:
         print("下位机平台上传发布失败，请检查冻结身份、来源分支、权限、网络及协议；底层输出已隐藏", file=sys.stderr)
         return 1

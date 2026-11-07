@@ -3,7 +3,6 @@
 set -euo pipefail
 : "${PLATFORM_UPLOAD_TOKEN:?缺少平台上传令牌}"
 : "${PLATFORM_GRPC_ENDPOINT:?缺少托管 Runner 可达的平台 gRPC 地址}"
-: "${PLATFORM_PUBLIC_BASE_URL:?缺少托管 Runner 可达的平台公开清单地址}"
 : "${LOWER_JOB_ARCH:?缺少发布架构}"
 case "${LOWER_JOB_ARCH}" in arm64|x64) ;; *) echo '错误：发布架构不合法' >&2; exit 1 ;; esac
 tar -xf "${RUNNER_TEMP}/lower-package/lower-package-${LOWER_JOB_ARCH}.tar"
@@ -17,4 +16,5 @@ if [[ -n "${PLATFORM_GRPC_CA_B64:-}" ]]; then
   trap 'rm -f -- "${PLATFORM_GRPC_CA_FILE:-}"' EXIT
 fi
 python script/gitlab/init_platform_proto.py
-python script/gitlab/platform_client.py --metadata "release/${LOWER_JOB_ARCH}/metadata.json" --proto-root .ci/platform-proto
+python script/gitlab/platform_client.py --metadata "release/${LOWER_JOB_ARCH}/metadata.json" \
+  --proto-root .ci/platform-proto --publish-response-only

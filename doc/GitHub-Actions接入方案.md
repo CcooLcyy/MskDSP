@@ -14,15 +14,15 @@ GitHub 运行身份包含 run_id、run_number、run_attempt、阶段与架构，
 
 失败后选择 **Re-run all jobs**。仅重跑失败作业会产生新的 run_attempt，但上游成功任务不重跑；本流程不会下载旧批次产物冒充新批次。产物名称包含 run_id 与 run_attempt，元数据另行复核两者。GitHub 整数作业身份采用运行编号和重跑次数的唯一配对，再区分阶段与架构，避免不同工作流的 run_number 相同而重复生成版本。
 
-托管 Runner 在本机原生制作 Docker 安装包，不依赖内网 BuildKit。发布继续使用既有平台 gRPC、上传令牌、TLS 和公开更新清单；托管 Runner 到平台的网络必须可达，缺少必要配置应明确失败，不跳过发布假装成功。GitHub Actions 仓库开关已经启用。
+托管 Runner 在本机原生制作 Docker 安装包。GitHub Actions 以平台 gRPC 的入库和通道发布成功响应为准。上传校验和断点续传仍在发布流程内执行。发布响应丢失时按可重试错误处理，重试耗尽仍未收到成功响应则报告结果无法确认。
 
 ## 配置与凭据
 
 仓库 `ci` 环境仅允许 master/main 分支和 v* 标签部署；v* 标签使用真实 GitHub ruleset 保护更新与删除，身份校验继续拒绝不合法版本和未保护正式引用。构建、检查与打包任务仅有仓库只读权限，不接收平台上传令牌。
 
-`ci` 环境保存 `PLATFORM_UPLOAD_TOKEN` secret；平台网络使用 `PLATFORM_GRPC_ENDPOINT`、`PLATFORM_GRPC_PLAINTEXT` 和 `PLATFORM_PUBLIC_BASE_URL` variables。私有 CA 使用 `PLATFORM_GRPC_CA_B64` secret，在发布临时主机写为受限文件后清理。发布后必须核对公开目录与清单，不因缺少公开地址而静默省略。
+`ci` 环境保存 `PLATFORM_UPLOAD_TOKEN` secret。公网发布将 `PLATFORM_GRPC_ENDPOINT` 配置为 Runner 可达的 TLS `host:port`，`PLATFORM_GRPC_PLAINTEXT` 留空或设为 `0`。私有 CA 使用 `PLATFORM_GRPC_CA_B64` secret，在发布临时主机写为受限文件后清理。
 
-原配置为内网 gRPC 与 HTTP 地址，GitHub 托管 Runner 无法直接使用。网络接入必须选择已授权的 SSH 隧道、公网 TLS 或 VPN 路径；不得直接将内网地址配置为已验证可用的托管发布入口。
+GitHub Actions 的发布任务仅访问 gRPC 发布接口。HTTP 清单可由使用该更新链路的客户端在内网读取。
 
 ## 验证边界
 

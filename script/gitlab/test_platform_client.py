@@ -296,6 +296,14 @@ class GrpcContractTests(unittest.TestCase):
     def test_real_outdated_branch_never_publishes(self):
         self.exercise("stale")
 
+    # 仅凭发布响应完成，不访问目录。响应丢失后必须收到重试的成功响应。
+    def test_publish_response_only_retries_until_acknowledged(self):
+        self.exercise("success", response_only=True)
+
+    # 即使服务端已发布，所有响应均丢失也不能判为成功。
+    def test_publish_response_only_reports_unknown_after_all_responses_lost(self):
+        self.exercise("lost", response_only=True)
+
     # 原 Beta 成功发布场景迁至 ARM64 CI，保留原始完整性、过期和响应丢失断言。
     def test_real_arm64_ci_channel_contract(self):
         for scenario in ("success", "interrupt", "invalid", "stale"):
@@ -308,7 +316,7 @@ class GrpcContractTests(unittest.TestCase):
             with self.subTest(scenario=scenario):
                 self.exercise(scenario, channel="stable")
 
-    def exercise(self, scenario, channel="ci", platform="linux-x64"):
+    def exercise(self, scenario, channel="ci", platform="linux-x64", *, response_only=False):
         import grpc
         from concurrent.futures import ThreadPoolExecutor
         if platform == "linux-arm64":
@@ -376,7 +384,7 @@ class GrpcContractTests(unittest.TestCase):
                         assert state["completed"] and request.channel == channel
                         state["published"] = True
                         state["publish_calls"] += 1
-                        if state["publish_calls"] == 1:
+                        if state["publish_calls"] == 1 or scenario == "lost":
                             context.abort(grpc.StatusCode.UNAVAILABLE, "模拟发布成功但响应丢失")
                         return messages.PublishReleaseResponse(package=self.package())
 
@@ -403,8 +411,8 @@ class GrpcContractTests(unittest.TestCase):
                                 raise client.ClientError("远端分支已变化")
 
                         def transfer():
-                            return client.transfer(services.SoftwarePublishServiceStub(rpc_channel),
-                                                   services.SoftwareCatalogServiceStub(rpc_channel), messages,
+                            catalog = None if response_only else services.SoftwareCatalogServiceStub(rpc_channel)
+                            return client.transfer(services.SoftwarePublishServiceStub(rpc_channel), catalog, messages,
                                                    archive, metadata, "test-token", before_publish=before,
                                                    retry_delay=0, chunk_size=3)
 
@@ -413,11 +421,18 @@ class GrpcContractTests(unittest.TestCase):
                                 transfer()
                             self.assertFalse(state["published"])
                             self.assertEqual(state["publish_calls"], 0)
+                        elif scenario == "lost":
+                            with self.assertRaisesRegex(client.ClientError, "无法确认"):
+                                transfer()
+                            self.assertTrue(state["published"])
+                            self.assertEqual(state["publish_calls"], 4)
                         else:
                             result = transfer()
                             self.assertEqual(result["package_id"], "package-1")
                             self.assertEqual(result["state"], "published")
                             self.assertTrue(heads)
+                            if response_only:
+                                self.assertEqual(state["publish_calls"], 2)
                             if scenario == "interrupt":
                                 self.assertEqual(state["streams"], 2)
                 finally:
