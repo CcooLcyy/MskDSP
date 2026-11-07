@@ -160,7 +160,8 @@ class BuildLowerTest(unittest.TestCase):
         root = Path(temporary.name)
         for filename in ("script/gitlab/build_lower.sh", "script/gitlab/lower_metadata.py", "script/gitlab/github_environment.py",
                          "script/gitlab/download_asset.py", "script/gitlab/init_platform_proto.py", "script/make_exe.sh",
-                         "script/workflow/write_lower_update_manifest.py", "Dockerfile", "VERSION", "vcpkg-configuration.json",
+                         "script/network/networkd_policy.py", "script/workflow/write_lower_update_manifest.py",
+                         "Dockerfile", "VERSION", "vcpkg-configuration.json",
                          "cmake/toolchains/aarch64-linux-gcc14.cmake", "cmake/vcpkg-triplets/arm64-linux-dynamic-cross.cmake"):
             destination = root / filename
             destination.parent.mkdir(parents=True, exist_ok=True)
