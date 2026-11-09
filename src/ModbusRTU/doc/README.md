@@ -7,6 +7,8 @@
 通信正常沿用本轮至少一个点成功解析的判据，不保证所有点或控制写入成功。消费者应同时检查质量与心跳超时；AGC 成员可选择该点关联参与控制。其他协议模块可复用公共 `mskdsp/CommunicationState.hpp` 的名称和值语义。详见 [设计与验收](../../../doc/AGC通信状态参与控制设计.md)。
 
 ## 简介
+
+点值的采集品质、异常时旧值保留及 IEC104 上送规则见 [采集品质与104上送](采集品质与104上送.md)。
 ModbusRTU 模块负责管理 ModbusRTU 链路与点表，当前同时支持两种传输方式：
 - `TRANSPORT_SERIAL`：本地串口直连，保留原有直接操作串口能力。
 - `TRANSPORT_MQTT_UART`：通过 `MQTTManager + uartManager` 透传原始 RTU 报文。

@@ -12,6 +12,7 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <variant>
 
 #include <grpcpp/client_context.h>
 #include <grpcpp/support/status.h>
@@ -155,6 +156,17 @@ private:
     size_t operator()(const MqttKey& key) const;
   };
 
+  struct PollSample {
+    using Value = std::variant<bool, mskdsp::numeric::Decimal20>;
+    Value value;
+    int64_t tsMs = 0;
+    uint32_t flags = 0;
+    bool qualityChanged = true;
+    std::optional<uint32_t> publishedFlags;
+    std::optional<mskdsp::numeric::Decimal20> publishedNumeric;
+  };
+  using PollSamples = std::unordered_map<std::string, PollSample>;
+
   struct LinkRuntime {
     ModbusRTUProto::LinkConfig config;
     SerialKey serialKey;
@@ -178,6 +190,8 @@ private:
     bool pointTableConfigured = false;
     std::shared_ptr<Bus> bus;
     std::shared_ptr<CommandGate> commandGate = std::make_shared<CommandGate>();
+    // 轮询线程写入，停止并等待线程退出后由手动停止路径更新。
+    std::shared_ptr<PollSamples> pollSamples = std::make_shared<PollSamples>();
     std::jthread pollThread;
     std::shared_ptr<grpc::ClientContext> dcCommandContext;
     std::shared_ptr<LatestCommandQueue> dcCommandQueue;
@@ -214,11 +228,16 @@ private:
                                    std::shared_ptr<Bus> bus,
                                    const DataCenterProto::PointUpdate& update);
 
+  grpc::Status stopLink(const std::string& connName, bool markSamplesNotTopical);
+  static DataCenterProto::PublishRequest makeSampleUpdate(uint32_t connId, const std::string& tag,
+                                                         const PollSample& sample);
+  void publishStoppedSamples(const std::string& connName, uint32_t connId, PollSamples& samples);
+
   void pollLoop(std::string connName,
                 uint32_t connId, uint64_t communicationGeneration,
                 ModbusRTUProto::LinkConfig config,
                 PointTable pointTable,
-                std::shared_ptr<Bus> bus,
+                std::shared_ptr<Bus> bus, PollSamples& samples,
                 std::stop_token stopToken);
   void updateLastError(const std::string& connName,
                        const std::string& error,

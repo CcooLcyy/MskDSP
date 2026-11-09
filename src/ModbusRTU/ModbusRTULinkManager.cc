@@ -23,6 +23,17 @@
 namespace ModbusRTU {
 namespace {
 using CommunicationState = mskdsp::communication::State;
+constexpr uint32_t kSampleNotTopical = DataCenterProto::QUALITY_FLAG_NOT_TOPICAL;
+constexpr uint32_t kSampleInvalid = DataCenterProto::QUALITY_FLAG_INVALID | kSampleNotTopical;
+
+uint32_t readFailureFlags(const grpc::Status& status) {
+  return IsReadExceptionStatus(status) ? kSampleInvalid : kSampleNotTopical;
+}
+
+int64_t sampleTimeMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+}
 
 std::vector<std::string> WithCommunicationTag(std::vector<std::string> tags) {
   tags.emplace_back(mskdsp::communication::kStateTag);
@@ -333,7 +344,7 @@ LinkManager::~LinkManager() {
     }
   }
   for (const auto &connName : connNames) {
-    const auto status = StopLink(connName);
+    const auto status = stopLink(connName, false);
     if (!status.ok() && status.error_code() != grpc::StatusCode::NOT_FOUND) {
       LOG_WARNING("ModbusRTU 管理器析构时停止链路失败: conn_name={}, 原因={}", connName, status.error_message());
     }
@@ -1691,6 +1702,9 @@ grpc::Status LinkManager::UpsertLink(const ModbusRTUProto::UpsertLinkRequest& re
         return status;
       }
 
+      if (it->second.config.SerializeAsString() != normalized.SerializeAsString()) {
+        it->second.pollSamples->clear();
+      }
       it->second.config = normalized;
       it->second.serialKey = serialKey;
       it->second.mqttKey = mqttKey;
@@ -2147,10 +2161,11 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
     clearLastErrorLocked(&link, LastErrorSource::kCommand);
     clearLastErrorLocked(&link, LastErrorSource::kSubscription);
     clearLastErrorLocked(&link, LastErrorSource::kPolling);
+    auto samples = link.pollSamples;
     link.pollThread = ModuleManager::StartModuleThread(
         ModbusRTULibInfo.LIB_NAME,
-        [this, connName, connId, generation, config, pointTable, bus](std::stop_token stopToken) {
-          pollLoop(connName, connId, generation, config, pointTable, bus, stopToken);
+        [this, connName, connId, generation, config, pointTable, bus, samples](std::stop_token stopToken) {
+          pollLoop(connName, connId, generation, config, pointTable, bus, *samples, stopToken);
         });
     startCommandSubscribeLocked(connName, &link);
   }
@@ -2170,6 +2185,11 @@ grpc::Status LinkManager::StartLink(const std::string& connName) {
 }
 
 grpc::Status LinkManager::StopLink(const std::string& connName) {
+  std::lock_guard mutationLock(pointTableMutationMu_);
+  return stopLink(connName, true);
+}
+
+grpc::Status LinkManager::stopLink(const std::string& connName, bool markSamplesNotTopical) {
   std::lock_guard lifecycleLock(lifecycleMu_);
   uint64_t generation = 0;
   auto status = validateConnName(connName);
@@ -2187,6 +2207,8 @@ grpc::Status LinkManager::StopLink(const std::string& connName) {
   std::shared_ptr<LatestCommandQueue> commandQueue;
   std::shared_ptr<CommandGate> commandGate;
   bool pendingDelete = false;
+  uint32_t connId = 0;
+  std::shared_ptr<PollSamples> samples;
   ModbusRTUProto::LinkConfig config;
 
   {
@@ -2201,6 +2223,8 @@ grpc::Status LinkManager::StopLink(const std::string& connName) {
     commandContext = std::move(it->second.dcCommandContext);
     commandQueue = std::move(it->second.dcCommandQueue);
     pollThread = std::move(it->second.pollThread);
+    connId = it->second.connId;
+    samples = it->second.pollSamples;
     config = it->second.config;
     serialKey = it->second.serialKey;
     mqttKey = it->second.mqttKey;
@@ -2216,6 +2240,7 @@ grpc::Status LinkManager::StopLink(const std::string& connName) {
     it->second.communicationState = ModbusRTUProto::COMMUNICATION_STATE_UNSPECIFIED;
   }
 
+  pollThread.request_stop();
   if (commandReadThread.joinable()) {
     LOG_INFO("ModbusRTU 停止 DataCenter 命令订阅: conn_name={}", connName);
     commandReadThread.request_stop();
@@ -2237,8 +2262,10 @@ grpc::Status LinkManager::StopLink(const std::string& connName) {
   }
 
   if (pollThread.joinable()) {
-    pollThread.request_stop();
     pollThread.join();
+  }
+  if (markSamplesNotTopical && !pendingDelete) {
+    publishStoppedSamples(connName, connId, *samples);
   }
 
   setCommunicationState(connName, generation, CommunicationState::Stopped);
@@ -2278,7 +2305,7 @@ grpc::Status LinkManager::DeleteLink(const std::string& connName) {
     return status;
   }
 
-  status = StopLink(connName);
+  status = stopLink(connName, false);
   if (!status.ok() && status.error_code() != grpc::StatusCode::NOT_FOUND) {
     return status;
   }
@@ -2391,6 +2418,17 @@ grpc::Status LinkManager::UpsertPointTable(const ModbusRTUProto::UpsertPointTabl
     if (!rollback.ok()) return {grpc::StatusCode::INTERNAL, "标签同步失败且磁盘点表恢复失败，请检查设备配置持久化状态"};
     return status;
   }
+  // 保留采样含义未变化的点，清除删除或重新映射的旧值。
+  std::erase_if(*link.pollSamples, [&](const auto& entry) {
+    const auto oldPoint = link.pointTable.FindByTag(entry.first);
+    const auto newPoint = next.FindByTag(entry.first);
+    return !oldPoint || !newPoint || oldPoint->function != newPoint->function ||
+           oldPoint->address != newPoint->address || oldPoint->type != newPoint->type ||
+           oldPoint->regCount != newPoint->regCount || oldPoint->wordOrder != newPoint->wordOrder ||
+           oldPoint->byteOrder != newPoint->byteOrder || oldPoint->scale != newPoint->scale ||
+           oldPoint->offset != newPoint->offset || oldPoint->bitIndex != newPoint->bitIndex ||
+           oldPoint->enumValue != newPoint->enumValue;
+  });
   link.pointTable = std::move(next);
   link.pointTableConfigured = !link.pointTable.Points().empty();
   link.pointTableRevision = nextRevision;
@@ -2419,17 +2457,107 @@ grpc::Status LinkManager::GetPointTable(const std::string& connName, ModbusRTUPr
   return grpc::Status::OK;
 }
 
+DataCenterProto::PublishRequest LinkManager::makeSampleUpdate(
+    uint32_t connId, const std::string& tag, const PollSample& sample) {
+  DataCenterProto::PublishRequest request;
+  request.set_conn_id(connId);
+  request.set_tag(tag);
+  request.set_ts_ms(sample.tsMs);
+  request.set_quality_flags(sample.flags);
+  if (const auto* value = std::get_if<bool>(&sample.value)) {
+    request.mutable_value()->set_bool_value(*value);
+  } else {
+    request.mutable_value()->set_decimal_value(std::get<Decimal20>(sample.value).ToFixedString());
+  }
+  return request;
+}
+
+void LinkManager::publishStoppedSamples(const std::string& connName, uint32_t connId,
+                                        PollSamples& samples) {
+  DataCenterProto::BatchPublishRequest request;
+  for (auto& [tag, sample] : samples) {
+    sample.qualityChanged |= (sample.flags & kSampleNotTopical) == 0;
+    sample.flags |= kSampleNotTopical;
+    if (sample.qualityChanged || sample.publishedFlags != sample.flags) {
+      *request.add_points() = makeSampleUpdate(connId, tag, sample);
+    }
+  }
+  if (request.points().empty()) return;
+  const auto status = dataCenter_.PublishSamples(request);
+  if (!status.ok()) {
+    LOG_WARNING("ModbusRTU 停止时发布采集品质失败: conn_name={}, 点数={}, 原因={}",
+                connName, request.points_size(), status.error_message());
+    return;
+  }
+  for (const auto& point : request.points()) {
+    auto& sample = samples.at(point.tag());
+    sample.publishedFlags = sample.flags;
+    sample.qualityChanged = false;
+  }
+  LOG_INFO("ModbusRTU 停止时已标记最近采样为非当前: conn_name={}, 点数={}",
+           connName, request.points_size());
+}
+
 void LinkManager::pollLoop(std::string connName,
                            uint32_t connId, uint64_t communicationGeneration,
                            ModbusRTUProto::LinkConfig config,
                            PointTable pointTable,
-                           std::shared_ptr<Bus> bus,
+                           std::shared_ptr<Bus> bus, PollSamples& samples,
                            std::stop_token stopToken) {
   setCommunicationState(connName, communicationGeneration, CommunicationState::Unknown);
   const auto interval = std::chrono::milliseconds(config.poll_interval_ms());
   const auto points = pointTable.Points();
-  std::unordered_map<std::string, Decimal20> lastReportedByTag;
-  lastReportedByTag.reserve(points.size());
+  samples.reserve(points.size());
+  const auto publish = [&](const std::string& tag, PollSample& sample) {
+    const auto status = dataCenter_.PublishSample(makeSampleUpdate(connId, tag, sample));
+    if (!status.ok()) {
+      updateLastError(connName, status.error_message());
+      LOG_ERROR("ModbusRTU 发布采集值失败: conn_name={}, tag={}, 品质位=0x{:02X}, 原因={}",
+                connName, tag, sample.flags, status.error_message());
+      return;
+    }
+    if (sample.publishedFlags != sample.flags) {
+      LOG_DEBUG("ModbusRTU 已发布采集品质变化: conn_name={}, tag={}, 品质位=0x{:02X}, 采样时间={}",
+                connName, tag, sample.flags, sample.tsMs);
+    }
+    sample.publishedFlags = sample.flags;
+    sample.qualityChanged = false;
+    if (sample.flags == 0) {
+      if (const auto* numeric = std::get_if<Decimal20>(&sample.value)) {
+        sample.publishedNumeric = *numeric;
+      }
+    }
+  };
+  const auto acceptSample = [&](const std::string& tag, PollSample::Value value,
+                                const Decimal20& deadband, int64_t tsMs) {
+    if (stopToken.stop_requested()) return;
+    auto& sample = samples[tag];
+    sample.qualityChanged |= sample.flags != 0;
+    sample.flags = 0;
+    sample.tsMs = tsMs;
+    sample.value = std::move(value);
+    const auto* numeric = std::get_if<Decimal20>(&sample.value);
+    if (!sample.qualityChanged && sample.publishedFlags == 0 &&
+        numeric && sample.publishedNumeric &&
+        !mskdsp::numeric::ShouldReport(*numeric, *sample.publishedNumeric, deadband)) {
+      LOG_DEBUG("ModbusRTU 死区过滤上报: conn_name={}, tag={}, 当前值={}, 上次值={}, 死区={}",
+                connName, tag, numeric->ToString(), sample.publishedNumeric->ToString(),
+                deadband.ToString());
+      return;
+    }
+    publish(tag, sample);
+  };
+  const auto rejectSample = [&](const std::string& tag, uint32_t flags) {
+    if (stopToken.stop_requested()) return;
+    auto it = samples.find(tag);
+    if (it == samples.end()) return;
+    auto& sample = it->second;
+    sample.qualityChanged |= sample.flags != flags;
+    sample.flags = flags;
+    if (sample.qualityChanged || sample.publishedFlags != flags) {
+      publish(tag, sample);
+    }
+  };
   const auto readPlanMode = config.has_read_plan() ? config.read_plan().mode() : ModbusRTUProto::READ_PLAN_MODE_POINT;
   const bool useExplicitPlan = (readPlanMode == ModbusRTUProto::READ_PLAN_MODE_EXPLICIT &&
                                 config.read_plan().blocks_size() > 0);
@@ -2463,6 +2591,7 @@ void LinkManager::pollLoop(std::string connName,
         uint32_t address = point.address;
         if (config.address_base() == ModbusRTUProto::ADDRESS_BASE_ONE) {
           if (address == 0) {
+            rejectSample(point.tag, kSampleInvalid);
             updateLastError(connName, "address_base=ONE 但 address 为 0");
             LOG_WARNING("ModbusRTU 点表地址非法: conn_name={}, tag={}, address=0", connName, point.tag);
             continue;
@@ -2471,16 +2600,18 @@ void LinkManager::pollLoop(std::string connName,
         }
 
         grpc::Status status;
+        bool pointDecodeFailed = false;
+        const auto decodeEngineering = [&](int64_t raw, Decimal20* out) {
+          const auto result = assignEngineeringFromRaw(raw, point.scale, point.offset, out);
+          pointDecodeFailed = !result.ok();
+          return result;
+        };
         if (point.function == ModbusRTUProto::FUNCTION_READ_COILS) {
           bool value = false;
           status = bus->ReadCoil(static_cast<uint8_t>(config.device_id()), static_cast<uint16_t>(address), &value);
           if (status.ok()) {
             roundSuccessCount += 1;
-            auto dc = dataCenter_.PublishBool(connId, point.tag, value, DataCenterProto::QUALITY_GOOD, 0);
-            if (!dc.ok()) {
-              updateLastError(connName, dc.error_message());
-              LOG_ERROR("ModbusRTU 发布点值失败: conn_name={}, tag={}, 原因={}", connName, point.tag, dc.error_message());
-            }
+            acceptSample(point.tag, value, point.deadband, sampleTimeMs());
           }
         } else if (point.function == ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS ||
                    point.function == ModbusRTUProto::FUNCTION_READ_INPUT_REGISTERS) {
@@ -2523,6 +2654,7 @@ void LinkManager::pollLoop(std::string connName,
                 }
               }
             } else {
+              pointDecodeFailed = true;
               status = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "寄存器 BOOL 点位 reg_count 不支持");
             }
             if (status.ok()) {
@@ -2536,11 +2668,7 @@ void LinkManager::pollLoop(std::string connName,
                         bitValue);
               // 现场帧已成功接收并解析，通信健康不依赖 DataCenter 上报结果。
               roundSuccessCount += 1;
-              auto dc = dataCenter_.PublishBool(connId, point.tag, bitValue, DataCenterProto::QUALITY_GOOD, 0);
-              if (!dc.ok()) {
-                updateLastError(connName, dc.error_message());
-                LOG_ERROR("ModbusRTU 发布点值失败: conn_name={}, tag={}, 原因={}", connName, point.tag, dc.error_message());
-              }
+              acceptSample(point.tag, bitValue, point.deadband, sampleTimeMs());
             }
           } else if (is16BitRegisterType(point.type)) {
             uint16_t value = 0;
@@ -2562,8 +2690,7 @@ void LinkManager::pollLoop(std::string connName,
                           value,
                           static_cast<int>(point.byteOrder));
                 engValue.emplace();
-                status = assignEngineeringFromRaw(
-                    value, point.scale, point.offset, &*engValue);
+                status = decodeEngineering(value, &*engValue);
                 if (!status.ok()) {
                   engValue.reset();
                 }
@@ -2575,8 +2702,7 @@ void LinkManager::pollLoop(std::string connName,
                           signedValue,
                           static_cast<int>(point.byteOrder));
                 engValue.emplace();
-                status = assignEngineeringFromRaw(
-                    signedValue, point.scale, point.offset, &*engValue);
+                status = decodeEngineering(signedValue, &*engValue);
                 if (!status.ok()) {
                   engValue.reset();
                 }
@@ -2609,8 +2735,7 @@ void LinkManager::pollLoop(std::string connName,
                             static_cast<int>(point.wordOrder),
                             static_cast<int>(point.byteOrder));
                   engValue.emplace();
-                  status = assignEngineeringFromRaw(
-                      raw, point.scale, point.offset, &*engValue);
+                  status = decodeEngineering(raw, &*engValue);
                   if (!status.ok()) {
                     engValue.reset();
                   }
@@ -2625,8 +2750,7 @@ void LinkManager::pollLoop(std::string connName,
                             static_cast<int>(point.wordOrder),
                             static_cast<int>(point.byteOrder));
                   engValue.emplace();
-                  status = assignEngineeringFromRaw(
-                      raw, point.scale, point.offset, &*engValue);
+                  status = decodeEngineering(raw, &*engValue);
                   if (!status.ok()) {
                     engValue.reset();
                   }
@@ -2634,42 +2758,21 @@ void LinkManager::pollLoop(std::string connName,
               }
             }
           } else {
+            pointDecodeFailed = true;
             status = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "寄存器点位类型不支持");
           }
           if (status.ok() && engValue.has_value()) {
             // 工程量换算成功即视为有效抄读，死区过滤不影响通信健康统计。
             roundSuccessCount += 1;
-            std::optional<Decimal20> last;
-            auto lastIt = lastReportedByTag.find(point.tag);
-            if (lastIt != lastReportedByTag.end()) {
-              last = lastIt->second;
-            }
-            if (last.has_value() &&
-                !mskdsp::numeric::ShouldReport(
-                    *engValue, *last, point.deadband)) {
-              LOG_DEBUG("ModbusRTU 死区过滤上报: conn_name={}, tag={}, 当前值={}, 上次值={}, 死区={}",
-                        connName,
-                        point.tag,
-                        engValue->ToString(),
-                        last->ToString(),
-                        point.deadband.ToString());
-              continue;
-            }
-            auto dc = dataCenter_.PublishDecimal(
-                connId, point.tag, engValue->ToFixedString(),
-                DataCenterProto::QUALITY_GOOD, 0);
-            if (!dc.ok()) {
-              updateLastError(connName, dc.error_message());
-              LOG_ERROR("ModbusRTU 发布点值失败: conn_name={}, tag={}, 原因={}", connName, point.tag, dc.error_message());
-            } else {
-              lastReportedByTag[point.tag] = *engValue;
-            }
+            acceptSample(point.tag, *engValue, point.deadband, sampleTimeMs());
           }
         } else {
+          pointDecodeFailed = true;
           status = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "不支持的功能码");
         }
 
         if (!status.ok()) {
+          rejectSample(point.tag, pointDecodeFailed ? kSampleInvalid : readFailureFlags(status));
           updateLastError(connName, status.error_message());
           LOG_WARNING("ModbusRTU 轮询点失败: conn_name={}, tag={}, 原因={}", connName, point.tag, status.error_message());
         }
@@ -2809,8 +2912,10 @@ void LinkManager::pollLoop(std::string connName,
         pollingErrorRevision = it->second.pollingErrorRevision;
       }
     }
-    std::unordered_set<std::string> processedTags;
-    processedTags.reserve(registerPoints.size());
+    // 本轮同一标签有成功样本时，优先使用它，避免重叠区间误发坏品质。
+    std::unordered_set<std::string> successfulTags;
+    std::unordered_map<std::string, uint32_t> failures;
+    successfulTags.reserve(registerPoints.size());
 
     for (const auto& block : config.read_plan().blocks()) {
       if (stopToken.stop_requested()) {
@@ -2841,6 +2946,16 @@ void LinkManager::pollLoop(std::string connName,
         start -= 1;
       }
 
+      const uint32_t end = start + block.quantity() - 1;
+      const auto isCovered = [&](const NormalizedPoint& point) {
+        return point.function == block.function() && point.address >= start &&
+               (point.address + point.regCount - 1) <= end;
+      };
+      const auto markBlockFailed = [&](uint32_t flags) {
+        for (const auto& point : registerPoints) {
+          if (isCovered(point)) failures[point.tag] |= flags;
+        }
+      };
       LOG_DEBUG("ModbusRTU 轮询区间抄读: conn_name={}, start={}, quantity={}",
                 connName,
                 start,
@@ -2857,6 +2972,7 @@ void LinkManager::pollLoop(std::string connName,
                                       static_cast<uint16_t>(block.quantity()),
                                       &values);
       if (!status.ok()) {
+        markBlockFailed(readFailureFlags(status));
         updateLastError(connName, status.error_message());
         LOG_WARNING("ModbusRTU 轮询区间抄读失败: conn_name={}, start={}, quantity={}, 原因={}",
                     connName,
@@ -2866,6 +2982,7 @@ void LinkManager::pollLoop(std::string connName,
         continue;
       }
       if (values.size() != block.quantity()) {
+        markBlockFailed(kSampleNotTopical);
         updateLastError(connName, std::string(registerName) + "响应数量异常");
         LOG_WARNING("ModbusRTU 轮询区间响应数量异常: conn_name={}, start={}, quantity={}, 实际={}",
                     connName,
@@ -2875,16 +2992,13 @@ void LinkManager::pollLoop(std::string connName,
         continue;
       }
 
+      const auto tsMs = sampleTimeMs();
       size_t matchedPoints = 0;
-      const uint32_t end = start + block.quantity() - 1;
       for (const auto& point : registerPoints) {
-        if (point.function != block.function()) {
+        if (!isCovered(point)) {
           continue;
         }
-        if (point.address < start || (point.address + point.regCount - 1) > end) {
-          continue;
-        }
-        if (!processedTags.insert(point.tag).second) {
+        if (successfulTags.contains(point.tag)) {
           LOG_WARNING("ModbusRTU 显式抄读区间重叠: conn_name={}, tag={} 已被重复抄读",
                       connName,
                       point.tag);
@@ -2897,6 +3011,7 @@ void LinkManager::pollLoop(std::string connName,
           uint32_t raw = 0;
           if (point.regCount == 1) {
             if (offset >= values.size()) {
+              failures[point.tag] |= kSampleInvalid;
               updateLastError(connName, std::string(registerName) + "地址溢出");
               LOG_WARNING("ModbusRTU 轮询区间解码越界: conn_name={}, tag={}, offset={}",
                           connName,
@@ -2911,6 +3026,7 @@ void LinkManager::pollLoop(std::string connName,
             raw = value;
           } else if (point.regCount == 2) {
             if (offset + 1 >= values.size()) {
+              failures[point.tag] |= kSampleInvalid;
               updateLastError(connName, std::string(registerName) + "地址溢出");
               LOG_WARNING("ModbusRTU 轮询区间解码越界: conn_name={}, tag={}, offset={}",
                           connName,
@@ -2920,6 +3036,7 @@ void LinkManager::pollLoop(std::string connName,
             }
             raw = decodeUint32(values[offset], values[offset + 1], point.wordOrder, point.byteOrder);
           } else {
+            failures[point.tag] |= kSampleInvalid;
             updateLastError(connName, "寄存器 BOOL 点位 reg_count 不支持");
             LOG_WARNING("ModbusRTU 轮询区间寄存器BOOL点位 reg_count 不支持: conn_name={}, tag={}", connName, point.tag);
             continue;
@@ -2932,17 +3049,15 @@ void LinkManager::pollLoop(std::string connName,
                     point.bitIndex.has_value() ? std::to_string(point.bitIndex.value()) : "-",
                     point.enumValue.has_value() ? std::to_string(point.enumValue.value()) : "-",
                     bitValue);
-          auto dc = dataCenter_.PublishBool(connId, point.tag, bitValue, DataCenterProto::QUALITY_GOOD, 0);
-          if (!dc.ok()) {
-            updateLastError(connName, dc.error_message());
-            LOG_ERROR("ModbusRTU 发布点值失败: conn_name={}, tag={}, 原因={}", connName, point.tag, dc.error_message());
-          }
+          acceptSample(point.tag, bitValue, point.deadband, tsMs);
+          successfulTags.insert(point.tag);
           matchedPoints += 1;
           roundSuccessCount += 1;
           continue;
         }
         if (point.type == ModbusRTUProto::DATA_TYPE_UINT16) {
           if (offset >= values.size()) {
+            failures[point.tag] |= kSampleInvalid;
             updateLastError(connName, std::string(registerName) + "地址溢出");
             LOG_WARNING("ModbusRTU 轮询区间解码越界: conn_name={}, tag={}, offset={}",
                         connName,
@@ -2962,6 +3077,7 @@ void LinkManager::pollLoop(std::string connName,
           status = assignEngineeringFromRaw(
               value, point.scale, point.offset, &engValue);
           if (!status.ok()) {
+            failures[point.tag] |= kSampleInvalid;
             updateLastError(connName, status.error_message());
             LOG_WARNING("ModbusRTU 轮询区间工程量换算失败: conn_name={}, tag={}, 原因={}",
                         connName, point.tag, status.error_message());
@@ -2969,6 +3085,7 @@ void LinkManager::pollLoop(std::string connName,
           }
         } else if (point.type == ModbusRTUProto::DATA_TYPE_INT16) {
           if (offset >= values.size()) {
+            failures[point.tag] |= kSampleInvalid;
             updateLastError(connName, std::string(registerName) + "地址溢出");
             LOG_WARNING("ModbusRTU 轮询区间解码越界: conn_name={}, tag={}, offset={}",
                         connName,
@@ -2985,6 +3102,7 @@ void LinkManager::pollLoop(std::string connName,
           status = assignEngineeringFromRaw(
               value, point.scale, point.offset, &engValue);
           if (!status.ok()) {
+            failures[point.tag] |= kSampleInvalid;
             updateLastError(connName, status.error_message());
             LOG_WARNING("ModbusRTU 轮询区间工程量换算失败: conn_name={}, tag={}, 原因={}",
                         connName, point.tag, status.error_message());
@@ -2992,6 +3110,7 @@ void LinkManager::pollLoop(std::string connName,
           }
         } else if (point.type == ModbusRTUProto::DATA_TYPE_UINT32) {
           if (offset + 1 >= values.size()) {
+            failures[point.tag] |= kSampleInvalid;
             updateLastError(connName, std::string(registerName) + "地址溢出");
             LOG_WARNING("ModbusRTU 轮询区间解码越界: conn_name={}, tag={}, offset={}",
                         connName,
@@ -3013,6 +3132,7 @@ void LinkManager::pollLoop(std::string connName,
           status = assignEngineeringFromRaw(
               raw, point.scale, point.offset, &engValue);
           if (!status.ok()) {
+            failures[point.tag] |= kSampleInvalid;
             updateLastError(connName, status.error_message());
             LOG_WARNING("ModbusRTU 轮询区间工程量换算失败: conn_name={}, tag={}, 原因={}",
                         connName, point.tag, status.error_message());
@@ -3020,6 +3140,7 @@ void LinkManager::pollLoop(std::string connName,
           }
         } else if (point.type == ModbusRTUProto::DATA_TYPE_INT32) {
           if (offset + 1 >= values.size()) {
+            failures[point.tag] |= kSampleInvalid;
             updateLastError(connName, std::string(registerName) + "地址溢出");
             LOG_WARNING("ModbusRTU 轮询区间解码越界: conn_name={}, tag={}, offset={}",
                         connName,
@@ -3041,12 +3162,14 @@ void LinkManager::pollLoop(std::string connName,
           status = assignEngineeringFromRaw(
               raw, point.scale, point.offset, &engValue);
           if (!status.ok()) {
+            failures[point.tag] |= kSampleInvalid;
             updateLastError(connName, status.error_message());
             LOG_WARNING("ModbusRTU 轮询区间工程量换算失败: conn_name={}, tag={}, 原因={}",
                         connName, point.tag, status.error_message());
             continue;
           }
         } else {
+          failures[point.tag] |= kSampleInvalid;
           updateLastError(connName, "寄存器点位类型不支持");
           LOG_WARNING("ModbusRTU 轮询区间点位类型不支持: conn_name={}, tag={}", connName, point.tag);
           continue;
@@ -3054,31 +3177,8 @@ void LinkManager::pollLoop(std::string connName,
         // 工程量已成功解析，平台上报或死区过滤不影响现场通信健康统计。
         matchedPoints += 1;
         roundSuccessCount += 1;
-        std::optional<Decimal20> last;
-        auto lastIt = lastReportedByTag.find(point.tag);
-        if (lastIt != lastReportedByTag.end()) {
-          last = lastIt->second;
-        }
-        if (last.has_value() &&
-            !mskdsp::numeric::ShouldReport(
-                engValue, *last, point.deadband)) {
-          LOG_DEBUG("ModbusRTU 死区过滤上报: conn_name={}, tag={}, 当前值={}, 上次值={}, 死区={}",
-                    connName,
-                    point.tag,
-                    engValue.ToString(),
-                    last->ToString(),
-                    point.deadband.ToString());
-          continue;
-        }
-        auto dc = dataCenter_.PublishDecimal(
-            connId, point.tag, engValue.ToFixedString(),
-            DataCenterProto::QUALITY_GOOD, 0);
-        if (!dc.ok()) {
-          updateLastError(connName, dc.error_message());
-          LOG_ERROR("ModbusRTU 发布点值失败: conn_name={}, tag={}, 原因={}", connName, point.tag, dc.error_message());
-        } else {
-          lastReportedByTag[point.tag] = engValue;
-        }
+        acceptSample(point.tag, engValue, point.deadband, tsMs);
+        successfulTags.insert(point.tag);
       }
 
       if (matchedPoints == 0) {
@@ -3087,6 +3187,10 @@ void LinkManager::pollLoop(std::string connName,
                   start,
                   block.quantity());
       }
+    }
+
+    for (const auto& [tag, flags] : failures) {
+      if (!successfulTags.contains(tag)) rejectSample(tag, flags);
     }
 
     for (const auto& point : coilPoints) {
@@ -3099,12 +3203,9 @@ void LinkManager::pollLoop(std::string connName,
                                   &value);
       if (status.ok()) {
         roundSuccessCount += 1;
-        auto dc = dataCenter_.PublishBool(connId, point.tag, value, DataCenterProto::QUALITY_GOOD, 0);
-        if (!dc.ok()) {
-          updateLastError(connName, dc.error_message());
-          LOG_ERROR("ModbusRTU 发布点值失败: conn_name={}, tag={}, 原因={}", connName, point.tag, dc.error_message());
-        }
+        acceptSample(point.tag, value, point.deadband, sampleTimeMs());
       } else {
+        rejectSample(point.tag, readFailureFlags(status));
         updateLastError(connName, status.error_message());
         LOG_WARNING("ModbusRTU 轮询点失败: conn_name={}, tag={}, 原因={}", connName, point.tag, status.error_message());
       }

@@ -46,18 +46,6 @@ DataCenterProto::Quality toDataCenterQuality(uint8_t qds) {
   return DataCenterProto::QUALITY_UNCERTAIN;
 }
 
-uint8_t toIec104Quality(DataCenterProto::Quality q) {
-  switch (q) {
-  case DataCenterProto::QUALITY_GOOD:
-    return kIec104QualityGood;
-  case DataCenterProto::QUALITY_BAD:
-  case DataCenterProto::QUALITY_UNCERTAIN:
-  case DataCenterProto::QUALITY_UNSPECIFIED:
-  default:
-  return kIec104QualityInvalid;
-}
-}
-
 bool applyScale(double raw,
                 const mskdsp::numeric::Decimal20& scale,
                 const mskdsp::numeric::Decimal20& offset,
@@ -363,10 +351,10 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, Li
           if (baseline != linkIt->second.lastReportedSingleByTag.end()) {
             last = baseline->second;
           }
-          if (detail::ShouldReportSoe(fixed->boolValue, DataCenterProto::QUALITY_GOOD, last) &&
+          if (detail::ShouldReportSoe(fixed->boolValue, DataCenterProto::QUALITY_GOOD, last, fixed->quality) &&
               storeAndSendSoe(connName, *fixed, transport)) {
             linkIt->second.lastReportedSingleByTag[update.dst_tag()] =
-                detail::LastReportedSinglePoint{fixed->boolValue, DataCenterProto::QUALITY_GOOD};
+                detail::LastReportedSinglePoint{fixed->boolValue, DataCenterProto::QUALITY_GOOD, fixed->quality};
           }
         } else {
           transport->SendPointValue(*fixed, kCotSpontaneous);
@@ -390,7 +378,8 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, Li
         if (lastIt != lastSentByTag.end()) {
           last = lastIt->second;
         }
-        if (!detail::ShouldReportTelemetry(value, it->second.deadband, update.quality(), update.ts_ms(), last)) {
+        const auto wireQuality = detail::ExplicitWireQuality(update, detail::kMeasuredValueQualityMask);
+        if (!detail::ShouldReportTelemetry(value, it->second.deadband, update.quality(), update.ts_ms(), last, wireQuality)) {
           LOG_DEBUG("IEC104 死区过滤上送: conn_name={}, tag={}, value={}, last={}, 品质={}, ts_ms={}, 死区={}",
                     connName,
                     update.dst_tag(),
@@ -411,13 +400,14 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, Li
         pv.ioa = it->second.ioa;
         pv.type = IEC104Proto::POINT_TYPE_FLOAT;
         pv.doubleValue = rawValue;
-        pv.quality = toIec104Quality(update.quality());
+        pv.quality = detail::WireQuality(update.quality(), wireQuality);
         pv.tsMs = update.ts_ms();
         transport->SendPointValue(pv, kCotSpontaneous);
         lastSentByTag[update.dst_tag()] = detail::LastReportedTelemetry{
             .value = value,
             .quality = update.quality(),
             .tsMs = update.ts_ms(),
+            .wireQuality = wireQuality,
         };
       } else if (it->second.type == IEC104Proto::POINT_TYPE_SINGLE) {
         bool value = false;
@@ -428,7 +418,8 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, Li
         // 遥信 SOE 只在变位（状态或品质变化）时形成事件：上游按轮询周期重复发布同一个值
         // 不构成变位，否则会持续上送同值并击穿 SOE 容量、刷满主站与日志。
         auto lastSoe = lastReportedSinglePoint(connName, update.dst_tag());
-        if (!detail::ShouldReportSoe(value, update.quality(), lastSoe)) {
+        const auto wireQuality = detail::ExplicitWireQuality(update, detail::kSinglePointQualityMask);
+        if (!detail::ShouldReportSoe(value, update.quality(), lastSoe, wireQuality)) {
           LOG_DEBUG("IEC104 遥信未变位过滤上送: conn_name={}, tag={}, ioa={}, 状态={}, 品质={}, 基线状态={}, 基线品质={}",
                     connName,
                     update.dst_tag(),
@@ -443,19 +434,20 @@ void LinkManager::startDataCenterSubscribeLocked(const std::string& connName, Li
         pv.ioa = it->second.ioa;
         pv.type = IEC104Proto::POINT_TYPE_SINGLE;
         pv.boolValue = value;
-        pv.quality = toIec104Quality(update.quality());
+        pv.quality = detail::WireQuality(update.quality(), wireQuality);
         pv.tsMs = update.ts_ms();
         if (!storeAndSendSoe(connName, pv, transport)) {
           // 落盘失败时不更新变位基线，下一次更新仍按变位重试上送。
           continue;
         }
-        rememberReportedSinglePoint(connName, update.dst_tag(), value, update.quality());
-        LOG_DEBUG("IEC104 遥信变位形成 SOE: conn_name={}, tag={}, ioa={}, 状态={}, 品质={}, 首次={}",
+        rememberReportedSinglePoint(connName, update.dst_tag(), value, update.quality(), wireQuality);
+        LOG_DEBUG("IEC104 遥信变位形成 SOE: conn_name={}, tag={}, ioa={}, 状态={}, 品质={}, 报文品质=0x{:02X}, 首次={}",
                   connName,
                   update.dst_tag(),
                   it->second.ioa,
                   value ? "合" : "分",
                   static_cast<int>(update.quality()),
+                  static_cast<int>(pv.quality),
                   lastSoe.has_value() ? "否" : "是");
       }
     }
@@ -499,7 +491,8 @@ std::optional<detail::LastReportedSinglePoint> LinkManager::lastReportedSinglePo
 void LinkManager::rememberReportedSinglePoint(const std::string& connName,
                                               const std::string& tag,
                                               bool value,
-                                              DataCenterProto::Quality quality) {
+                                              DataCenterProto::Quality quality,
+                                              std::optional<uint8_t> wireQuality) {
   std::lock_guard<std::mutex> lock(mu_);
   auto it = linksByName_.find(connName);
   if (it == linksByName_.end()) {
@@ -508,6 +501,7 @@ void LinkManager::rememberReportedSinglePoint(const std::string& connName,
   it->second.lastReportedSingleByTag[tag] = detail::LastReportedSinglePoint{
       .value = value,
       .quality = quality,
+      .wireQuality = wireQuality,
   };
 }
 
@@ -1109,7 +1103,8 @@ std::vector<PointValue> LinkManager::buildInterrogationSnapshot(
       mv.ioa = it->second.ioa;
       mv.type = IEC104Proto::POINT_TYPE_FLOAT;
       mv.doubleValue = rawValue;
-      mv.quality = toIec104Quality(update.quality());
+      mv.quality = detail::WireQuality(
+          update.quality(), detail::ExplicitWireQuality(update, detail::kMeasuredValueQualityMask));
       mv.tsMs = update.ts_ms();
       valuesByTag[update.dst_tag()] = std::move(mv);
     } else if (it->second.type == IEC104Proto::POINT_TYPE_SINGLE) {
@@ -1121,7 +1116,8 @@ std::vector<PointValue> LinkManager::buildInterrogationSnapshot(
       pv.ioa = it->second.ioa;
       pv.type = IEC104Proto::POINT_TYPE_SINGLE;
       pv.boolValue = value;
-      pv.quality = toIec104Quality(update.quality());
+      pv.quality = detail::WireQuality(
+          update.quality(), detail::ExplicitWireQuality(update, detail::kSinglePointQualityMask));
       pv.tsMs = update.ts_ms();
       valuesByTag[update.dst_tag()] = std::move(pv);
     }
@@ -1219,7 +1215,8 @@ std::vector<PointValue> LinkManager::buildActivationSnapshot(const std::string& 
       return initial->second.has_value();
     }
     return !initial->second || current->second.value != initial->second->value ||
-        current->second.quality != initial->second->quality;
+        current->second.quality != initial->second->quality ||
+        current->second.wireQuality != initial->second->wireQuality;
   });
   for (const auto& value : snapshot) {
     const auto point = it->second.pointTable.FindByIoa(value.ioa);
@@ -1228,7 +1225,7 @@ std::vector<PointValue> LinkManager::buildActivationSnapshot(const std::string& 
     }
     if (value.type == IEC104Proto::POINT_TYPE_SINGLE) {
       it->second.lastReportedSingleByTag[point->tag] =
-          detail::LastReportedSinglePoint{value.boolValue, toDataCenterQuality(value.quality)};
+          detail::LastReportedSinglePoint{value.boolValue, toDataCenterQuality(value.quality), value.quality};
     }
     // 解除固定的恢复点持续保留到下一次点表更新，重连时再次恢复最新真实值。
     LOG_INFO("IEC104 从站激活快照已准备: conn_name={}, tag={}, ioa={}, 固定值模式={}",
@@ -1629,6 +1626,7 @@ grpc::Status LinkManager::sendSimulationValuesLocked(const std::string& connName
     link.lastReportedSingleByTag[point->tag] = detail::LastReportedSinglePoint{
         .value = pv.boolValue,
         .quality = toDataCenterQuality(pv.quality),
+        .wireQuality = pv.quality,
     };
     ++singleCount;
     LOG_INFO("IEC104 模拟遥信已提交不带时标发送并更新变位基线: conn_name={}, tag={}, ioa={}, 状态={}", connName, point->tag, pv.ioa, pv.boolValue ? "合" : "分");

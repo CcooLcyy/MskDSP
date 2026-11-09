@@ -534,7 +534,7 @@ grpc::Status SerialBus::readResponseLocked(
     if (crc != respCrc) {
       return grpc::Status(grpc::StatusCode::UNAVAILABLE, "异常响应 CRC 不匹配");
     }
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("Modbus 异常: {}", header[2]));
+    return MakeReadExceptionStatus(header[2]);
   }
 
   if (function != expectedFunction) {

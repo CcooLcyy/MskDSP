@@ -684,6 +684,39 @@ TEST(IEC104LinkManagerHelperTest, ActivationDoesNotRollbackLiveSingleBaseline) {
   EXPECT_TRUE(baseline->value);
 }
 
+// 验证：恢复快照查询期间即使遥信数值和摘要不变，实时品质位变化仍阻止旧快照倒退。
+TEST(IEC104LinkManagerHelperTest, ActivationDoesNotRollbackLiveWireQuality) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(stub);
+  LinkManager::LinkRuntime runtime;
+  runtime.connId = 7;
+  runtime.config = MakeClientConfig("released-quality", IEC104Proto::STATION_ROLE_SLAVE);
+  runtime.pointTable = MakePointTable();
+  runtime.fixedRefreshTags.insert("single-tag");
+  runtime.lastReportedSingleByTag["single-tag"] = {
+      true, DataCenterProto::QUALITY_UNCERTAIN, 0x40};
+  mgr.linksByName_.emplace("released-quality", std::move(runtime));
+  EXPECT_CALL(*stub, GetLatest(::testing::_, ::testing::_, ::testing::_))
+      .WillOnce(::testing::Invoke([&](grpc::ClientContext*,
+                                     const DataCenterProto::GetLatestRequest&,
+                                     DataCenterProto::GetLatestResponse* response) {
+        mgr.rememberReportedSinglePoint(
+            "released-quality", "single-tag", true, DataCenterProto::QUALITY_UNCERTAIN, 0x20);
+        auto* update = response->add_updates();
+        update->set_dst_tag("single-tag");
+        update->mutable_value()->set_bool_value(true);
+        update->set_quality(DataCenterProto::QUALITY_UNCERTAIN);
+        update->set_quality_flags(0x40);
+        return grpc::Status::OK;
+      }));
+  EXPECT_TRUE(mgr.buildActivationSnapshot("released-quality").empty());
+  const auto baseline = mgr.lastReportedSinglePoint("released-quality", "single-tag");
+  ASSERT_TRUE(baseline.has_value());
+  EXPECT_EQ(baseline->wireQuality, 0x20);
+}
+
 // 验证：重连时已有但未被实时订阅推进的遥信基线不阻止主动恢复最新真实快照。
 TEST(IEC104LinkManagerHelperTest, ActivationRestoresLatestSingleWithUnchangedExistingBaseline) {
   FakeDataCenterState state;
@@ -701,17 +734,19 @@ TEST(IEC104LinkManagerHelperTest, ActivationRestoresLatestSingleWithUnchangedExi
   publish.set_tag("single-tag");
   publish.mutable_value()->set_bool_value(false);
   publish.set_quality(DataCenterProto::QUALITY_BAD);
+  publish.set_quality_flags(0xC0);
   publish.set_ts_ms(4321);
   ASSERT_TRUE(state.Publish(publish).ok());
   const auto snapshot = mgr.buildActivationSnapshot("released");
   ASSERT_EQ(snapshot.size(), 1);
   EXPECT_FALSE(snapshot.front().boolValue);
-  EXPECT_EQ(snapshot.front().quality, 0x80);
+  EXPECT_EQ(snapshot.front().quality, 0xC0);
   EXPECT_EQ(snapshot.front().tsMs, 4321);
   const auto baseline = mgr.lastReportedSinglePoint("released", "single-tag");
   ASSERT_TRUE(baseline.has_value());
   EXPECT_FALSE(baseline->value);
   EXPECT_EQ(baseline->quality, DataCenterProto::QUALITY_BAD);
+  EXPECT_EQ(baseline->wireQuality, 0xC0);
 }
 
 // 验证：解除固定并更换标签仍按同一 IOA 主动恢复，转为非上报业务后清除恢复标记。
@@ -804,6 +839,22 @@ TEST(IEC104ReportPolicyTest, DecimalValueAtDeadbandBoundaryReports) {
 
   EXPECT_TRUE(IEC104::detail::ShouldReportTelemetry(
       current, deadband, DataCenterProto::QUALITY_GOOD, 100, last));
+}
+
+// 验证：遥测值及时标相同，实际品质位变化仍绕过死区，同品质时继续按死区过滤。
+TEST(IEC104ReportPolicyTest, TelemetryWireQualityChangeBypassesDeadband) {
+  const IEC104::detail::LastReportedTelemetry last{
+      .value = mskdsp::numeric::Decimal20::Parse("100").value(),
+      .quality = DataCenterProto::QUALITY_UNCERTAIN,
+      .tsMs = 1000,
+      .wireQuality = 0x40,
+  };
+  EXPECT_TRUE(IEC104::detail::ShouldReportTelemetry(
+      100.0, 1.0, DataCenterProto::QUALITY_UNCERTAIN, 1000, last, 0x20));
+  EXPECT_FALSE(IEC104::detail::ShouldReportTelemetry(
+      100.0, 1.0, DataCenterProto::QUALITY_UNCERTAIN, 1000, last, 0x40));
+  EXPECT_TRUE(IEC104::detail::ShouldReportTelemetry(
+      100.0, 1.0, DataCenterProto::QUALITY_GOOD, 1000, last, 0));
 }
 
 // 验证：遥信无历史基线时（例如链路启动后的第一条更新）必须形成 SOE 事件。
@@ -1261,6 +1312,50 @@ TEST(IEC104LinkManagerHelperTest, HandleTimeSyncCommandRejectsSystemClockFailure
   EXPECT_EQ(requestedTsMs, 1710000000123);
   EXPECT_EQ(state.GetPublishCount(9, "__time_sync__"), 0u);
   EXPECT_EQ(state.GetFailedPublishCount(9, "__time_sync__"), 0u);
+}
+
+// 验证：总召省略无样本点，按信息对象类型筛选明细品质，并在新样本显式清零后恢复。
+TEST(IEC104LinkManagerHelperTest, InterrogationMapsExplicitQualityByPointType) {
+  FakeDataCenterState state;
+  LinkManager mgr("IEC104");
+  mgr.setDataCenterStub(MakeStub(&state));
+  LinkManager::LinkRuntime runtime;
+  runtime.connId = 7;
+  runtime.config = MakeClientConfig("quality-flags", IEC104Proto::STATION_ROLE_SLAVE);
+  runtime.pointTable = MakePointTable();
+  mgr.linksByName_.emplace("quality-flags", std::move(runtime));
+  EXPECT_TRUE(mgr.buildInterrogationSnapshot("quality-flags").empty());
+
+  DataCenterProto::PublishRequest telemetry;
+  telemetry.set_conn_id(7);
+  telemetry.set_tag("float-tag");
+  telemetry.mutable_value()->set_double_value(201.0);
+  telemetry.set_ts_ms(1000);
+  telemetry.set_quality_flags(0x800000FFu);
+  ASSERT_TRUE(state.Publish(telemetry).ok());
+  DataCenterProto::PublishRequest indication;
+  indication.set_conn_id(7);
+  indication.set_tag("single-tag");
+  indication.mutable_value()->set_bool_value(true);
+  indication.set_ts_ms(1000);
+  indication.set_quality_flags(0x800000FFu);
+  ASSERT_TRUE(state.Publish(indication).ok());
+  const auto snapshot = mgr.buildInterrogationSnapshot(
+      "quality-flags", {"float-tag", "single-tag", "float-tag-2"});
+  ASSERT_EQ(snapshot.size(), 2u);
+  EXPECT_EQ(snapshot[0].ioa, 100u);
+  EXPECT_DOUBLE_EQ(snapshot[0].doubleValue, 100.0);
+  EXPECT_EQ(snapshot[0].quality, 0xF1);
+  EXPECT_EQ(snapshot[0].tsMs, 1000);
+  EXPECT_EQ(snapshot[1].ioa, 200u);
+  EXPECT_TRUE(snapshot[1].boolValue);
+  EXPECT_EQ(snapshot[1].quality, 0xF0);
+
+  telemetry.set_quality_flags(0);
+  ASSERT_TRUE(state.Publish(telemetry).ok());
+  const auto restored = mgr.buildInterrogationSnapshot("quality-flags", {"float-tag"});
+  ASSERT_EQ(restored.size(), 1u);
+  EXPECT_EQ(restored.front().quality, 0);
 }
 
 // 验证：buildInterrogationSnapshot 能根据最新值生成快照并处理异常数据。

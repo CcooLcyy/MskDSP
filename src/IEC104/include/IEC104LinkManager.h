@@ -182,7 +182,8 @@ private:
                                                                         const std::string &tag) const;
   // 记录某条链路某 tag 本次已成功上送的遥信状态，作为下一次变位判定的基线。
   void rememberReportedSinglePoint(const std::string &connName, const std::string &tag, bool value,
-                                   DataCenterProto::Quality quality);
+                                   DataCenterProto::Quality quality,
+                                   std::optional<uint8_t> wireQuality = std::nullopt);
   grpc::Status fillSimulationSnapshotLocked(const LinkRuntime &link, IEC104Proto::SimulationSnapshot *out) const;
   grpc::Status sendSimulationValuesLocked(const std::string &connName, LinkRuntime &link, bool activeOnly);
   bool simulationPeriodicReadyLocked(const LinkRuntime &link) const;

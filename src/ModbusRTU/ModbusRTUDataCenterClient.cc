@@ -270,6 +270,22 @@ grpc::Status DataCenterClient::PublishDecimal(
   return stub->Publish(&ctx, req, &resp);
 }
 
+grpc::Status DataCenterClient::PublishSample(const DataCenterProto::PublishRequest& request) {
+  auto stub = getStub();
+  grpc::ClientContext context;
+  context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(1));
+  DataCenterProto::Empty response;
+  return stub->Publish(&context, request, &response);
+}
+
+grpc::Status DataCenterClient::PublishSamples(const DataCenterProto::BatchPublishRequest& request) {
+  auto stub = getStub();
+  grpc::ClientContext context;
+  context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(1));
+  DataCenterProto::Empty response;
+  return stub->BatchPublish(&context, request, &response);
+}
+
 std::unique_ptr<grpc::ClientReaderInterface<DataCenterProto::PointUpdate>> DataCenterClient::Subscribe(
     grpc::ClientContext* context, uint32_t connId, const std::vector<std::string>& tags, bool snapshot) {
   if (context == nullptr) {

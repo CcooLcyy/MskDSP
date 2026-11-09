@@ -1227,6 +1227,45 @@ TEST(IEC104LinkManagerTest, RepeatedUnchangedSinglePointFormsSingleSoe) {
   EXPECT_EQ(state.GetSubscriptionCount(info.conn_id()), 0u);
 }
 
+// 验证：同值遥信按实际品质位形成 SOE，未支持的位变化不重复落盘，显式零恢复正常。
+TEST(IEC104LinkManagerTest, SinglePointWireQualityChangeFormsSoe) {
+  ScopedTempDir dir;
+  FakeDataCenterState state;
+  auto progress = std::make_shared<SubscriptionProgress>();
+  LinkManager mgr("IEC104", dir.path() / "config.db");
+  mgr.setDataCenterStub(MakeProcessingAwareStub(&state, progress));
+
+  const auto req = MakeServerLinkReq("conn-soe-quality", "0.0.0.0", AllocateFreeTcpPort());
+  IEC104Proto::LinkInfo info;
+  ASSERT_TRUE(mgr.UpsertLink(req, &info).ok());
+  IEC104Proto::UpsertPointTableRequest points;
+  points.set_conn_name("conn-soe-quality");
+  *points.add_points() = MakeBoolPoint("DI-1", 9);
+  ASSERT_TRUE(mgr.UpsertPointTable(points).ok());
+  ASSERT_TRUE(mgr.StartLink("conn-soe-quality").ok());
+  ASSERT_TRUE(WaitForSubscriptionCreated(state, info.conn_id()));
+
+  const std::vector<uint32_t> flags{0, 0x40, 0x41, 0x20, 0xC0, 0};
+  for (const auto bits : flags) {
+    auto update = MakeSinglePointUpdate(info.conn_id(), "DI-1", true, 1000);
+    update.set_quality_flags(bits);
+    update.set_quality(bits == 0 ? DataCenterProto::QUALITY_GOOD
+        : (bits & 0x80) != 0 ? DataCenterProto::QUALITY_BAD : DataCenterProto::QUALITY_UNCERTAIN);
+    state.DeliverUpdate(update);
+  }
+  ASSERT_TRUE(progress->WaitForProcessed(flags.size()));
+  IEC104Proto::QuerySoeRequest query;
+  query.set_conn_name("conn-soe-quality");
+  IEC104Proto::QuerySoeResponse response;
+  ASSERT_TRUE(mgr.QuerySoe(query, &response).ok());
+  ASSERT_EQ(response.events_size(), 5);
+  const std::vector<uint32_t> expected{0, 0xC0, 0x20, 0x40, 0};
+  for (int i = 0; i < response.events_size(); ++i) {
+    EXPECT_EQ(response.events(i).quality(), expected[i]);
+  }
+  ASSERT_TRUE(mgr.StopLink("conn-soe-quality").ok());
+}
+
 // 验证：遥信真实变位仍形成新的 SOE，变位判定不会吞掉真实事件。
 TEST(IEC104LinkManagerTest, ChangedSinglePointFormsAdditionalSoe) {
   ScopedTempDir dir;

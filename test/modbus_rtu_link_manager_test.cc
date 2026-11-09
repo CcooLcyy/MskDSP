@@ -1267,6 +1267,153 @@ TEST(ModbusRtuLinkManagerTest, PollingReportsExactDecimalAtDeadbandBoundary) {
   responder.request_stop();
 }
 
+
+// 验证：两种抄读方式均保留最近采样值与时间，坏品质重试及同值恢复绕过死区。
+TEST(ModbusRtuLinkManagerTest, PollingQualityRetainsSampleAndRecoversAtSameValue) {
+  for (const auto mode : {ModbusRTUProto::READ_PLAN_MODE_POINT,
+                          ModbusRTUProto::READ_PLAN_MODE_EXPLICIT}) {
+    SCOPED_TRACE(mode);
+    ScopedPseudoTty pty;
+    ASSERT_TRUE(pty.ok()) << pty.error();
+    FakeDataCenterState state;
+    LinkManagerTestEnv env;
+    env.mgr.setDataCenterStub(MakeStub(&state));
+    auto request = MakeMinimalLinkReq("quality", pty.slavePath().c_str(), 1);
+    auto* config = request.mutable_config();
+    config->set_poll_interval_ms(5);
+    config->mutable_serial()->set_read_timeout_ms(100);
+    auto* plan = config->mutable_read_plan();
+    plan->set_mode(mode);
+    if (mode == ModbusRTUProto::READ_PLAN_MODE_EXPLICIT) {
+      auto* block = plan->add_blocks();
+      block->set_function(ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS);
+      block->set_start(10);
+      block->set_quantity(1);
+    }
+    ModbusRTUProto::LinkInfo info;
+    ASSERT_TRUE(env.mgr.UpsertLink(request, &info).ok());
+    ModbusRTUProto::UpsertPointTableRequest points;
+    points.set_conn_name("quality");
+    points.set_replace(true);
+    *points.add_points() = MakeHoldingRegisterPoint("sample", 10);
+    points.mutable_points(0)->set_deadband(10);
+    ASSERT_TRUE(env.mgr.UpsertPointTable(points).ok());
+    ASSERT_TRUE(env.mgr.StartLink("quality").ok());
+
+    std::vector<uint8_t> frame;
+    const auto read = [&] { return pty.readExact(&frame, 8, 1000); };
+    const auto respond = [&](std::vector<uint8_t> response) {
+      ModbusRTU::SerialBus::appendCrc(&response);
+      return pty.writeAll(response);
+    };
+    const auto connId = info.conn_id();
+    const auto wait = [&](size_t count) {
+      return state.WaitForPublishCount(connId, "sample", count, std::chrono::seconds(2));
+    };
+    ASSERT_TRUE(read());  // 首次请求超时，下一请求开始前没有占位值。
+    ASSERT_TRUE(read());
+    EXPECT_EQ(state.GetPublishCount(connId, "sample"), 0u);
+    ASSERT_TRUE(respond({1, 3, 2, 0, 100}));
+    ASSERT_TRUE(wait(1));
+
+    ASSERT_TRUE(read());
+    ASSERT_TRUE(respond({1, 3, 2, 0, 101}));  // 死区内仍应更新最近成功样本。
+    ASSERT_TRUE(read());
+    state.FailPublishForTag("sample");  // 首次坏品质发布失败。
+    ASSERT_TRUE(read());
+    EXPECT_GE(state.GetFailedPublishCount(connId, "sample"), 1u);
+    state.AllowPublishForTag("sample");  // 本次也超时，应该重试 NT。
+    ASSERT_TRUE(wait(2));
+
+    ASSERT_TRUE(read());
+    ASSERT_TRUE(respond({1, 0x83, 2}));
+    ASSERT_TRUE(wait(3));
+    ASSERT_TRUE(read());
+    ASSERT_TRUE(respond({1, 3, 2, 0, 100}));
+    ASSERT_TRUE(wait(4));
+    ASSERT_TRUE(read());
+    std::vector<uint8_t> corruptException{1, 0x83, 2};
+    ModbusRTU::SerialBus::appendCrc(&corruptException);
+    corruptException.back() ^= 0x01;
+    ASSERT_TRUE(pty.writeAll(corruptException));
+    ASSERT_TRUE(wait(5));
+    ASSERT_TRUE(read());
+    ASSERT_TRUE(respond({1, 0x83, 2}));
+    ASSERT_TRUE(wait(6));
+    ASSERT_TRUE(env.mgr.StopLink("quality").ok());
+
+    const auto updates = state.GetPublishedUpdates(connId, "sample");
+    ASSERT_EQ(updates.size(), 6u);  // 停止仍为 IV|NT，无重复发布。
+    const std::vector<uint32_t> expected{0, 0x40, 0xC0, 0, 0x40, 0xC0};
+    for (size_t index = 0; index < expected.size(); ++index) {
+      ASSERT_TRUE(updates[index].has_quality_flags());
+      EXPECT_EQ(updates[index].quality_flags(), expected[index]);
+      EXPECT_GT(updates[index].ts_ms(), 0);
+    }
+    EXPECT_EQ(updates[0].value().decimal_value(), "100.00000000000000000000");
+    EXPECT_EQ(updates[1].value().decimal_value(), "101.00000000000000000000");
+    EXPECT_EQ(updates[2].value().decimal_value(), updates[1].value().decimal_value());
+    EXPECT_EQ(updates[2].ts_ms(), updates[1].ts_ms());
+    EXPECT_GE(updates[1].ts_ms(), updates[0].ts_ms());
+    EXPECT_EQ(updates[3].value().decimal_value(), updates[0].value().decimal_value());
+    EXPECT_EQ(updates[4].ts_ms(), updates[3].ts_ms());
+    EXPECT_EQ(updates[5].ts_ms(), updates[3].ts_ms());
+  }
+}
+
+// 验证：区间失败仅使没有被同轮重叠区间补读的点非当前。
+TEST(ModbusRtuLinkManagerTest, OverlappingBlockSuccessPreventsInvalidQuality) {
+  ScopedPseudoTty pty;
+  ASSERT_TRUE(pty.ok()) << pty.error();
+  FakeDataCenterState state;
+  LinkManagerTestEnv env;
+  env.mgr.setDataCenterStub(MakeStub(&state));
+  auto request = MakeMinimalLinkReq("overlap-quality", pty.slavePath().c_str(), 1);
+  auto* config = request.mutable_config();
+  config->set_poll_interval_ms(5);
+  config->mutable_serial()->set_read_timeout_ms(100);
+  auto* plan = config->mutable_read_plan();
+  plan->set_mode(ModbusRTUProto::READ_PLAN_MODE_EXPLICIT);
+  for (auto address : {10, 11}) {
+    auto* block = plan->add_blocks();
+    block->set_function(ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS);
+    block->set_start(address);
+    block->set_quantity(address == 10 ? 2 : 1);
+  }
+  ModbusRTUProto::LinkInfo info;
+  ASSERT_TRUE(env.mgr.UpsertLink(request, &info).ok());
+  ModbusRTUProto::UpsertPointTableRequest points;
+  points.set_conn_name("overlap-quality");
+  points.set_replace(true);
+  *points.add_points() = MakeHoldingRegisterPoint("first-only", 10);
+  *points.add_points() = MakeHoldingRegisterPoint("shared", 11);
+  for (auto& point : *points.mutable_points()) point.set_deadband(10);
+  ASSERT_TRUE(env.mgr.UpsertPointTable(points).ok());
+  ASSERT_TRUE(env.mgr.StartLink("overlap-quality").ok());
+  std::vector<uint8_t> frame;
+  const auto respond = [&](std::vector<uint8_t> response) {
+    ModbusRTU::SerialBus::appendCrc(&response);
+    return pty.writeAll(response);
+  };
+  ASSERT_TRUE(pty.readExact(&frame, 8, 1000));
+  ASSERT_TRUE(respond({1, 3, 4, 0, 100, 0, 101}));
+  ASSERT_TRUE(pty.readExact(&frame, 8, 1000));
+  ASSERT_TRUE(respond({1, 3, 2, 0, 101}));
+  ASSERT_TRUE(pty.readExact(&frame, 8, 1000));
+  ASSERT_TRUE(respond({1, 0x83, 2}));
+  ASSERT_TRUE(pty.readExact(&frame, 8, 1000));
+  ASSERT_TRUE(respond({1, 3, 2, 0, 101}));
+  const auto connId = info.conn_id();
+  ASSERT_TRUE(state.WaitForPublishCount(connId, "first-only", 2, std::chrono::seconds(2)));
+  const auto first = state.GetPublishedUpdates(connId, "first-only");
+  const auto shared = state.GetPublishedUpdates(connId, "shared");
+  ASSERT_EQ(first.size(), 2u);
+  EXPECT_EQ(first.back().quality_flags(), 0xC0u);
+  ASSERT_EQ(shared.size(), 1u);
+  ASSERT_TRUE(shared.back().has_quality_flags());
+  EXPECT_EQ(shared.back().quality_flags(), 0u);
+}
+
 // 验证：RTU 单点/区间读取在字节和字序归一化后发布枚举 BOOL，兼容 0x03/0x04 与 16/32 位。
 TEST(ModbusRtuLinkManagerTest, PollsEnumBoolInPointAndExplicitModes) {
   for (auto mode : {ModbusRTUProto::READ_PLAN_MODE_POINT, ModbusRTUProto::READ_PLAN_MODE_EXPLICIT}) {
@@ -2060,6 +2207,7 @@ TEST(ModbusRtuLinkManagerTest, CommunicationStateHeartbeatRecoversInBothReadMode
     state.AllowPublishForTag("__communication_state");
     const auto baseline = state.GetPublishCount(info.conn_id(), "__communication_state");
     ASSERT_TRUE(state.WaitForPublishCount(info.conn_id(), "__communication_state", baseline + 3, std::chrono::seconds(2)));
+    EXPECT_EQ(state.GetPublishCount(info.conn_id(), "constant-value"), 1u);
     ASSERT_TRUE(mgr.StopLink("communication-heartbeat").ok());
     responder.request_stop();
     const auto updates = state.GetPublishedUpdates(info.conn_id(), "__communication_state");
@@ -2072,7 +2220,12 @@ TEST(ModbusRtuLinkManagerTest, CommunicationStateHeartbeatRecoversInBothReadMode
       if (update.value().int_value() == 1) ++healthy;
     }
     EXPECT_GE(healthy, 3);
-    EXPECT_EQ(state.GetPublishCount(info.conn_id(), "constant-value"), 1);
+    const auto pointUpdates = state.GetPublishedUpdates(info.conn_id(), "constant-value");
+    ASSERT_EQ(pointUpdates.size(), 2u);
+    ASSERT_TRUE(pointUpdates.back().has_quality_flags());
+    EXPECT_EQ(pointUpdates.back().quality_flags(), 0x40u);
+    EXPECT_GE(pointUpdates.back().ts_ms(), pointUpdates.front().ts_ms());
+    EXPECT_EQ(pointUpdates.back().value().decimal_value(), pointUpdates.front().value().decimal_value());
   }
 }
 

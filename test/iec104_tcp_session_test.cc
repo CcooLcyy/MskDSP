@@ -1395,6 +1395,50 @@ TEST(IEC104TcpSessionTest, PointWithTimeUsesTimestampTypes) {
   io->stop();
 }
 
+// 验证：合包窗口内同一遥测点保留每次品质转换，同品质的重复采样只发送最新值。
+TEST(IEC104TcpSessionTest, PointDedupePreservesQualityTransitions) {
+  auto io = std::make_shared<boost::asio::io_context>();
+  auto sockets = MakeConnectedSockets(*io);
+  auto config = MakeConfig("point-quality-dedupe", IEC104Proto::ROLE_SERVER, 5, 5, 1, 5, 8);
+  config.set_point_batch_window_ms(500);
+  config.set_point_dedupe(true);
+  auto session = std::make_shared<IEC104::TcpSession>(*io, config, false);
+  session->Start(std::move(sockets.session_socket));
+  std::jthread sessionThread = ModuleManager::StartModuleThread(IEC104LibInfo.LIB_NAME, [&]() { io->run(); });
+  struct Cleanup {
+    std::shared_ptr<IEC104::TcpSession> session;
+    std::shared_ptr<boost::asio::io_context> io;
+    ~Cleanup() { session->Stop(); io->stop(); }
+  } cleanup{session, io};
+  boost::asio::write(sockets.peer_socket, boost::asio::buffer(BuildUFrame(kUStartDtAct)));
+  const auto start = ReadApduWithTimeout(sockets.peer_socket, std::chrono::milliseconds(2000), "数据传输激活确认");
+  ASSERT_EQ(start.size(), 6u);
+  ASSERT_EQ(start[2], kUStartDtCon);
+
+  IEC104::PointValue value;
+  value.ioa = 100;
+  value.type = IEC104Proto::POINT_TYPE_FLOAT;
+  value.doubleValue = 99.0;
+  session->SendPointValue(value, kCotSpontaneous);
+  value.doubleValue = 100.0;
+  session->SendPointValue(value, kCotSpontaneous);
+  for (const uint8_t flags : {0x40, 0xC0, 0}) {
+    value.quality = flags;
+    session->SendPointValue(value, kCotSpontaneous);
+  }
+
+  for (const uint8_t flags : {0, 0x40, 0xC0, 0}) {
+    const auto apdu = ReadApduWithTimeout(
+        sockets.peer_socket, std::chrono::milliseconds(2000), "同点品质变化遥测");
+    ASSERT_EQ(apdu.size(), 20u);
+    EXPECT_EQ(apdu[6], kTypeIdMeasuredValueShort);
+    EXPECT_EQ(apdu[19], flags);
+    float actual = 0;
+    std::memcpy(&actual, apdu.data() + 15, sizeof(actual));
+    EXPECT_FLOAT_EQ(actual, 100.0F);
+  }
+}
+
 // 验证周期快照仅在 STARTDT 激活后提交，STOPDT 后拒绝，恢复不会发送暂停期间的旧快照。
 TEST(IEC104TcpSessionTest, PeriodicSnapshotRequiresActiveDataTransfer) {
   auto io = std::make_shared<boost::asio::io_context>();
@@ -1635,7 +1679,7 @@ TEST(IEC104TcpSessionTest, ReplaysSoeInOrderAndAcknowledgesByReceiveSequence) {
     second.value.ioa = 9;
     second.value.type = IEC104Proto::POINT_TYPE_SINGLE;
     second.value.boolValue = false;
-    second.value.quality = 0x80;
+    second.value.quality = 0xC0;
     second.value.tsMs = 1710000000002;
     return std::vector<IEC104::SoeEvent>{first, second};
   });
@@ -1692,7 +1736,7 @@ TEST(IEC104TcpSessionTest, ReplaysSoeInOrderAndAcknowledgesByReceiveSequence) {
   EXPECT_EQ(second[6], kTypeIdSinglePointWithTime);
   EXPECT_EQ(first[15] & 0x01, 0x01);
   EXPECT_EQ(second[15] & 0x01, 0x00);
-  EXPECT_EQ(second[15] & 0xF0, 0x80);
+  EXPECT_EQ(second[15] & 0xF0, 0xC0);
 
   auto firstAck = BuildSFrame(1);
   boost::asio::write(sockets.peer_socket, boost::asio::buffer(firstAck));

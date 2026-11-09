@@ -418,6 +418,15 @@ void TcpSession::enqueuePointValue(const PointValue &value, uint8_t cause) {
 
   if (pointDedupe_) {
     const uint64_t key = (static_cast<uint64_t>(value.type) << 32) | value.ioa;
+    const auto previous = pointPendingByKey_.find(key);
+    if (dataTransferActive_ && previous != pointPendingByKey_.end() &&
+        previous->second.value.quality != value.quality) {
+      LOG_DEBUG("IEC104 点品质变化，先提交合包窗口内的旧品质: conn_name={}, ioa={}, 旧品质=0x{:02X}, 新品质=0x{:02X}",
+                config_.conn_name(), value.ioa, static_cast<int>(previous->second.value.quality),
+                static_cast<int>(value.quality));
+      // 沿用已安排的刷新时刻，新品质仍可与窗口内后续点值合包。
+      drainPointQueue();
+    }
     pointPendingByKey_[key] = entry;
   } else {
     pointPending_.push_back(entry);

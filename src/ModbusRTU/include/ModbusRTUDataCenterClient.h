@@ -35,6 +35,8 @@ public:
   grpc::Status PublishDouble(uint32_t connId, const std::string& tag, double value, DataCenterProto::Quality quality, int64_t tsMs);
   grpc::Status PublishDecimal(uint32_t connId, const std::string& tag, const std::string& value,
                               DataCenterProto::Quality quality, int64_t tsMs);
+  grpc::Status PublishSample(const DataCenterProto::PublishRequest& request);
+  grpc::Status PublishSamples(const DataCenterProto::BatchPublishRequest& request);
   std::unique_ptr<grpc::ClientReaderInterface<DataCenterProto::PointUpdate>> Subscribe(
       grpc::ClientContext* context, uint32_t connId, const std::vector<std::string>& tags, bool snapshot);
 

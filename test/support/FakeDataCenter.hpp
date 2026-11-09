@@ -521,9 +521,19 @@ public:
     update.set_dst_tag(request.tag());
     update.mutable_value()->CopyFrom(request.value());
     update.set_ts_ms(request.ts_ms());
-    update.set_quality(request.quality());
-    // Mock 与已发布协议保持一致，保留品质位的存在性及完整数值。
-    if (request.has_quality_flags()) update.set_quality_flags(request.quality_flags());
+    auto quality = request.quality();
+    if (request.has_quality_flags()) {
+      const auto flags = request.quality_flags();
+      // 补齐省略的摘要，也允许测试注入显式不一致的上游数据。
+      if (quality == DataCenterProto::QUALITY_UNSPECIFIED) {
+        quality = (flags & DataCenterProto::QUALITY_FLAG_INVALID) != 0
+                      ? DataCenterProto::QUALITY_BAD
+                  : flags == 0 ? DataCenterProto::QUALITY_GOOD
+                               : DataCenterProto::QUALITY_UNCERTAIN;
+      }
+      update.set_quality_flags(flags);
+    }
+    update.set_quality(quality);
 
     std::vector<std::shared_ptr<SubscriptionState>> subscriptions;
     {

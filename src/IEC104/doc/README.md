@@ -46,6 +46,7 @@ IEC104 协议模块，提供 IEC 60870-5-104 的 TCP Server/Client 能力，并�
 - IEC104 在 `UpsertPointTable` 成功后，会把点表 tags（包含 `time_sync_tag`）同步到 DataCenter 连接标签注册表，用于路由校验、展示与自愈；这不是协议地址映射点表。
 - STATION_ROLE_MASTER：收到 IEC104 点值后 `Publish(conn_id, tag, value)` 到 DataCenter；是否能转发给其他模块由 DataCenter 路由配置决定。
 - STATION_ROLE_SLAVE：通过 `Subscribe(conn_id)` 接收 DataCenter 更新并转为 IEC104 自发上送；总召通过 `GetLatest(conn_id)` 拉取快照。
+- 从站自发上送和总召优先使用 DataCenter 的 `quality_flags`。遥信支持 IV、NT、SB、BL，短浮点遥测另支持 OV。字段缺席时使用原四级品质映射。总召省略没有快照样本的普通点，固定值和模拟点按各自配置生成。
 - 语义强调：DataCenter 订阅与最新值缓存为 best-effort，可能丢消息；配置落盘失败会返回错误，但内存状态不回滚。
 
 ### 链路层参数（APCI）

@@ -497,7 +497,7 @@ grpc::Status MqttBus::parseReadResponse(const std::vector<uint8_t>& frame,
     if (crc != respCrc) {
       return grpc::Status(grpc::StatusCode::UNAVAILABLE, "异常响应 CRC 不匹配");
     }
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, std::format("Modbus 异常: {}", frame[2]));
+    return MakeReadExceptionStatus(frame[2]);
   }
 
   if (function != expectedFunction) {
