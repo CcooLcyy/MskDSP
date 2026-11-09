@@ -3,14 +3,17 @@
 
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "AVCGroupManager.h"
 #include "DataCenter_mock.grpc.pb.h"
@@ -252,6 +255,92 @@ bool WaitForSubscriptionCount(const FakeDataCenterState& state, uint32_t connId,
   }
   return false;
 }
+
+using Clock = std::chrono::steady_clock;
+using namespace std::chrono_literals;
+
+struct TimedValue {
+  Clock::time_point at;
+  double value;
+};
+
+class PublishTrace {
+ public:
+  void Record(const DataCenterProto::PublishRequest& request, Clock::time_point at) {
+    if (request.tag() != "INV1_Q_SET" && request.tag() != "总无功目标" && request.tag() != "电压偏差") {
+      return;
+    }
+    const auto value = PointValueAsDouble(request.value());
+    if (value.has_value()) {
+      std::lock_guard lock(mu_);
+      events_[request.tag()].push_back({at, *value});
+      cv_.notify_all();
+    }
+  }
+
+  std::optional<TimedValue> WaitFor(const std::string& tag, size_t index) {
+    std::unique_lock lock(mu_);
+    if (!cv_.wait_for(lock, 10s, [&] { return events_[tag].size() > index; })) {
+      return std::nullopt;
+    }
+    return events_[tag][index];
+  }
+
+  size_t Count(const std::string& tag) {
+    std::lock_guard lock(mu_);
+    return events_[tag].size();
+  }
+
+ private:
+  std::mutex mu_;
+  std::condition_variable cv_;
+  std::unordered_map<std::string, std::vector<TimedValue>> events_;
+};
+
+class AvcCycleTest : public testing::Test {
+ protected:
+  static constexpr auto kGroupName = "g-avc-cycle";
+
+  AvcCycleTest() {
+    manager.setDataCenterStub(stub);
+    ON_CALL(*stub, Publish(_, _, _))
+        .WillByDefault(Invoke([this](grpc::ClientContext*, const DataCenterProto::PublishRequest& request,
+                                     DataCenterProto::Empty*) {
+          auto status = state.Publish(request);
+          if (status.ok()) {
+            trace.Record(request, Clock::now());
+            if (request.tag() == "INV1_Q_SET" && injectTargetsOnFirstPublish) {
+              injectTargetsOnFirstPublish = false;
+              PublishDoublePoint(&state, request.conn_id(), "Q_CMD", 40.0);
+              PublishDoublePoint(&state, request.conn_id(), "Q_CMD", 60.0);
+              EXPECT_TRUE(WaitForLatestDouble(state, request.conn_id(), "调节返回值", 60.0));
+            }
+          }
+          return status;
+        }));
+  }
+
+  void TearDown() override {
+    (void)manager.StopGroup(kGroupName);
+  }
+
+  AVCProto::UpsertGroupRequest MakeCyclicGroup(bool voltageMode) {
+    auto request = voltageMode ? MakeVoltageGroupReq(kGroupName) : MakeQTotalGroupReq(kGroupName);
+    auto* config = request.mutable_config();
+    config->mutable_members()->RemoveLast();
+    config->set_control_mode(AVCProto::CONTROL_MODE_DIRECT_CYCLIC);
+    config->set_calculation_execution_period_seconds(1.0);
+    config->set_command_control_period_seconds(4.0);
+    return request;
+  }
+
+  FakeDataCenterState state;
+  PublishTrace trace;
+  // 在控制组启动前设置，由成员设定发布回调独占读写。
+  bool injectTargetsOnFirstPublish = false;
+  decltype(MakeStub(&state)) stub = MakeStub(&state);
+  GroupManager manager{"AVC"};
+};
 
 }  // namespace
 
@@ -540,6 +629,96 @@ TEST(AvcGroupManagerTest, VoltageModeRepeatedSameCommandRetriggersMemberSetpoint
   EXPECT_TRUE(WaitForPublishCount(state, info.conn_id(), "INV2_Q_SET", inv2PublishCount + 1));
 
   ASSERT_TRUE(mgr.StopGroup("g-voltage-repeat").ok());
+}
+
+// 验证：目标和量测不再更新时，死区外的持续电压偏差仍按周期计算。
+TEST_F(AvcCycleTest, VoltageCycleRecalculatesWithoutNewInput) {
+  auto request = MakeCyclicGroup(true);
+  request.mutable_config()->mutable_voltage_control()->set_deadband(0.01);
+  AVCProto::GroupInfo info;
+  const auto status = manager.UpsertGroup(request, &info);
+  ASSERT_TRUE(status.ok()) << status.error_message();
+  ASSERT_TRUE(WaitForSubscriptionCount(state, info.conn_id(), 1));
+
+  PublishDoublePoint(&state, info.conn_id(), "V_MEAS", 0.9);
+  PublishDoublePoint(&state, info.conn_id(), "INV1_Q_MEAS", 0.0);
+  PublishDoublePoint(&state, info.conn_id(), "V_CMD", 1.0);
+  const auto firstSetpoint = trace.WaitFor("INV1_Q_SET", 0);
+  ASSERT_TRUE(firstSetpoint);
+  EXPECT_NEAR(firstSetpoint->value, 10.0, 1e-9);
+
+  const auto firstError = trace.WaitFor("电压偏差", 0);
+  const auto secondError = trace.WaitFor("电压偏差", 1);
+  ASSERT_TRUE(firstError);
+  ASSERT_TRUE(secondError);
+  EXPECT_NEAR(firstError->value, 0.1, 1e-9);
+  EXPECT_NEAR(secondError->value, firstError->value, 1e-9);
+  // 用结果点观察计算时允许少量发布耗时差与线程调度延迟。
+  EXPECT_GE(secondError->at - firstError->at, 950ms);
+  EXPECT_LT(secondError->at - firstError->at, 2s);
+}
+
+// 验证：成员发布返回前收到多个新目标时，下一轮仍遵守命令间隔并只下发最新目标。
+TEST_F(AvcCycleTest, NewTargetsDuringPublishKeepCommandInterval) {
+  injectTargetsOnFirstPublish = true;
+  AVCProto::GroupInfo info;
+  ASSERT_TRUE(manager.UpsertGroup(MakeCyclicGroup(false), &info).ok());
+  ASSERT_TRUE(WaitForSubscriptionCount(state, info.conn_id(), 1));
+  PublishDoublePoint(&state, info.conn_id(), "INV1_Q_MEAS", 0.0);
+  PublishDoublePoint(&state, info.conn_id(), "Q_CMD", 20.0);
+
+  const auto first = trace.WaitFor("INV1_Q_SET", 0);
+  const auto second = trace.WaitFor("INV1_Q_SET", 1);
+  ASSERT_TRUE(first);
+  ASSERT_TRUE(second);
+  EXPECT_NEAR(first->value, 20.0, 1e-9);
+  EXPECT_NEAR(second->value, 60.0, 1e-9);
+  EXPECT_GE(second->at - first->at, 4s);
+}
+
+// 验证：停组后保存新周期并启动，首轮不等待完整周期，后续按新周期计算和限频。
+TEST_F(AvcCycleTest, RestartUsesUpdatedCalculationAndCommandPeriods) {
+  auto request = MakeCyclicGroup(false);
+  AVCProto::GroupInfo info;
+  ASSERT_TRUE(manager.UpsertGroup(request, &info).ok());
+  const auto connId = info.conn_id();
+  ASSERT_TRUE(WaitForSubscriptionCount(state, connId, 1));
+  PublishDoublePoint(&state, connId, "INV1_Q_MEAS", 0.0);
+  PublishDoublePoint(&state, connId, "Q_CMD", 20.0);
+  const auto initial = trace.WaitFor("INV1_Q_SET", 0);
+  ASSERT_TRUE(initial);
+  EXPECT_NEAR(initial->value, 20.0, 1e-9);
+  ASSERT_TRUE(manager.StopGroup(kGroupName).ok());
+  const auto previousSetpoints = trace.Count("INV1_Q_SET");
+  const auto previousCalculations = trace.Count("总无功目标");
+
+  PublishDoublePoint(&state, connId, "Q_CMD", 40.0);
+  request.set_create_only(false);
+  request.mutable_config()->set_calculation_execution_period_seconds(3.0);
+  request.mutable_config()->set_command_control_period_seconds(6.0);
+  const auto restartedAt = Clock::now();
+  ASSERT_TRUE(manager.UpsertGroup(request, &info).ok());
+  ASSERT_EQ(info.conn_id(), connId);
+  ASSERT_TRUE(manager.StartGroup(kGroupName).ok());
+  const auto firstAfterRestart = trace.WaitFor("INV1_Q_SET", previousSetpoints);
+  ASSERT_TRUE(firstAfterRestart);
+  EXPECT_NEAR(firstAfterRestart->value, 40.0, 1e-9);
+  EXPECT_LT(firstAfterRestart->at - restartedAt, 3s);
+
+  PublishDoublePoint(&state, connId, "Q_CMD", 60.0);
+  const auto firstCalculation = trace.WaitFor("总无功目标", previousCalculations);
+  const auto secondCalculation = trace.WaitFor("总无功目标", previousCalculations + 1);
+  ASSERT_TRUE(firstCalculation);
+  ASSERT_TRUE(secondCalculation);
+  EXPECT_NEAR(firstCalculation->value, 40.0, 1e-9);
+  EXPECT_NEAR(secondCalculation->value, 60.0, 1e-9);
+  EXPECT_GE(secondCalculation->at - firstCalculation->at, 2950ms);
+  EXPECT_LT(secondCalculation->at - firstCalculation->at, 4500ms);
+
+  const auto secondAfterRestart = trace.WaitFor("INV1_Q_SET", previousSetpoints + 1);
+  ASSERT_TRUE(secondAfterRestart);
+  EXPECT_NEAR(secondAfterRestart->value, 60.0, 1e-9);
+  EXPECT_GE(secondAfterRestart->at - firstAfterRestart->at, 6s);
 }
 
 // 验证：总无功模式在命令更新后会发布总无功结果点，但不会发布电压偏差点。

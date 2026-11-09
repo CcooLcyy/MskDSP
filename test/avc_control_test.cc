@@ -89,13 +89,14 @@ AVC::ControlInput MakeQTotalInput(double qCmdRaw, const std::vector<double>& qMe
 
 }  // namespace
 
-// 验证：周期直分配模式要求 AVC 使用总无功命令，目标电压模式保留 PI 事件调节。
-TEST(AvcControlTest, DirectCyclicModeRequiresQTotalCommand) {
+// 验证：AVC 目标电压和总无功命令均可配置合法的计算周期与命令最小间隔。
+TEST(AvcControlTest, CyclicModeAcceptsVoltageAndQTotalCommands) {
   auto cfg = MakeBaseConfig();
   cfg.set_control_mode(AVCProto::CONTROL_MODE_DIRECT_CYCLIC);
   cfg.set_calculation_execution_period_seconds(1.0);
   cfg.set_command_control_period_seconds(4.0);
-  EXPECT_FALSE(AVC::ValidateGroupConfig(cfg).ok());
+  const auto voltageStatus = AVC::ValidateGroupConfig(cfg);
+  EXPECT_TRUE(voltageStatus.ok()) << voltageStatus.error_message();
 
   cfg.clear_voltage_cmd();
   cfg.mutable_q_total_cmd()->mutable_signal()->set_tag("Q_CMD");

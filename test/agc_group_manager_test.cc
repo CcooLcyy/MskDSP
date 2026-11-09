@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include "AGCGroupManager.h"
 #include "DataCenter_mock.grpc.pb.h"
@@ -670,6 +671,75 @@ TEST(AgcGroupManagerTest, DirectionBlocksIgnoreComputedTargetsUntilCommandPeriod
   EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV1_P_SET", 50));
   EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV2_P_SET", 100));
   ASSERT_TRUE(manager.StopGroup("g-block-period").ok());
+}
+
+// 验证：AGC 在限频窗口内合并高频命令，下一轮只下发最新目标且间隔不少于配置值。
+TEST(AgcGroupManagerTest, CyclicBurstPublishesOnlyLatestTargetAfterCommandInterval) {
+  using Clock = std::chrono::steady_clock;
+  constexpr auto kCommandInterval = std::chrono::seconds(4);
+  constexpr auto kPublishTimeout = std::chrono::seconds(10);
+  FakeDataCenterState state;
+  std::mutex publishTimesMutex;
+  std::vector<Clock::time_point> publishTimes;
+  auto stub = MakeStub(&state);
+  ON_CALL(*stub, Publish(_, _, _)).WillByDefault(Invoke(
+      [&](grpc::ClientContext *, const DataCenterProto::PublishRequest &request,
+          DataCenterProto::Empty *) {
+        if (request.tag() != "INV1_P_SET") {
+          return state.Publish(request);
+        }
+        // 持锁记录成功发布时间，确保观察到发布历史后能读取对应的单调时钟。
+        std::lock_guard lock(publishTimesMutex);
+        const auto status = state.Publish(request);
+        if (status.ok()) {
+          publishTimes.push_back(Clock::now());
+        }
+        return status;
+      }));
+
+  GroupManager manager("AGC");
+  manager.setDataCenterStub(stub);
+  constexpr auto kGroup = "g-cyclic-burst";
+  auto request = MakeGroupReq(kGroup);
+  auto *config = request.mutable_config();
+  config->set_control_mode(AGCProto::CONTROL_MODE_DIRECT_CYCLIC);
+  config->set_calculation_execution_period_seconds(1);
+  config->set_command_control_period_seconds(kCommandInterval.count());
+  config->mutable_members()->RemoveLast();
+  config->mutable_outputs()->mutable_p_total_target()->set_tag("P_TARGET");
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(manager.UpsertGroup(request, &info).ok());
+  const auto connId = info.conn_id();
+  ASSERT_EQ(ExecuteDoubleCommand(&manager, kGroup, connId, "P_CMD", 10).status(),
+            DataCenterProto::COMMAND_ACCEPTED);
+  ASSERT_TRUE(state.WaitForPublishCount(connId, "INV1_P_SET", 1, kPublishTimeout));
+
+  ASSERT_EQ(ExecuteDoubleCommand(&manager, kGroup, connId, "P_CMD", 20).status(),
+            DataCenterProto::COMMAND_ACCEPTED);
+  ASSERT_TRUE(WaitForLatestDouble(state, connId, "P_TARGET", 20));
+  for (int target = 21; target <= 40; ++target) {
+    ASSERT_EQ(ExecuteDoubleCommand(&manager, kGroup, connId, "P_CMD", target).status(),
+              DataCenterProto::COMMAND_ACCEPTED) << "目标功率 " << target;
+  }
+  {
+    std::lock_guard lock(publishTimesMutex);
+    ASSERT_FALSE(publishTimes.empty());
+    ASSERT_LT(Clock::now() - publishTimes.front(), kCommandInterval)
+        << "全部新目标应在首轮下发后的限频窗口内受理";
+  }
+  ASSERT_TRUE(state.WaitForPublishCount(connId, "INV1_P_SET", 2, kPublishTimeout));
+  ASSERT_TRUE(manager.StopGroup(kGroup).ok());
+
+  const auto history = state.GetPublishedUpdates(connId, "INV1_P_SET");
+  ASSERT_EQ(history.size(), 2u);
+  double firstSetpoint = 0;
+  double secondSetpoint = 0;
+  ASSERT_TRUE(PointValueToDoubleForTest(history[0].value(), &firstSetpoint));
+  ASSERT_TRUE(PointValueToDoubleForTest(history[1].value(), &secondSetpoint));
+  EXPECT_DOUBLE_EQ(firstSetpoint, 10);
+  EXPECT_DOUBLE_EQ(secondSetpoint, 40);
+  ASSERT_EQ(publishTimes.size(), 2u);
+  EXPECT_GE(publishTimes[1] - publishTimes[0], kCommandInterval);
 }
 
 // 验证：DELTA 成员发布零增量时，遥信仍依据绝对目标到上限，不会误判减闭锁。
