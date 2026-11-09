@@ -96,7 +96,7 @@ private:
     std::vector<bool> hasLastMemberTargetQKvar;
     std::vector<Decimal> lastMemberTargetQKvar;
 
-    // 周期直分配模式的命令节流状态；PI_EVENT 模式不使用。
+    // 周期控制模式的命令节流状态。
     std::chrono::steady_clock::time_point lastCommandPublishedAt{};
     bool hasLastCommandPublishedAt{false};
 
@@ -125,7 +125,7 @@ private:
       const DataCenterProto::PointUpdate& update);
 
   bool handleUpdateLocked(GroupRuntime* group, const DataCenterProto::PointUpdate& update);
-  void controlTick(const std::string& groupName);
+  void controlTick(const std::string& groupName, const std::shared_ptr<ControlTrigger>& trigger);
 
   static bool pointValueToDecimal(const DataCenterProto::PointValue& value, Decimal* out);
   static std::unordered_set<std::string> collectAllTags(const AVCProto::GroupConfig& config);

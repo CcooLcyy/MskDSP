@@ -619,7 +619,7 @@ void GroupManager::startThreadsLocked(const std::string& groupName, GroupRuntime
             if (!trigger->pending.exchange(false)) {
               continue;
             }
-            controlTick(groupName);
+            controlTick(groupName, trigger);
           }
           return;
         }
@@ -630,7 +630,7 @@ void GroupManager::startThreadsLocked(const std::string& groupName, GroupRuntime
           return;
         }
         trigger->pending.store(false);
-        controlTick(groupName);
+        controlTick(groupName, trigger);
 
         const auto period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
             std::chrono::duration<double>(calcPeriod));
@@ -638,7 +638,7 @@ void GroupManager::startThreadsLocked(const std::string& groupName, GroupRuntime
         while (!st.stop_requested()) {
           // 即使输入通知持续到达，也不能推迟已经到期的周期计算。
           if (std::chrono::steady_clock::now() >= nextTick) {
-            controlTick(groupName);
+            controlTick(groupName, trigger);
             nextTick = std::chrono::steady_clock::now() + period;
             continue;
           }
@@ -646,7 +646,7 @@ void GroupManager::startThreadsLocked(const std::string& groupName, GroupRuntime
             trigger->pending.store(false);
             continue;
           }
-          controlTick(groupName);
+          controlTick(groupName, trigger);
           nextTick = std::chrono::steady_clock::now() + period;
         }
       });
@@ -715,7 +715,7 @@ void GroupManager::startThreadsLocked(const std::string& groupName, GroupRuntime
            groupName,
            connId,
            tags.size(),
-           group->config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC ? "周期直分配" : "PI 事件触发");
+           group->config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC ? "周期控制" : "PI 事件触发");
 }
 
 grpc::Status GroupManager::StartGroup(const std::string& groupName) {
@@ -1653,7 +1653,7 @@ void GroupManager::publishCommandEchoPoint(
   }
 }
 
-void GroupManager::controlTick(const std::string& groupName) {
+void GroupManager::controlTick(const std::string& groupName, const std::shared_ptr<ControlTrigger>& trigger) {
   AVCProto::GroupConfig config;
   uint32_t connId = 0;
   bool functionEnabled = true;
@@ -1663,10 +1663,8 @@ void GroupManager::controlTick(const std::string& groupName) {
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = groupsByName_.find(groupName);
-    if (it == groupsByName_.end()) {
-      return;
-    }
-    if (it->second.state != AVCProto::GROUP_STATE_RUNNING) {
+    if (it == groupsByName_.end() || it->second.state != AVCProto::GROUP_STATE_RUNNING ||
+        it->second.controlTrigger != trigger) {
       return;
     }
 
@@ -1731,7 +1729,7 @@ void GroupManager::controlTick(const std::string& groupName) {
     }
   }
   publishDefaultLimitPoints(groupName,
-                            config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC ? "周期直分配控制" : "PI 事件触发控制");
+                            config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC ? "周期控制" : "PI 事件触发控制");
 
   if (!functionEnabled) {
     LOG_DEBUG("AVC 跳过控制输出: group_name={}, 原因=AVC 功能未投入", groupName);
@@ -1749,6 +1747,7 @@ void GroupManager::controlTick(const std::string& groupName) {
     std::lock_guard<std::mutex> lock(mu_);
     const auto it = groupsByName_.find(groupName);
     if (it == groupsByName_.end() || it->second.state != AVCProto::GROUP_STATE_RUNNING ||
+        it->second.controlTrigger != trigger ||
         it->second.commandRevision != commandRevision) {
       LOG_DEBUG("AVC 丢弃已过期控制计算结果: group_name={}, command_revision={}", groupName, commandRevision);
       return;
@@ -1762,6 +1761,7 @@ void GroupManager::controlTick(const std::string& groupName) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = groupsByName_.find(groupName);
     if (it != groupsByName_.end() && it->second.state == AVCProto::GROUP_STATE_RUNNING &&
+        it->second.controlTrigger == trigger &&
         it->second.commandRevision == commandRevision) {
       it->second.directResolvedCommandRevision = commandRevision;
       it->second.directResolvedDesiredTotalQKvar = output.rawDesiredTotalQKvar;
@@ -1773,7 +1773,7 @@ void GroupManager::controlTick(const std::string& groupName) {
     }
   }
 
-  // 周期直分配模式按命令控制周期限制成员设定下发，状态量仍按计算周期刷新。
+  // 周期控制模式按命令控制周期限制成员设定下发，状态量仍按计算周期刷新。
   const bool directCyclic = config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC;
   bool allowMemberPublish = true;
   if (directCyclic) {
@@ -1860,8 +1860,19 @@ void GroupManager::controlTick(const std::string& groupName) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = groupsByName_.find(groupName);
     if (it == groupsByName_.end() || it->second.state != AVCProto::GROUP_STATE_RUNNING ||
-        it->second.commandRevision != commandRevision) {
-      LOG_DEBUG("AVC 跳过过期控制状态写回: group_name={}, command_revision={}", groupName, commandRevision);
+        it->second.controlTrigger != trigger) {
+      LOG_DEBUG("AVC 跳过已结束的控制任务状态写回: group_name={}", groupName);
+      return;
+    }
+
+    // 同一控制任务中，发布期间收到的新命令不影响本轮成功下发的计时。
+    if (directCyclic && commandApplied) {
+      it->second.lastCommandPublishedAt = std::chrono::steady_clock::now();
+      it->second.hasLastCommandPublishedAt = true;
+    }
+    if (it->second.commandRevision != commandRevision) {
+      LOG_DEBUG("AVC 跳过过期控制结果写回: group_name={}, command_revision={}, 已记录成功下发时间={}",
+                groupName, commandRevision, directCyclic && commandApplied);
       return;
     }
 
@@ -1870,10 +1881,6 @@ void GroupManager::controlTick(const std::string& groupName) {
       it->second.lastDesiredTotalQKvar = output.nextLastDesiredTotalQKvar;
       it->second.hasLastMemberTargetQKvar = output.hasLastMemberTargetQKvar;
       it->second.lastMemberTargetQKvar = output.nextLastMemberTargetQKvar;
-    }
-    if (directCyclic && commandApplied) {
-      it->second.lastCommandPublishedAt = std::chrono::steady_clock::now();
-      it->second.hasLastCommandPublishedAt = true;
     }
 
     if (!unallocatedQKvar.IsZero()) {

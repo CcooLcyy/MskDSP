@@ -102,7 +102,7 @@ README 这里只保留模块说明、启动方式、配置入口与基础语义�
 - AVC 配置使用 `avc.groups[].upsert` 下发控制组；`avc.groups[].start` 为兼容保留字段，当前仅记录日志，不再额外调用 `StartGroup`
 - AVC 的 `jsonc` 改名语义按“删除旧组 + 创建新组”处理；ConfigPusher 不提供显式 `RenameGroup` 任务
 - AVC 支持 `voltage_cmd` 或 `q_total_cmd` 两类主命令输入；ConfigPusher 只负责按 `jsonc` 收敛下发，控制组是否自动进入运行态由 AVC 模块依据当前配置判定
-- AVC 使用 `CONTROL_MODE_DIRECT_CYCLIC` 时必须配置 `q_total_cmd` 总无功命令；目标电压模式依赖 `kp/deadband`，继续使用 `CONTROL_MODE_PI_EVENT`
+- AVC 的 `CONTROL_MODE_DIRECT_CYCLIC` 支持 `q_total_cmd` 总无功命令和 `voltage_cmd` 目标电压命令。目标电压组按配置的 `kp/deadband` 周期调节。
 - Calc 配置使用 `calc.groups[].upsert` 下发计算分组；`calc.groups[].start` 为兼容保留字段，当前仅记录日志，不再额外调用 `StartGroup`
 - Calc 的 `jsonc` 改名语义按“删除旧组 + 创建新组”处理；ConfigPusher 不提供显式 `RenameGroup` 任务
 - Calc 计算项中的 `ROUTED_INPUT` 只声明输入槽位，外部源点仍通过 DataCenter Route 绑定到二元项的 `<item_name>/left_input`/`<item_name>/right_input` 或 SUM/AVERAGE 项的 `<item_name>/input_N`；计算结果发布到 `<item_name>/result`

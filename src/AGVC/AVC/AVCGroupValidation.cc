@@ -69,9 +69,6 @@ grpc::Status ValidateGroupConfig(const AVCProto::GroupConfig& config) {
     if (config.command_control_period_seconds() < 4.0 || config.command_control_period_seconds() > 30.0) {
       return makeInvalid("DIRECT_CYCLIC 模式要求 command_control_period_seconds 在 4~30 秒范围内");
     }
-    if (config.command_case() != AVCProto::GroupConfig::kQTotalCmd) {
-      return makeInvalid("AVC DIRECT_CYCLIC 模式必须使用 q_total_cmd，总无功目标电压调节仍使用 PI_EVENT 模式");
-    }
   }
   if (!config.has_voltage_meas() || config.voltage_meas().tag().empty()) {
     return makeInvalid("voltage_meas.tag 不能为空");
