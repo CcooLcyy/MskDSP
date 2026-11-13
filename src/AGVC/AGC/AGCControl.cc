@@ -18,6 +18,17 @@ bool memberParticipates(const AGCProto::GroupConfig &config,
           (index < input.memberAvailable.size() && input.memberAvailable[index]));
 }
 
+bool includePassiveMembers(const ControlInput &input) {
+  return input.memberAvailable.empty() || input.includePassiveMembersWithAvailability;
+}
+
+bool memberContributesMeasurement(const AGCProto::GroupConfig &config,
+                                  const ControlInput &input, size_t index) {
+  return config.members(static_cast<int>(index)).controllable()
+             ? memberParticipates(config, input, index)
+             : includePassiveMembers(input);
+}
+
 std::expected<Decimal, Error> toPhysicalAbs(
     const AGCProto::SignalSpec &signal, const Decimal &raw) {
   auto scale = numeric::Scale(signal);
@@ -95,7 +106,7 @@ std::expected<Decimal, Error> computeTotalMeasKw(
   Decimal total;
   const auto memberCount = static_cast<size_t>(config.members_size());
   for (size_t index = 0; index < memberCount; ++index) {
-    if (!input.memberAvailable.empty() && !memberParticipates(config, input, index)) {
+    if (!memberContributesMeasurement(config, input, index)) {
       continue;
     }
     if (index >= input.memberMeasRaw.size() ||
@@ -217,7 +228,7 @@ DefaultPointOutput ComputeDefaultPointOutput(
       continue;
     }
 
-    if (!input.memberAvailable.empty()) {
+    if (!includePassiveMembers(input)) {
       continue;
     }
     ++out.uncontrollableMemberCount;
@@ -239,7 +250,7 @@ DefaultPointOutput ComputeDefaultPointOutput(
     ++out.missingUncontrollableMemberCount;
   }
 
-  // 旧组叠加固定可控容量；通信组已经逐成员汇总当前可用容量。
+  // 旧组叠加固定可控容量；配置参与条件的组逐成员汇总当前可用容量。
   auto lower = out.dynamicLowerKw.Add(input.memberAvailable.empty() ? out.theoreticalLowerKw : Decimal{});
   auto upper = out.dynamicUpperKw.Add(input.memberAvailable.empty() ? out.theoreticalUpperKw : Decimal{});
   if (lower.has_value() && upper.has_value()) {
@@ -284,7 +295,7 @@ std::optional<ControlOutput> ComputeControlOutput(
 
   std::vector<Decimal> measuredKw(memberCount);
   for (size_t index = 0; index < memberCount; ++index) {
-    if (!input.memberAvailable.empty() && !memberParticipates(config, input, index)) {
+    if (!memberContributesMeasurement(config, input, index)) {
       continue;
     }
     if (index >= input.memberMeasRaw.size() ||
@@ -368,7 +379,7 @@ std::optional<ControlOutput> ComputeControlOutput(
   }
 
   for (size_t index = 0; index < memberCount; ++index) {
-    if (!input.memberAvailable.empty() || config.members(static_cast<int>(index)).controllable()) {
+    if (!includePassiveMembers(input) || config.members(static_cast<int>(index)).controllable()) {
       continue;
     }
     auto next = out.passiveKw.Add(measuredKw[index]);
@@ -421,7 +432,7 @@ std::optional<ControlOutput> ComputeControlOutput(
   auto allocation =
       strategy.AllocateDecimal(out.targetControllableKw, allocationMembers);
   if (!input.memberAvailable.empty()) {
-    LOG_DEBUG("AGC 按通信状态分配: group_name={}, 参与成员数={}, 配置成员数={}, 可控目标_kw={}",
+    LOG_DEBUG("AGC 按成员参与条件分配: group_name={}, 参与成员数={}, 配置成员数={}, 可控目标_kw={}",
               config.group_name(), controllableIndexes.size(), memberCount,
               out.targetControllableKw.ToFixedString());
   }

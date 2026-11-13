@@ -204,6 +204,11 @@ grpc::Status ValidateGroupConfig(const AGCProto::GroupConfig& config) {
         (m.communication_timeout_ms() < 1000 || m.communication_timeout_ms() > 3600000)) {
       return makeInvalid("通信状态有效期必须为 0 或 1000..3600000 毫秒");
     }
+    if (m.measurement_validity_ms() != 0 &&
+        (!m.controllable() || m.measurement_validity_ms() < 1000 || m.measurement_validity_ms() > 3600000)) {
+      return makeInvalid(std::format("成员 {} 的量测有效期仅用于可控成员，必须为 0 或 1000..3600000 毫秒",
+                                     m.member_name()));
+    }
     status = validateNoReservedDefaultTag(m.p_meas().tag(), std::format("members[{}].p_meas.tag", m.member_name()));
     if (!status.ok()) {
       return status;

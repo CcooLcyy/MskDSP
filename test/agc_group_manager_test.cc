@@ -170,13 +170,15 @@ AGCProto::UpsertGroupRequest MakeFourMemberGroupReq(const char *groupName) {
   return req;
 }
 
-void PublishDoublePoint(FakeDataCenterState *state, uint32_t connId, const char *tag, double value) {
+void PublishDoublePoint(FakeDataCenterState *state, uint32_t connId, const char *tag, double value,
+                        int64_t tsMs = 0) {
   ASSERT_NE(state, nullptr);
   DataCenterProto::PublishRequest req;
   req.set_conn_id(connId);
   req.set_tag(tag);
   req.mutable_value()->set_double_value(value);
   req.set_quality(DataCenterProto::QUALITY_GOOD);
+  req.set_ts_ms(tsMs);
   ASSERT_TRUE(state->Publish(req).ok());
 }
 
@@ -1980,6 +1982,64 @@ TEST(AgcGroupManagerTest, CommunicationChangesRedistributeAndRestoreWithoutNewCo
   EXPECT_TRUE(WaitForLatestDouble(state, info.conn_id(), "INV2_P_SET", 50));
   EXPECT_TRUE(state.WaitForPublishCount(info.conn_id(), "INV1_P_SET", offlineCount + 1, std::chrono::seconds(5)));
   ASSERT_TRUE(manager.StopGroup("g-health-redistribute").ok());
+}
+
+// 验证：周期直分配排除通信正常但量测过期的成员，同值新采样后沿用总目标恢复分配。
+TEST(AgcGroupManagerTest, StaleMeasurementExcludesOnlineMemberAndFreshSampleRestoresAllocation) {
+  constexpr auto kGroup = "g-measurement-expiry";
+  constexpr uint32_t kValidityMs = 10000;
+  constexpr auto kPublishTimeout = std::chrono::seconds(8);
+  const auto nowMs = [] {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+  };
+  FakeDataCenterState state;
+  GroupManager manager("AGC");
+  manager.setDataCenterStub(MakeStub(&state));
+  auto request = MakeGroupReq(kGroup);
+  auto *config = request.mutable_config();
+  config->set_control_mode(AGCProto::CONTROL_MODE_DIRECT_CYCLIC);
+  config->set_calculation_execution_period_seconds(1);
+  config->set_command_control_period_seconds(4);
+  for (int index = 0; index < config->members_size(); ++index) {
+    auto *member = config->mutable_members(index);
+    member->set_capacity_kw(100);
+    member->set_weight(1);
+    member->mutable_communication_state()->set_tag(index == 0 ? "HEALTH1" : "HEALTH2");
+    member->set_communication_timeout_ms(60000);
+    member->set_measurement_validity_ms(kValidityMs);
+  }
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(manager.UpsertGroup(request, &info).ok());
+  const auto connId = info.conn_id();
+  ASSERT_EQ(info.config().members(0).measurement_validity_ms(), kValidityMs);
+  ASSERT_TRUE(WaitForSubscriptionCount(state, connId, 1u));
+  PublishCommunication(&state, connId, "HEALTH1", 1);
+  PublishCommunication(&state, connId, "HEALTH2", 1);
+  PublishDoublePoint(&state, connId, "INV2_P_MEAS", 40, nowMs());
+
+  // 用较早的有效源时间戳缩短等待，并验证有效期从采样时刻起算。
+  PublishDoublePoint(&state, connId, "INV1_P_MEAS", 40, nowMs() - 6500);
+  PublishDoublePoint(&state, connId, "P_CMD", 80);
+  ASSERT_TRUE(WaitForLatestDouble(state, connId, "INV1_P_SET", 40));
+  ASSERT_TRUE(WaitForLatestDouble(state, connId, "INV2_P_SET", 40));
+  const auto firstMemberWrites = state.GetPublishCount(connId, "INV1_P_SET");
+
+  ASSERT_TRUE(WaitForLatestDouble(state, connId, "当前可调有功上限", 100));
+  PublishDoublePoint(&state, connId, "INV2_P_MEAS", 40, nowMs());
+  const auto secondMemberWrites = state.GetPublishCount(connId, "INV2_P_SET");
+  ASSERT_EQ(ExecuteDoubleCommand(&manager, kGroup, connId, "P_CMD", 100).status(),
+            DataCenterProto::COMMAND_ACCEPTED);
+  ASSERT_TRUE(state.WaitForPublishCount(connId, "INV2_P_SET", secondMemberWrites + 1, kPublishTimeout));
+  ASSERT_TRUE(WaitForLatestDouble(state, connId, "INV2_P_SET", 100));
+  EXPECT_EQ(state.GetPublishCount(connId, "INV1_P_SET"), firstMemberWrites);
+
+  PublishDoublePoint(&state, connId, "INV2_P_MEAS", 40, nowMs());
+  PublishDoublePoint(&state, connId, "INV1_P_MEAS", 40, nowMs());
+  ASSERT_TRUE(state.WaitForPublishCount(connId, "INV1_P_SET", firstMemberWrites + 1, kPublishTimeout));
+  ASSERT_TRUE(WaitForLatestDouble(state, connId, "INV1_P_SET", 50));
+  EXPECT_TRUE(WaitForLatestDouble(state, connId, "INV2_P_SET", 50));
+  ASSERT_TRUE(manager.StopGroup(kGroup).ok());
 }
 
 // 验证：坏质量、未知、停止和过期快照都不能允许成员参与控制。

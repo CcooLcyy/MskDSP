@@ -403,6 +403,26 @@ TEST(AgcControlTest, DirectCyclicModeValidatesPeriods) {
   EXPECT_TRUE(AGC::ValidateGroupConfig(cfg).ok());
 }
 
+// 验证：量测有效期缺省兼容，非零配置仅适用于可控成员且须在有效范围内。
+TEST(AgcControlTest, MeasurementValidityRequiresControllableMemberAndValidDuration) {
+  auto cfg = MakeBaseConfig();
+  auto *member = cfg.mutable_members(0);
+  for (const auto validityMs : {0u, 1000u, 3600000u}) {
+    member->set_measurement_validity_ms(validityMs);
+    EXPECT_TRUE(AGC::ValidateGroupConfig(cfg).ok()) << validityMs;
+  }
+  for (const auto validityMs : {999u, 3600001u}) {
+    member->set_measurement_validity_ms(validityMs);
+    EXPECT_FALSE(AGC::ValidateGroupConfig(cfg).ok()) << validityMs;
+  }
+  member->set_controllable(false);
+  member->clear_p_set();
+  member->set_measurement_validity_ms(10000);
+  EXPECT_FALSE(AGC::ValidateGroupConfig(cfg).ok());
+  member->set_measurement_validity_ms(0);
+  EXPECT_TRUE(AGC::ValidateGroupConfig(cfg).ok());
+}
+
 // 验证：调试目标覆盖临时总目标，但不改变原有成员分配策略。
 TEST(AgcControlTest, DesiredTotalOverrideUsesTemporaryTuningTarget) {
   auto cfg = MakeBaseConfig();

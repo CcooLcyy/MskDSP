@@ -79,7 +79,7 @@ private:
 
     // 由配置派生的缓存 tags（供订阅线程使用）。
     std::string cmdTag;
-    std::unordered_map<std::string, size_t> memberIndexByMeasTag;
+    std::unordered_map<std::string, std::vector<size_t>> memberIndexesByMeasTag;
     std::unordered_map<std::string, std::vector<size_t>> memberIndexesByCommunicationTag;
     std::vector<bool> memberAvailable;
     std::vector<bool> memberCommunicationHealthy;
@@ -97,6 +97,11 @@ private:
     std::unordered_map<std::string, Decimal> baseRawByTag;
     std::vector<bool> hasMemberMeasRaw;
     std::vector<Decimal> memberMeasRaw;
+    struct MeasurementValidity {
+      int64_t sourceTsMs{0};
+      std::chrono::steady_clock::time_point validUntil{};
+    };
+    std::vector<MeasurementValidity> memberMeasurementValidity;
 
     bool hasLastDesiredTotalKw{false};
     Decimal lastDesiredTotalKw;
@@ -162,8 +167,8 @@ private:
                               bool *publishedAny = nullptr);
 
   bool handleUpdateLocked(GroupRuntime *g, const DataCenterProto::PointUpdate &update);
-  bool refreshCommunicationAvailabilityLocked(GroupRuntime *g);
-  void checkCommunicationTimeouts(const std::string &groupName);
+  bool refreshMemberAvailabilityLocked(GroupRuntime *g);
+  void checkMemberAvailabilityTimeouts(const std::string &groupName);
   void controlTick(const std::string &groupName);
 
   static bool pointValueToDecimal(const DataCenterProto::PointValue &v, Decimal *out);
