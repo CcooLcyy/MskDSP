@@ -140,7 +140,9 @@ private:
       const DataCenterProto::PointUpdate& update);
 
   bool handleUpdateLocked(GroupRuntime* group, const DataCenterProto::PointUpdate& update);
-  void controlTick(const std::string& groupName, const std::shared_ptr<ControlTrigger>& trigger);
+
+  enum class ControlTickResult { Complete, CommandChanged };
+  ControlTickResult controlTick(const std::string& groupName, const std::shared_ptr<ControlTrigger>& trigger);
 
   static bool pointValueToDecimal(const DataCenterProto::PointValue& value, Decimal* out);
   static std::unordered_set<std::string> collectAllTags(const AVCProto::GroupConfig& config);

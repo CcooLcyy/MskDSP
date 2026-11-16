@@ -630,7 +630,12 @@ void GroupManager::startThreadsLocked(const std::string& groupName, GroupRuntime
           return;
         }
         trigger->pending.store(false);
-        controlTick(groupName, trigger);
+        while (!st.stop_requested()) {
+          if (controlTick(groupName, trigger) != ControlTickResult::CommandChanged) {
+            break;
+          }
+          LOG_DEBUG("AVC 周期控制首轮命令已更新，立即重新计算: group_name={}", groupName);
+        }
 
         const auto period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
             std::chrono::duration<double>(calcPeriod));
@@ -1753,7 +1758,8 @@ void GroupManager::publishCommandEchoPoint(
   }
 }
 
-void GroupManager::controlTick(const std::string& groupName, const std::shared_ptr<ControlTrigger>& trigger) {
+GroupManager::ControlTickResult GroupManager::controlTick(
+    const std::string& groupName, const std::shared_ptr<ControlTrigger>& trigger) {
   AVCProto::GroupConfig config;
   uint32_t connId = 0;
   bool functionEnabled = true;
@@ -1765,7 +1771,7 @@ void GroupManager::controlTick(const std::string& groupName, const std::shared_p
     auto it = groupsByName_.find(groupName);
     if (it == groupsByName_.end() || it->second.state != AVCProto::GROUP_STATE_RUNNING ||
         it->second.controlTrigger != trigger) {
-      return;
+      return ControlTickResult::Complete;
     }
 
     config = it->second.config;
@@ -1796,7 +1802,7 @@ void GroupManager::controlTick(const std::string& groupName, const std::shared_p
   }
 
   if (connId == 0) {
-    return;
+    return ControlTickResult::Complete;
   }
 
   const auto quality = DataCenterProto::QUALITY_GOOD;
@@ -1833,26 +1839,28 @@ void GroupManager::controlTick(const std::string& groupName, const std::shared_p
 
   if (!functionEnabled) {
     LOG_DEBUG("AVC 跳过控制输出: group_name={}, 原因=AVC 功能未投入", groupName);
-    return;
+    return ControlTickResult::Complete;
   }
 
   const auto outputOpt = ComputeControlOutput(config, input, weightedStrategy_);
-  if (!outputOpt) {
-    return;
-  }
-  const auto& output = *outputOpt;
 
   // 计算期间若收到更新命令，当前结果已过期，不得覆盖最新目标。
   {
     std::lock_guard<std::mutex> lock(mu_);
     const auto it = groupsByName_.find(groupName);
     if (it == groupsByName_.end() || it->second.state != AVCProto::GROUP_STATE_RUNNING ||
-        it->second.controlTrigger != trigger ||
-        it->second.commandRevision != commandRevision) {
+        it->second.controlTrigger != trigger) {
+      return ControlTickResult::Complete;
+    }
+    if (it->second.commandRevision != commandRevision) {
       LOG_DEBUG("AVC 丢弃已过期控制计算结果: group_name={}, command_revision={}", groupName, commandRevision);
-      return;
+      return ControlTickResult::CommandChanged;
     }
   }
+  if (!outputOpt) {
+    return ControlTickResult::Complete;
+  }
+  const auto& output = *outputOpt;
 
   const bool stableDeltaTarget = config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC &&
                                  config.q_total_cmd().mode() == AVCProto::VALUE_MODE_DELTA &&
@@ -1941,7 +1949,7 @@ void GroupManager::controlTick(const std::string& groupName, const std::shared_p
     if (it == groupsByName_.end() || it->second.state != AVCProto::GROUP_STATE_RUNNING ||
         it->second.controlTrigger != trigger) {
       LOG_DEBUG("AVC 跳过已结束的控制任务状态写回: group_name={}", groupName);
-      return;
+      return ControlTickResult::Complete;
     }
 
     // 同一控制任务中，发布期间收到的新命令不影响本轮成功下发的计时。
@@ -1952,7 +1960,7 @@ void GroupManager::controlTick(const std::string& groupName, const std::shared_p
     if (it->second.commandRevision != commandRevision) {
       LOG_DEBUG("AVC 跳过过期控制结果写回: group_name={}, command_revision={}, 已记录成功下发时间={}",
                 groupName, commandRevision, directCyclic && commandApplied);
-      return;
+      return ControlTickResult::Complete;
     }
 
     if (!directCyclic || commandApplied) {
@@ -1988,6 +1996,7 @@ void GroupManager::controlTick(const std::string& groupName, const std::shared_p
                 desiredTotalQKvar.ToFixedString(),
                 actualTargetQKvar.ToFixedString());
   }
+  return ControlTickResult::Complete;
 }
 
 }  // namespace AVC

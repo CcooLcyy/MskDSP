@@ -281,7 +281,8 @@ struct TimedValue {
 class PublishTrace {
  public:
   void Record(const DataCenterProto::PublishRequest& request, Clock::time_point at) {
-    if (request.tag() != "INV1_Q_SET" && request.tag() != "总无功目标" && request.tag() != "电压偏差") {
+    if (request.tag() != "INV1_Q_SET" && request.tag() != "总无功目标" && request.tag() != "电压偏差" &&
+        request.tag() != "调节返回值") {
       return;
     }
     const auto value = PointValueAsDouble(request.value());
@@ -329,6 +330,12 @@ class AvcCycleTest : public testing::Test {
               PublishDoublePoint(&state, request.conn_id(), "Q_CMD", 60.0);
               EXPECT_TRUE(WaitForLatestDouble(state, request.conn_id(), "调节返回值", 60.0));
             }
+            if (request.tag() == "总无功实测" && injectTargetOnFirstMeasurement) {
+              injectTargetOnFirstMeasurement = false;
+              PublishDoublePoint(&state, request.conn_id(), "Q_CMD", 60.0);
+              // 订阅线程更新命令版本后才发布调节返回值，首轮计算在此等待更新完成。
+              EXPECT_TRUE(trace.WaitFor("调节返回值", 1));
+            }
           }
           return status;
         }));
@@ -350,8 +357,9 @@ class AvcCycleTest : public testing::Test {
 
   FakeDataCenterState state;
   PublishTrace trace;
-  // 在控制组启动前设置，由成员设定发布回调独占读写。
+  // 在控制组启动前设置，由控制线程的发布回调独占读写。
   bool injectTargetsOnFirstPublish = false;
+  bool injectTargetOnFirstMeasurement = false;
   decltype(MakeStub(&state)) stub = MakeStub(&state);
   GroupManager manager{"AVC"};
 };
@@ -803,6 +811,33 @@ TEST_F(AvcCycleTest, NewTargetsDuringPublishKeepCommandInterval) {
   EXPECT_NEAR(first->value, 20.0, 1e-9);
   EXPECT_NEAR(second->value, 60.0, 1e-9);
   EXPECT_GE(second->at - first->at, 4s);
+}
+
+// 验证：首轮输出前收到新命令，立即重算且首次总目标和成员设定均使用最新命令。
+TEST_F(AvcCycleTest, FirstCalculationRetriesWhenCommandChangesBeforeOutput) {
+  constexpr auto calculationPeriod = 6s;
+  injectTargetOnFirstMeasurement = true;
+  auto request = MakeCyclicGroup(false);
+  request.mutable_config()->set_calculation_execution_period_seconds(calculationPeriod.count());
+  AVCProto::GroupInfo info;
+  ASSERT_TRUE(manager.UpsertGroup(request, &info).ok());
+  ASSERT_TRUE(WaitForSubscriptionCount(state, info.conn_id(), 1));
+
+  // 使用绝对总无功命令触发首轮，避免量测提前唤醒控制线程。
+  PublishDoublePoint(&state, info.conn_id(), "Q_CMD", 20.0);
+  const auto latestCommand = trace.WaitFor("调节返回值", 1);
+  ASSERT_TRUE(latestCommand);
+  EXPECT_NEAR(latestCommand->value, 60.0, 1e-9);
+
+  const auto firstTarget = trace.WaitFor("总无功目标", 0);
+  ASSERT_TRUE(firstTarget);
+  EXPECT_NEAR(firstTarget->value, 60.0, 1e-9);
+  EXPECT_GE(firstTarget->at, latestCommand->at);
+
+  const auto firstSetpoint = trace.WaitFor("INV1_Q_SET", 0);
+  ASSERT_TRUE(firstSetpoint);
+  EXPECT_NEAR(firstSetpoint->value, 60.0, 1e-9);
+  EXPECT_LT(firstSetpoint->at - latestCommand->at, calculationPeriod);
 }
 
 // 验证：停组后保存新周期并启动，首轮不等待完整周期，后续按新周期计算和限频。
