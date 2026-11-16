@@ -433,8 +433,8 @@ TEST_F(IEC104ManualSimulationTest, RejectsFixedAndOtherBusinessPointsWithoutChan
   }
 }
 
-// 验证：输入工程量通过点表反向缩放校验，极小倍率导致的线格式溢出在保存前被拒绝。
-TEST_F(IEC104ManualSimulationTest, RejectsReverseScalingOverflowBeforeReplacingSnapshot) {
+// 验证：输入超过短浮点范围，即使按点表换算后可编码，也拒绝保存并保留旧快照。
+TEST_F(IEC104ManualSimulationTest, RejectsOutOfRangeWireValueBeforeReplacingSnapshot) {
   AddSingle(false);
   ASSERT_TRUE(mgr.SetSimulationValues(request, &response).ok());
   const auto previous = response.SerializeAsString();
@@ -443,27 +443,27 @@ TEST_F(IEC104ManualSimulationTest, RejectsReverseScalingOverflowBeforeReplacingS
   table.ToProto("manual", &configured);
   for (auto &point : *configured.mutable_points()) {
     if (point.tag() == "float-tag") {
-      point.set_scale_decimal("0.00000000000000000001");
+      point.set_scale_decimal("100");
       point.set_offset_decimal("0");
     }
   }
   ASSERT_TRUE(table.Upsert(configured.points(), true).ok());
   request.clear_points();
-  AddFloat(1e20);
+  AddFloat(1e39);
   EXPECT_EQ(mgr.SetSimulationValues(request, &response).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
   IEC104Proto::SimulationSnapshot loaded;
   ASSERT_TRUE(mgr.GetSimulationSnapshot("manual", &loaded).ok());
   EXPECT_EQ(loaded.SerializeAsString(), previous);
 }
 
-// 验证：工程量允许超过短浮点范围，只要反向缩放后的原始值可发送；零倍率仍按一处理。
-TEST_F(IEC104ManualSimulationTest, AcceptsEngineeringValueBeyondFloatRangeAndZeroScale) {
+// 验证：模拟值保存和总召不依赖倍率偏移，包含短浮点上界和零倍率配置。
+TEST_F(IEC104ManualSimulationTest, AcceptsWireValuesRegardlessOfScaleAndOffset) {
   auto &table = mgr.linksByName_.at("manual").pointTable;
   IEC104Proto::PointTable configured;
   table.ToProto("manual", &configured);
   for (auto &point : *configured.mutable_points()) {
     if (point.tag() == "float-tag") {
-      point.set_scale_decimal("100");
+      point.set_scale_decimal("0.00000000000000000001");
       point.set_offset_decimal("0");
     } else if (point.tag() == "float-tag-2") {
       point.set_scale_decimal("0");
@@ -471,18 +471,19 @@ TEST_F(IEC104ManualSimulationTest, AcceptsEngineeringValueBeyondFloatRangeAndZer
     }
   }
   ASSERT_TRUE(table.Upsert(configured.points(), true).ok());
-  AddFloat(1e39);
+  const double maxShortFloat = std::numeric_limits<float>::max();
+  AddFloat(maxShortFloat);
   auto *second = request.add_points();
   second->set_tag("float-tag-2");
   second->set_type(IEC104Proto::POINT_TYPE_FLOAT);
   second->set_double_value(11);
   ASSERT_TRUE(mgr.SetSimulationValues(request, &response).ok());
   ASSERT_EQ(response.points_size(), 2);
-  EXPECT_DOUBLE_EQ(response.points(0).double_value(), 1e39);
+  EXPECT_DOUBLE_EQ(response.points(0).double_value(), maxShortFloat);
   const auto snapshot = mgr.buildInterrogationSnapshot("manual", {"float-tag", "float-tag-2"});
   ASSERT_EQ(snapshot.size(), 2);
-  EXPECT_DOUBLE_EQ(snapshot[0].doubleValue, static_cast<double>(static_cast<float>(1e37)));
-  EXPECT_DOUBLE_EQ(snapshot[1].doubleValue, 10);
+  EXPECT_DOUBLE_EQ(snapshot[0].doubleValue, maxShortFloat);
+  EXPECT_DOUBLE_EQ(snapshot[1].doubleValue, 11);
 }
 
 // 验证：手动接口拒绝未知链路、空链路名、空响应、主站和无点表，链路停止状态不妨碍保存。
@@ -1613,7 +1614,7 @@ TEST(IEC104LinkManagerHelperTest, ApplySimulationKeepsSoeHistoryAndUpdatesSingle
   }
 }
 
-// 验证：后续遥测无法反向缩放时，整批应用失败且不落盘、不推进已有遥信基线或创建新基线。
+// 验证：后续遥测超出短浮点范围时，整批应用失败且不落盘、不更新遥信基线。
 TEST(IEC104LinkManagerHelperTest, ApplySimulationRejectsInvalidFloatBeforeChangingSingleBaselines) {
   ScopedSimulationTempDir dir;
   LinkManager mgr("IEC104");
@@ -1640,10 +1641,9 @@ TEST(IEC104LinkManagerHelperTest, ApplySimulationRejectsInvalidFloatBeforeChangi
   badFloat->set_ioa(100);
   badFloat->set_type(IEC104Proto::POINT_TYPE_FLOAT);
   badFloat->set_business_type(IEC104Proto::POINT_BUSINESS_TYPE_TELEMETRY);
-  badFloat->set_scale_decimal("0.00000000000000000001");
+  badFloat->set_scale_decimal("100");
   ASSERT_TRUE(runtime.pointTable.Upsert(table.points(), true).ok());
-  // 工程量有效，但除以该倍率后的原始值为 1e40，超出 IEC104 短浮点范围。
-  runtime.simulationValues["z-invalid-float"].set_double_value(1e20);
+  runtime.simulationValues["z-invalid-float"].set_double_value(1e39);
   runtime.lastReportedSingleByTag["a-single-existing"] = {false, DataCenterProto::QUALITY_GOOD};
   mgr.linksByName_.emplace("sim-invalid", std::move(runtime));
 
@@ -1690,7 +1690,7 @@ TEST(IEC104LinkManagerHelperTest, SimulationValuesExcludeRemoteAdjustAndRemoteCo
   EXPECT_EQ(FindSimulationPoint(generated, "remote-control"), nullptr);
 }
 
-// 验证：模拟值只遮蔽同 Tag 的真实数据，未模拟的遥调点仍保留在总召快照中。
+// 验证：总召原样返回模拟值，未模拟的遥调点仍按点表换算。
 TEST(IEC104LinkManagerHelperTest, InterrogationMergesSimulationWithUnsimulatedRealValues) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
@@ -1726,7 +1726,7 @@ TEST(IEC104LinkManagerHelperTest, InterrogationMergesSimulationWithUnsimulatedRe
   const auto snapshot = mgr.buildInterrogationSnapshot("sim-merge");
   ASSERT_EQ(snapshot.size(), 2u);
   EXPECT_EQ(snapshot[0].ioa, 100u);
-  EXPECT_DOUBLE_EQ(snapshot[0].doubleValue, 5.0);
+  EXPECT_DOUBLE_EQ(snapshot[0].doubleValue, 11.0);
   EXPECT_EQ(snapshot[1].ioa, 0x6201u);
   EXPECT_DOUBLE_EQ(snapshot[1].doubleValue, 15.0);
 }
@@ -1908,7 +1908,7 @@ TEST(IEC104LinkManagerHelperTest, SimulationValuesRejectMasterStation) {
   EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
 }
 
-// 验证：总召优先使用固定模拟值，不读取 DataCenter 最新值。
+// 验证：总召优先使用模拟值并直接上送，不读取 DataCenter 最新值。
 TEST(IEC104LinkManagerHelperTest, InterrogationUsesSimulationSnapshotFirst) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
@@ -1931,7 +1931,7 @@ TEST(IEC104LinkManagerHelperTest, InterrogationUsesSimulationSnapshotFirst) {
   auto snapshot = mgr.buildInterrogationSnapshot("sim");
   ASSERT_EQ(snapshot.size(), 1u);
   EXPECT_EQ(snapshot.front().ioa, 100u);
-  EXPECT_DOUBLE_EQ(snapshot.front().doubleValue, 5.0);
+  EXPECT_DOUBLE_EQ(snapshot.front().doubleValue, 11.0);
 }
 
 // 验证：清除模拟值后总召恢复 DataCenter 最新值路径。

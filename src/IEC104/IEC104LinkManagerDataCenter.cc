@@ -7,6 +7,7 @@
 #include <cstring>
 #include <ctime>
 #include <format>
+#include <limits>
 #include <optional>
 #include <random>
 #include <string>
@@ -89,12 +90,8 @@ bool reverseScale(const mskdsp::numeric::Decimal20& engineering,
   return true;
 }
 
-bool reverseScale(double engineering,
-                  const mskdsp::numeric::Decimal20& scale,
-                  const mskdsp::numeric::Decimal20& offset,
-                  double* out) {
-  auto decimal = mskdsp::numeric::Decimal20::FromDouble(engineering);
-  return decimal && reverseScale(*decimal, scale, offset, out);
+bool isValidSimulationFloat(double value) {
+  return std::isfinite(value) && std::abs(value) <= std::numeric_limits<float>::max();
 }
 
 bool shouldReport(const mskdsp::numeric::Decimal20& value,
@@ -1142,9 +1139,11 @@ std::vector<PointValue> LinkManager::buildInterrogationSnapshot(
     pv.quality = static_cast<uint8_t>(sim.quality());
     pv.tsMs = sim.ts_ms();
     if (metaIt->second.type == IEC104Proto::POINT_TYPE_FLOAT && sim.has_double_value()) {
-      if (!reverseScale(sim.double_value(), metaIt->second.scale, metaIt->second.offset, &pv.doubleValue)) {
+      if (!isValidSimulationFloat(sim.double_value())) {
+        LOG_WARNING("IEC104 总召跳过超出短浮点范围的模拟值: conn_name={}, tag={}", connName, tag);
         continue;
       }
+      pv.doubleValue = sim.double_value();
     } else if (metaIt->second.type == IEC104Proto::POINT_TYPE_SINGLE && sim.has_bool_value()) {
       pv.boolValue = sim.bool_value();
     } else {
@@ -1517,12 +1516,10 @@ grpc::Status LinkManager::SetSimulationValues(
       if (!requested.has_double_value() || requested.has_bool_value()) {
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::format("遥测模拟点必须仅填写浮点值: {}", tag));
       }
-      double rawValue = 0;
-      if (!std::isfinite(requested.double_value()) ||
-          !reverseScale(requested.double_value(), point->scale, point->offset, &rawValue)) {
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::format("遥测模拟值必须有限且可按点表换算为短浮点: {}", tag));
+      if (!isValidSimulationFloat(requested.double_value())) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, std::format("遥测模拟值必须有限且在短浮点范围内: {}", tag));
       }
-      // 快照保留工程量，应用与总召继续通过既有逻辑执行倍率、偏移和线格式转换。
+      // 快照保存要上送的值，编码时直接转为短浮点，不经过倍率与偏移。
       value.set_double_value(requested.double_value());
     } else {
       if (!requested.has_bool_value() || requested.has_double_value()) {
@@ -1597,9 +1594,11 @@ grpc::Status LinkManager::sendSimulationValuesLocked(const std::string& connName
     pv.quality = static_cast<uint8_t>(simIt->second.quality());
     pv.tsMs = simIt->second.ts_ms();
     if (point->type == IEC104Proto::POINT_TYPE_FLOAT && simIt->second.has_double_value()) {
-      if (!reverseScale(simIt->second.double_value(), point->scale, point->offset, &pv.doubleValue)) {
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "模拟浮点值无法按点表缩放");
+      if (!isValidSimulationFloat(simIt->second.double_value())) {
+        LOG_WARNING("IEC104 模拟遥测超出短浮点范围: conn_name={}, tag={}", connName, tag);
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "模拟浮点值必须有限且在短浮点范围内");
       }
+      pv.doubleValue = simIt->second.double_value();
     } else if (point->type == IEC104Proto::POINT_TYPE_SINGLE && simIt->second.has_bool_value()) {
       pv.boolValue = simIt->second.bool_value();
     } else {
