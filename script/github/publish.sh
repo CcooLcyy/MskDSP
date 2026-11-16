@@ -17,4 +17,4 @@ if [[ -n "${PLATFORM_GRPC_CA_B64:-}" ]]; then
 fi
 python script/gitlab/init_platform_proto.py
 python script/gitlab/platform_client.py --metadata "release/${LOWER_JOB_ARCH}/metadata.json" \
-  --proto-root .ci/platform-proto --publish-response-only
+  --proto-root .ci/platform-proto --upload-timeout "${PLATFORM_STREAM_UPLOAD_TIMEOUT:-60}" --publish-response-only

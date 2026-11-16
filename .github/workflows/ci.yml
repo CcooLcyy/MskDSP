@@ -178,6 +178,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     environment: ci
+    permissions:
+      contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -193,13 +196,35 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
-      - name: 获取本次冻结安装包
+      - name: 选择同一运行和架构的冻结安装包
+        id: package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          artifacts=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.expired == false) | .name')
+          for (( attempt=GITHUB_RUN_ATTEMPT; attempt>0; --attempt )); do
+            name="lower-package-${LOWER_JOB_ARCH}-${GITHUB_RUN_ID}-${attempt}"
+            if grep -Fxq -- "$name" <<< "$artifacts"; then
+              printf 'name=%s\nattempt=%s\n' "$name" "$attempt" >> "$GITHUB_OUTPUT"
+              echo "使用同一运行的冻结安装包：$name"
+              exit 0
+            fi
+          done
+          echo '错误：同一运行和架构没有可用的冻结安装包，请重跑全部作业。' >&2
+          exit 1
+      - name: 获取所选冻结安装包
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: lower-package-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ steps.package.outputs.name }}
           path: ${{ runner.temp }}/lower-package
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
       - name: 通过 gRPC 入库和发布
         env:
+          LOWER_PACKAGE_RUN_ATTEMPT: ${{ steps.package.outputs.attempt }}
+          PLATFORM_STREAM_UPLOAD_TIMEOUT: '300'
           PLATFORM_UPLOAD_TOKEN: ${{ secrets.PLATFORM_UPLOAD_TOKEN }}
           PLATFORM_GRPC_ENDPOINT: ${{ vars.PLATFORM_GRPC_ENDPOINT }}
           PLATFORM_GRPC_PLAINTEXT: ${{ vars.PLATFORM_GRPC_PLAINTEXT }}

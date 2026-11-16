@@ -15,7 +15,7 @@ from test_github_environment import github_environment
 
 
 class IdentityTests(unittest.TestCase):
-    # GitHub 上传只能消费本次运行、重跑、架构和真实仓库的冻结产物。
+    # 主干发布可重用同一运行的指定冻结包，仍须匹配来源和产物的实际尝试次数。
     def test_github_publish_identity_and_public_source_fetch(self):
         env = github_environment(LOWER_JOB_ARCH="x64")
         identity = lower_metadata.create_identity("1.0.0", "x64", env)
@@ -36,6 +36,16 @@ class IdentityTests(unittest.TestCase):
                         {"LOWER_JOB_ARCH": "arm64"}, {"GITHUB_REPOSITORY": "other/repo"}):
             with self.subTest(changes=changes), self.assertRaises(client.ClientError):
                 client.load_metadata(self.path, publish | changes)
+
+        retry = publish | {"GITHUB_RUN_ATTEMPT": "2", "LOWER_PACKAGE_RUN_ATTEMPT": "1"}
+        self.assertEqual(client.load_metadata(self.path, retry), (self.archive, metadata))
+        for changes in ({"LOWER_PACKAGE_RUN_ATTEMPT": "2"}, {"LOWER_PACKAGE_RUN_ATTEMPT": "3"},
+                        {"LOWER_PACKAGE_RUN_ATTEMPT": "0"}, {"GITHUB_RUN_ID": "101"},
+                        {"GITHUB_RUN_NUMBER": "8"}, {"GITHUB_SHA": "b" * 40},
+                        {"LOWER_JOB_ARCH": "arm64"}, {"GITHUB_REPOSITORY": "other/repo"},
+                        {"GITHUB_REF_NAME": "main", "GITHUB_REF": "refs/heads/main"}):
+            with self.subTest(changes=changes), self.assertRaises(client.ClientError):
+                client.load_metadata(self.path, retry | changes)
 
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -360,6 +370,7 @@ class GrpcContractTests(unittest.TestCase):
                     def CreateUpload(self, request, context):
                         self.authorize(context)
                         assert request.metadata == expected
+                        assert 0 < context.time_remaining() <= 61
                         return messages.CreateUploadResponse(upload=self.upload())
 
                     def GetUpload(self, request, context):
@@ -368,13 +379,14 @@ class GrpcContractTests(unittest.TestCase):
 
                     def UploadPackage(self, requests, context):
                         self.authorize(context)
+                        assert context.time_remaining() > 60
                         state["streams"] += 1
                         for request in requests:
                             assert request.offset == state["received"]
                             assert request.data == payload[request.offset:request.offset + len(request.data)]
                             state["received"] += len(request.data)
                             if scenario == "interrupt" and state["streams"] == 1:
-                                context.abort(grpc.StatusCode.UNAVAILABLE, "模拟分块落盘后连接中断")
+                                context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, "模拟分块落盘后上传超时")
                         return messages.UploadPackageResponse(upload=self.upload())
 
                     def CompleteUpload(self, request, context):
@@ -420,7 +432,7 @@ class GrpcContractTests(unittest.TestCase):
                             catalog = None if response_only else services.SoftwareCatalogServiceStub(rpc_channel)
                             return client.transfer(services.SoftwarePublishServiceStub(rpc_channel), catalog, messages,
                                                    archive, metadata, "test-token", before_publish=before,
-                                                   retry_delay=0, chunk_size=3)
+                                                   retry_delay=0, chunk_size=3, upload_timeout=120)
 
                         if scenario in ("invalid", "stale"):
                             with self.assertRaises(client.ClientError):

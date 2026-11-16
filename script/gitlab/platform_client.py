@@ -90,7 +90,14 @@ def load_metadata(metadata_path, environ=None):
         raise ClientError("下位机冻结身份、文件或摘要不合法")
     validate_publication_channel(data)
     if environment.get("GITHUB_ACTIONS") == "true":
-        if (data.get("github_run_attempt") != environment["GITHUB_RUN_ATTEMPT"]
+        current_attempt = environment["GITHUB_RUN_ATTEMPT"]
+        package_attempt = environment.get("LOWER_PACKAGE_RUN_ATTEMPT", current_attempt)
+        if (not re.fullmatch(r"[1-9][0-9]{0,19}", package_attempt)
+                or int(package_attempt) > int(current_attempt)
+                or (package_attempt != current_attempt
+                    and (environment.get("LOWER_JOB_PHASE") != "publish"
+                         or environment.get("CI_COMMIT_BRANCH") not in ("master", "main")))
+                or data.get("github_run_attempt") != package_attempt
                 or data.get("pipeline_iid") != environment["CI_PIPELINE_IID"]
                 or data["platform"] != "linux-" + environment["LOWER_JOB_ARCH"]):
             raise ClientError("GitHub 发布作业与构建重跑、运行序号或架构不一致")
@@ -273,13 +280,17 @@ def confirm_manifest(base_url, metadata, *, timeout=30):
 
 
 def transfer(publisher, catalog, messages, archive, metadata, token, *, before_publish,
-             attempts=4, retry_delay=1, timeout=60, chunk_size=1024 * 1024, after_publish=None):
+             attempts=4, retry_delay=1, timeout=60, upload_timeout=None,
+             chunk_size=1024 * 1024, after_publish=None):
     validate_publication_channel(metadata)
     import grpc
     channel = metadata["channel"]
     if channel == "stable" and metadata["platform"] != "linux-arm64":
         raise ClientError("发布通道不合法，Stable 仅支持 ARM64")
-    if (not 1 <= attempts <= 10 or not 0 < timeout <= 1800 or not 1 <= chunk_size <= 1024 * 1024
+    if upload_timeout is None:
+        upload_timeout = timeout
+    if (not 1 <= attempts <= 10 or not 0 < timeout <= 1800 or not 0 < upload_timeout <= 1800
+            or not 1 <= chunk_size <= 1024 * 1024
             or not token or not token.isascii() or any(ord(char) < 33 or ord(char) > 126 for char in token)):
         raise ClientError("上传配置或发布令牌不合法")
     authorization = (("authorization", "Bearer " + token),)
@@ -321,12 +332,17 @@ def transfer(publisher, catalog, messages, archive, metadata, token, *, before_p
         if current.state == "completed":
             package_id = current.package_id
             break
+        operation = "UploadPackage"
         try:
             if current.received_bytes < metadata["size"]:
-                publisher.UploadPackage(chunks(current.received_bytes), metadata=authorization, timeout=timeout)
+                print(f"平台流式上传第 {attempt + 1}/{attempts} 次，"
+                      f"起始偏移 {current.received_bytes}/{metadata['size']} 字节，限时 {upload_timeout:g} 秒",
+                      flush=True)
+                publisher.UploadPackage(chunks(current.received_bytes), metadata=authorization, timeout=upload_timeout)
             current = state()
             if current.received_bytes != metadata["size"]:
                 raise ClientError("上传结束后实际长度仍不完整")
+            operation = "CompleteUpload"
             package = publisher.CompleteUpload(messages.CompleteUploadRequest(upload_id=upload_id),
                                                metadata=authorization, timeout=timeout).package
             current = state()
@@ -337,11 +353,13 @@ def transfer(publisher, catalog, messages, archive, metadata, token, *, before_p
             break
         except grpc.RpcError as error:
             current = state()
+            print(f"平台 {operation} 第 {attempt + 1}/{attempts} 次返回 {error.code().name}，"
+                  f"平台已接收 {current.received_bytes}/{metadata['size']} 字节", file=sys.stderr, flush=True)
             if current.state == "completed":
                 package_id = current.package_id
                 break
             if error.code() not in retryable or attempt == attempts - 1:
-                raise ClientError("平台上传失败：" + error.code().name) from None
+                raise ClientError(f"平台 {operation} 失败：{error.code().name}") from None
             time.sleep(retry_delay)
     if not package_id:
         raise ClientError("平台未确认完成入库")
@@ -386,7 +404,8 @@ def transfer(publisher, catalog, messages, archive, metadata, token, *, before_p
     raise ClientError("平台来源通道发布未完成")
 
 
-def upload(metadata, proto_root=Path(".ci/platform-proto"), timeout=60, publish_response_only=False):
+def upload(metadata, proto_root=Path(".ci/platform-proto"), timeout=60, publish_response_only=False,
+           upload_timeout=None):
     archive, identity = load_metadata(metadata)
     check_current_head(identity)
     plaintext = os.environ.get("PLATFORM_GRPC_PLAINTEXT", "0") == "1"
@@ -415,6 +434,7 @@ def upload(metadata, proto_root=Path(".ci/platform-proto"), timeout=60, publish_
                 return transfer(services.SoftwarePublishServiceStub(channel), catalog,
                                 messages, archive, identity, os.environ.get("PLATFORM_UPLOAD_TOKEN", ""),
                                 before_publish=lambda: check_current_head(identity), timeout=timeout,
+                                upload_timeout=upload_timeout,
                                 after_publish=(lambda: confirm_manifest(public_base, identity, timeout=timeout)) if public_base else None)
 
 
@@ -428,6 +448,7 @@ def main(argv=None):
     parser.add_argument("--metadata", type=Path, required=True)
     parser.add_argument("--proto-root", type=Path, default=Path(".ci/platform-proto"))
     parser.add_argument("--timeout", type=float, default=60)
+    parser.add_argument("--upload-timeout", type=float, help="流式安装包上传的单次超时秒数")
     parser.add_argument("--publish-response-only", action="store_true", help="以 gRPC 发布成功响应为准")
     args = parser.parse_args(argv)
     try:
