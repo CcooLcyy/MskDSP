@@ -551,7 +551,7 @@ TEST(ModbusRtuLinkManagerTest, UpsertLinkRejectsSerialConflict) {
   EXPECT_EQ(st.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
 }
 
-// 验证：当 DataCenter 删除失败时，DeleteLink 标记 PENDING_DELETE 且保留本地配置以便重试。
+// 验证：DataCenter 删除失败后保留本地配置，重复停止也保留待删除状态。
 TEST(ModbusRtuLinkManagerTest, DeleteLinkFailureMarksPendingDeleteAndKeepsLocal) {
   FakeDataCenterState state;
   state.FailDeleteForConnName("conn-fail");
@@ -569,6 +569,9 @@ TEST(ModbusRtuLinkManagerTest, DeleteLinkFailureMarksPendingDeleteAndKeepsLocal)
   EXPECT_EQ(st.error_code(), grpc::StatusCode::INTERNAL);
 
   ModbusRTUProto::LinkInfo got;
+  ASSERT_TRUE(mgr.GetLink("conn-fail", &got).ok());
+  ASSERT_EQ(got.state(), ModbusRTUProto::LINK_STATE_PENDING_DELETE);
+  ASSERT_TRUE(mgr.StopLink("conn-fail").ok());
   ASSERT_TRUE(mgr.GetLink("conn-fail", &got).ok());
   EXPECT_EQ(got.state(), ModbusRTUProto::LINK_STATE_PENDING_DELETE);
 }
@@ -1358,6 +1361,69 @@ TEST(ModbusRtuLinkManagerTest, PollingQualityRetainsSampleAndRecoversAtSameValue
     EXPECT_EQ(updates[3].value().decimal_value(), updates[0].value().decimal_value());
     EXPECT_EQ(updates[4].ts_ms(), updates[3].ts_ms());
     EXPECT_EQ(updates[5].ts_ms(), updates[3].ts_ms());
+  }
+}
+
+// 验证：点读和显式块读都能在 30 秒轮询间隔内及时停止，清理完成后连接可删除。
+TEST(ModbusRtuLinkManagerTest, StopWakesLongPollingIntervalInBothReadModes) {
+  for (const auto mode : {ModbusRTUProto::READ_PLAN_MODE_POINT,
+                          ModbusRTUProto::READ_PLAN_MODE_EXPLICIT}) {
+    SCOPED_TRACE(mode);
+    ScopedPseudoTty pty;
+    ASSERT_TRUE(pty.ok()) << pty.error();
+    FakeDataCenterState state;
+    LinkManagerTestEnv env;
+    auto& mgr = env.mgr;
+    auto stub = MakeStub(&state);
+    mgr.setDataCenterStub(stub);
+    constexpr auto connName = "long-interval-stop";
+    auto request = MakeMinimalLinkReq(connName, pty.slavePath().c_str(), 1);
+    auto* config = request.mutable_config();
+    config->set_poll_interval_ms(30000);
+    auto* plan = config->mutable_read_plan();
+    plan->set_mode(mode);
+    if (mode == ModbusRTUProto::READ_PLAN_MODE_EXPLICIT) {
+      auto* block = plan->add_blocks();
+      block->set_function(ModbusRTUProto::FUNCTION_READ_HOLDING_REGISTERS);
+      block->set_start(10);
+      block->set_quantity(1);
+    }
+    ModbusRTUProto::LinkInfo info;
+    ASSERT_TRUE(mgr.UpsertLink(request, &info).ok());
+    ModbusRTUProto::UpsertPointTableRequest points;
+    points.set_conn_name(connName);
+    points.set_replace(true);
+    *points.add_points() = MakeHoldingRegisterPoint("sample", 10);
+    ASSERT_TRUE(mgr.UpsertPointTable(points).ok());
+    EXPECT_CALL(*stub, BatchPublish(_, _, _))
+        .WillOnce([&](grpc::ClientContext*, const DataCenterProto::BatchPublishRequest& batch,
+                      DataCenterProto::Empty*) {
+          ModbusRTUProto::LinkInfo stopping;
+          EXPECT_TRUE(mgr.GetLink(connName, &stopping).ok());
+          EXPECT_EQ(stopping.state(), ModbusRTUProto::LINK_STATE_RUNNING);
+          return state.BatchPublish(batch);
+        });
+    ASSERT_TRUE(mgr.StartLink(connName).ok());
+
+    std::vector<uint8_t> frame;
+    ASSERT_TRUE(pty.readExact(&frame, 8, 1000));
+    std::vector<uint8_t> response{1, 3, 2, 0, 42};
+    ModbusRTU::SerialBus::appendCrc(&response);
+    ASSERT_TRUE(pty.writeAll(response));
+    constexpr auto timeout = std::chrono::seconds(2);
+    ASSERT_TRUE(state.WaitForPublishCount(info.conn_id(), "sample", 1, timeout));
+    ASSERT_TRUE(state.WaitForPublishCount(info.conn_id(), "__communication_state", 3, timeout));
+    EXPECT_FALSE(pty.readExact(&frame, 8, 100));
+
+    const auto stopStarted = std::chrono::steady_clock::now();
+    ASSERT_TRUE(mgr.StopLink(connName).ok());
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - stopStarted);
+    ASSERT_LT(elapsed.count(), 5000);
+    ASSERT_TRUE(mgr.GetLink(connName, &info).ok());
+    EXPECT_EQ(info.state(), ModbusRTUProto::LINK_STATE_STOPPED);
+    ASSERT_TRUE(mgr.DeleteLink(connName).ok());
+    EXPECT_EQ(mgr.GetLink(connName, &info).error_code(), grpc::StatusCode::NOT_FOUND);
   }
 }
 

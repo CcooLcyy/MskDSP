@@ -4,6 +4,7 @@
 #include <array>
 #include <chrono>
 #include <concepts>
+#include <condition_variable>
 #include <format>
 #include <limits>
 #include <optional>
@@ -2236,10 +2237,10 @@ grpc::Status LinkManager::stopLink(const std::string& connName, bool markSamples
     }
     it->second.bus.reset();
     generation = ++it->second.communicationGeneration;
-    it->second.state = pendingDelete ? ModbusRTUProto::LINK_STATE_PENDING_DELETE : ModbusRTUProto::LINK_STATE_STOPPED;
     it->second.communicationState = ModbusRTUProto::COMMUNICATION_STATE_UNSPECIFIED;
   }
 
+  LOG_INFO("ModbusRTU 开始停止轮询并清理链路: conn_name={}", connName);
   pollThread.request_stop();
   if (commandReadThread.joinable()) {
     LOG_INFO("ModbusRTU 停止 DataCenter 命令订阅: conn_name={}", connName);
@@ -2268,8 +2269,6 @@ grpc::Status LinkManager::stopLink(const std::string& connName, bool markSamples
     publishStoppedSamples(connName, connId, *samples);
   }
 
-  setCommunicationState(connName, generation, CommunicationState::Stopped);
-
   if (commandGate) {
     std::unique_lock<std::mutex> gateLock(commandGate->mu);
     commandGate->cv.wait(gateLock, [&commandGate]() { return commandGate->active == 0; });
@@ -2289,6 +2288,12 @@ grpc::Status LinkManager::stopLink(const std::string& connName, bool markSamples
       released->Close();
     }
   }
+
+  if (!pendingDelete) {
+    std::lock_guard lock(mu_);
+    linksByName_.at(connName).state = ModbusRTUProto::LINK_STATE_STOPPED;
+  }
+  setCommunicationState(connName, generation, CommunicationState::Stopped);
 
   if (config.transport_type() == ModbusRTUProto::TRANSPORT_SERIAL) {
     LOG_INFO("ModbusRTU 已停止轮询: conn_name={}", connName);
@@ -2506,6 +2511,12 @@ void LinkManager::pollLoop(std::string connName,
                            std::stop_token stopToken) {
   setCommunicationState(connName, communicationGeneration, CommunicationState::Unknown);
   const auto interval = std::chrono::milliseconds(config.poll_interval_ms());
+  std::mutex intervalMutex;
+  std::condition_variable_any intervalCv;
+  const auto waitForNextRound = [&] {
+    std::unique_lock lock(intervalMutex);
+    (void)intervalCv.wait_for(lock, stopToken, interval, [] { return false; });
+  };
   const auto points = pointTable.Points();
   samples.reserve(points.size());
   const auto publish = [&](const std::string& tag, PollSample& sample) {
@@ -2793,7 +2804,7 @@ void LinkManager::pollLoop(std::string connName,
       setCommunicationState(
           connName, communicationGeneration,
           roundSuccessCount > 0 ? CommunicationState::Healthy : CommunicationState::Unhealthy);
-      std::this_thread::sleep_for(interval);
+      waitForNextRound();
     }
 
     LOG_INFO("ModbusRTU 轮询结束: conn_name={}", connName);
@@ -3226,7 +3237,7 @@ void LinkManager::pollLoop(std::string connName,
     setCommunicationState(
         connName, communicationGeneration,
         roundSuccessCount > 0 ? CommunicationState::Healthy : CommunicationState::Unhealthy);
-    std::this_thread::sleep_for(interval);
+    waitForNextRound();
   }
 
   LOG_INFO("ModbusRTU 轮询结束: conn_name={}", connName);

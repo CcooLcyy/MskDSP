@@ -59,6 +59,8 @@ ModbusRTU 模块负责管理 ModbusRTU 链路与点表，当前同时支持两�
 ### 连接状态显示
 
 - `state` 表示链路生命周期：`STOPPED`、`RUNNING` 或 `PENDING_DELETE`，用于控制启停操作。
+- 停止轮询时，`StopLink` 会唤醒正在等待下一轮的轮询线程，停止耗时不再包含剩余轮询间隔。已经发出的串口或 MQTT 读写仍按各自的超时处理。
+- 轮询线程、命令处理和链路总线清理完成后，链路才进入 `STOPPED`。若已处于 `PENDING_DELETE`，停止后保留该状态，供后续重试删除。上位机在停止请求完成后即可继续删除或重启链路。
 - `communication_state` 表示最近一轮实际抄读的现场通信健康状态，独立于 `state`。
 - 链路启动、停止或重启后先为 `UNSPECIFIED`（等待首轮抄读）。
 - 一轮抄读中只要至少一个点收到合法 RTU 帧并完成解析，就置为 `HEALTHY`；整轮没有任何有效点则置为 `UNHEALTHY`。
