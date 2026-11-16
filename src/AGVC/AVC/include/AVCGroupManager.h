@@ -26,6 +26,8 @@
 
 namespace AVC {
 
+struct ControlOutput;
+
 class GroupManager {
 public:
   explicit GroupManager(std::string moduleName, std::filesystem::path configDbPath = std::filesystem::path("./conf/config.db"));
@@ -50,6 +52,7 @@ private:
   struct ControlTrigger {
     std::atomic<bool> pending{false};
     std::counting_semaphore<1024> signal{0};
+    std::mutex memberPublishMutex;
   };
 
   struct GroupRuntime {
@@ -96,6 +99,10 @@ private:
     std::vector<bool> hasLastMemberTargetQKvar;
     std::vector<Decimal> lastMemberTargetQKvar;
 
+    std::shared_ptr<std::mutex> directionBlockPublishMutex{std::make_shared<std::mutex>()};
+    std::vector<bool> hasPublishedMemberTargetQKvar;
+    std::vector<Decimal> publishedMemberTargetQKvar;
+
     // 周期控制模式的命令节流状态。
     std::chrono::steady_clock::time_point lastCommandPublishedAt{};
     bool hasLastCommandPublishedAt{false};
@@ -118,6 +125,14 @@ private:
   void requestControlLocked(const std::string& groupName, GroupRuntime* group, std::string_view reason, std::string_view tag);
   void publishControlStatePoints(const std::string& groupName, std::string_view trigger);
   void publishDefaultLimitPoints(const std::string& groupName, std::string_view trigger);
+  void publishDirectionBlockPoints(const std::string& groupName, std::string_view reason);
+  bool publishMemberSetpoints(
+      const std::string& groupName,
+      const std::shared_ptr<ControlTrigger>& trigger,
+      uint32_t connId,
+      const AVCProto::GroupConfig& config,
+      const ControlOutput& output,
+      std::string_view reason);
   void publishCommandEchoPoint(
       uint32_t connId,
       const AVCProto::SignalSpec& commandSignal,
@@ -129,7 +144,7 @@ private:
 
   static bool pointValueToDecimal(const DataCenterProto::PointValue& value, Decimal* out);
   static std::unordered_set<std::string> collectAllTags(const AVCProto::GroupConfig& config);
-  static void rebuildTagCache(GroupRuntime* group);
+  static void rebuildTagCache(GroupRuntime* group, bool preserveDirectionTargets = false);
 
   mutable std::mutex mu_;
   std::unordered_map<std::string, GroupRuntime> groupsByName_;

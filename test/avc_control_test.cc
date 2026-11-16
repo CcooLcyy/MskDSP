@@ -89,6 +89,61 @@ AVC::ControlInput MakeQTotalInput(double qCmdRaw, const std::vector<double>& qMe
 
 }  // namespace
 
+// 验证：全部可控成员的已发布绝对设定值到同一方向边界才置位，离开边界随即解除。
+TEST(AvcControlTest, DirectionBlocksRequireAllControllableTargetsAtTheSameLimit) {
+  auto cfg = MakeBaseConfig();
+  cfg.mutable_members(0)->set_q_min_kvar_decimal("-20");
+  cfg.mutable_members(0)->set_q_max_kvar_decimal("30");
+  cfg.mutable_members(1)->set_q_min_kvar_decimal("-40");
+  cfg.mutable_members(1)->set_q_max_kvar_decimal("80");
+  cfg.add_members()->set_controllable(false);
+
+  auto check = [&](std::string_view first, std::string_view second,
+                   bool increaseBlocked, bool decreaseBlocked) {
+    const auto output = AVC::ComputeDirectionBlockOutput(
+        cfg, {true, true}, {DecimalValue(first), DecimalValue(second)});
+    EXPECT_EQ(output.quality, DataCenterProto::QUALITY_GOOD);
+    EXPECT_EQ(output.increaseBlocked, increaseBlocked);
+    EXPECT_EQ(output.decreaseBlocked, decreaseBlocked);
+  };
+  check("30", "79.99999999999999999999", false, false);
+  check("30", "80", true, false);
+  check("30", "70", false, false);
+  check("-19.99999999999999999999", "-40", false, false);
+  check("-20", "-40", false, true);
+  check("-19", "-40", false, false);
+}
+
+// 验证：缺少任一可控成员的已发布设定值时，两方向均为未知品质。
+TEST(AvcControlTest, DirectionBlocksAreUnknownUntilEveryControllableTargetIsKnown) {
+  const auto cfg = MakeBaseConfig();
+  const auto output = AVC::ComputeDirectionBlockOutput(
+      cfg, {true, false}, {DecimalValue("100"), DecimalValue("100")});
+  EXPECT_EQ(output.quality, DataCenterProto::QUALITY_BAD);
+  EXPECT_FALSE(output.increaseBlocked);
+  EXPECT_FALSE(output.decreaseBlocked);
+}
+
+// 验证：无可控成员或全部可控成员的上下限相等时，两方向均闭锁。
+TEST(AvcControlTest, DirectionBlocksBothDirectionsWhenNoAdjustmentIsPossible) {
+  auto cfg = MakeBaseConfig();
+  cfg.mutable_members(0)->set_controllable(false);
+  cfg.mutable_members(1)->set_controllable(false);
+  auto output = AVC::ComputeDirectionBlockOutput(cfg, {}, {});
+  EXPECT_EQ(output.quality, DataCenterProto::QUALITY_GOOD);
+  EXPECT_TRUE(output.increaseBlocked);
+  EXPECT_TRUE(output.decreaseBlocked);
+
+  cfg.mutable_members(1)->set_controllable(true);
+  cfg.mutable_members(1)->set_q_min_kvar_decimal("-9.25");
+  cfg.mutable_members(1)->set_q_max_kvar_decimal("-9.25");
+  output = AVC::ComputeDirectionBlockOutput(
+      cfg, {false, true}, {Decimal{}, DecimalValue("-9.25")});
+  EXPECT_EQ(output.quality, DataCenterProto::QUALITY_GOOD);
+  EXPECT_TRUE(output.increaseBlocked);
+  EXPECT_TRUE(output.decreaseBlocked);
+}
+
 // 验证：AVC 目标电压和总无功命令均可配置合法的计算周期与命令最小间隔。
 TEST(AvcControlTest, CyclicModeAcceptsVoltageAndQTotalCommands) {
   auto cfg = MakeBaseConfig();

@@ -5,7 +5,7 @@
 namespace AVC {
 namespace {
 
-constexpr std::array<DefaultPointDefinition, 12> kDefaultPoints{{
+constexpr std::array<DefaultPointDefinition, 14> kDefaultPoints{{
     {
         .kind = AVCProto::DEFAULT_POINT_KIND_THEORETICAL_LOWER,
         .tag = "理论可调无功下限",
@@ -77,6 +77,18 @@ constexpr std::array<DefaultPointDefinition, 12> kDefaultPoints{{
         .tag = "AVC远方操作",
         .name = "AVC远方操作",
         .description = "AVC 是否允许远方控制状态；BOOL，true 表示允许",
+    },
+    {
+        .kind = AVCProto::DEFAULT_POINT_KIND_INCREASE_BLOCK,
+        .tag = "AVC增闭锁",
+        .name = "AVC增闭锁",
+        .description = "全部可控成员的已发布绝对设定值达到无功上限；只读 BOOL",
+    },
+    {
+        .kind = AVCProto::DEFAULT_POINT_KIND_DECREASE_BLOCK,
+        .tag = "AVC减闭锁",
+        .name = "AVC减闭锁",
+        .description = "全部可控成员的已发布绝对设定值达到无功下限；只读 BOOL",
     },
 }};
 

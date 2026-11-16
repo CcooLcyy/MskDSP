@@ -67,6 +67,37 @@ std::expected<Decimal, Error> computeTotalQMeasKvar(
 
 }  // 命名空间结束
 
+DirectionBlockOutput ComputeDirectionBlockOutput(
+    const AVCProto::GroupConfig& config,
+    const std::vector<bool>& hasPublishedTarget,
+    const std::vector<Decimal>& publishedTargetQKvar) {
+  bool increaseBlocked = true;
+  bool decreaseBlocked = true;
+  const auto memberCount = static_cast<size_t>(config.members_size());
+  for (size_t index = 0; index < memberCount; ++index) {
+    const auto& member = config.members(static_cast<int>(index));
+    if (!member.controllable()) {
+      continue;
+    }
+    if (index >= hasPublishedTarget.size() || !hasPublishedTarget[index] ||
+        index >= publishedTargetQKvar.size()) {
+      return {};
+    }
+    const auto minimum = numeric::Minimum(member);
+    const auto maximum = numeric::Maximum(member);
+    if (!minimum.has_value() || !maximum.has_value()) {
+      logCalculationError(config, "计算增减闭锁",
+                          !minimum.has_value() ? minimum.error() : maximum.error());
+      return {};
+    }
+    increaseBlocked = increaseBlocked && publishedTargetQKvar[index] >= *maximum;
+    decreaseBlocked = decreaseBlocked && publishedTargetQKvar[index] <= *minimum;
+  }
+  return {.increaseBlocked = increaseBlocked,
+          .decreaseBlocked = decreaseBlocked,
+          .quality = DataCenterProto::QUALITY_GOOD};
+}
+
 std::optional<Decimal> ComputeVoltageMeas(
     const AVCProto::GroupConfig& config, const ControlInput& input) {
   if (!input.hasVoltageMeasRaw) {

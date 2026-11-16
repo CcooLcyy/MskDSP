@@ -579,7 +579,7 @@ void GroupManager::startThreadsLocked(const std::string& groupName, GroupRuntime
   if (group == nullptr) {
     return;
   }
-  rebuildTagCache(group);
+  rebuildTagCache(group, true);
 
   const auto connId = group->connId;
   auto tags = group->subscribeTags;
@@ -746,10 +746,12 @@ grpc::Status GroupManager::StartGroup(const std::string& groupName) {
   }
   if (alreadyRunning) {
     publishControlStatePoints(groupName, "控制组启动幂等请求");
+    publishDirectionBlockPoints(groupName, "控制组启动幂等请求");
     LOG_INFO("AVC 启动控制组请求幂等成功: group_name={}, 原因=控制组已在运行", groupName);
     return grpc::Status::OK;
   }
   publishControlStatePoints(groupName, "控制组启动");
+  publishDirectionBlockPoints(groupName, "控制组启动");
   primeControlInputs(groupName);
   LOG_INFO("AVC 控制组已启动控制功能: group_name={}", groupName);
   return grpc::Status::OK;
@@ -953,6 +955,7 @@ grpc::Status GroupManager::ExecuteCommand(
   AVCProto::SignalSpec commandSignal;
   auto commandMode = AVCProto::VALUE_MODE_ABSOLUTE;
   bool directCyclic = false;
+  std::shared_ptr<ControlTrigger> controlTrigger;
   ControlInput input;
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -989,6 +992,7 @@ grpc::Status GroupManager::ExecuteCommand(
     }
 
     config = it->second.config;
+    controlTrigger = it->second.controlTrigger;
     directCyclic = config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC;
     connId = it->second.connId;
     voltageMode = it->second.voltageMode;
@@ -1082,7 +1086,8 @@ grpc::Status GroupManager::ExecuteCommand(
     {
       std::lock_guard<std::mutex> lock(mu_);
       auto it = groupsByName_.find(groupName);
-      if (it == groupsByName_.end() || it->second.state != AVCProto::GROUP_STATE_RUNNING) {
+      if (it == groupsByName_.end() || it->second.state != AVCProto::GROUP_STATE_RUNNING ||
+          it->second.controlTrigger != controlTrigger) {
         response->set_status(DataCenterProto::COMMAND_REJECTED);
         response->set_reject_code(DataCenterProto::COMMAND_REJECT_GROUP_NOT_RUNNING);
         response->set_reason("AVC 控制组状态已变化，命令未排队");
@@ -1109,7 +1114,8 @@ grpc::Status GroupManager::ExecuteCommand(
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = groupsByName_.find(groupName);
-    if (it == groupsByName_.end() || it->second.state != AVCProto::GROUP_STATE_RUNNING) {
+    if (it == groupsByName_.end() || it->second.state != AVCProto::GROUP_STATE_RUNNING ||
+        it->second.controlTrigger != controlTrigger) {
       response->set_status(DataCenterProto::COMMAND_REJECTED);
       response->set_reject_code(DataCenterProto::COMMAND_REJECT_GROUP_NOT_RUNNING);
       response->set_reason("AVC 控制组状态已变化，命令未执行");
@@ -1164,18 +1170,7 @@ grpc::Status GroupManager::ExecuteCommand(
         output.voltageError.ToFixedString(), quality, 0);
   }
 
-  for (size_t i = 0; i < output.memberPublish.size() && i < output.memberPublishKvar.size(); ++i) {
-    if (!output.memberPublish[i]) {
-      continue;
-    }
-    const auto& member = config.members(static_cast<int>(i));
-    if (!member.has_q_set() || !member.q_set().has_signal() || member.q_set().signal().tag().empty()) {
-      continue;
-    }
-    (void)dataCenter_.PublishDecimal(
-        connId, member.q_set().signal().tag(),
-        output.memberPublishKvar[i].ToFixedString(), quality, 0);
-  }
+  (void)publishMemberSetpoints(groupName, controlTrigger, connId, config, output, "同步命令执行");
 
   response->set_status(DataCenterProto::COMMAND_ACCEPTED);
   response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSPECIFIED);
@@ -1277,7 +1272,7 @@ std::unordered_set<std::string> GroupManager::collectAllTags(const AVCProto::Gro
   return tags;
 }
 
-void GroupManager::rebuildTagCache(GroupRuntime* group) {
+void GroupManager::rebuildTagCache(GroupRuntime* group, bool preserveDirectionTargets) {
   if (group == nullptr) {
     return;
   }
@@ -1311,6 +1306,10 @@ void GroupManager::rebuildTagCache(GroupRuntime* group) {
   group->memberQMeasRaw.assign(memberCount, Decimal{});
   group->hasLastMemberTargetQKvar.assign(memberCount, false);
   group->lastMemberTargetQKvar.assign(memberCount, Decimal{});
+  if (!preserveDirectionTargets) {
+    group->hasPublishedMemberTargetQKvar.assign(memberCount, false);
+    group->publishedMemberTargetQKvar.assign(memberCount, Decimal{});
+  }
 
   std::unordered_set<std::string> seenSubscribeTags;
   auto addSubscribeTag = [&seenSubscribeTags, group](const std::string& tag) {
@@ -1616,6 +1615,107 @@ void GroupManager::publishDefaultLimitPoints(const std::string& groupName, std::
       static_cast<int>(defaultOutput.dynamicQuality),
       defaultOutput.uncontrollableMemberCount,
       defaultOutput.missingUncontrollableMemberCount);
+  publishDirectionBlockPoints(groupName, trigger);
+}
+
+void GroupManager::publishDirectionBlockPoints(const std::string& groupName, std::string_view reason) {
+  std::shared_ptr<std::mutex> publishMutex;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    const auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end()) {
+      return;
+    }
+    publishMutex = it->second.directionBlockPublishMutex;
+  }
+  std::lock_guard<std::mutex> publishLock(*publishMutex);
+  uint32_t connId = 0;
+  DirectionBlockOutput output;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    const auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end() || it->second.directionBlockPublishMutex != publishMutex) {
+      return;
+    }
+    const auto& group = it->second;
+    connId = group.connId;
+    output = ComputeDirectionBlockOutput(
+        group.config, group.hasPublishedMemberTargetQKvar, group.publishedMemberTargetQKvar);
+  }
+  if (connId == 0) {
+    return;
+  }
+  for (const auto kind : {AVCProto::DEFAULT_POINT_KIND_INCREASE_BLOCK,
+                         AVCProto::DEFAULT_POINT_KIND_DECREASE_BLOCK}) {
+    const auto tag = defaultPointTag(kind);
+    const bool blocked = kind == AVCProto::DEFAULT_POINT_KIND_INCREASE_BLOCK
+                             ? output.increaseBlocked : output.decreaseBlocked;
+    DataCenterProto::PointValue value;
+    value.set_bool_value(blocked);
+    const auto status = dataCenter_.PublishValue(connId, std::string(tag), value, output.quality, 0);
+    if (!status.ok()) {
+      LOG_ERROR("AVC 发布增减闭锁遥信失败: group_name={}, tag={}, 闭锁={}, 品质={}, 触发来源={}, 原因={}",
+                groupName, tag, blocked, static_cast<int>(output.quality), reason, status.error_message());
+    } else {
+      LOG_DEBUG("AVC 已发布增减闭锁遥信: group_name={}, tag={}, 闭锁={}, 品质={}, 触发来源={}",
+                groupName, tag, blocked, static_cast<int>(output.quality), reason);
+    }
+  }
+}
+
+bool GroupManager::publishMemberSetpoints(
+    const std::string& groupName,
+    const std::shared_ptr<ControlTrigger>& trigger,
+    uint32_t connId,
+    const AVCProto::GroupConfig& config,
+    const ControlOutput& output,
+    std::string_view reason) {
+  if (!trigger) {
+    return false;
+  }
+  std::lock_guard<std::mutex> publishLock(trigger->memberPublishMutex);
+  bool applied = false;
+  const auto count = static_cast<size_t>(config.members_size());
+  for (size_t i = 0; i < count && i < output.memberPublish.size() &&
+                     i < output.memberPublishKvar.size() && i < output.memberTargetQKvar.size(); ++i) {
+    if (!output.memberPublish[i]) {
+      continue;
+    }
+    const auto& member = config.members(static_cast<int>(i));
+    if (!member.has_q_set() || !member.q_set().has_signal() || member.q_set().signal().tag().empty()) {
+      continue;
+    }
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      const auto it = groupsByName_.find(groupName);
+      if (it == groupsByName_.end() || it->second.controlTrigger != trigger || it->second.connId != connId ||
+          it->second.state != AVCProto::GROUP_STATE_RUNNING) {
+        break;
+      }
+    }
+    const auto& tag = member.q_set().signal().tag();
+    const auto status = dataCenter_.PublishDecimal(
+        connId, tag, output.memberPublishKvar[i].ToFixedString(), DataCenterProto::QUALITY_GOOD, 0);
+    if (!status.ok()) {
+      LOG_ERROR("AVC 下发成员无功设定失败: group_name={}, member_name={}, tag={}, publish_kvar={}, 原因={}",
+                groupName, member.member_name(), tag, output.memberPublishKvar[i].ToFixedString(),
+                status.error_message());
+      continue;
+    }
+    applied = true;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      const auto it = groupsByName_.find(groupName);
+      if (it != groupsByName_.end() && it->second.controlTrigger == trigger) {
+        it->second.hasPublishedMemberTargetQKvar[i] = true;
+        it->second.publishedMemberTargetQKvar[i] = output.memberTargetQKvar[i];
+      }
+    }
+  }
+  if (applied) {
+    publishDirectionBlockPoints(groupName, reason);
+  }
+  return applied;
 }
 
 void GroupManager::publishCommandEchoPoint(
@@ -1826,29 +1926,8 @@ void GroupManager::controlTick(const std::string& groupName, const std::shared_p
     }
   }
 
-  bool commandApplied = false;
-  for (size_t i = 0; i < output.memberPublish.size() && i < output.memberPublishKvar.size(); ++i) {
-    if (!allowMemberPublish || !output.memberPublish[i]) {
-      continue;
-    }
-    const auto& member = config.members(static_cast<int>(i));
-    if (!member.has_q_set() || !member.q_set().has_signal() || member.q_set().signal().tag().empty()) {
-      continue;
-    }
-    status = dataCenter_.PublishDecimal(
-        connId, member.q_set().signal().tag(),
-        output.memberPublishKvar[i].ToFixedString(), quality, 0);
-    if (!status.ok()) {
-      LOG_ERROR("AVC 下发成员无功设定失败: group_name={}, member_name={}, tag={}, publish_kvar={}, 原因={}",
-                groupName,
-                member.member_name(),
-                member.q_set().signal().tag(),
-                output.memberPublishKvar[i].ToFixedString(),
-                status.error_message());
-    } else {
-      commandApplied = true;
-    }
-  }
+  const bool commandApplied = allowMemberPublish && publishMemberSetpoints(
+      groupName, trigger, connId, config, output, directCyclic ? "周期控制" : "PI 事件触发控制");
 
   bool shouldLogUnallocated = false;
   const auto unallocatedQKvar = output.unallocatedQKvar;

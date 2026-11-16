@@ -75,6 +75,18 @@ struct DefaultPointOutput {
   size_t missingUncontrollableMemberCount{0};
 };
 
+// 全部可控成员的绝对设定值已成功发布时才有确定的方向闭锁状态。
+struct DirectionBlockOutput {
+  bool increaseBlocked{false};
+  bool decreaseBlocked{false};
+  DataCenterProto::Quality quality{DataCenterProto::QUALITY_BAD};
+};
+
+DirectionBlockOutput ComputeDirectionBlockOutput(
+    const AVCProto::GroupConfig& config,
+    const std::vector<bool>& hasPublishedTarget,
+    const std::vector<Decimal>& publishedTargetQKvar);
+
 std::optional<Decimal> ComputeVoltageMeas(const AVCProto::GroupConfig& config, const ControlInput& input);
 std::optional<Decimal> ComputeTotalQMeasKvar(const AVCProto::GroupConfig& config, const ControlInput& input);
 DefaultPointOutput ComputeDefaultPointOutput(const AVCProto::GroupConfig& config, const ControlInput& input);

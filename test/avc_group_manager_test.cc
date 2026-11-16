@@ -144,6 +144,19 @@ DataCenterProto::ExecuteCommandResponse ExecuteBoolCommand(
   return response;
 }
 
+DataCenterProto::ExecuteCommandResponse ExecuteQTotalCommand(
+    GroupManager* manager, const char* groupName, uint32_t connId, double value) {
+  DataCenterProto::ExecuteCommandRequest request;
+  request.mutable_dst()->set_conn_name(groupName);
+  request.mutable_dst()->set_conn_id(connId);
+  request.mutable_dst()->set_tag("Q_CMD");
+  request.mutable_value()->set_double_value(value);
+  request.set_quality(DataCenterProto::QUALITY_GOOD);
+  DataCenterProto::ExecuteCommandResponse response;
+  EXPECT_TRUE(manager->ExecuteCommand(request, &response).ok());
+  return response;
+}
+
 bool WaitForLatestDouble(const FakeDataCenterState& state, uint32_t connId, const char* tag, double expected) {
   for (int i = 0; i < kAsyncWaitIterations; ++i) {
     DataCenterProto::GetLatestRequest req;
@@ -220,7 +233,8 @@ bool WaitForLatestDecimal(
   return false;
 }
 
-bool WaitForLatestBool(const FakeDataCenterState& state, uint32_t connId, const char* tag, bool expected) {
+bool WaitForLatestBool(const FakeDataCenterState& state, uint32_t connId, const char* tag, bool expected,
+                       std::optional<DataCenterProto::Quality> quality = std::nullopt) {
   for (int i = 0; i < kAsyncWaitIterations; ++i) {
     DataCenterProto::GetLatestRequest req;
     req.set_conn_id(connId);
@@ -228,7 +242,7 @@ bool WaitForLatestBool(const FakeDataCenterState& state, uint32_t connId, const 
 
     DataCenterProto::GetLatestResponse resp;
     if (state.GetLatest(req, &resp).ok() && resp.updates_size() == 1 && resp.updates(0).value().has_bool_value() &&
-        resp.updates(0).value().bool_value() == expected) {
+        resp.updates(0).value().bool_value() == expected && (!quality || resp.updates(0).quality() == *quality)) {
       return true;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -403,13 +417,23 @@ TEST(AvcGroupManagerTest, DecimalCommandRemainsExactThroughResponseAndPublishing
 TEST(AvcGroupManagerTest, UpsertGroupReturnsDefaultPointInfos) {
   FakeDataCenterState state;
   auto stub = MakeStub(&state);
+  EXPECT_CALL(*stub, UpsertConnTags(_, _, _))
+      .WillOnce(Invoke([](grpc::ClientContext*, const DataCenterProto::UpsertConnTagsRequest& request,
+                         DataCenterProto::Empty*) {
+        EXPECT_NE(request.conn_id(), 0u);
+        EXPECT_TRUE(request.replace());
+        const std::unordered_set<std::string> tags(request.tags().begin(), request.tags().end());
+        EXPECT_TRUE(tags.contains("AVC增闭锁"));
+        EXPECT_TRUE(tags.contains("AVC减闭锁"));
+        return grpc::Status::OK;
+      }));
 
   GroupManager mgr("AVC");
   mgr.setDataCenterStub(stub);
 
   AVCProto::GroupInfo info;
   ASSERT_TRUE(mgr.UpsertGroup(MakeVoltageGroupReq("g-default-points"), &info).ok());
-  ASSERT_EQ(info.default_points_size(), 12);
+  ASSERT_EQ(info.default_points_size(), 14);
 
   std::unordered_map<std::string, AVCProto::DefaultPointKind> defaultPoints;
   for (const auto& point : info.default_points()) {
@@ -427,10 +451,115 @@ TEST(AvcGroupManagerTest, UpsertGroupReturnsDefaultPointInfos) {
   EXPECT_EQ(defaultPoints["电压偏差"], AVCProto::DEFAULT_POINT_KIND_VOLTAGE_ERROR);
   EXPECT_EQ(defaultPoints["AVC功能投入"], AVCProto::DEFAULT_POINT_KIND_FUNCTION_ENABLE);
   EXPECT_EQ(defaultPoints["AVC远方操作"], AVCProto::DEFAULT_POINT_KIND_REMOTE_OPERATION);
+  EXPECT_EQ(defaultPoints["AVC增闭锁"], AVCProto::DEFAULT_POINT_KIND_INCREASE_BLOCK);
+  EXPECT_EQ(defaultPoints["AVC减闭锁"], AVCProto::DEFAULT_POINT_KIND_DECREASE_BLOCK);
   EXPECT_TRUE(info.function_enabled());
   EXPECT_TRUE(info.remote_enabled());
 
   ASSERT_TRUE(mgr.StopGroup("g-default-points").ok());
+}
+
+// 验证：新建控制组的增减闭锁质量未知，闭锁点拒绝写入且标签不能被用户命令点复用。
+TEST(AvcGroupManagerTest, DirectionBlockPointsAreReadOnlyAndInitiallyUnknown) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  GroupManager manager("AVC");
+  manager.setDataCenterStub(stub);
+  constexpr auto kGroup = "g-block-read-only";
+  AVCProto::GroupInfo info;
+  ASSERT_TRUE(manager.UpsertGroup(MakeQTotalGroupReq(kGroup), &info).ok());
+
+  for (const char* tag : {"AVC增闭锁", "AVC减闭锁"}) {
+    ASSERT_TRUE(WaitForLatestBool(state, info.conn_id(), tag, false, DataCenterProto::QUALITY_BAD));
+    const auto response = ExecuteBoolCommand(&manager, kGroup, info.conn_id(), tag, true);
+    EXPECT_EQ(response.status(), DataCenterProto::COMMAND_REJECTED);
+    EXPECT_EQ(response.reject_code(), DataCenterProto::COMMAND_REJECT_UNSUPPORTED_POINT);
+    EXPECT_TRUE(WaitForLatestBool(state, info.conn_id(), tag, false, DataCenterProto::QUALITY_BAD));
+
+    auto invalid = MakeQTotalGroupReq("g-block-reserved");
+    invalid.mutable_config()->mutable_q_total_cmd()->mutable_signal()->set_tag(tag);
+    AVCProto::GroupInfo unused;
+    EXPECT_EQ(manager.UpsertGroup(invalid, &unused).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  }
+  ASSERT_TRUE(manager.StopGroup(kGroup).ok());
+}
+
+// 验证：绝对设点到限即发布闭锁，反向解除，停止和重启控制组保留设点且配置替换清除旧判据。
+TEST(AvcGroupManagerTest, DirectionBlocksTrackPublishedTargetsAndGroupLifecycle) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  GroupManager manager("AVC");
+  manager.setDataCenterStub(stub);
+  constexpr auto kGroup = "g-block-lifecycle";
+  auto request = MakeQTotalGroupReq(kGroup);
+  request.mutable_config()->mutable_members(0)->set_q_min_kvar(-40.0);
+  request.mutable_config()->mutable_members(1)->set_q_min_kvar(-20.0);
+  AVCProto::GroupInfo info;
+  ASSERT_TRUE(manager.UpsertGroup(request, &info).ok());
+  const auto connId = info.conn_id();
+
+  ASSERT_EQ(ExecuteQTotalCommand(&manager, kGroup, connId, 200.0).status(), DataCenterProto::COMMAND_ACCEPTED);
+  ASSERT_TRUE(WaitForLatestBool(state, connId, "AVC增闭锁", true, DataCenterProto::QUALITY_GOOD));
+  EXPECT_TRUE(WaitForLatestBool(state, connId, "AVC减闭锁", false, DataCenterProto::QUALITY_GOOD));
+  const auto rejected = ExecuteQTotalCommand(&manager, kGroup, connId, 201.0);
+  EXPECT_EQ(rejected.reject_code(), DataCenterProto::COMMAND_REJECT_OVER_UPPER_LIMIT);
+  EXPECT_TRUE(WaitForLatestBool(state, connId, "AVC增闭锁", true, DataCenterProto::QUALITY_GOOD));
+
+  ASSERT_EQ(ExecuteQTotalCommand(&manager, kGroup, connId, -60.0).status(), DataCenterProto::COMMAND_ACCEPTED);
+  ASSERT_TRUE(WaitForLatestBool(state, connId, "AVC减闭锁", true, DataCenterProto::QUALITY_GOOD));
+  EXPECT_TRUE(WaitForLatestBool(state, connId, "AVC增闭锁", false, DataCenterProto::QUALITY_GOOD));
+  ASSERT_TRUE(manager.StopGroup(kGroup).ok());
+  EXPECT_TRUE(WaitForLatestBool(state, connId, "AVC减闭锁", true, DataCenterProto::QUALITY_GOOD));
+  ASSERT_TRUE(manager.StartGroup(kGroup).ok());
+  EXPECT_TRUE(WaitForLatestBool(state, connId, "AVC减闭锁", true, DataCenterProto::QUALITY_GOOD));
+
+  ASSERT_EQ(ExecuteQTotalCommand(&manager, kGroup, connId, 0.0).status(), DataCenterProto::COMMAND_ACCEPTED);
+  ASSERT_TRUE(WaitForLatestBool(state, connId, "AVC减闭锁", false, DataCenterProto::QUALITY_GOOD));
+  ASSERT_TRUE(manager.StopGroup(kGroup).ok());
+  request.set_create_only(false);
+  request.mutable_config()->mutable_members(0)->set_q_max_kvar(80.0);
+  ASSERT_TRUE(manager.UpsertGroup(request, &info).ok());
+  ASSERT_EQ(info.conn_id(), connId);
+  EXPECT_TRUE(WaitForLatestBool(state, connId, "AVC增闭锁", false, DataCenterProto::QUALITY_BAD));
+  EXPECT_TRUE(WaitForLatestBool(state, connId, "AVC减闭锁", false, DataCenterProto::QUALITY_BAD));
+  ASSERT_TRUE(manager.StopGroup(kGroup).ok());
+}
+
+// 验证：首次发布失败保持未知，后续失败保留该成员上次成功设点，失败目标不能提前置闭锁。
+TEST(AvcGroupManagerTest, DirectionBlocksIgnoreUnpublishedMemberTargets) {
+  FakeDataCenterState state;
+  auto stub = MakeStub(&state);
+  GroupManager manager("AVC");
+  manager.setDataCenterStub(stub);
+  constexpr auto kGroup = "g-block-publish-failure";
+  AVCProto::GroupInfo info;
+  ASSERT_TRUE(manager.UpsertGroup(MakeQTotalGroupReq(kGroup), &info).ok());
+  const auto connId = info.conn_id();
+
+  state.FailPublishForTag("INV2_Q_SET");
+  ASSERT_EQ(ExecuteQTotalCommand(&manager, kGroup, connId, 200.0).status(), DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_TRUE(WaitForLatestDouble(state, connId, "INV1_Q_SET", 100.0));
+  EXPECT_GT(state.GetFailedPublishCount(connId, "INV2_Q_SET"), 0u);
+  EXPECT_TRUE(WaitForLatestBool(state, connId, "AVC增闭锁", false, DataCenterProto::QUALITY_BAD));
+  EXPECT_TRUE(WaitForLatestBool(state, connId, "AVC减闭锁", false, DataCenterProto::QUALITY_BAD));
+
+  state.AllowPublishForTag("INV2_Q_SET");
+  ASSERT_EQ(ExecuteQTotalCommand(&manager, kGroup, connId, 200.0).status(), DataCenterProto::COMMAND_ACCEPTED);
+  ASSERT_TRUE(WaitForLatestBool(state, connId, "AVC增闭锁", true, DataCenterProto::QUALITY_GOOD));
+
+  state.FailPublishForTag("INV2_Q_SET");
+  const auto failedCount = state.GetFailedPublishCount(connId, "INV2_Q_SET");
+  ASSERT_EQ(ExecuteQTotalCommand(&manager, kGroup, connId, 0.0).status(), DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_GT(state.GetFailedPublishCount(connId, "INV2_Q_SET"), failedCount);
+  EXPECT_TRUE(WaitForLatestDouble(state, connId, "INV1_Q_SET", 0.0));
+  EXPECT_TRUE(WaitForLatestDouble(state, connId, "INV2_Q_SET", 100.0));
+  ASSERT_TRUE(WaitForLatestBool(state, connId, "AVC增闭锁", false, DataCenterProto::QUALITY_GOOD));
+  EXPECT_TRUE(WaitForLatestBool(state, connId, "AVC减闭锁", false, DataCenterProto::QUALITY_GOOD));
+
+  state.AllowPublishForTag("INV2_Q_SET");
+  ASSERT_EQ(ExecuteQTotalCommand(&manager, kGroup, connId, 0.0).status(), DataCenterProto::COMMAND_ACCEPTED);
+  EXPECT_TRUE(WaitForLatestBool(state, connId, "AVC减闭锁", true, DataCenterProto::QUALITY_GOOD));
+  ASSERT_TRUE(manager.StopGroup(kGroup).ok());
 }
 
 // 验证：AVC 功能投入与远方操作控制点接受 BOOL 命令、发布当前状态，并对普通目标命令执行门控。
