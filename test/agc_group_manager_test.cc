@@ -1,6 +1,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -190,6 +191,16 @@ void PublishDecimalPoint(FakeDataCenterState *state, uint32_t connId, const char
   req.set_tag(tag);
   req.mutable_value()->set_decimal_value(std::move(value));
   req.set_quality(DataCenterProto::QUALITY_GOOD);
+  ASSERT_TRUE(state->Publish(req).ok());
+}
+
+void PublishDirectionPoint(FakeDataCenterState *state, uint32_t connId, const char *tag, bool value,
+                           DataCenterProto::Quality quality = DataCenterProto::QUALITY_GOOD) {
+  DataCenterProto::PublishRequest req;
+  req.set_conn_id(connId);
+  req.set_tag(tag);
+  req.mutable_value()->set_bool_value(value);
+  req.set_quality(quality);
   ASSERT_TRUE(state->Publish(req).ok());
 }
 
@@ -1951,6 +1962,110 @@ TEST(AgcGroupManagerTest, ConfirmedControlProfilePersistsAcrossManagerRestart) {
   EXPECT_DOUBLE_EQ(restored.members(0).up_p_gain(), 0.4);
   EXPECT_DOUBLE_EQ(restored.members(1).down_p_gain(), 0.7);
   ASSERT_TRUE(reader.StopGroup("g-profile").ok());
+}
+
+// 验证：坏品质不能解除成员增闭锁，闭锁期间接受原能力内目标，解除后沿用该目标重分配。
+TEST(AgcGroupManagerTest, ExternalIncreaseBlockKeepsLatestAcceptedTotalInBothModes) {
+  for (const auto mode : {AGVC::kEventTriggered<AGCProto::ControlMode>, AGVC::kPeriodicAllocation<AGCProto::ControlMode>}) {
+    SCOPED_TRACE(mode);
+    constexpr auto kGroup = "g-external-direction-block";
+    FakeDataCenterState state;
+    std::atomic<unsigned> directionSnapshots{0};
+    auto stub = MakeStub(&state);
+    ON_CALL(*stub, GetLatest(_, _, _))
+        .WillByDefault(Invoke([&](grpc::ClientContext *, const DataCenterProto::GetLatestRequest &request,
+                                 DataCenterProto::GetLatestResponse *response) {
+          if (std::find(request.tags().begin(), request.tags().end(), "ZZ_BLOCK_UP") != request.tags().end() &&
+              directionSnapshots.fetch_add(1) == 0) {
+            return grpc::Status(grpc::StatusCode::UNAVAILABLE, "测试模拟首次闭锁快照不可用");
+          }
+          return state.GetLatest(request, response);
+        }));
+    GroupManager manager("AGC");
+    manager.setDataCenterStub(stub);
+    auto request = MakeGroupReq(kGroup);
+    auto *config = request.mutable_config();
+    config->set_control_mode(mode);
+    if (mode == AGVC::kPeriodicAllocation<AGCProto::ControlMode>) {
+      config->set_calculation_execution_period_seconds(1);
+      config->set_command_control_period_seconds(4);
+    }
+    for (auto &member : *config->mutable_members()) {
+      member.set_capacity_kw(100);
+      member.set_weight(1);
+    }
+    config->mutable_members(0)->mutable_increase_block_input()->set_tag("ZZ_BLOCK_UP");
+    AGCProto::GroupInfo info;
+    ASSERT_TRUE(manager.UpsertGroup(request, &info).ok());
+    ASSERT_TRUE(manager.StopGroup(kGroup).ok());
+    const auto connId = info.conn_id();
+    PublishDoublePoint(&state, connId, "INV1_P_MEAS", 30);
+    PublishDirectionPoint(&state, connId, "ZZ_BLOCK_UP", true);
+    PublishDoublePoint(&state, connId, "P_CMD", 80);
+    ASSERT_TRUE(manager.StartGroup(kGroup).ok());
+    ASSERT_TRUE(WaitForLatestDouble(state, connId, "INV1_P_SET", 30));
+    ASSERT_TRUE(WaitForLatestDouble(state, connId, "INV2_P_SET", 50));
+    EXPECT_GE(directionSnapshots.load(), 2u);
+    const auto initialWrites = state.GetPublishedUpdates(connId, "INV1_P_SET");
+    ASSERT_FALSE(initialWrites.empty());
+    double firstSetpoint = 0;
+    ASSERT_TRUE(PointValueToDoubleForTest(initialWrites.front().value(), &firstSetpoint));
+    EXPECT_DOUBLE_EQ(firstSetpoint, 30.0);
+
+    PublishDirectionPoint(&state, connId, "ZZ_BLOCK_UP", false, DataCenterProto::QUALITY_BAD);
+    const auto secondMemberWrites = state.GetPublishCount(connId, "INV2_P_SET");
+    const auto response = ExecuteDoubleCommand(&manager, kGroup, connId, "P_CMD", 150);
+    ASSERT_EQ(response.status(), DataCenterProto::COMMAND_ACCEPTED);
+    EXPECT_DOUBLE_EQ(response.accepted_value(), 130.0);
+    ASSERT_EQ(ExecuteDoubleCommand(&manager, kGroup, connId, "P_CMD", 210).reject_code(),
+              DataCenterProto::COMMAND_REJECT_OVER_UPPER_LIMIT);
+    ASSERT_TRUE(state.WaitForPublishCount(connId, "INV2_P_SET", secondMemberWrites + 1, std::chrono::seconds(8)));
+    ASSERT_TRUE(WaitForLatestDouble(state, connId, "INV2_P_SET", 100));
+    EXPECT_TRUE(WaitForLatestDouble(state, connId, "INV1_P_SET", 30));
+    EXPECT_TRUE(WaitForLatestBoolWithQuality(state, connId, "AGC增闭锁", false, DataCenterProto::QUALITY_GOOD));
+
+    const auto firstMemberWrites = state.GetPublishCount(connId, "INV1_P_SET");
+    PublishDirectionPoint(&state, connId, "ZZ_BLOCK_UP", false);
+    ASSERT_TRUE(state.WaitForPublishCount(connId, "INV1_P_SET", firstMemberWrites + 1, std::chrono::seconds(8)));
+    ASSERT_TRUE(WaitForLatestDouble(state, connId, "INV1_P_SET", 75));
+    EXPECT_TRUE(WaitForLatestDouble(state, connId, "INV2_P_SET", 75));
+    ASSERT_TRUE(manager.StopGroup(kGroup).ok());
+  }
+}
+
+// 验证：数值 0 不是解除遥信，收到有效 BOOL 解除后增量总目标不会重复叠加。
+TEST(AgcGroupManagerTest, ExternalDirectionBlockReleaseDoesNotApplyDeltaAgain) {
+  constexpr auto kGroup = "g-external-direction-delta";
+  FakeDataCenterState state;
+  GroupManager manager("AGC");
+  manager.setDataCenterStub(MakeStub(&state));
+  auto request = MakeGroupReq(kGroup);
+  auto *config = request.mutable_config();
+  config->mutable_p_cmd()->set_mode(AGCProto::VALUE_MODE_DELTA);
+  config->mutable_p_cmd()->set_delta_base(AGCProto::DELTA_BASE_LAST_TARGET);
+  config->mutable_members(0)->set_weight(1);
+  config->mutable_members(1)->set_weight(1);
+  config->mutable_members(0)->mutable_increase_block_input()->set_tag("BLOCK_UP");
+  AGCProto::GroupInfo info;
+  ASSERT_TRUE(manager.UpsertGroup(request, &info).ok());
+  const auto connId = info.conn_id();
+  ASSERT_TRUE(WaitForSubscriptionCount(state, connId, 1u));
+  PublishDirectionPoint(&state, connId, "BLOCK_UP", true);
+  PublishDoublePoint(&state, connId, "INV1_P_MEAS", 20);
+  PublishDoublePoint(&state, connId, "INV2_P_MEAS", 20);
+  ASSERT_TRUE(WaitForLatestDouble(state, connId, "P_TOTAL", 40));
+  PublishDoublePoint(&state, connId, "P_CMD", 10);
+  ASSERT_TRUE(WaitForLatestDouble(state, connId, "INV1_P_SET", 20));
+  ASSERT_TRUE(WaitForLatestDouble(state, connId, "INV2_P_SET", 30));
+
+  PublishDoublePoint(&state, connId, "BLOCK_UP", 0);
+  PublishDoublePoint(&state, connId, "INV2_P_MEAS", 21);
+  ASSERT_TRUE(WaitForLatestDouble(state, connId, "P_TOTAL", 41));
+  EXPECT_TRUE(WaitForLatestDouble(state, connId, "INV1_P_SET", 20));
+  PublishDirectionPoint(&state, connId, "BLOCK_UP", false);
+  ASSERT_TRUE(WaitForLatestDouble(state, connId, "INV1_P_SET", 25));
+  EXPECT_TRUE(WaitForLatestDouble(state, connId, "INV2_P_SET", 25));
+  ASSERT_TRUE(manager.StopGroup(kGroup).ok());
 }
 
 // 验证：通信异常不改变可控配置，剩余在线成员按原目标重分配，恢复无需新命令。

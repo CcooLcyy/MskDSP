@@ -644,17 +644,24 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
         }
 
         if (!periodicAllocation) {
+          std::chrono::steady_clock::time_point nextDirectionSnapshotRetry;
           while (true) {
             const bool signaled = trigger->signal.try_acquire_for(std::chrono::milliseconds(250));
             if (st.stop_requested()) {
               break;
             }
             checkMemberAvailabilityTimeouts(groupName);
-            if (!signaled && !trigger->pending.load()) continue;
-            if (!trigger->pending.exchange(false)) {
+            const bool retryScheduled = nextDirectionSnapshotRetry.time_since_epoch().count() != 0;
+            if (retryScheduled && std::chrono::steady_clock::now() < nextDirectionSnapshotRetry) continue;
+            if (!retryScheduled && !signaled && !trigger->pending.load()) continue;
+            if (!trigger->pending.exchange(false) && !retryScheduled) {
               continue;
             }
-            controlTick(groupName);
+            bool retryDirectionSnapshot = false;
+            controlTick(groupName, &retryDirectionSnapshot);
+            nextDirectionSnapshotRetry = retryDirectionSnapshot
+                                             ? std::chrono::steady_clock::now() + std::chrono::seconds(1)
+                                             : std::chrono::steady_clock::time_point{};
           }
           return;
         }
@@ -716,15 +723,18 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
               break;
             }
             const auto measurement = it->second.memberIndexesByMeasTag.find(update.dst_tag());
-            const bool affectsMemberAvailability = measurement != it->second.memberIndexesByMeasTag.end() &&
+            const bool affectsMemberControl = measurement != it->second.memberIndexesByMeasTag.end() &&
                 std::ranges::any_of(measurement->second, [&](size_t index) {
-                  return it->second.config.members(static_cast<int>(index)).measurement_validity_ms() != 0;
+                  const auto &member = it->second.config.members(static_cast<int>(index));
+                  return member.measurement_validity_ms() != 0 || member.has_increase_block_input() ||
+                         member.has_decrease_block_input();
                 });
             const bool affectsControlTarget =
                 (!it->second.cmdTag.empty() && update.dst_tag() == it->second.cmdTag) ||
                 it->second.baseTags.contains(update.dst_tag()) ||
                 it->second.memberIndexesByCommunicationTag.contains(update.dst_tag()) ||
-                affectsMemberAvailability;
+                it->second.directionInputByTag.contains(update.dst_tag()) ||
+                affectsMemberControl;
             if (affectsControlTarget) {
               outputMutex = it->second.outputMutex;
             }
@@ -1081,6 +1091,12 @@ grpc::Status GroupManager::ExecuteCommand(
   bool periodicAllocation = false;
   ControlInput input;
   uint64_t controlRevision = 0;
+  if (!primeMemberDirectionInputs(groupName)) {
+    response->set_status(DataCenterProto::COMMAND_REJECTED);
+    response->set_reject_code(DataCenterProto::COMMAND_REJECT_BAD_CONFIG);
+    response->set_reason("AGC 成员方向闭锁快照暂不可用");
+    return grpc::Status::OK;
+  }
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = groupsByName_.find(groupName);
@@ -1141,6 +1157,7 @@ grpc::Status GroupManager::ExecuteCommand(
     input.controlProfile = it->second.controlProfile;
     input.integralMemoryKw = it->second.integralMemoryKw;
     input.enableFeedbackCorrection = !periodicAllocation;
+    copyMemberDirectionInputsLocked(it->second, &input);
   }
 
   const auto defaultOutput = ComputeDefaultPointOutput(config, input);
@@ -1162,9 +1179,25 @@ grpc::Status GroupManager::ExecuteCommand(
   response->set_requested_value(numeric::ToLegacyDouble(output.desiredTotalKw));
   response->set_accepted_value(numeric::ToLegacyDouble(output.actualTargetKw));
 
-  if (!output.unallocatedKw.IsZero()) {
+  auto rejectedUnallocated = output.unallocatedKw;
+  if (std::ranges::any_of(input.memberDirectionConstraints, [](const auto &constraint) {
+        return constraint.increaseBlocked || constraint.decreaseBlocked;
+      })) {
+    // 外部成员闭锁只影响当前可下发值，不改变命令原有的越限判定。
+    auto unrestrictedInput = input;
+    unrestrictedInput.memberDirectionConstraints.clear();
+    const auto unrestricted = ComputeControlOutput(config, unrestrictedInput, weightedStrategy_);
+    if (!unrestricted) {
+      response->set_status(DataCenterProto::COMMAND_REJECTED);
+      response->set_reject_code(DataCenterProto::COMMAND_REJECT_BAD_CONFIG);
+      response->set_reason("AGC 控制计算无法验证未闭锁范围");
+      return grpc::Status::OK;
+    }
+    rejectedUnallocated = unrestricted->unallocatedKw;
+  }
+  if (!rejectedUnallocated.IsZero()) {
     response->set_status(DataCenterProto::COMMAND_REJECTED);
-    if (output.unallocatedKw > numeric::Zero()) {
+    if (rejectedUnallocated > numeric::Zero()) {
       response->set_reject_code(DataCenterProto::COMMAND_REJECT_OVER_UPPER_LIMIT);
       response->set_reason("总有功目标超过当前可调上限");
     } else {
@@ -1177,7 +1210,7 @@ grpc::Status GroupManager::ExecuteCommand(
                 defaultOutput.dynamicLowerKw.ToFixedString(),
                 defaultOutput.dynamicUpperKw.ToFixedString(),
                 output.actualTargetKw.ToFixedString(),
-                output.unallocatedKw.ToFixedString());
+                rejectedUnallocated.ToFixedString());
     return grpc::Status::OK;
   }
 
@@ -1204,7 +1237,7 @@ grpc::Status GroupManager::ExecuteCommand(
       it->second.cmdRaw = raw;
       it->second.hasCmdRaw = true;
       ++it->second.commandRevision;
-      it->second.hasDirectResolvedDesiredTotalKw = !input.memberAvailable.empty();
+      it->second.hasDirectResolvedDesiredTotalKw = !input.memberAvailable.empty() || !input.memberDirectionConstraints.empty();
       it->second.directResolvedCommandRevision = it->second.commandRevision;
       it->second.directResolvedDesiredTotalKw = output.desiredTotalKw;
       ++it->second.controlRevision;
@@ -1238,7 +1271,7 @@ grpc::Status GroupManager::ExecuteCommand(
     ++it->second.commandRevision;
     it->second.directResolvedCommandRevision = it->second.commandRevision;
     it->second.directResolvedDesiredTotalKw = output.desiredTotalKw;
-    it->second.hasDirectResolvedDesiredTotalKw = !input.memberAvailable.empty();
+    it->second.hasDirectResolvedDesiredTotalKw = !input.memberAvailable.empty() || !input.memberDirectionConstraints.empty();
     ++it->second.controlRevision;
     controlRevision = it->second.controlRevision;
     it->second.hasLastDesiredTotalKw = output.hasLastDesiredTotalKw;
@@ -1356,6 +1389,8 @@ std::unordered_set<std::string> GroupManager::collectAllTags(const AGCProto::Gro
 
   for (const auto &m : config.members()) {
     if (m.has_communication_state()) tags.emplace(m.communication_state().tag());
+    if (m.has_increase_block_input()) tags.emplace(m.increase_block_input().tag());
+    if (m.has_decrease_block_input()) tags.emplace(m.decrease_block_input().tag());
     if (m.has_p_meas() && !m.p_meas().tag().empty()) {
       tags.emplace(m.p_meas().tag());
     }
@@ -1377,6 +1412,8 @@ void GroupManager::rebuildTagCache(GroupRuntime *g, bool resetPublishedTargets) 
   g->cmdTag.clear();
   g->memberIndexesByMeasTag.clear();
   g->memberIndexesByCommunicationTag.clear();
+  g->directionInputByTag.clear();
+  g->directionInputsPrimed = false;
   g->memberAvailable.clear();
   g->baseTags.clear();
   g->subscribeTags.clear();
@@ -1426,6 +1463,12 @@ void GroupManager::rebuildTagCache(GroupRuntime *g, bool resetPublishedTargets) 
 
   for (int i = 0; i < g->config.members_size(); ++i) {
     const auto &m = g->config.members(i);
+    const auto addDirectionInput = [&](const AGCProto::SignalSpec &input, bool blocksIncrease) {
+      g->directionInputByTag.emplace(input.tag(), GroupRuntime::DirectionInputBinding{static_cast<size_t>(i), blocksIncrease});
+      g->subscribeTags.emplace_back(input.tag());
+    };
+    if (m.has_increase_block_input()) addDirectionInput(m.increase_block_input(), true);
+    if (m.has_decrease_block_input()) addDirectionInput(m.decrease_block_input(), false);
     if (m.has_communication_state() && !m.communication_state().tag().empty()) {
       g->memberIndexesByCommunicationTag[m.communication_state().tag()].push_back(static_cast<size_t>(i));
       g->subscribeTags.push_back(m.communication_state().tag());
@@ -1438,6 +1481,17 @@ void GroupManager::rebuildTagCache(GroupRuntime *g, bool resetPublishedTargets) 
     if (m.has_p_set() && m.p_set().mode() == AGCProto::VALUE_MODE_DELTA && m.p_set().delta_base() == AGCProto::DELTA_BASE_BASE_TAG &&
         !m.p_set().base_tag().empty()) {
       g->baseTags.emplace(m.p_set().base_tag());
+    }
+  }
+
+  if (g->directionInputByTag.empty()) {
+    g->memberDirectionRuntime.clear();
+  } else {
+    if (resetPublishedTargets) g->memberDirectionRuntime.clear();
+    g->memberDirectionRuntime.resize(memberCount);
+    for (auto &member : g->memberDirectionRuntime) {
+      member.constraint.validMeasurementRaw.reset();
+      member.measurementSourceTsMs = 0;
     }
   }
 
@@ -1610,11 +1664,116 @@ void GroupManager::checkMemberAvailabilityTimeouts(const std::string &groupName)
   }
 }
 
+bool GroupManager::primeMemberDirectionInputs(const std::string &groupName) {
+  // 调用方持有输出锁；首轮下发前读取方向输入，不依赖流式快照的标签顺序。
+  uint32_t connId = 0;
+  std::vector<std::string> tags;
+  std::shared_ptr<ControlTrigger> trigger;
+  {
+    std::lock_guard lock(mu_);
+    const auto it = groupsByName_.find(groupName);
+    if (it == groupsByName_.end() || it->second.state != AGCProto::GROUP_STATE_RUNNING ||
+        it->second.directionInputByTag.empty() || it->second.directionInputsPrimed) return true;
+    const auto &group = it->second;
+    connId = group.connId;
+    trigger = group.controlTrigger;
+    std::unordered_set<std::string> uniqueTags;
+    for (const auto &[tag, binding] : group.directionInputByTag) {
+      uniqueTags.emplace(tag);
+      uniqueTags.emplace(group.config.members(static_cast<int>(binding.memberIndex)).p_meas().tag());
+    }
+    tags.assign(uniqueTags.begin(), uniqueTags.end());
+  }
+
+  DataCenterProto::GetLatestResponse snapshot;
+  const auto status = dataCenter_.GetLatest(connId, tags, &snapshot);
+  if (!status.ok()) {
+    LOG_WARNING("AGC 读取成员方向闭锁启动快照失败，暂缓下发: group_name={}, 原因={}", groupName, status.error_message());
+    return false;
+  }
+
+  std::lock_guard lock(mu_);
+  const auto it = groupsByName_.find(groupName);
+  if (it == groupsByName_.end() || it->second.controlTrigger != trigger || it->second.connId != connId) return false;
+  auto &group = it->second;
+  for (const auto &update : snapshot.updates()) {
+    if (group.directionInputByTag.contains(update.dst_tag())) {
+      handleMemberDirectionInputLocked(&group, update);
+    } else if (const auto measurement = group.memberIndexesByMeasTag.find(update.dst_tag());
+               measurement != group.memberIndexesByMeasTag.end()) {
+      for (const auto index : measurement->second) {
+        handleMemberDirectionMeasurementLocked(&group, index, update);
+      }
+    }
+  }
+  group.directionInputsPrimed = true;
+  return true;
+}
+
+void GroupManager::copyMemberDirectionInputsLocked(const GroupRuntime &g, ControlInput *input) {
+  input->memberDirectionConstraints.reserve(g.memberDirectionRuntime.size());
+  for (const auto &member : g.memberDirectionRuntime) {
+    input->memberDirectionConstraints.push_back(member.constraint);
+  }
+}
+
+bool GroupManager::handleMemberDirectionInputLocked(GroupRuntime *g, const DataCenterProto::PointUpdate &update) {
+  const auto found = g->directionInputByTag.find(update.dst_tag());
+  if (found == g->directionInputByTag.end() || !update.value().has_bool_value() ||
+      update.quality() != DataCenterProto::QUALITY_GOOD || (update.has_quality_flags() && update.quality_flags() != 0)) {
+    return false;
+  }
+  const auto &binding = found->second;
+  auto &member = g->memberDirectionRuntime[binding.memberIndex];
+  auto &sourceTsMs = binding.blocksIncrease ? member.increaseSourceTsMs : member.decreaseSourceTsMs;
+  if (update.ts_ms() < sourceTsMs) return false;
+  sourceTsMs = update.ts_ms();
+  auto &blocked = binding.blocksIncrease ? member.constraint.increaseBlocked : member.constraint.decreaseBlocked;
+  if (blocked == update.value().bool_value()) return false;
+  blocked = update.value().bool_value();
+  ++g->controlRevision;
+  LOG_INFO("AGC 成员外部方向闭锁变化: group_name={}, member_name={}, tag={}, 方向={}, 闭锁={}",
+           g->config.group_name(), g->config.members(static_cast<int>(binding.memberIndex)).member_name(),
+           update.dst_tag(), binding.blocksIncrease ? "增出力" : "减出力", blocked);
+  return true;
+}
+
+bool GroupManager::handleMemberDirectionMeasurementLocked(
+    GroupRuntime *g, size_t index, const DataCenterProto::PointUpdate &update) {
+  if (index >= g->memberDirectionRuntime.size()) return false;
+  const auto &config = g->config.members(static_cast<int>(index));
+  if (!config.has_increase_block_input() && !config.has_decrease_block_input()) return false;
+  auto &member = g->memberDirectionRuntime[index];
+  auto &constraint = member.constraint;
+  if (constraint.publishedTargetKw || update.ts_ms() < member.measurementSourceTsMs) return false;
+  bool fresh = true;
+  if (config.measurement_validity_ms() != 0) {
+    const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    if (update.ts_ms() <= 0 || update.ts_ms() > nowMs) return false;
+    fresh = nowMs - update.ts_ms() < config.measurement_validity_ms();
+  }
+  member.measurementSourceTsMs = update.ts_ms();
+  Decimal raw;
+  const bool good = fresh && update.quality() == DataCenterProto::QUALITY_GOOD &&
+                    (!update.has_quality_flags() || update.quality_flags() == 0) &&
+                    !update.value().has_bool_value() && pointValueToDecimal(update.value(), &raw);
+  const auto value = good ? std::optional<Decimal>(raw) : std::nullopt;
+  const bool changed = constraint.validMeasurementRaw != value;
+  constraint.validMeasurementRaw = value;
+  if (!changed || (!constraint.increaseBlocked && !constraint.decreaseBlocked)) return false;
+  ++g->controlRevision;
+  return true;
+}
+
 bool GroupManager::handleUpdateLocked(GroupRuntime *g, const DataCenterProto::PointUpdate &update) {
   if (g == nullptr) {
     return false;
   }
   const auto &tag = update.dst_tag();
+  if (g->directionInputByTag.contains(tag)) {
+    return handleMemberDirectionInputLocked(g, update);
+  }
   if (const auto health = g->memberIndexesByCommunicationTag.find(tag);
       health != g->memberIndexesByCommunicationTag.end()) {
     Decimal value;
@@ -1669,6 +1828,7 @@ bool GroupManager::handleUpdateLocked(GroupRuntime *g, const DataCenterProto::Po
                     (!update.has_quality_flags() || update.quality_flags() == 0);
   bool checkAvailability = false;
   for (const auto idx : measurement->second) {
+    changed |= handleMemberDirectionMeasurementLocked(g, idx, update);
     const auto validityMs = g->config.members(static_cast<int>(idx)).measurement_validity_ms();
     if (validityMs != 0) {
       auto &validity = g->memberMeasurementValidity[idx];
@@ -1964,6 +2124,10 @@ bool GroupManager::publishMemberSetpoints(const std::string &groupName,
         it->second.lastMemberSetpointPublishedAt[i] = publishedAt;
         it->second.hasPublishedMemberTargetKw[i] = true;
         it->second.publishedMemberTargetKw[i] = memberTargetKw[i];
+        if (i < it->second.memberDirectionRuntime.size() &&
+            (member.has_increase_block_input() || member.has_decrease_block_input())) {
+          it->second.memberDirectionRuntime[i].constraint.publishedTargetKw = memberTargetKw[i];
+        }
         if (isPeriodicAllocationMode(it->second.config)) {
           it->second.hasLastCommandPublishedAt = true;
           it->second.lastCommandPublishedAt = publishedAt;
@@ -1995,7 +2159,7 @@ bool GroupManager::publishMemberSetpoints(const std::string &groupName,
   return allSucceeded;
 }
 
-void GroupManager::controlTick(const std::string &groupName) {
+void GroupManager::controlTick(const std::string &groupName, bool *retryDirectionSnapshot) {
   std::shared_ptr<std::mutex> outputMutex;
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -2009,6 +2173,10 @@ void GroupManager::controlTick(const std::string &groupName) {
     return;
   }
   std::unique_lock<std::mutex> outputLock(*outputMutex);
+  if (!primeMemberDirectionInputs(groupName)) {
+    if (retryDirectionSnapshot != nullptr) *retryDirectionSnapshot = true;
+    return;
+  }
 
   AGCProto::GroupConfig config;
   uint32_t connId = 0;
@@ -2040,6 +2208,7 @@ void GroupManager::controlTick(const std::string &groupName) {
     input.includePassiveMembersWithAvailability = it->second.memberIndexesByCommunicationTag.empty();
     input.hasMemberMeasRaw = it->second.hasMemberMeasRaw;
     input.memberMeasRaw = it->second.memberMeasRaw;
+    copyMemberDirectionInputsLocked(it->second, &input);
     input.hasLastMemberTargetKw = it->second.hasLastMemberTargetKw;
     input.lastMemberTargetKw = it->second.lastMemberTargetKw;
     input.hasLastDesiredTotalKw = it->second.hasLastDesiredTotalKw;
@@ -2048,7 +2217,7 @@ void GroupManager::controlTick(const std::string &groupName) {
     input.integralMemoryKw = it->second.integralMemoryKw;
     input.enableFeedbackCorrection = !isPeriodicAllocationMode(config);
     const bool stableDeltaTarget = config.p_cmd().mode() == AGCProto::VALUE_MODE_DELTA &&
-                                   (!input.memberAvailable.empty() || (isPeriodicAllocationMode(config) &&
+                                   (!input.memberAvailable.empty() || !input.memberDirectionConstraints.empty() || (isPeriodicAllocationMode(config) &&
                                     config.p_cmd().delta_base() == AGCProto::DELTA_BASE_LAST_TARGET));
     if (stableDeltaTarget && it->second.hasDirectResolvedDesiredTotalKw &&
         it->second.directResolvedCommandRevision == it->second.commandRevision) {
@@ -2169,7 +2338,7 @@ void GroupManager::controlTick(const std::string &groupName) {
   const auto &output = *outputOpt;
 
   const bool stableDeltaTarget = config.p_cmd().mode() == AGCProto::VALUE_MODE_DELTA &&
-                                 (!input.memberAvailable.empty() || (isPeriodicAllocationMode(config) &&
+                                 (!input.memberAvailable.empty() || !input.memberDirectionConstraints.empty() || (isPeriodicAllocationMode(config) &&
                                   config.p_cmd().delta_base() == AGCProto::DELTA_BASE_LAST_TARGET));
   if (stableDeltaTarget && !input.hasDesiredTotalOverride) {
     std::lock_guard<std::mutex> lock(mu_);

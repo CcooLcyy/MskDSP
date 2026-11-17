@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "AGC.pb.h"
+#include "AGCControl.h"
 #include "AGCControlProfileStore.h"
 #include "AGCGroupStore.h"
 #include "AgvcDataCenterClient.h"
@@ -81,6 +82,19 @@ private:
     std::string cmdTag;
     std::unordered_map<std::string, std::vector<size_t>> memberIndexesByMeasTag;
     std::unordered_map<std::string, std::vector<size_t>> memberIndexesByCommunicationTag;
+    struct DirectionInputBinding {
+      size_t memberIndex;
+      bool blocksIncrease;
+    };
+    struct MemberDirectionRuntime {
+      MemberDirectionConstraint constraint;
+      int64_t increaseSourceTsMs{0};
+      int64_t decreaseSourceTsMs{0};
+      int64_t measurementSourceTsMs{0};
+    };
+    std::unordered_map<std::string, DirectionInputBinding> directionInputByTag;
+    std::vector<MemberDirectionRuntime> memberDirectionRuntime;
+    bool directionInputsPrimed{false};
     std::vector<bool> memberAvailable;
     std::vector<bool> memberCommunicationHealthy;
     std::vector<int64_t> memberCommunicationSourceTs;
@@ -167,9 +181,14 @@ private:
                               bool *publishedAny = nullptr);
 
   bool handleUpdateLocked(GroupRuntime *g, const DataCenterProto::PointUpdate &update);
+  bool primeMemberDirectionInputs(const std::string &groupName);
+  static void copyMemberDirectionInputsLocked(const GroupRuntime &g, ControlInput *input);
+  static bool handleMemberDirectionInputLocked(GroupRuntime *g, const DataCenterProto::PointUpdate &update);
+  static bool handleMemberDirectionMeasurementLocked(
+      GroupRuntime *g, size_t index, const DataCenterProto::PointUpdate &update);
   bool refreshMemberAvailabilityLocked(GroupRuntime *g);
   void checkMemberAvailabilityTimeouts(const std::string &groupName);
-  void controlTick(const std::string &groupName);
+  void controlTick(const std::string &groupName, bool *retryDirectionSnapshot = nullptr);
 
   static bool pointValueToDecimal(const DataCenterProto::PointValue &v, Decimal *out);
 

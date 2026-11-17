@@ -1,5 +1,6 @@
 #include "AGCControl.h"
 
+#include <algorithm>
 #include <cmath>
 #include <expected>
 #include <string_view>
@@ -134,6 +135,50 @@ void logCalculationError(const AGCProto::GroupConfig &config,
   LOG_ERROR("AGC 十进制控制计算失败: group_name={}, 阶段={}, 原因={}",
             config.group_name(), stage,
             mskdsp::numeric::DecimalErrorMessage(error));
+}
+
+// 先保留既有分配比例，只移走外部闭锁截断造成的差额。
+std::expected<void, Error> redistributeDirectionLimitedAllocation(
+    const Decimal &target, const AGVC::WeightedStrategy &strategy,
+    const std::vector<AGVC::DecimalAllocationMember> &bounds,
+    AGVC::DecimalAllocationOutput *allocation) {
+  Decimal assigned;
+  for (size_t i = 0; i < bounds.size(); ++i) {
+    auto &value = allocation->values[i];
+    value = std::clamp(value, bounds[i].min, bounds[i].max);
+    auto next = assigned.Add(value);
+    if (!next) return std::unexpected(next.error());
+    assigned = *next;
+  }
+  auto remaining = target.Subtract(assigned);
+  if (!remaining) return std::unexpected(remaining.error());
+  allocation->unallocated = *remaining;
+  if (remaining->IsZero()) return {};
+
+  const bool increasing = *remaining > numeric::Zero();
+  const auto magnitude = increasing ? remaining : numeric::Negate(*remaining);
+  if (!magnitude) return std::unexpected(magnitude.error());
+  std::vector<AGVC::DecimalAllocationMember> headroom;
+  headroom.reserve(bounds.size());
+  for (size_t i = 0; i < bounds.size(); ++i) {
+    const auto space = increasing ? bounds[i].max.Subtract(allocation->values[i])
+                                  : allocation->values[i].Subtract(bounds[i].min);
+    if (!space) return std::unexpected(space.error());
+    headroom.push_back({.weight = bounds[i].weight, .min = Decimal{}, .max = *space});
+  }
+  const auto adjustment = strategy.AllocateDecimal(*magnitude, headroom);
+  if (!adjustment) return std::unexpected(adjustment.error());
+  for (size_t i = 0; i < bounds.size(); ++i) {
+    const auto next = increasing ? allocation->values[i].Add(adjustment->values[i])
+                                 : allocation->values[i].Subtract(adjustment->values[i]);
+    if (!next) return std::unexpected(next.error());
+    allocation->values[i] = *next;
+  }
+  const auto unallocated = increasing ? std::expected<Decimal, Error>(adjustment->unallocated)
+                                      : numeric::Negate(adjustment->unallocated);
+  if (!unallocated) return std::unexpected(unallocated.error());
+  allocation->unallocated = *unallocated;
+  return {};
 }
 
 }  // namespace
@@ -389,17 +434,15 @@ std::optional<ControlOutput> ComputeControlOutput(
     }
     out.passiveKw = *next;
   }
-  auto controllableTarget = desiredTotalKw.Subtract(out.passiveKw);
-  if (!controllableTarget.has_value()) {
-    logCalculationError(config, "计算可控目标", controllableTarget.error());
-    return std::nullopt;
-  }
-  out.targetControllableKw = *controllableTarget;
-
   std::vector<size_t> controllableIndexes;
   std::vector<AGVC::DecimalAllocationMember> allocationMembers;
+  std::vector<AGVC::DecimalAllocationMember> directionBounds;
+  const bool hasDirectionInputs = !input.memberDirectionConstraints.empty();
+  std::vector<std::optional<AGVC::DecimalAllocationMember>> constrainedBounds(hasDirectionInputs ? memberCount : 0);
+  bool hasDirectionLimits = false;
   controllableIndexes.reserve(memberCount);
   allocationMembers.reserve(memberCount);
+  if (hasDirectionInputs) directionBounds.reserve(memberCount);
   for (size_t index = 0; index < memberCount; ++index) {
     const auto &member = config.members(static_cast<int>(index));
     if (!memberParticipates(config, input, index)) {
@@ -418,17 +461,59 @@ std::optional<ControlOutput> ComputeControlOutput(
       logCalculationError(config, "读取成员分配参数", error);
       return std::nullopt;
     }
-    controllableIndexes.emplace_back(index);
-    allocationMembers.push_back({
+    const AGVC::DecimalAllocationMember ordinaryBounds{
         .weight = *weight > numeric::Zero()
                       ? *weight
                       : (*capacity > numeric::Zero() ? *capacity
                                                      : numeric::One()),
         .min = *minimum,
         .max = *maximum,
-    });
+    };
+    auto effectiveBounds = ordinaryBounds;
+    if (index < input.memberDirectionConstraints.size()) {
+      const auto &constraint = input.memberDirectionConstraints[index];
+      if (constraint.increaseBlocked || constraint.decreaseBlocked) {
+        auto anchor = constraint.publishedTargetKw;
+        if (!anchor && constraint.validMeasurementRaw) {
+          const auto measured = toPhysicalAbs(member.p_meas(), *constraint.validMeasurementRaw);
+          if (!measured) {
+            logCalculationError(config, "换算成员方向闭锁量测边界", measured.error());
+            return std::nullopt;
+          }
+          anchor = *measured;
+        }
+        if (anchor) {
+          if (constraint.increaseBlocked) effectiveBounds.max = std::min(effectiveBounds.max, *anchor);
+          if (constraint.decreaseBlocked) effectiveBounds.min = std::max(effectiveBounds.min, *anchor);
+        }
+        if (!anchor || effectiveBounds.min > effectiveBounds.max) {
+          LOG_DEBUG("AGC 暂不下发方向闭锁成员设点: group_name={}, member_name={}, 原因={}",
+                    config.group_name(), member.member_name(), anchor ? "方向边界与静态范围冲突" : "缺少有效量测或成功下发值");
+          if (anchor) {
+            const auto fixedOutput = out.passiveKw.Add(*anchor);
+            if (!fixedOutput) {
+              logCalculationError(config, "汇总方向闭锁成员固定出力", fixedOutput.error());
+              return std::nullopt;
+            }
+            out.passiveKw = *fixedOutput;
+          }
+          continue;
+        }
+        constrainedBounds[index] = effectiveBounds;
+        hasDirectionLimits = true;
+      }
+    }
+    controllableIndexes.emplace_back(index);
+    allocationMembers.push_back(ordinaryBounds);
+    if (hasDirectionInputs) directionBounds.push_back(effectiveBounds);
   }
 
+  const auto controllableTarget = desiredTotalKw.Subtract(out.passiveKw);
+  if (!controllableTarget) {
+    logCalculationError(config, "计算可控目标", controllableTarget.error());
+    return std::nullopt;
+  }
+  out.targetControllableKw = *controllableTarget;
   auto allocation =
       strategy.AllocateDecimal(out.targetControllableKw, allocationMembers);
   if (!input.memberAvailable.empty()) {
@@ -439,6 +524,14 @@ std::optional<ControlOutput> ComputeControlOutput(
   if (!allocation.has_value()) {
     logCalculationError(config, "执行加权分配", allocation.error());
     return std::nullopt;
+  }
+  if (hasDirectionLimits) {
+    const auto redistribution = redistributeDirectionLimitedAllocation(
+        out.targetControllableKw, strategy, directionBounds, &*allocation);
+    if (!redistribution) {
+      logCalculationError(config, "执行成员方向闭锁重分配", redistribution.error());
+      return std::nullopt;
+    }
   }
   out.unallocatedKw = allocation->unallocated;
   for (size_t index = 0;
@@ -458,11 +551,8 @@ std::optional<ControlOutput> ComputeControlOutput(
     logCalculationError(config, "转换控制周期", decimalPeriod.error());
     return std::nullopt;
   }
-  for (size_t index = 0; index < memberCount; ++index) {
+  for (const auto index : controllableIndexes) {
     const auto &member = config.members(static_cast<int>(index));
-    if (!memberParticipates(config, input, index)) {
-      continue;
-    }
     const auto *profile =
         findControlProfile(input.controlProfile, member.member_name());
     const auto previousIntegral = index < input.integralMemoryKw.size()
@@ -598,13 +688,18 @@ std::optional<ControlOutput> ComputeControlOutput(
       return std::nullopt;
     }
     out.memberTargetKw[index] = *clamped;
+    if (index < constrainedBounds.size() && constrainedBounds[index]) {
+      const auto &bounds = constrainedBounds[index];
+      const auto directionClamped = std::clamp(*clamped, bounds->min, bounds->max);
+      if (directionClamped != *clamped) {
+        out.nextIntegralMemoryKw[index] = previousIntegral;
+      }
+      out.memberTargetKw[index] = directionClamped;
+    }
   }
 
   out.actualTargetKw = out.passiveKw;
-  for (size_t index = 0; index < memberCount; ++index) {
-    if (!memberParticipates(config, input, index)) {
-      continue;
-    }
+  for (const auto index : controllableIndexes) {
     auto next = out.actualTargetKw.Add(out.memberTargetKw[index]);
     if (!next.has_value()) {
       logCalculationError(config, "汇总实际目标", next.error());
@@ -628,9 +723,9 @@ std::optional<ControlOutput> ComputeControlOutput(
                             !outputs.p_total_error().tag().empty();
   }
 
-  for (size_t index = 0; index < memberCount; ++index) {
+  for (const auto index : controllableIndexes) {
     const auto &member = config.members(static_cast<int>(index));
-    if (!memberParticipates(config, input, index) || !member.has_p_set() ||
+    if (!member.has_p_set() ||
         !member.p_set().has_signal() ||
         member.p_set().signal().tag().empty()) {
       continue;
@@ -685,11 +780,9 @@ std::optional<ControlOutput> ComputeControlOutput(
   out.nextLastDesiredTotalKw = desiredTotalKw;
   out.hasLastMemberTargetKw.assign(memberCount, false);
   out.nextLastMemberTargetKw.assign(memberCount, Decimal{});
-  for (size_t index = 0; index < memberCount; ++index) {
-    if (memberParticipates(config, input, index)) {
-      out.hasLastMemberTargetKw[index] = true;
-      out.nextLastMemberTargetKw[index] = out.memberTargetKw[index];
-    }
+  for (const auto index : controllableIndexes) {
+    out.hasLastMemberTargetKw[index] = true;
+    out.nextLastMemberTargetKw[index] = out.memberTargetKw[index];
   }
   return out;
 }

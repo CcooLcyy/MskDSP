@@ -101,6 +101,80 @@ AGC::ControlInput MakeBaseInput(double cmdRaw, const std::vector<double>& measRa
 }
 }  // 命名空间结束
 
+// 验证：两路闭锁必须使用独立内部标签且保持 BOOL 恒等换算。
+TEST(AgcControlTest, ExternalDirectionBlocksValidateOptionalSignalBindings) {
+  auto cfg = MakeBaseConfig();
+  auto *member = cfg.mutable_members(0);
+  member->mutable_increase_block_input()->set_tag("BLOCK_UP");
+  ASSERT_TRUE(AGC::ValidateGroupConfig(cfg).ok());
+  auto *decrease = member->mutable_decrease_block_input();
+  for (const auto *tag : {"", "BLOCK_UP", "M2_SET", "AGC减闭锁"}) {
+    SCOPED_TRACE(tag);
+    decrease->set_tag(tag);
+    EXPECT_EQ(AGC::ValidateGroupConfig(cfg).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  }
+  decrease->set_tag("BLOCK_DOWN");
+  decrease->set_scale_decimal("-1");
+  EXPECT_EQ(AGC::ValidateGroupConfig(cfg).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  decrease->set_scale_decimal("1");
+  EXPECT_TRUE(AGC::ValidateGroupConfig(cfg).ok());
+}
+
+// 验证：单向闭锁只限制禁止方向，差额由其他成员承担，并优先采用已发布绝对值。
+TEST(AgcControlTest, ExternalDirectionBlocksOnlyRestrictTheirOwnDirection) {
+  auto cfg = MakeBaseConfig();
+  cfg.mutable_members(1)->set_weight(1);
+  auto input = MakeBaseInput(100, {30, 50});
+  input.memberDirectionConstraints.resize(2);
+  auto &constraint = input.memberDirectionConstraints[0];
+  constraint.increaseBlocked = true;
+  constraint.validMeasurementRaw = Decimal(30);
+  const AGVC::WeightedStrategy strategy;
+  auto result = AGC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->memberTargetKw, (std::vector{Decimal(30), Decimal(70)}));
+
+  constraint.increaseBlocked = false;
+  constraint.decreaseBlocked = true;
+  constraint.publishedTargetKw = Decimal(50);
+  input.cmdRaw = Decimal(80);
+  result = AGC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->memberTargetKw, (std::vector{Decimal(50), Decimal(30)}));
+
+  input.cmdRaw = Decimal(120);
+  result = AGC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->memberTargetKw, (std::vector{Decimal(60), Decimal(60)}));
+}
+
+// 验证：无边界时不写闭锁成员；有边界且双向闭锁时 PI 不能越过绝对设定边界。
+TEST(AgcControlTest, ExternalDirectionBlocksRequireAnAnchorAndConstrainFeedbackCorrection) {
+  auto cfg = MakeBaseConfig();
+  cfg.mutable_members(1)->set_weight(1);
+  auto input = MakeBaseInput(80, {20, 40});
+  input.memberDirectionConstraints.resize(2);
+  auto &constraint = input.memberDirectionConstraints[0];
+  constraint.increaseBlocked = true;
+  constraint.decreaseBlocked = true;
+  const AGVC::WeightedStrategy strategy;
+  auto result = AGC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_FALSE(result->memberPublish[0]);
+  EXPECT_TRUE(result->memberPublish[1]);
+  EXPECT_EQ(result->memberTargetKw[1], Decimal(80));
+
+  constraint.publishedTargetKw = Decimal(30);
+  auto *profile = input.controlProfile.add_members();
+  profile->set_member_name("m1");
+  profile->set_up_p_gain(1);
+  profile->set_up_i_gain(1);
+  result = AGC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->memberTargetKw, (std::vector{Decimal(30), Decimal(50)}));
+  EXPECT_EQ(result->nextIntegralMemoryKw[0], Decimal(0));
+}
+
 // 验证：方向闭锁依据当前绝对下发设定值，到上限、下限和返回区间时分别置位与解除。
 TEST(AgcControlTest, DirectionBlocksFollowCurrentPublishedTargetWithoutLatching) {
   auto cfg = MakeBaseConfig();

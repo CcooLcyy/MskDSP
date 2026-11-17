@@ -144,6 +144,51 @@ grpc::Status ValidateGroupConfig(const AGCProto::GroupConfig& config) {
     }
   }
 
+  std::unordered_set<std::string> directionOccupiedTags{config.p_cmd().signal().tag()};
+  const auto addActiveBaseTag = [&](const AGCProto::ValueSpec &value) {
+    if (value.mode() == AGCProto::VALUE_MODE_DELTA && value.delta_base() == AGCProto::DELTA_BASE_BASE_TAG) {
+      directionOccupiedTags.emplace(value.base_tag());
+    }
+  };
+  addActiveBaseTag(config.p_cmd());
+  for (const auto &member : config.members()) {
+    directionOccupiedTags.emplace(member.p_meas().tag());
+    directionOccupiedTags.emplace(member.p_set().signal().tag());
+    addActiveBaseTag(member.p_set());
+    if (member.has_communication_state()) directionOccupiedTags.emplace(member.communication_state().tag());
+  }
+  if (config.has_outputs()) {
+    directionOccupiedTags.emplace(config.outputs().p_total_meas().tag());
+    directionOccupiedTags.emplace(config.outputs().p_total_target().tag());
+    directionOccupiedTags.emplace(config.outputs().p_total_error().tag());
+  }
+  const auto validateDirectionInput = [&](const AGCProto::MemberConfig &member, const AGCProto::SignalSpec &input,
+                                         std::string_view name) -> grpc::Status {
+    const auto field = std::format("成员 {} {}遥信", member.member_name(), name);
+    if (!member.controllable()) return makeInvalid(std::format("{}仅可用于可控成员", field));
+    if (input.tag().empty()) return makeInvalid(std::format("{}标签不能为空", field));
+    if (auto result = validateNoReservedDefaultTag(input.tag(), field); !result.ok()) return result;
+    if (!directionOccupiedTags.emplace(input.tag()).second) {
+      return makeInvalid(std::format("{}标签与控制组内其他点冲突: {}", field, input.tag()));
+    }
+    const auto scale = numeric::Scale(input);
+    const auto offset = numeric::Offset(input);
+    if (!scale || !offset || *scale != numeric::One() || !offset->IsZero()) {
+      return makeInvalid(std::format("{}只接受不带换算的 BOOL 点", field));
+    }
+    return grpc::Status::OK;
+  };
+  for (const auto &member : config.members()) {
+    if (member.has_increase_block_input()) {
+      const auto result = validateDirectionInput(member, member.increase_block_input(), "禁止增出力");
+      if (!result.ok()) return result;
+    }
+    if (member.has_decrease_block_input()) {
+      const auto result = validateDirectionInput(member, member.decrease_block_input(), "禁止减出力");
+      if (!result.ok()) return result;
+    }
+  }
+
   std::unordered_set<std::string> memberNames;
   memberNames.reserve(static_cast<size_t>(config.members_size()));
   numeric::Decimal installedCapacityKw;

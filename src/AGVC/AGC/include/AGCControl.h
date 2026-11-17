@@ -15,6 +15,13 @@ namespace AGC {
 
 using Decimal = numeric::Decimal;
 
+struct MemberDirectionConstraint {
+  bool increaseBlocked{false};
+  bool decreaseBlocked{false};
+  std::optional<Decimal> publishedTargetKw;
+  std::optional<Decimal> validMeasurementRaw;
+};
+
 struct ControlInput {
   bool hasCmdRaw{false};
   Decimal cmdRaw;
@@ -26,6 +33,8 @@ struct ControlInput {
   std::vector<bool> memberAvailable;
   // 仅配置量测有效期时，仍按原口径汇总不可控成员的出力。
   bool includePassiveMembersWithAvailability{false};
+  // 成员外部方向闭锁：最近成功下发绝对值优先，首次使用有效量测。
+  std::vector<MemberDirectionConstraint> memberDirectionConstraints;
 
   bool hasLastDesiredTotalKw{false};
   Decimal lastDesiredTotalKw;
