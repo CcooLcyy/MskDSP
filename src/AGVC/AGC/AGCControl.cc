@@ -6,6 +6,7 @@
 #include <string_view>
 
 #include "Logger.h"
+#include "mskdsp/AgvcControlMode.hpp"
 
 namespace AGC {
 namespace {
@@ -137,8 +138,8 @@ void logCalculationError(const AGCProto::GroupConfig &config,
             mskdsp::numeric::DecimalErrorMessage(error));
 }
 
-// 先保留既有分配比例，只移走外部闭锁截断造成的差额。
-std::expected<void, Error> redistributeDirectionLimitedAllocation(
+// 先将基准值限制在成员范围内，再按剩余调节空间分摊与总目标的差额。
+std::expected<void, Error> rebalanceAllocationWithinBounds(
     const Decimal &target, const AGVC::WeightedStrategy &strategy,
     const std::vector<AGVC::DecimalAllocationMember> &bounds,
     AGVC::DecimalAllocationOutput *allocation) {
@@ -179,6 +180,21 @@ std::expected<void, Error> redistributeDirectionLimitedAllocation(
   if (!unallocated) return std::unexpected(unallocated.error());
   allocation->unallocated = *unallocated;
   return {};
+}
+
+std::expected<AGVC::DecimalAllocationOutput, Error> allocateFromMeasurements(
+    const Decimal &target, const AGVC::WeightedStrategy &strategy,
+    const std::vector<AGVC::DecimalAllocationMember> &bounds,
+    const std::vector<size_t> &memberIndexes, const std::vector<Decimal> &baselineKw) {
+  AGVC::DecimalAllocationOutput allocation;
+  allocation.values.reserve(memberIndexes.size());
+  for (const auto index : memberIndexes) {
+    allocation.values.push_back(baselineKw[index]);
+  }
+  // 分配器按同一权重分摊减量，每个成员最多减到自身下限。
+  const auto result = rebalanceAllocationWithinBounds(target, strategy, bounds, &allocation);
+  if (!result) return std::unexpected(result.error());
+  return allocation;
 }
 
 }  // namespace
@@ -514,8 +530,35 @@ std::optional<ControlOutput> ComputeControlOutput(
     return std::nullopt;
   }
   out.targetControllableKw = *controllableTarget;
-  auto allocation =
-      strategy.AllocateDecimal(out.targetControllableKw, allocationMembers);
+  if (config.control_mode() == AGVC::kPeriodicAllocation<AGCProto::ControlMode> &&
+      command.mode() != AGCProto::VALUE_MODE_DELTA && !input.hasDesiredTotalOverride) {
+    out.periodicReductionBaselineKw = input.periodicReductionBaselineKw;
+    if (!out.periodicReductionBaselineKw && !controllableIndexes.empty()) {
+      bool hasValidMeasurements = true;
+      for (size_t index = 0; index < memberCount; ++index) {
+        if (memberContributesMeasurement(config, input, index) &&
+            (index >= input.memberMeasurementGood.size() || !input.memberMeasurementGood[index] ||
+             index >= input.hasMemberMeasRaw.size() || !input.hasMemberMeasRaw[index] ||
+             index >= input.memberMeasRaw.size())) {
+          hasValidMeasurements = false;
+          break;
+        }
+      }
+      if (hasValidMeasurements) {
+        out.periodicReductionBaselineKw.emplace();
+        if (out.totalErrorKw < numeric::Zero()) {
+          *out.periodicReductionBaselineKw = measuredKw;
+          LOG_DEBUG("AGC 周期分配按实测分摊减量: group_name={}, 实测总功率_kw={}, 目标总功率_kw={}",
+                    config.group_name(), out.totalMeasKw.ToFixedString(), desiredTotalKw.ToFixedString());
+        }
+      }
+    }
+  }
+  const auto &baseline = out.periodicReductionBaselineKw;
+  auto allocation = baseline && !baseline->empty()
+                        ? allocateFromMeasurements(out.targetControllableKw, strategy, allocationMembers,
+                                                   controllableIndexes, *baseline)
+                        : strategy.AllocateDecimal(out.targetControllableKw, allocationMembers);
   if (!input.memberAvailable.empty()) {
     LOG_DEBUG("AGC 按成员参与条件分配: group_name={}, 参与成员数={}, 配置成员数={}, 可控目标_kw={}",
               config.group_name(), controllableIndexes.size(), memberCount,
@@ -526,7 +569,7 @@ std::optional<ControlOutput> ComputeControlOutput(
     return std::nullopt;
   }
   if (hasDirectionLimits) {
-    const auto redistribution = redistributeDirectionLimitedAllocation(
+    const auto redistribution = rebalanceAllocationWithinBounds(
         out.targetControllableKw, strategy, directionBounds, &*allocation);
     if (!redistribution) {
       logCalculationError(config, "执行成员方向闭锁重分配", redistribution.error());

@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <semaphore>
 #include <stop_token>
 #include <string>
@@ -105,6 +106,7 @@ private:
     bool hasCmdRaw{false};
     Decimal cmdRaw;
     uint64_t commandRevision{0};
+    std::optional<std::vector<Decimal>> periodicReductionBaselineKw;
     uint64_t directResolvedCommandRevision{0};
     bool hasDirectResolvedDesiredTotalKw{false};
     Decimal directResolvedDesiredTotalKw;
@@ -114,6 +116,7 @@ private:
     struct MeasurementValidity {
       int64_t sourceTsMs{0};
       std::chrono::steady_clock::time_point validUntil{};
+      bool good{false};
     };
     std::vector<MeasurementValidity> memberMeasurementValidity;
 
@@ -182,6 +185,7 @@ private:
 
   bool handleUpdateLocked(GroupRuntime *g, const DataCenterProto::PointUpdate &update);
   bool primeMemberDirectionInputs(const std::string &groupName);
+  static void copyMemberMeasurementsLocked(const GroupRuntime &g, ControlInput *input);
   static void copyMemberDirectionInputsLocked(const GroupRuntime &g, ControlInput *input);
   static bool handleMemberDirectionInputLocked(GroupRuntime *g, const DataCenterProto::PointUpdate &update);
   static bool handleMemberDirectionMeasurementLocked(

@@ -464,6 +464,64 @@ TEST(AgcControlTest, PeriodicAllocationModeDisablesFeedbackCorrection) {
   EXPECT_NEAR(Legacy(out->nextIntegralMemoryKw[0]), 100.0, 1e-6);
 }
 
+// 验证：按实测分摊减量，先到下限的成员不再承担减量，同一命令的实测回填不使设点回摆。
+TEST(AgcControlTest, PeriodicReductionRedistributesUntilAllMembersReachMinimum) {
+  auto cfg = MakeBaseConfig();
+  cfg.set_control_mode(AGVC::kPeriodicAllocation<AGCProto::ControlMode>);
+  cfg.mutable_members(0)->set_capacity_kw(20);
+  cfg.mutable_members(0)->set_weight(20);
+  cfg.mutable_members(1)->set_capacity_kw(100);
+  cfg.mutable_members(1)->set_weight(100);
+  for (auto &member : *cfg.mutable_members()) member.set_min_kw(10);
+  AGVC::WeightedStrategy strategy;
+
+  auto input = MakeBaseInput(48, {20, 100});
+  input.enableFeedbackCorrection = false;
+  input.memberMeasurementGood = {true, true};
+  const auto first = AGC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(first->periodicReductionBaselineKw.has_value());
+  const std::vector<AGC::Decimal> firstTargets{Decimal(10), Decimal(38)};
+  EXPECT_EQ(first->memberTargetKw, firstTargets);
+  EXPECT_TRUE(first->unallocatedKw.IsZero());
+  EXPECT_FALSE(AGC::ComputeDirectionBlockOutput(cfg, {true, true}, first->memberTargetKw).decreaseBlocked);
+
+  input.periodicReductionBaselineKw = first->periodicReductionBaselineKw;
+  // 两台成员不同步回填，先检查 B 跟进时，再检查两台都跟进后。
+  input.memberMeasRaw = {Decimal(20), Decimal(38)};
+  const auto partialFeedback = AGC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(partialFeedback.has_value());
+  EXPECT_EQ(partialFeedback->memberTargetKw, firstTargets);
+  input.memberMeasRaw[0] = Decimal(10);
+  const auto fullFeedback = AGC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(fullFeedback.has_value());
+  EXPECT_EQ(fullFeedback->memberTargetKw, firstTargets);
+
+  input.periodicReductionBaselineKw.reset();
+  input.cmdRaw = Decimal(42);
+  const auto second = AGC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(second.has_value());
+  const std::vector<AGC::Decimal> secondTargets{Decimal(10), Decimal(32)};
+  EXPECT_EQ(second->memberTargetKw, secondTargets);
+  EXPECT_FALSE(AGC::ComputeDirectionBlockOutput(cfg, {true, true}, second->memberTargetKw).decreaseBlocked);
+
+  input.memberMeasRaw = secondTargets;
+  input.cmdRaw = Decimal(20);
+  const auto minimum = AGC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(minimum.has_value());
+  const std::vector<AGC::Decimal> minimumTargets{Decimal(10), Decimal(10)};
+  EXPECT_EQ(minimum->memberTargetKw, minimumTargets);
+  EXPECT_TRUE(AGC::ComputeDirectionBlockOutput(cfg, {true, true}, minimum->memberTargetKw).decreaseBlocked);
+
+  input.memberMeasRaw = minimumTargets;
+  input.cmdRaw = Decimal(56);
+  const auto increase = AGC::ComputeControlOutput(cfg, input, strategy);
+  ASSERT_TRUE(increase.has_value());
+  const std::vector<AGC::Decimal> increaseTargets{Decimal(16), Decimal(40)};
+  EXPECT_EQ(increase->memberTargetKw, increaseTargets);
+  EXPECT_FALSE(AGC::ComputeDirectionBlockOutput(cfg, {true, true}, increase->memberTargetKw).decreaseBlocked);
+}
+
 // 验证：周期分配模式强制校验计算周期和命令周期范围。
 TEST(AgcControlTest, PeriodicAllocationModeValidatesPeriods) {
   auto cfg = MakeBaseConfig();

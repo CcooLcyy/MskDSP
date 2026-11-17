@@ -28,6 +28,10 @@ struct ControlInput {
   std::unordered_map<std::string, Decimal> baseRawByTag;
   std::vector<bool> hasMemberMeasRaw;
   std::vector<Decimal> memberMeasRaw;
+  std::vector<bool> memberMeasurementGood;
+  // 周期分配的同一条绝对目标命令沿用首次确认的分配基准。
+  // 未设置表示待确认，空向量表示按绝对总目标分配，非空表示按该实测基准分摊减量。
+  std::optional<std::vector<Decimal>> periodicReductionBaselineKw;
   // 空向量沿用未配置参与条件的旧组口径；非空时仅 true 的可控成员参与分配。
   // 缺少索引按不可用处理，不能把掉线成员的最后量测当作被动出力。
   std::vector<bool> memberAvailable;
@@ -70,6 +74,7 @@ struct ControlOutput {
   std::vector<Decimal> memberTargetKw;
   std::vector<bool> memberPublish;
   std::vector<Decimal> memberPublishKw;
+  std::optional<std::vector<Decimal>> periodicReductionBaselineKw;
 
   bool hasLastDesiredTotalKw{false};
   Decimal nextLastDesiredTotalKw;

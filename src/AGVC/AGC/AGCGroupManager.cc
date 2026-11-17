@@ -873,6 +873,7 @@ grpc::Status GroupManager::StopGroup(const std::string &groupName) {
               std::chrono::steady_clock::time_point{});
     std::fill(it->second.integralMemoryKw.begin(), it->second.integralMemoryKw.end(), Decimal{});
     it->second.commandRevision = 0;
+    it->second.periodicReductionBaselineKw.reset();
     it->second.directResolvedCommandRevision = 0;
     it->second.hasDirectResolvedDesiredTotalKw = false;
     it->second.directResolvedDesiredTotalKw = Decimal{};
@@ -1148,8 +1149,10 @@ grpc::Status GroupManager::ExecuteCommand(
     refreshMemberAvailabilityLocked(&it->second);
     input.memberAvailable = it->second.memberAvailable;
     input.includePassiveMembersWithAvailability = it->second.memberIndexesByCommunicationTag.empty();
-    input.hasMemberMeasRaw = it->second.hasMemberMeasRaw;
-    input.memberMeasRaw = it->second.memberMeasRaw;
+    copyMemberMeasurementsLocked(it->second, &input);
+    if (periodicAllocation && it->second.hasCmdRaw && sameValue(it->second.cmdRaw, raw)) {
+      input.periodicReductionBaselineKw = it->second.periodicReductionBaselineKw;
+    }
     input.hasLastMemberTargetKw = it->second.hasLastMemberTargetKw;
     input.lastMemberTargetKw = it->second.lastMemberTargetKw;
     input.hasLastDesiredTotalKw = it->second.hasLastDesiredTotalKw;
@@ -1237,6 +1240,7 @@ grpc::Status GroupManager::ExecuteCommand(
       it->second.cmdRaw = raw;
       it->second.hasCmdRaw = true;
       ++it->second.commandRevision;
+      it->second.periodicReductionBaselineKw = output.periodicReductionBaselineKw;
       it->second.hasDirectResolvedDesiredTotalKw = !input.memberAvailable.empty() || !input.memberDirectionConstraints.empty();
       it->second.directResolvedCommandRevision = it->second.commandRevision;
       it->second.directResolvedDesiredTotalKw = output.desiredTotalKw;
@@ -1431,6 +1435,7 @@ void GroupManager::rebuildTagCache(GroupRuntime *g, bool resetPublishedTargets) 
   g->memberCommunicationSourceTs.assign(memberCount, 0);
   g->memberCommunicationReceivedAt.assign(memberCount, {});
   g->commandRevision = 0;
+  g->periodicReductionBaselineKw.reset();
   g->directResolvedCommandRevision = 0;
   g->hasDirectResolvedDesiredTotalKw = false;
   g->directResolvedDesiredTotalKw = Decimal{};
@@ -1632,6 +1637,7 @@ bool GroupManager::refreshMemberAvailabilityLocked(GroupRuntime *g) {
   }
   if (changed) {
     ++g->controlRevision;
+    g->periodicReductionBaselineKw.reset();
     std::fill(g->integralMemoryKw.begin(), g->integralMemoryKw.end(), Decimal{});
     if (g->tuningStatus.state() == AGCProto::TUNING_STATE_RUNNING) {
       g->tuningStatus.set_state(AGCProto::TUNING_STATE_FAILED);
@@ -1708,6 +1714,15 @@ bool GroupManager::primeMemberDirectionInputs(const std::string &groupName) {
   }
   group.directionInputsPrimed = true;
   return true;
+}
+
+void GroupManager::copyMemberMeasurementsLocked(const GroupRuntime &g, ControlInput *input) {
+  input->hasMemberMeasRaw = g.hasMemberMeasRaw;
+  input->memberMeasRaw = g.memberMeasRaw;
+  input->memberMeasurementGood.reserve(g.memberMeasurementValidity.size());
+  for (const auto &measurement : g.memberMeasurementValidity) {
+    input->memberMeasurementGood.push_back(measurement.good);
+  }
 }
 
 void GroupManager::copyMemberDirectionInputsLocked(const GroupRuntime &g, ControlInput *input) {
@@ -1799,6 +1814,7 @@ bool GroupManager::handleUpdateLocked(GroupRuntime *g, const DataCenterProto::Po
     g->hasCmdRaw = true;
     if (changed) {
       ++g->commandRevision;
+      g->periodicReductionBaselineKw.reset();
       g->hasDirectResolvedDesiredTotalKw = false;
       ++g->controlRevision;
       std::fill(g->integralMemoryKw.begin(), g->integralMemoryKw.end(), Decimal{});
@@ -1830,19 +1846,22 @@ bool GroupManager::handleUpdateLocked(GroupRuntime *g, const DataCenterProto::Po
   for (const auto idx : measurement->second) {
     changed |= handleMemberDirectionMeasurementLocked(g, idx, update);
     const auto validityMs = g->config.members(static_cast<int>(idx)).measurement_validity_ms();
+    auto &validity = g->memberMeasurementValidity[idx];
     if (validityMs != 0) {
-      auto &validity = g->memberMeasurementValidity[idx];
       if (sourceTs <= 0 || sourceTs > nowMs || sourceTs < validity.sourceTsMs ||
           (good && sourceTs == validity.sourceTsMs)) {
         continue;
       }
       validity.sourceTsMs = sourceTs;
       const auto remainingMs = static_cast<int64_t>(validityMs) - (nowMs - sourceTs);
-      validity.validUntil = good && remainingMs > 0
+      validity.good = good && remainingMs > 0;
+      validity.validUntil = validity.good
                                 ? now + std::chrono::milliseconds(remainingMs)
                                 : std::chrono::steady_clock::time_point{};
       checkAvailability = true;
-      if (!good || remainingMs <= 0) continue;
+      if (!validity.good) continue;
+    } else {
+      validity.good = good;
     }
     if (hasRaw) {
       changed |= !g->hasMemberMeasRaw[idx] || !sameValue(g->memberMeasRaw[idx], raw);
@@ -2206,8 +2225,8 @@ void GroupManager::controlTick(const std::string &groupName, bool *retryDirectio
     input.baseRawByTag = it->second.baseRawByTag;
     input.memberAvailable = it->second.memberAvailable;
     input.includePassiveMembersWithAvailability = it->second.memberIndexesByCommunicationTag.empty();
-    input.hasMemberMeasRaw = it->second.hasMemberMeasRaw;
-    input.memberMeasRaw = it->second.memberMeasRaw;
+    copyMemberMeasurementsLocked(it->second, &input);
+    input.periodicReductionBaselineKw = it->second.periodicReductionBaselineKw;
     copyMemberDirectionInputsLocked(it->second, &input);
     input.hasLastMemberTargetKw = it->second.hasLastMemberTargetKw;
     input.lastMemberTargetKw = it->second.lastMemberTargetKw;
@@ -2362,6 +2381,9 @@ void GroupManager::controlTick(const std::string &groupName, bool *retryDirectio
         !it->second.functionEnabled || it->second.controlRevision != controlRevision) {
       LOG_DEBUG("AGC 丢弃已过期控制计算结果: group_name={}, revision={}", groupName, controlRevision);
       return;
+    }
+    if (!it->second.periodicReductionBaselineKw) {
+      it->second.periodicReductionBaselineKw = output.periodicReductionBaselineKw;
     }
   }
 
