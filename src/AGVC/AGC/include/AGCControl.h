@@ -37,8 +37,8 @@ struct ControlInput {
   AGCProto::GroupControlProfile controlProfile;
   std::vector<Decimal> integralMemoryKw;
   double controlPeriodSeconds{1.0};
-  // 仅 PI 事件触发模式启用固定参数修正；周期分配模式保持纯分配。
-  bool enablePi{true};
+  // 仅事件触发模式启用固定参数修正；周期分配模式保持纯分配。
+  bool enableFeedbackCorrection{true};
   bool integralEnabled{true};
   bool hasDesiredTotalOverride{false};
   Decimal desiredTotalOverrideKw;

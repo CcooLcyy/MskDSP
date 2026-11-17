@@ -18,6 +18,7 @@
 #include "AVCGroupManager.h"
 #include "DataCenter_mock.grpc.pb.h"
 #include "mskdsp/Decimal20.hpp"
+#include "mskdsp/AgvcControlMode.hpp"
 #include "support/FakeDataCenter.hpp"
 
 namespace {
@@ -349,7 +350,7 @@ class AvcCycleTest : public testing::Test {
     auto request = voltageMode ? MakeVoltageGroupReq(kGroupName) : MakeQTotalGroupReq(kGroupName);
     auto* config = request.mutable_config();
     config->mutable_members()->RemoveLast();
-    config->set_control_mode(AVCProto::CONTROL_MODE_DIRECT_CYCLIC);
+    config->set_control_mode(AGVC::kPeriodicAllocation<AVCProto::ControlMode>);
     config->set_calculation_execution_period_seconds(1.0);
     config->set_command_control_period_seconds(4.0);
     return request;

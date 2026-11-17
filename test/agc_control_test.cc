@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "AGCControl.h"
+#include "mskdsp/AgvcControlMode.hpp"
 #include "AGCGroupValidation.h"
 
 namespace {
@@ -203,7 +204,7 @@ TEST(AgcControlTest, DirectionBlocksUseAbsoluteTargetForDeltaOutputs) {
   set->set_mode(AGCProto::VALUE_MODE_DELTA);
   set->set_delta_base(AGCProto::DELTA_BASE_CURRENT_MEAS);
   auto input = MakeBaseInput(100, {100});
-  input.enablePi = false;
+  input.enableFeedbackCorrection = false;
   AGVC::WeightedStrategy strategy;
   const auto control = AGC::ComputeControlOutput(cfg, input, strategy);
   ASSERT_TRUE(control.has_value());
@@ -243,8 +244,8 @@ TEST(AgcControlTest, DecimalConfigurationAndInputsRemainExactThroughAllocation) 
   EXPECT_TRUE(out->unallocatedKw.IsZero());
 }
 
-// 验证：AGC 的 PI 参数、积分记忆和偏置优先使用十进制文本，计算结果不经过 double 中转。
-TEST(AgcControlTest, DecimalPiProfileRemainsExact) {
+// 验证：AGC 的比例积分参数、积分记忆和偏置优先使用十进制文本，计算结果不经过 double 中转。
+TEST(AgcControlTest, DecimalFeedbackProfileRemainsExact) {
   auto cfg = MakeBaseConfig();
   cfg.mutable_members(0)->set_weight_decimal("1");
   cfg.mutable_members(1)->set_weight_decimal("1");
@@ -326,7 +327,7 @@ TEST(AgcControlTest, AbsoluteCommandAllocatesByWeight) {
 }
 
 // 验证：固定参数按成员独立生效，积分记忆在控制计算后更新。
-TEST(AgcControlTest, MemberControlProfileAppliesIndependentPiCorrection) {
+TEST(AgcControlTest, MemberControlProfileAppliesIndependentFeedbackCorrection) {
   auto cfg = MakeBaseConfig();
   AGVC::WeightedStrategy strategy;
   auto input = MakeBaseInput(60.0, {10.0, 20.0});
@@ -344,8 +345,8 @@ TEST(AgcControlTest, MemberControlProfileAppliesIndependentPiCorrection) {
   EXPECT_NEAR(Legacy(out->nextIntegralMemoryKw[0]), 10.0, 1e-6);
 }
 
-// 验证：负功率成员经 PI 修正后仍受负数 max_kw 上限约束。
-TEST(AgcControlTest, NegativeMemberMaximumStillClampsPiCorrection) {
+// 验证：负功率成员经比例积分修正后仍受负数 max_kw 上限约束。
+TEST(AgcControlTest, NegativeMemberMaximumStillClampsFeedbackCorrection) {
   auto cfg = MakeBaseConfig();
   cfg.mutable_members(0)->set_min_kw_decimal("-100");
   cfg.mutable_members(0)->set_max_kw_decimal("-10");
@@ -367,15 +368,15 @@ TEST(AgcControlTest, NegativeMemberMaximumStillClampsPiCorrection) {
             "-10.00000000000000000000");
 }
 
-// 验证：周期分配模式完全跳过 PI 比例/积分修正，仅按基础策略分配。
-TEST(AgcControlTest, DirectCyclicModeDisablesPiCorrection) {
+// 验证：周期分配模式完全跳过比例积分修正，仅按基础策略分配。
+TEST(AgcControlTest, PeriodicAllocationModeDisablesFeedbackCorrection) {
   auto cfg = MakeBaseConfig();
-  cfg.set_control_mode(AGCProto::CONTROL_MODE_DIRECT_CYCLIC);
+  cfg.set_control_mode(AGVC::kPeriodicAllocation<AGCProto::ControlMode>);
   cfg.set_calculation_execution_period_seconds(1.0);
   cfg.set_command_control_period_seconds(4.0);
   AGVC::WeightedStrategy strategy;
   auto input = MakeBaseInput(60.0, {10.0, 20.0});
-  input.enablePi = false;
+  input.enableFeedbackCorrection = false;
   auto *profile = input.controlProfile.mutable_members()->Add();
   profile->set_member_name("m1");
   profile->set_up_p_gain(10.0);
@@ -390,9 +391,9 @@ TEST(AgcControlTest, DirectCyclicModeDisablesPiCorrection) {
 }
 
 // 验证：周期分配模式强制校验计算周期和命令周期范围。
-TEST(AgcControlTest, DirectCyclicModeValidatesPeriods) {
+TEST(AgcControlTest, PeriodicAllocationModeValidatesPeriods) {
   auto cfg = MakeBaseConfig();
-  cfg.set_control_mode(AGCProto::CONTROL_MODE_DIRECT_CYCLIC);
+  cfg.set_control_mode(AGVC::kPeriodicAllocation<AGCProto::ControlMode>);
   cfg.set_calculation_execution_period_seconds(0.5);
   cfg.set_command_control_period_seconds(4.0);
   EXPECT_FALSE(AGC::ValidateGroupConfig(cfg).ok());
@@ -673,7 +674,7 @@ TEST(AgcControlTest, CommunicationMaskReallocatesOriginalTargetAndRecovers) {
     member.set_weight(1);
   }
   auto input = MakeBaseInput(300, {80, 90, 100});
-  input.enablePi = false;
+  input.enableFeedbackCorrection = false;
   input.memberAvailable = {true, true, true};
   AGVC::WeightedStrategy strategy;
   auto out = AGC::ComputeControlOutput(cfg, input, strategy);
@@ -736,7 +737,7 @@ TEST(AgcControlTest, OfflineCapacityCannotAbsorbUnallocatedTarget) {
   EXPECT_EQ(out->unallocatedKw, Decimal(50));
 }
 
-// 验证：失联成员不继续积累 PI 积分，恢复前不保留可发布目标。
+// 验证：失联成员不继续积累积分，恢复前不保留可发布目标。
 TEST(AgcControlTest, OfflineMemberClearsIntegralMemoryAndTarget) {
   const auto cfg = MakeBaseConfig();
   auto input = MakeBaseInput(100, {0, 0});

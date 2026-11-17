@@ -21,6 +21,7 @@
 
 #include "AGCGroupManager.h"
 #include "DataCenter_mock.grpc.pb.h"
+#include "mskdsp/AgvcControlMode.hpp"
 #include "support/FakeDataCenter.hpp"
 
 // 通信输入使用源采集时间，不能把旧快照当成新心跳。
@@ -653,7 +654,7 @@ TEST(AgcGroupManagerTest, DirectionBlocksIgnoreComputedTargetsUntilCommandPeriod
   manager.setDataCenterStub(stub);
   auto request = MakeGroupReq("g-block-period");
   auto *config = request.mutable_config();
-  config->set_control_mode(AGCProto::CONTROL_MODE_DIRECT_CYCLIC);
+  config->set_control_mode(AGVC::kPeriodicAllocation<AGCProto::ControlMode>);
   config->set_calculation_execution_period_seconds(1);
   config->set_command_control_period_seconds(30);
   config->mutable_outputs()->mutable_p_total_target()->set_tag("P_TARGET");
@@ -704,7 +705,7 @@ TEST(AgcGroupManagerTest, CyclicBurstPublishesOnlyLatestTargetAfterCommandInterv
   constexpr auto kGroup = "g-cyclic-burst";
   auto request = MakeGroupReq(kGroup);
   auto *config = request.mutable_config();
-  config->set_control_mode(AGCProto::CONTROL_MODE_DIRECT_CYCLIC);
+  config->set_control_mode(AGVC::kPeriodicAllocation<AGCProto::ControlMode>);
   config->set_calculation_execution_period_seconds(1);
   config->set_command_control_period_seconds(kCommandInterval.count());
   config->mutable_members()->RemoveLast();
@@ -1998,7 +1999,7 @@ TEST(AgcGroupManagerTest, StaleMeasurementExcludesOnlineMemberAndFreshSampleRest
   manager.setDataCenterStub(MakeStub(&state));
   auto request = MakeGroupReq(kGroup);
   auto *config = request.mutable_config();
-  config->set_control_mode(AGCProto::CONTROL_MODE_DIRECT_CYCLIC);
+  config->set_control_mode(AGVC::kPeriodicAllocation<AGCProto::ControlMode>);
   config->set_calculation_execution_period_seconds(1);
   config->set_command_control_period_seconds(4);
   for (int index = 0; index < config->members_size(); ++index) {
@@ -2067,7 +2068,7 @@ TEST(AgcGroupManagerTest, InvalidCommunicationInputsExcludeMember) {
   }
 }
 
-// 验证：PI 事件触发模式在心跳静默超时后也重新分配，无需新输入通知。
+// 验证：事件触发模式在心跳静默超时后也重新分配，无需新输入通知。
 TEST(AgcGroupManagerTest, CommunicationTimeoutRecalculatesInEventMode) {
   FakeDataCenterState state;
   GroupManager manager("AGC");
@@ -2217,7 +2218,7 @@ TEST(AgcGroupManagerTest, DirectSynchronousDeltaKeepsAcceptedTargetAcrossFeedbac
   manager.setDataCenterStub(MakeStub(&state));
   auto request = MakeGroupReq("g-health-direct-delta");
   auto *config = request.mutable_config();
-  config->set_control_mode(AGCProto::CONTROL_MODE_DIRECT_CYCLIC);
+  config->set_control_mode(AGVC::kPeriodicAllocation<AGCProto::ControlMode>);
   config->set_calculation_execution_period_seconds(1);
   config->set_command_control_period_seconds(4);
   config->mutable_p_cmd()->set_mode(AGCProto::VALUE_MODE_DELTA);

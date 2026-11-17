@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "AVCControl.h"
+#include "mskdsp/AgvcControlMode.hpp"
 #include "AVCGroupValidation.h"
 
 namespace {
@@ -147,7 +148,7 @@ TEST(AvcControlTest, DirectionBlocksBothDirectionsWhenNoAdjustmentIsPossible) {
 // 验证：AVC 目标电压和总无功命令均可配置合法的计算周期与命令最小间隔。
 TEST(AvcControlTest, CyclicModeAcceptsVoltageAndQTotalCommands) {
   auto cfg = MakeBaseConfig();
-  cfg.set_control_mode(AVCProto::CONTROL_MODE_DIRECT_CYCLIC);
+  cfg.set_control_mode(AGVC::kPeriodicAllocation<AVCProto::ControlMode>);
   cfg.set_calculation_execution_period_seconds(1.0);
   cfg.set_command_control_period_seconds(4.0);
   const auto voltageStatus = AVC::ValidateGroupConfig(cfg);
@@ -209,10 +210,10 @@ TEST(AvcControlTest, DecimalValidationRejectsInvalidTextAndAllowsNegativeDeadban
 }
 
 // 验证：周期分配模式的总无功命令按基础策略直接分配，不依赖电压比例参数。
-TEST(AvcControlTest, DirectCyclicQTotalCommandAllocatesDirectly) {
+TEST(AvcControlTest, PeriodicAllocationQTotalCommandAllocatesDirectly) {
   auto cfg = MakeBaseConfig();
   cfg.clear_voltage_cmd();
-  cfg.set_control_mode(AVCProto::CONTROL_MODE_DIRECT_CYCLIC);
+  cfg.set_control_mode(AGVC::kPeriodicAllocation<AVCProto::ControlMode>);
   cfg.set_calculation_execution_period_seconds(1.0);
   cfg.set_command_control_period_seconds(4.0);
   cfg.mutable_q_total_cmd()->mutable_signal()->set_tag("Q_CMD");

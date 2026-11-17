@@ -16,6 +16,7 @@
 #include "AGCLibInfo.h"
 #include "Logger.h"
 #include "ThreadUtil.hpp"
+#include "mskdsp/AgvcControlMode.hpp"
 #include "mskdsp/Decimal20.hpp"
 
 namespace AGC {
@@ -50,12 +51,12 @@ constexpr auto kMemberSetpointRefreshInterval = std::chrono::seconds(30);
 
 AGCProto::ControlMode effectiveControlMode(const AGCProto::GroupConfig &config) {
   return config.control_mode() == AGCProto::CONTROL_MODE_UNSPECIFIED
-             ? AGCProto::CONTROL_MODE_PI_EVENT
+             ? AGVC::kEventTriggered<AGCProto::ControlMode>
              : config.control_mode();
 }
 
-bool isDirectCyclicMode(const AGCProto::GroupConfig &config) {
-  return effectiveControlMode(config) == AGCProto::CONTROL_MODE_DIRECT_CYCLIC;
+bool isPeriodicAllocationMode(const AGCProto::GroupConfig &config) {
+  return effectiveControlMode(config) == AGVC::kPeriodicAllocation<AGCProto::ControlMode>;
 }
 
 bool sameValue(const Decimal &lhs, const Decimal &rhs) {
@@ -628,13 +629,13 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
       [this, groupName, trigger](std::stop_token st) {
         std::stop_callback cb(st, [trigger]() { trigger->signal.release(); });
 
-        bool directCyclic = false;
+        bool periodicAllocation = false;
         double calculationPeriodSeconds = 1.0;
         {
           std::lock_guard<std::mutex> lock(mu_);
           auto it = groupsByName_.find(groupName);
           if (it != groupsByName_.end()) {
-            directCyclic = isDirectCyclicMode(it->second.config);
+            periodicAllocation = isPeriodicAllocationMode(it->second.config);
             const auto configuredPeriod = it->second.config.calculation_execution_period_seconds();
             if (std::isfinite(configuredPeriod) && configuredPeriod > 0.0) {
               calculationPeriodSeconds = std::clamp(configuredPeriod, 1.0, 15.0);
@@ -642,7 +643,7 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
           }
         }
 
-        if (!directCyclic) {
+        if (!periodicAllocation) {
           while (true) {
             const bool signaled = trigger->signal.try_acquire_for(std::chrono::milliseconds(250));
             if (st.stop_requested()) {
@@ -771,7 +772,7 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
            groupName,
            connId,
            tags.size(),
-           isDirectCyclicMode(g->config) ? "周期分配" : "PI 事件触发");
+           isPeriodicAllocationMode(g->config) ? "周期分配" : "事件触发");
 }
 
 grpc::Status GroupManager::StartGroup(const std::string &groupName) {
@@ -781,7 +782,7 @@ grpc::Status GroupManager::StartGroup(const std::string &groupName) {
   }
 
   bool alreadyRunning = false;
-  AGCProto::ControlMode controlMode = AGCProto::CONTROL_MODE_PI_EVENT;
+  AGCProto::ControlMode controlMode = AGVC::kEventTriggered<AGCProto::ControlMode>;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = groupsByName_.find(groupName);
@@ -812,7 +813,7 @@ grpc::Status GroupManager::StartGroup(const std::string &groupName) {
   publishDirectionBlockPoints(groupName, "控制组启动");
   LOG_INFO("AGC 控制组已启动控制功能: group_name={}, 控制方式={}",
            groupName,
-           controlMode == AGCProto::CONTROL_MODE_DIRECT_CYCLIC ? "周期分配" : "PI 事件触发");
+           controlMode == AGVC::kPeriodicAllocation<AGCProto::ControlMode> ? "周期分配" : "事件触发");
   return grpc::Status::OK;
 }
 
@@ -1077,7 +1078,7 @@ grpc::Status GroupManager::ExecuteCommand(
 
   AGCProto::GroupConfig config;
   uint32_t connId = 0;
-  bool directCyclic = false;
+  bool periodicAllocation = false;
   ControlInput input;
   uint64_t controlRevision = 0;
   {
@@ -1124,7 +1125,7 @@ grpc::Status GroupManager::ExecuteCommand(
 
     config = it->second.config;
     connId = it->second.connId;
-    directCyclic = isDirectCyclicMode(config);
+    periodicAllocation = isPeriodicAllocationMode(config);
     input.hasCmdRaw = true;
     input.cmdRaw = raw;
     input.baseRawByTag = it->second.baseRawByTag;
@@ -1139,7 +1140,7 @@ grpc::Status GroupManager::ExecuteCommand(
     input.lastDesiredTotalKw = it->second.lastDesiredTotalKw;
     input.controlProfile = it->second.controlProfile;
     input.integralMemoryKw = it->second.integralMemoryKw;
-    input.enablePi = !directCyclic;
+    input.enableFeedbackCorrection = !periodicAllocation;
   }
 
   const auto defaultOutput = ComputeDefaultPointOutput(config, input);
@@ -1189,8 +1190,8 @@ grpc::Status GroupManager::ExecuteCommand(
   commandUpdate.set_ts_ms(request.ts_ms());
   commandUpdate.set_quality(request.quality());
 
-  if (directCyclic) {
-    // 周期分配模式执行与 PI 事件触发模式相同的范围和缺测校验，再仅缓存最新命令。
+  if (periodicAllocation) {
+    // 周期分配模式执行与事件触发模式相同的范围和缺测校验，再仅缓存最新命令。
     {
       std::lock_guard<std::mutex> lock(mu_);
       auto it = groupsByName_.find(groupName);
@@ -1462,7 +1463,7 @@ void GroupManager::requestControlLocked(
   if (g == nullptr || g->state != AGCProto::GROUP_STATE_RUNNING || !g->controlTrigger) {
     return;
   }
-  if (isDirectCyclicMode(g->config)) {
+  if (isPeriodicAllocationMode(g->config)) {
     const bool firstValidInput = g->hasCmdRaw && !g->hasLastCommandPublishedAt &&
                                  g->lastControlTickAt.time_since_epoch().count() == 0;
     g->controlTrigger->pending.store(true);
@@ -1479,9 +1480,9 @@ void GroupManager::requestControlLocked(
   if (!g->controlTrigger->pending.exchange(true)) {
     g->controlTrigger->signal.release();
     if (tag.empty()) {
-      LOG_DEBUG("AGC 控制组已请求一次计算: 控制方式=PI 事件触发, group_name={}, 原因={}", groupName, reason);
+      LOG_DEBUG("AGC 控制组已请求一次计算: 控制方式=事件触发, group_name={}, 原因={}", groupName, reason);
     } else {
-      LOG_DEBUG("AGC 控制组已请求一次计算: 控制方式=PI 事件触发, group_name={}, 原因={}, tag={}", groupName, reason, tag);
+      LOG_DEBUG("AGC 控制组已请求一次计算: 控制方式=事件触发, group_name={}, 原因={}, tag={}", groupName, reason, tag);
     }
   }
 }
@@ -1874,7 +1875,7 @@ bool GroupManager::publishMemberSetpoints(const std::string &groupName,
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = groupsByName_.find(groupName);
-    if (it != groupsByName_.end() && isDirectCyclicMode(it->second.config) &&
+    if (it != groupsByName_.end() && isPeriodicAllocationMode(it->second.config) &&
         it->second.hasLastCommandPublishedAt) {
       const auto configuredSeconds = std::clamp(it->second.config.command_control_period_seconds(), 4.0, 30.0);
       cyclicCommandBlocked = commandNow - it->second.lastCommandPublishedAt <
@@ -1963,7 +1964,7 @@ bool GroupManager::publishMemberSetpoints(const std::string &groupName,
         it->second.lastMemberSetpointPublishedAt[i] = publishedAt;
         it->second.hasPublishedMemberTargetKw[i] = true;
         it->second.publishedMemberTargetKw[i] = memberTargetKw[i];
-        if (isDirectCyclicMode(it->second.config)) {
+        if (isPeriodicAllocationMode(it->second.config)) {
           it->second.hasLastCommandPublishedAt = true;
           it->second.lastCommandPublishedAt = publishedAt;
         }
@@ -2045,9 +2046,9 @@ void GroupManager::controlTick(const std::string &groupName) {
     input.lastDesiredTotalKw = it->second.lastDesiredTotalKw;
     input.controlProfile = it->second.controlProfile;
     input.integralMemoryKw = it->second.integralMemoryKw;
-    input.enablePi = !isDirectCyclicMode(config);
+    input.enableFeedbackCorrection = !isPeriodicAllocationMode(config);
     const bool stableDeltaTarget = config.p_cmd().mode() == AGCProto::VALUE_MODE_DELTA &&
-                                   (!input.memberAvailable.empty() || (isDirectCyclicMode(config) &&
+                                   (!input.memberAvailable.empty() || (isPeriodicAllocationMode(config) &&
                                     config.p_cmd().delta_base() == AGCProto::DELTA_BASE_LAST_TARGET));
     if (stableDeltaTarget && it->second.hasDirectResolvedDesiredTotalKw &&
         it->second.directResolvedCommandRevision == it->second.commandRevision) {
@@ -2154,7 +2155,7 @@ void GroupManager::controlTick(const std::string &groupName) {
           totalMeasPublishKw->ToFixedString());
     }
   }
-  publishDefaultLimitPoints(groupName, isDirectCyclicMode(config) ? "周期分配" : "PI 事件触发");
+  publishDefaultLimitPoints(groupName, isPeriodicAllocationMode(config) ? "周期分配" : "事件触发");
 
   if (!functionEnabled) {
     LOG_DEBUG("AGC 跳过控制输出: group_name={}, 原因=AGC 功能未投入", groupName);
@@ -2168,7 +2169,7 @@ void GroupManager::controlTick(const std::string &groupName) {
   const auto &output = *outputOpt;
 
   const bool stableDeltaTarget = config.p_cmd().mode() == AGCProto::VALUE_MODE_DELTA &&
-                                 (!input.memberAvailable.empty() || (isDirectCyclicMode(config) &&
+                                 (!input.memberAvailable.empty() || (isPeriodicAllocationMode(config) &&
                                   config.p_cmd().delta_base() == AGCProto::DELTA_BASE_LAST_TARGET));
   if (stableDeltaTarget && !input.hasDesiredTotalOverride) {
     std::lock_guard<std::mutex> lock(mu_);
@@ -2214,7 +2215,7 @@ void GroupManager::controlTick(const std::string &groupName) {
                                output.memberTargetKw,
                                quality,
                                controlRevision,
-                               isDirectCyclicMode(config) ? "周期分配" : "PI 事件触发",
+                               isPeriodicAllocationMode(config) ? "周期分配" : "事件触发",
                                &publishedAny);
 
   // 下发后更新状态（尽力而为）。
@@ -2236,13 +2237,13 @@ void GroupManager::controlTick(const std::string &groupName) {
       return;
     }
 
-    // PI 事件触发模式在每轮计算后更新积分和上一轮目标；周期分配仅在实际下发成员命令后更新应用目标。
-    if (!isDirectCyclicMode(config) || publishedAny) {
+    // 事件触发模式在每轮计算后更新积分和上一轮目标；周期分配仅在实际下发成员命令后更新应用目标。
+    if (!isPeriodicAllocationMode(config) || publishedAny) {
       it->second.hasLastDesiredTotalKw = output.hasLastDesiredTotalKw;
       it->second.lastDesiredTotalKw = output.nextLastDesiredTotalKw;
       it->second.hasLastMemberTargetKw = output.hasLastMemberTargetKw;
       it->second.lastMemberTargetKw = output.nextLastMemberTargetKw;
-      if (!isDirectCyclicMode(config)) {
+      if (!isPeriodicAllocationMode(config)) {
         it->second.integralMemoryKw = output.nextIntegralMemoryKw;
       }
     }

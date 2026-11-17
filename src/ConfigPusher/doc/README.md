@@ -93,16 +93,16 @@ README 这里只保留模块说明、启动方式、配置入口与基础语义�
 - IEC104/ModbusRTU/ModbusTCP/DLT645/AGC/AVC/Calc及DataCenter自身配置依赖DataCenter时，只有DataCenter内部gRPC通道确认就绪后才继续启动依赖模块或下发配置；未就绪时本次依赖配置停止收敛，避免向尚未监听的地址发送请求
 - AGC 配置使用 `agc.groups[].upsert` 下发控制组；`agc.groups[].start` 为兼容保留字段，当前仅记录日志，不再额外调用 `StartGroup`
 - AGC 控制组配置已不再包含 `loop`、`kp`、`deadband_kw`、`max_step_kw` 等旧闭环参数；ConfigPusher 只接受当前 `GroupConfig` 结构
-- AGC/AVC 控制组可通过 `control_mode` 选择 `CONTROL_MODE_PI_EVENT` 或 `CONTROL_MODE_DIRECT_CYCLIC`；未填写或填写 `CONTROL_MODE_UNSPECIFIED` 时兼容为「PI 事件触发」模式
+- AGC/AVC 控制组可通过 `control_mode` 选择「事件触发」（`1`）或「周期分配」（`2`）；未填写或填写 `0` 时兼容为「事件触发」模式
 - 周期分配模式必须配置 `calculation_execution_period_seconds`（1～15 秒）和 `command_control_period_seconds`（4～30 秒）；后者限制 AGC/AVC 向下游逆变器成功发布成员设定命令的最小间隔，不限制主站向 AGC/AVC 下发命令的间隔
 - ConfigPusher 仅按 protobuf 字段原样下发控制模式和周期参数，不在配置下发层实现定时或限频
 - AGC 每个成员必须配置大于 0 的 `capacity_kw`；该字段由 ConfigPusher 原样下发，由 AGC 最终校验，容量缺失或非法时控制组不会创建/更新成功
-- AGC 的 PI 事件触发模式（`PI_EVENT`）在 `p_cmd`、成员量测或 `base_tag` 等相关输入点变化时触发既有 PI 调节；周期分配模式（`DIRECT_CYCLIC`）按计算周期重算，成员命令按命令控制周期限频。成员上下限、不可控成员扣减、`ABSOLUTE/DELTA` 与 `DELTA_BASE_LAST_TARGET` 等语义保持不变
+- AGC 的事件触发模式在 `p_cmd`、成员量测或 `base_tag` 等相关输入点变化时触发既有比例积分调节；周期分配模式按计算周期重算，成员命令按命令控制周期限频。成员上下限、不可控成员扣减、`ABSOLUTE/DELTA` 与 `DELTA_BASE_LAST_TARGET` 等语义保持不变
 - 若 JSONC 里仍保留旧 `loop` 字段，ConfigPusher 会在解析阶段直接报错，避免继续向 AGC 下发过期配置
 - AVC 配置使用 `avc.groups[].upsert` 下发控制组；`avc.groups[].start` 为兼容保留字段，当前仅记录日志，不再额外调用 `StartGroup`
 - AVC 的 `jsonc` 改名语义按“删除旧组 + 创建新组”处理；ConfigPusher 不提供显式 `RenameGroup` 任务
 - AVC 支持 `voltage_cmd` 或 `q_total_cmd` 两类主命令输入；ConfigPusher 只负责按 `jsonc` 收敛下发，控制组是否自动进入运行态由 AVC 模块依据当前配置判定
-- AVC 的 `CONTROL_MODE_DIRECT_CYCLIC` 支持 `q_total_cmd` 总无功命令和 `voltage_cmd` 目标电压命令。目标电压组按配置的 `kp/deadband` 周期调节。
+- AVC 的周期分配模式支持 `q_total_cmd` 总无功命令和 `voltage_cmd` 目标电压命令。目标电压组按配置的 `kp/deadband` 周期调节。
 - Calc 配置使用 `calc.groups[].upsert` 下发计算分组；`calc.groups[].start` 为兼容保留字段，当前仅记录日志，不再额外调用 `StartGroup`
 - Calc 的 `jsonc` 改名语义按“删除旧组 + 创建新组”处理；ConfigPusher 不提供显式 `RenameGroup` 任务
 - Calc 计算项中的 `ROUTED_INPUT` 只声明输入槽位，外部源点仍通过 DataCenter Route 绑定到二元项的 `<item_name>/left_input`/`<item_name>/right_input` 或 SUM/AVERAGE 项的 `<item_name>/input_N`；计算结果发布到 `<item_name>/result`
@@ -318,13 +318,13 @@ AGC/AVC 周期分配模式在各自的 `upsert.config` 中使用同一组字段�
 
 ```jsonc
 {
-  "control_mode": "CONTROL_MODE_DIRECT_CYCLIC",
+  "control_mode": 2,
   "calculation_execution_period_seconds": 2.0,
   "command_control_period_seconds": 4.0
 }
 ```
 
-切回「PI 事件触发」时，将 `control_mode` 设置为 `CONTROL_MODE_PI_EVENT`；周期字段可省略。
+切回「事件触发」时，将 `control_mode` 设置为 `1`；周期字段可省略。
 
 ## 线程与日志
 - 模块内部线程统一使用 `ModuleManager::StartModuleThread(模块LibInfo.LIB_NAME, ...)` 创建，自动绑定日志模块名上下文。

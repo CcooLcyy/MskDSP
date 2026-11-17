@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "AVCDefaultPoints.h"
+#include "mskdsp/AgvcControlMode.hpp"
 #include "AVCNumeric.hpp"
 
 namespace AVC {
@@ -47,11 +48,11 @@ grpc::Status ValidateGroupConfig(const AVCProto::GroupConfig& config) {
     return makeInvalid("group_name 不能为空");
   }
   const auto mode = config.control_mode();
-  if (mode != AVCProto::CONTROL_MODE_UNSPECIFIED && mode != AVCProto::CONTROL_MODE_PI_EVENT &&
-      mode != AVCProto::CONTROL_MODE_DIRECT_CYCLIC) {
+  if (mode != AVCProto::CONTROL_MODE_UNSPECIFIED && mode != AGVC::kEventTriggered<AVCProto::ControlMode> &&
+      mode != AGVC::kPeriodicAllocation<AVCProto::ControlMode>) {
     return makeInvalid("control_mode 无效");
   }
-  // 周期字段如有配置始终校验；未配置的 PI_EVENT/UNSPECIFIED 保持旧行为。
+  // 周期字段如有配置始终校验；未配置周期的事件触发模式和未指定模式保持旧行为。
   if (config.calculation_execution_period_seconds() != 0.0 &&
       (!std::isfinite(config.calculation_execution_period_seconds()) ||
        config.calculation_execution_period_seconds() < 1.0 || config.calculation_execution_period_seconds() > 15.0)) {
@@ -62,12 +63,12 @@ grpc::Status ValidateGroupConfig(const AVCProto::GroupConfig& config) {
        config.command_control_period_seconds() < 4.0 || config.command_control_period_seconds() > 30.0)) {
     return makeInvalid("command_control_period_seconds 必须在 4~30 秒范围内");
   }
-  if (mode == AVCProto::CONTROL_MODE_DIRECT_CYCLIC) {
+  if (mode == AGVC::kPeriodicAllocation<AVCProto::ControlMode>) {
     if (config.calculation_execution_period_seconds() < 1.0 || config.calculation_execution_period_seconds() > 15.0) {
-      return makeInvalid("DIRECT_CYCLIC 模式要求 calculation_execution_period_seconds 在 1~15 秒范围内");
+      return makeInvalid("周期分配模式要求 calculation_execution_period_seconds 在 1~15 秒范围内");
     }
     if (config.command_control_period_seconds() < 4.0 || config.command_control_period_seconds() > 30.0) {
-      return makeInvalid("DIRECT_CYCLIC 模式要求 command_control_period_seconds 在 4~30 秒范围内");
+      return makeInvalid("周期分配模式要求 command_control_period_seconds 在 4~30 秒范围内");
     }
   }
   if (!config.has_voltage_meas() || config.voltage_meas().tag().empty()) {

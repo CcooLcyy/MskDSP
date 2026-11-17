@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "AGCDefaultPoints.h"
+#include "mskdsp/AgvcControlMode.hpp"
 #include "AGCNumeric.hpp"
 
 namespace AGC {
@@ -69,8 +70,8 @@ grpc::Status ValidateGroupConfig(const AGCProto::GroupConfig& config) {
   }
 
   const auto mode = config.control_mode();
-  if (mode != AGCProto::CONTROL_MODE_UNSPECIFIED && mode != AGCProto::CONTROL_MODE_PI_EVENT &&
-      mode != AGCProto::CONTROL_MODE_DIRECT_CYCLIC) {
+  if (mode != AGCProto::CONTROL_MODE_UNSPECIFIED && mode != AGVC::kEventTriggered<AGCProto::ControlMode> &&
+      mode != AGVC::kPeriodicAllocation<AGCProto::ControlMode>) {
     return makeInvalid("control_mode 取值无效");
   }
   const auto calc = config.calculation_execution_period_seconds();
@@ -81,7 +82,7 @@ grpc::Status ValidateGroupConfig(const AGCProto::GroupConfig& config) {
   if (command != 0.0 && (!std::isfinite(command) || command < 4.0 || command > 30.0)) {
     return makeInvalid("command_control_period_seconds 必须在 4～30 秒范围内");
   }
-  if (mode == AGCProto::CONTROL_MODE_DIRECT_CYCLIC) {
+  if (mode == AGVC::kPeriodicAllocation<AGCProto::ControlMode>) {
     if (!std::isfinite(calc) || calc < 1.0 || calc > 15.0) {
       return makeInvalid("周期分配模式 calculation_execution_period_seconds 必须在 1～15 秒范围内");
     }

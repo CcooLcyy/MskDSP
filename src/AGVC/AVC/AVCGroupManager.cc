@@ -14,6 +14,7 @@
 #include "AVCLibInfo.h"
 #include "Logger.h"
 #include "ThreadUtil.hpp"
+#include "mskdsp/AgvcControlMode.hpp"
 #include "mskdsp/Decimal20.hpp"
 
 namespace AVC {
@@ -602,7 +603,7 @@ void GroupManager::startThreadsLocked(const std::string& groupName, GroupRuntime
           std::lock_guard<std::mutex> lock(mu_);
           auto it = groupsByName_.find(groupName);
           if (it != groupsByName_.end()) {
-            cyclic = it->second.config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC;
+            cyclic = it->second.config.control_mode() == AGVC::kPeriodicAllocation<AVCProto::ControlMode>;
             const auto configuredPeriod = it->second.config.calculation_execution_period_seconds();
             if (std::isfinite(configuredPeriod) && configuredPeriod > 0.0) {
               calcPeriod = std::clamp(configuredPeriod, 1.0, 15.0);
@@ -720,7 +721,7 @@ void GroupManager::startThreadsLocked(const std::string& groupName, GroupRuntime
            groupName,
            connId,
            tags.size(),
-           group->config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC ? "周期分配" : "PI 事件触发");
+           group->config.control_mode() == AGVC::kPeriodicAllocation<AVCProto::ControlMode> ? "周期分配" : "事件触发");
 }
 
 grpc::Status GroupManager::StartGroup(const std::string& groupName) {
@@ -959,7 +960,7 @@ grpc::Status GroupManager::ExecuteCommand(
   bool voltageMode = false;
   AVCProto::SignalSpec commandSignal;
   auto commandMode = AVCProto::VALUE_MODE_ABSOLUTE;
-  bool directCyclic = false;
+  bool periodicAllocation = false;
   std::shared_ptr<ControlTrigger> controlTrigger;
   ControlInput input;
   {
@@ -998,7 +999,7 @@ grpc::Status GroupManager::ExecuteCommand(
 
     config = it->second.config;
     controlTrigger = it->second.controlTrigger;
-    directCyclic = config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC;
+    periodicAllocation = config.control_mode() == AGVC::kPeriodicAllocation<AVCProto::ControlMode>;
     connId = it->second.connId;
     voltageMode = it->second.voltageMode;
     input.hasVoltageMeasRaw = it->second.hasVoltageMeasRaw;
@@ -1086,8 +1087,8 @@ grpc::Status GroupManager::ExecuteCommand(
   commandUpdate.set_ts_ms(request.ts_ms());
   commandUpdate.set_quality(request.quality());
 
-  if (directCyclic) {
-    // 已完成与 PI_EVENT 相同的缺测、限值校验；周期线程只保留最新命令并负责实际下发。
+  if (periodicAllocation) {
+    // 已完成与事件触发模式相同的缺测、限值校验；周期线程只保留最新命令并负责实际下发。
     {
       std::lock_guard<std::mutex> lock(mu_);
       auto it = groupsByName_.find(groupName);
@@ -1435,9 +1436,9 @@ void GroupManager::requestControlLocked(
   if (!group->controlTrigger->pending.exchange(true)) {
     group->controlTrigger->signal.release();
     if (tag.empty()) {
-      LOG_DEBUG("AVC 控制组已请求一次计算: 控制方式=PI 事件触发, group_name={}, 原因={}", groupName, reason);
+      LOG_DEBUG("AVC 控制组已请求一次计算: 控制方式=事件触发, group_name={}, 原因={}", groupName, reason);
     } else {
-      LOG_DEBUG("AVC 控制组已请求一次计算: 控制方式=PI 事件触发, group_name={}, 原因={}, tag={}", groupName, reason, tag);
+      LOG_DEBUG("AVC 控制组已请求一次计算: 控制方式=事件触发, group_name={}, 原因={}, tag={}", groupName, reason, tag);
     }
   }
 }
@@ -1791,7 +1792,7 @@ GroupManager::ControlTickResult GroupManager::controlTick(
     input.lastMemberTargetQKvar = it->second.lastMemberTargetQKvar;
     input.hasLastDesiredTotalQKvar = it->second.hasLastDesiredTotalQKvar;
     input.lastDesiredTotalQKvar = it->second.lastDesiredTotalQKvar;
-    const bool stableDeltaTarget = config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC &&
+    const bool stableDeltaTarget = config.control_mode() == AGVC::kPeriodicAllocation<AVCProto::ControlMode> &&
                                    config.q_total_cmd().mode() == AVCProto::VALUE_MODE_DELTA &&
                                    config.q_total_cmd().delta_base() == AVCProto::DELTA_BASE_LAST_TARGET;
     if (stableDeltaTarget && it->second.hasDirectResolvedDesiredTotalQKvar &&
@@ -1835,7 +1836,7 @@ GroupManager::ControlTickResult GroupManager::controlTick(
     }
   }
   publishDefaultLimitPoints(groupName,
-                            config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC ? "周期分配" : "PI 事件触发");
+                            config.control_mode() == AGVC::kPeriodicAllocation<AVCProto::ControlMode> ? "周期分配" : "事件触发");
 
   if (!functionEnabled) {
     LOG_DEBUG("AVC 跳过控制输出: group_name={}, 原因=AVC 功能未投入", groupName);
@@ -1862,7 +1863,7 @@ GroupManager::ControlTickResult GroupManager::controlTick(
   }
   const auto& output = *outputOpt;
 
-  const bool stableDeltaTarget = config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC &&
+  const bool stableDeltaTarget = config.control_mode() == AGVC::kPeriodicAllocation<AVCProto::ControlMode> &&
                                  config.q_total_cmd().mode() == AVCProto::VALUE_MODE_DELTA &&
                                  config.q_total_cmd().delta_base() == AVCProto::DELTA_BASE_LAST_TARGET;
   if (stableDeltaTarget && !input.hasDesiredTotalOverride) {
@@ -1882,9 +1883,9 @@ GroupManager::ControlTickResult GroupManager::controlTick(
   }
 
   // 周期分配模式按命令控制周期限制成员设定下发，状态量仍按计算周期刷新。
-  const bool directCyclic = config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC;
+  const bool periodicAllocation = config.control_mode() == AGVC::kPeriodicAllocation<AVCProto::ControlMode>;
   bool allowMemberPublish = true;
-  if (directCyclic) {
+  if (periodicAllocation) {
     const auto minInterval = std::chrono::duration<double>(config.command_control_period_seconds());
     std::lock_guard<std::mutex> lock(mu_);
     auto it = groupsByName_.find(groupName);
@@ -1935,7 +1936,7 @@ GroupManager::ControlTickResult GroupManager::controlTick(
   }
 
   const bool commandApplied = allowMemberPublish && publishMemberSetpoints(
-      groupName, trigger, connId, config, output, directCyclic ? "周期分配" : "PI 事件触发");
+      groupName, trigger, connId, config, output, periodicAllocation ? "周期分配" : "事件触发");
 
   bool shouldLogUnallocated = false;
   const auto unallocatedQKvar = output.unallocatedQKvar;
@@ -1953,17 +1954,17 @@ GroupManager::ControlTickResult GroupManager::controlTick(
     }
 
     // 同一控制任务中，发布期间收到的新命令不影响本轮成功下发的计时。
-    if (directCyclic && commandApplied) {
+    if (periodicAllocation && commandApplied) {
       it->second.lastCommandPublishedAt = std::chrono::steady_clock::now();
       it->second.hasLastCommandPublishedAt = true;
     }
     if (it->second.commandRevision != commandRevision) {
       LOG_DEBUG("AVC 跳过过期控制结果写回: group_name={}, command_revision={}, 已记录成功下发时间={}",
-                groupName, commandRevision, directCyclic && commandApplied);
+                groupName, commandRevision, periodicAllocation && commandApplied);
       return ControlTickResult::Complete;
     }
 
-    if (!directCyclic || commandApplied) {
+    if (!periodicAllocation || commandApplied) {
       it->second.hasLastDesiredTotalQKvar = output.hasLastDesiredTotalQKvar;
       it->second.lastDesiredTotalQKvar = output.nextLastDesiredTotalQKvar;
       it->second.hasLastMemberTargetQKvar = output.hasLastMemberTargetQKvar;
@@ -1983,7 +1984,7 @@ GroupManager::ControlTickResult GroupManager::controlTick(
     }
   }
 
-  if (directCyclic && !allowMemberPublish) {
+  if (periodicAllocation && !allowMemberPublish) {
     LOG_DEBUG("AVC 周期分配暂缓成员命令下发: group_name={}, 原因=命令控制周期未到", groupName);
   }
 

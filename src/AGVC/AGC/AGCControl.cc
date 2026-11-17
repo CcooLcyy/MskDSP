@@ -469,7 +469,7 @@ std::optional<ControlOutput> ComputeControlOutput(
                                       ? input.integralMemoryKw[index]
                                       : Decimal{};
     out.nextIntegralMemoryKw[index] = previousIntegral;
-    if (!input.enablePi || profile == nullptr) {
+    if (!input.enableFeedbackCorrection || profile == nullptr) {
       continue;
     }
 
@@ -521,7 +521,7 @@ std::optional<ControlOutput> ComputeControlOutput(
       const auto error = !pGain.has_value() ? pGain.error()
                          : !iGain.has_value() ? iGain.error()
                                               : bias.error();
-      logCalculationError(config, "读取成员 PI 参数", error);
+      logCalculationError(config, "读取成员比例积分参数", error);
       return std::nullopt;
     }
     auto pCorrection = pGain->Multiply(*memberError);
@@ -529,7 +529,7 @@ std::optional<ControlOutput> ComputeControlOutput(
                            ? iGain->Multiply(*integral)
                            : std::expected<Decimal, Error>(Decimal{});
     if (!pCorrection.has_value() || !iCorrection.has_value()) {
-      logCalculationError(config, "计算成员 PI 修正",
+      logCalculationError(config, "计算成员比例积分修正",
                           !pCorrection.has_value() ? pCorrection.error()
                                                    : iCorrection.error());
       return std::nullopt;

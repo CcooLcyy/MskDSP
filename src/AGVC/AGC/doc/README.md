@@ -7,7 +7,7 @@ AGC（Automatic Generation Control）自动功率控制模块：从 DataCenter �
 - 按连接管理控制组：一个 `group_name` 对应 DataCenter 的一条连接 `(module_name="AGC", conn_name=group_name) -> conn_id`
 - 总设定拆分：将一个总有功设定值按策略（平均/按容量比例）分解为多个成员设定点
 - 多轮分配：成员触顶/触底时自动再分配剩余量，尽量满足总目标
-- 可切换控制方式：`PI_EVENT`（PI 事件触发）在相关输入更新时计算，`DIRECT_CYCLIC`（周期分配）按可配置周期计算分配结果，两个算法的运行态相互隔离
+- 可切换控制方式：事件触发（1）在相关输入更新时计算，周期分配（2）按可配置周期计算分配结果，两个算法的运行态相互隔离
 - 派生点：台区总实时有功可按成员量测实时汇总发布，总目标/偏差等由 AGC 控制计算发布，可转发给主站或其他模块
 - 默认点：AGC 会自动生成并注册一组内建点（理论/当前可调上下限、调节返回值、装机容量、功能投入、远方操作、增闭锁、减闭锁），无需手工建点即可直接通过 DataCenter 路由
 - 总装机容量：AGC 要求每个成员配置有效的 `capacity_kw`，并自动发布所有成员容量之和，可通过 DataCenter 路由到 IEC104 等上游
@@ -36,7 +36,7 @@ AGC 不直接对接 IEC104/ModbusRTU；上下游均通过 DataCenter 的有向�
 - `group_name`：上位机指定的控制组名（模块内唯一）；同时作为 DataCenter 连接主键的 `conn_name`
 - `conn_id`：由 DataCenter 分配的连接 ID（稳定且可持久化），上位机后续用它配置路由/订阅
 - `p_cmd`：主站下发的总有功设定点（通过 DataCenter 路由进入 AGC 的 `conn_id` 内某个 `tag`）
-- `control_mode`：控制方式；未指定时兼容为 `PI_EVENT`
+- `control_mode`：控制方式；未指定时兼容为事件触发（1）
 - `calculation_execution_period_seconds`：周期分配的计算周期，范围 1～15 秒
 - `command_control_period_seconds`：周期分配向下游发布成员设定的最小间隔，范围 4～30 秒；不限制主站向 AGC 下发命令的频率
 - `members[]`：成员（例如逆变器）；每个成员至少包含量测点 `p_meas.tag` 与可选设定点 `p_set.tag`
@@ -89,7 +89,7 @@ AGC 为每个控制组固定生成以下 10 个默认点，并自动注册到该
 ### 总输出点发布规则
 - `outputs.p_total_meas`：作为“总实时测量值”，控制组启动后会先尝试基于输入快照发布一次；之后任一成员量测变化时都会重新汇总并发布，不依赖 `p_cmd`
 - `outputs.p_total_target` / `outputs.p_total_error`：仍属于控制计算结果，只有在 AGC 已收到 `p_cmd` 且成功完成一轮控制计算后才会发布
-- 若运行中只发生 `p_cmd` 变化、成员量测未变化，`outputs.p_total_meas` 仍会随该轮 PI 事件触发计算一起重发一次当前汇总值
+- 若运行中只发生 `p_cmd` 变化、成员量测未变化，`outputs.p_total_meas` 仍会随该轮事件触发计算一起重发一次当前汇总值
 
 ### ValueSpec：目标值/增量值语义（可配置）
 `ValueSpec` 用于描述一个点的 `tag/unit/scale/offset` 与值语义：
@@ -103,7 +103,7 @@ AGC 为每个控制组固定生成以下 10 个默认点，并自动注册到该
 
 ### Decimal20 精度规则
 
-- 工程量、倍率、偏移、容量、权重、上下限、PI 参数、偏置、积分限值、步长、斜率、调试目标和调试容差均提供同名 `*_decimal` 文本字段；文本非空时优先于旧 `double` 字段。
+- 工程量、倍率、偏移、容量、权重、上下限、比例积分参数、偏置、积分限值、步长、斜率、调试目标和调试容差均提供同名 `*_decimal` 文本字段；文本非空时优先于旧 `double` 字段。
 - 十进制文本按 Decimal20 严格解析，支持普通十进制和科学计数法；每次乘除后按半数远离零量化到小数点后 20 位。非法文本、非有限旧值、除零和溢出会拒绝配置或停止本轮输出。
 - `scale_decimal=0` 与旧 `scale=0` 的兼容语义一致，实际倍率按 `1` 处理。成员 `capacity_kw_decimal` 必须大于 0；有效上限为非零 `max_kw_decimal` 与容量的较小值，`max_kw_decimal=0` 时使用容量，`min_kw_decimal` 超过有效上限时拒绝配置。负数上下限按同一规则比较和限幅。
 - DataCenter 的 `decimal_value` 输入直接进入 Decimal20 缓存，不经过 `double`；工程量输出统一发布固定 20 位 `decimal_value`。
@@ -111,12 +111,12 @@ AGC 为每个控制组固定生成以下 10 个默认点，并自动注册到该
 - 计算周期、命令周期及运行时间等时间量仍使用现有浮点计时语义，不属于工程量精度改造范围。
 
 ### 控制计算
-`PI_EVENT` 保持现有事件触发调节：输入更新触发计算，并使用已确认的成员控制参数、积分记忆、步长和爬坡约束。
+事件触发模式保持现有调节行为：输入更新触发计算，并使用已确认的成员控制参数、积分记忆、步长和爬坡约束。
 
-`DIRECT_CYCLIC` 使用独立的周期分配流程：
+周期分配模式使用独立的调度流程：
 - 读取当前总设定输入 `p_cmd`、成员量测以及 `base_tag`
 - 按 `ABSOLUTE/DELTA` 与 `DELTA_BASE_*` 语义计算 `desiredTotalKw`
-- 直接以 `desiredTotalKw` 作为本轮组总目标，不读取或更新 PI 参数和积分记忆
+- 直接以 `desiredTotalKw` 作为本轮组总目标，不读取或更新比例积分参数和积分记忆
 - 先扣减不可控成员的被动出力，再把剩余目标按 weighted 策略和成员 `min_kw/max_kw` 约束分配给可控成员
 - 输入事件和同步命令只更新最新缓存；计算周期到达后计算，命令控制周期满足后才向下游发布，间隔内多个目标只保留最新值
 - 若成员约束导致无法完全分配，常规订阅输入会记录 `unallocated` 并输出告警日志；`outputs.p_total_target` 发布的是本轮实际可下发的总目标值
@@ -157,7 +157,7 @@ AGC 会将控制组配置作为 protobuf payload 写入 `./conf/config.db`，用
 - 每次 `UpsertGroup` / `DeleteGroup` 完成本地配置变更后自动落盘。
 - 落盘失败会返回 `INTERNAL`，但内存中的控制组配置不会回滚。
 - `RUNNING/STOPPED` 等瞬时运行态不落盘；若 `DeleteGroup` 因 DataCenter 删除失败而进入 `PENDING_DELETE`，会将待删除控制面状态一并落盘。
-- 订阅线程、控制线程、PI 运行态与周期调度缓存不落盘。
+- 订阅线程、控制线程、事件触发运行态与周期调度缓存不落盘。
 
 ### 启动恢复
 - AGC 启动时会自动加载 SQLite 中的 `AGC/groups`，并按 `group_name` 重新向 DataCenter 调用 `GetOrCreateConnection` 取回稳定 `conn_id`。
