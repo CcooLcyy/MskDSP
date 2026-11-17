@@ -634,7 +634,7 @@ void GroupManager::startThreadsLocked(const std::string& groupName, GroupRuntime
           if (controlTick(groupName, trigger) != ControlTickResult::CommandChanged) {
             break;
           }
-          LOG_DEBUG("AVC 周期控制首轮命令已更新，立即重新计算: group_name={}", groupName);
+          LOG_DEBUG("AVC 周期分配首轮命令已更新，立即重新计算: group_name={}", groupName);
         }
 
         const auto period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
@@ -720,7 +720,7 @@ void GroupManager::startThreadsLocked(const std::string& groupName, GroupRuntime
            groupName,
            connId,
            tags.size(),
-           group->config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC ? "周期控制" : "PI 事件触发");
+           group->config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC ? "周期分配" : "PI 事件触发");
 }
 
 grpc::Status GroupManager::StartGroup(const std::string& groupName) {
@@ -1435,9 +1435,9 @@ void GroupManager::requestControlLocked(
   if (!group->controlTrigger->pending.exchange(true)) {
     group->controlTrigger->signal.release();
     if (tag.empty()) {
-      LOG_DEBUG("AVC 控制组已请求一次事件触发控制: group_name={}, 原因={}", groupName, reason);
+      LOG_DEBUG("AVC 控制组已请求一次计算: 控制方式=PI 事件触发, group_name={}, 原因={}", groupName, reason);
     } else {
-      LOG_DEBUG("AVC 控制组已请求一次事件触发控制: group_name={}, 原因={}, tag={}", groupName, reason, tag);
+      LOG_DEBUG("AVC 控制组已请求一次计算: 控制方式=PI 事件触发, group_name={}, 原因={}, tag={}", groupName, reason, tag);
     }
   }
 }
@@ -1835,7 +1835,7 @@ GroupManager::ControlTickResult GroupManager::controlTick(
     }
   }
   publishDefaultLimitPoints(groupName,
-                            config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC ? "周期控制" : "PI 事件触发控制");
+                            config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC ? "周期分配" : "PI 事件触发");
 
   if (!functionEnabled) {
     LOG_DEBUG("AVC 跳过控制输出: group_name={}, 原因=AVC 功能未投入", groupName);
@@ -1874,14 +1874,14 @@ GroupManager::ControlTickResult GroupManager::controlTick(
       it->second.directResolvedCommandRevision = commandRevision;
       it->second.directResolvedDesiredTotalQKvar = output.rawDesiredTotalQKvar;
       it->second.hasDirectResolvedDesiredTotalQKvar = true;
-      LOG_DEBUG("AVC 周期直分配已固定增量命令解析目标: group_name={}, command_revision={}, desired_total_q_kvar={}",
+      LOG_DEBUG("AVC 周期分配已固定增量命令解析目标: group_name={}, command_revision={}, desired_total_q_kvar={}",
                 groupName,
                 commandRevision,
                 output.rawDesiredTotalQKvar.ToFixedString());
     }
   }
 
-  // 周期控制模式按命令控制周期限制成员设定下发，状态量仍按计算周期刷新。
+  // 周期分配模式按命令控制周期限制成员设定下发，状态量仍按计算周期刷新。
   const bool directCyclic = config.control_mode() == AVCProto::CONTROL_MODE_DIRECT_CYCLIC;
   bool allowMemberPublish = true;
   if (directCyclic) {
@@ -1935,7 +1935,7 @@ GroupManager::ControlTickResult GroupManager::controlTick(
   }
 
   const bool commandApplied = allowMemberPublish && publishMemberSetpoints(
-      groupName, trigger, connId, config, output, directCyclic ? "周期控制" : "PI 事件触发控制");
+      groupName, trigger, connId, config, output, directCyclic ? "周期分配" : "PI 事件触发");
 
   bool shouldLogUnallocated = false;
   const auto unallocatedQKvar = output.unallocatedQKvar;
@@ -1984,7 +1984,7 @@ GroupManager::ControlTickResult GroupManager::controlTick(
   }
 
   if (directCyclic && !allowMemberPublish) {
-    LOG_DEBUG("AVC 周期控制暂缓成员命令下发: group_name={}, 原因=命令控制周期未到", groupName);
+    LOG_DEBUG("AVC 周期分配暂缓成员命令下发: group_name={}, 原因=命令控制周期未到", groupName);
   }
 
   if (shouldLogUnallocated) {

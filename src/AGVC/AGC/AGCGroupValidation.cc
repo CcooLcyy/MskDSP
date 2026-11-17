@@ -83,10 +83,10 @@ grpc::Status ValidateGroupConfig(const AGCProto::GroupConfig& config) {
   }
   if (mode == AGCProto::CONTROL_MODE_DIRECT_CYCLIC) {
     if (!std::isfinite(calc) || calc < 1.0 || calc > 15.0) {
-      return makeInvalid("周期直分配模式 calculation_execution_period_seconds 必须在 1～15 秒范围内");
+      return makeInvalid("周期分配模式 calculation_execution_period_seconds 必须在 1～15 秒范围内");
     }
     if (!std::isfinite(command) || command < 4.0 || command > 30.0) {
-      return makeInvalid("周期直分配模式 command_control_period_seconds 必须在 4～30 秒范围内");
+      return makeInvalid("周期分配模式 command_control_period_seconds 必须在 4～30 秒范围内");
     }
   }
 

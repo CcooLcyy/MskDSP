@@ -367,7 +367,7 @@ TEST(AgcControlTest, NegativeMemberMaximumStillClampsPiCorrection) {
             "-10.00000000000000000000");
 }
 
-// 验证：周期直分配模式完全跳过 PI 比例/积分修正，仅按基础策略分配。
+// 验证：周期分配模式完全跳过 PI 比例/积分修正，仅按基础策略分配。
 TEST(AgcControlTest, DirectCyclicModeDisablesPiCorrection) {
   auto cfg = MakeBaseConfig();
   cfg.set_control_mode(AGCProto::CONTROL_MODE_DIRECT_CYCLIC);
@@ -389,7 +389,7 @@ TEST(AgcControlTest, DirectCyclicModeDisablesPiCorrection) {
   EXPECT_NEAR(Legacy(out->nextIntegralMemoryKw[0]), 100.0, 1e-6);
 }
 
-// 验证：周期直分配模式强制校验计算周期和命令周期范围。
+// 验证：周期分配模式强制校验计算周期和命令周期范围。
 TEST(AgcControlTest, DirectCyclicModeValidatesPeriods) {
   auto cfg = MakeBaseConfig();
   cfg.set_control_mode(AGCProto::CONTROL_MODE_DIRECT_CYCLIC);

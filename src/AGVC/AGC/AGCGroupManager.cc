@@ -771,7 +771,7 @@ void GroupManager::startThreadsLocked(const std::string &groupName, GroupRuntime
            groupName,
            connId,
            tags.size(),
-           isDirectCyclicMode(g->config) ? "周期直分配" : "PI 事件触发");
+           isDirectCyclicMode(g->config) ? "周期分配" : "PI 事件触发");
 }
 
 grpc::Status GroupManager::StartGroup(const std::string &groupName) {
@@ -812,7 +812,7 @@ grpc::Status GroupManager::StartGroup(const std::string &groupName) {
   publishDirectionBlockPoints(groupName, "控制组启动");
   LOG_INFO("AGC 控制组已启动控制功能: group_name={}, 控制方式={}",
            groupName,
-           controlMode == AGCProto::CONTROL_MODE_DIRECT_CYCLIC ? "周期直分配" : "PI 事件触发");
+           controlMode == AGCProto::CONTROL_MODE_DIRECT_CYCLIC ? "周期分配" : "PI 事件触发");
   return grpc::Status::OK;
 }
 
@@ -1190,7 +1190,7 @@ grpc::Status GroupManager::ExecuteCommand(
   commandUpdate.set_quality(request.quality());
 
   if (directCyclic) {
-    // 周期直分配模式先完成同 PI 路径一致的范围/缺测校验，再仅缓存最新命令。
+    // 周期分配模式执行与 PI 事件触发模式相同的范围和缺测校验，再仅缓存最新命令。
     {
       std::lock_guard<std::mutex> lock(mu_);
       auto it = groupsByName_.find(groupName);
@@ -1207,14 +1207,14 @@ grpc::Status GroupManager::ExecuteCommand(
       it->second.directResolvedCommandRevision = it->second.commandRevision;
       it->second.directResolvedDesiredTotalKw = output.desiredTotalKw;
       ++it->second.controlRevision;
-      requestControlLocked(groupName, &it->second, "周期直分配同步命令", request.dst().tag());
+      requestControlLocked(groupName, &it->second, "周期分配同步命令", request.dst().tag());
     }
     publishCommandEchoPoint(connId, config.p_cmd(), commandUpdate);
-    publishDefaultLimitPoints(groupName, "周期直分配同步命令");
+    publishDefaultLimitPoints(groupName, "周期分配同步命令");
     response->set_status(DataCenterProto::COMMAND_ACCEPTED);
     response->set_reject_code(DataCenterProto::COMMAND_REJECT_UNSPECIFIED);
-    response->set_reason("AGC 周期直分配命令已缓存，将按计算与命令周期下发");
-    LOG_INFO("AGC 周期直分配模式缓存同步总有功命令: group_name={}, desired_total_kw={}, actual_target_kw={}, 计算周期={}秒, 命令周期={}秒",
+    response->set_reason("AGC 周期分配模式已缓存命令，将按计算与命令周期下发");
+    LOG_INFO("AGC 周期分配模式缓存同步总有功命令: group_name={}, desired_total_kw={}, actual_target_kw={}, 计算周期={}秒, 命令周期={}秒",
              groupName,
              output.desiredTotalKw.ToFixedString(),
              output.actualTargetKw.ToFixedString(),
@@ -1470,18 +1470,18 @@ void GroupManager::requestControlLocked(
       g->controlTrigger->signal.release();
     }
     if (tag.empty()) {
-      LOG_DEBUG("AGC 周期直分配模式已缓存最新控制输入: group_name={}, 原因={}", groupName, reason);
+      LOG_DEBUG("AGC 周期分配模式已缓存最新控制输入: group_name={}, 原因={}", groupName, reason);
     } else {
-      LOG_DEBUG("AGC 周期直分配模式已缓存最新控制输入: group_name={}, 原因={}, tag={}", groupName, reason, tag);
+      LOG_DEBUG("AGC 周期分配模式已缓存最新控制输入: group_name={}, 原因={}, tag={}", groupName, reason, tag);
     }
     return;
   }
   if (!g->controlTrigger->pending.exchange(true)) {
     g->controlTrigger->signal.release();
     if (tag.empty()) {
-      LOG_DEBUG("AGC 控制组已请求一次事件触发控制: group_name={}, 原因={}", groupName, reason);
+      LOG_DEBUG("AGC 控制组已请求一次计算: 控制方式=PI 事件触发, group_name={}, 原因={}", groupName, reason);
     } else {
-      LOG_DEBUG("AGC 控制组已请求一次事件触发控制: group_name={}, 原因={}, tag={}", groupName, reason, tag);
+      LOG_DEBUG("AGC 控制组已请求一次计算: 控制方式=PI 事件触发, group_name={}, 原因={}, tag={}", groupName, reason, tag);
     }
   }
 }
@@ -1880,7 +1880,7 @@ bool GroupManager::publishMemberSetpoints(const std::string &groupName,
       cyclicCommandBlocked = commandNow - it->second.lastCommandPublishedAt <
                              std::chrono::duration<double>(configuredSeconds);
       if (cyclicCommandBlocked) {
-        LOG_DEBUG("AGC 周期直分配命令限频，保留最新目标待下次周期下发: group_name={}, command_period_seconds={}",
+        LOG_DEBUG("AGC 周期分配模式命令限频，保留最新目标待下次周期下发: group_name={}, command_period_seconds={}",
                   groupName,
                   configuredSeconds);
       }
@@ -2154,7 +2154,7 @@ void GroupManager::controlTick(const std::string &groupName) {
           totalMeasPublishKw->ToFixedString());
     }
   }
-  publishDefaultLimitPoints(groupName, isDirectCyclicMode(config) ? "周期直分配控制" : "PI 事件触发控制");
+  publishDefaultLimitPoints(groupName, isDirectCyclicMode(config) ? "周期分配" : "PI 事件触发");
 
   if (!functionEnabled) {
     LOG_DEBUG("AGC 跳过控制输出: group_name={}, 原因=AGC 功能未投入", groupName);
@@ -2178,7 +2178,7 @@ void GroupManager::controlTick(const std::string &groupName) {
       it->second.directResolvedCommandRevision = commandRevision;
       it->second.directResolvedDesiredTotalKw = output.desiredTotalKw;
       it->second.hasDirectResolvedDesiredTotalKw = true;
-      LOG_DEBUG("AGC 周期直分配已固定增量命令解析目标: group_name={}, command_revision={}, desired_total_kw={}",
+      LOG_DEBUG("AGC 周期分配已固定增量命令解析目标: group_name={}, command_revision={}, desired_total_kw={}",
                 groupName,
                 commandRevision,
                 output.desiredTotalKw.ToFixedString());
@@ -2214,7 +2214,7 @@ void GroupManager::controlTick(const std::string &groupName) {
                                output.memberTargetKw,
                                quality,
                                controlRevision,
-                               isDirectCyclicMode(config) ? "周期直分配控制" : "事件触发控制",
+                               isDirectCyclicMode(config) ? "周期分配" : "PI 事件触发",
                                &publishedAny);
 
   // 下发后更新状态（尽力而为）。
@@ -2236,7 +2236,7 @@ void GroupManager::controlTick(const std::string &groupName) {
       return;
     }
 
-    // PI_EVENT 在每轮计算后更新积分和上一轮目标；周期直分配仅在实际下发成员命令后更新应用目标。
+    // PI 事件触发模式在每轮计算后更新积分和上一轮目标；周期分配仅在实际下发成员命令后更新应用目标。
     if (!isDirectCyclicMode(config) || publishedAny) {
       it->second.hasLastDesiredTotalKw = output.hasLastDesiredTotalKw;
       it->second.lastDesiredTotalKw = output.nextLastDesiredTotalKw;

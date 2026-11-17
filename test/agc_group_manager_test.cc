@@ -1984,7 +1984,7 @@ TEST(AgcGroupManagerTest, CommunicationChangesRedistributeAndRestoreWithoutNewCo
   ASSERT_TRUE(manager.StopGroup("g-health-redistribute").ok());
 }
 
-// 验证：周期直分配排除通信正常但量测过期的成员，同值新采样后沿用总目标恢复分配。
+// 验证：周期分配排除通信正常但量测过期的成员，同值新采样后沿用总目标恢复分配。
 TEST(AgcGroupManagerTest, StaleMeasurementExcludesOnlineMemberAndFreshSampleRestoresAllocation) {
   constexpr auto kGroup = "g-measurement-expiry";
   constexpr uint32_t kValidityMs = 10000;
@@ -2067,7 +2067,7 @@ TEST(AgcGroupManagerTest, InvalidCommunicationInputsExcludeMember) {
   }
 }
 
-// 验证：PI 事件模式在心跳静默超时后也重新分配，无需新输入通知。
+// 验证：PI 事件触发模式在心跳静默超时后也重新分配，无需新输入通知。
 TEST(AgcGroupManagerTest, CommunicationTimeoutRecalculatesInEventMode) {
   FakeDataCenterState state;
   GroupManager manager("AGC");

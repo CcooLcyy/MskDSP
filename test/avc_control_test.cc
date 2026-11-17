@@ -208,7 +208,7 @@ TEST(AvcControlTest, DecimalValidationRejectsInvalidTextAndAllowsNegativeDeadban
   EXPECT_FALSE(AVC::ValidateGroupConfig(cfg).ok());
 }
 
-// 验证：周期直分配模式的总无功命令按基础策略直接分配，不依赖电压比例参数。
+// 验证：周期分配模式的总无功命令按基础策略直接分配，不依赖电压比例参数。
 TEST(AvcControlTest, DirectCyclicQTotalCommandAllocatesDirectly) {
   auto cfg = MakeBaseConfig();
   cfg.clear_voltage_cmd();

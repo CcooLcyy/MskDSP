@@ -103,7 +103,7 @@ private:
     std::vector<bool> hasPublishedMemberTargetQKvar;
     std::vector<Decimal> publishedMemberTargetQKvar;
 
-    // 周期控制模式的命令节流状态。
+    // 周期分配模式的命令节流状态。
     std::chrono::steady_clock::time_point lastCommandPublishedAt{};
     bool hasLastCommandPublishedAt{false};
 
